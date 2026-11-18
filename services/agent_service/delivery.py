@@ -259,7 +259,8 @@ class _Win32FileApi:
         if not handle or handle == ctypes.c_void_p(-1).value:
             raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[reportAttributeAccessIssue]  # Windows-only：WinError 在 Linux 平台不存在
         try:
-            return int(msvcrt.open_osfhandle(handle, os.O_RDONLY | getattr(os, "O_BINARY", 0)))
+            open_osfhandle = msvcrt.open_osfhandle  # type: ignore[attr-defined]  # typeshed 3.14 stub 未收录；运行时恒提供
+            return int(open_osfhandle(handle, os.O_RDONLY | getattr(os, "O_BINARY", 0)))
         except OSError:
             self._kernel32.CloseHandle(handle)
             raise
@@ -282,7 +283,7 @@ class _Win32FileApi:
             encoded,
             len(encoded),
         )
-        handle = msvcrt.get_osfhandle(fd)
+        handle = msvcrt.get_osfhandle(fd)  # type: ignore[attr-defined]  # typeshed 3.14 stub 未收录；运行时恒提供
         if not self._kernel32.SetFileInformationByHandle(handle, _WIN_FILE_RENAME_INFO, buffer, size):
             raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[reportAttributeAccessIssue]  # Windows-only：WinError 在 Linux 平台不存在
 
@@ -293,7 +294,7 @@ class _Win32FileApi:
         import msvcrt
 
         info = self._disposition_info(DeleteFile=True)
-        handle = msvcrt.get_osfhandle(fd)
+        handle = msvcrt.get_osfhandle(fd)  # type: ignore[attr-defined]  # typeshed 3.14 stub 未收录；运行时恒提供
         if not self._kernel32.SetFileInformationByHandle(
             handle, _WIN_FILE_DISPOSITION_INFO, ctypes.byref(info), ctypes.sizeof(info)
         ):

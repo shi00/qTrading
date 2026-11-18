@@ -1359,8 +1359,11 @@ class SkillCatalogService:
         ticket.cancel()
         try:
             await asyncio.shield(self._settle_cancelled(ticket))
-        except (Exception, asyncio.CancelledError):
-            # 收尾失败时事实保留在票据上（未确认退出即 UNKNOWN），不掩盖取消/超时。
+        except asyncio.CancelledError:
+            # R2：再次取消继续上抛；收尾事实仍留在票据上（未确认退出即 UNKNOWN），不掩盖取消。
+            raise
+        except Exception:
+            # 收尾失败不改变调用方正在传播的取消/超时事实（票据保留未确认退出即 UNKNOWN）。
             pass
 
     async def _settle_cancelled(self, ticket: SkillOperationTicket) -> None:

@@ -582,6 +582,7 @@
     "agent_research_decision_dedicated": "Needs the dedicated authorization surface; this observer does not approve it",
     "agent_research_decision_stale": "This decision changed; refresh before submitting",
     "agent_research_answer_hint": "Type your answer",
+    "agent_research_answer_label": "Answer",
     "agent_research_submit": "Submit answer",
     "agent_research_submitting": "Submitting…",
     "agent_research_error_fmt": "Read failed: {code} (unknown stays unknown, never 0)",

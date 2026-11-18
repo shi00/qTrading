@@ -65,6 +65,7 @@ def _build_decision_card(
             ft.TextField(
                 value=draft,
                 hint_text=I18n.get("agent_research_answer_hint"),
+                tooltip=I18n.get("agent_research_answer_label"),
                 multiline=True,
                 min_lines=2,
                 max_lines=4,
