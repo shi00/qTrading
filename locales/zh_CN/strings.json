@@ -117,6 +117,8 @@
     "screener_all_strategies": "全部策略",
     "ai_save_prompt": "保存修改",
     "ai_reset_default": "恢复默认",
+    "ai_restore_default_confirm_title": "恢复默认提示词",
+    "ai_restore_default_confirm_body": "将清除策略「{strategy}」已保存的自定义提示词覆盖（如有），并把编辑框内容替换为该策略的默认提示词；当前未保存的修改将丢失，其他策略与全局提示词不受影响。",
     "ai_settings_saved": "系统提示词已保存",
     "ai_settings_restored": "系统提示词已恢复默认",
     "history_load_more": "加载更早记录",
