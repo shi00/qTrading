@@ -42,12 +42,14 @@ from ui.viewmodels.pagination_sorting_mixin import AI_SECTION_KEYS, PaginationSo
 from ui.viewmodels.screener_view_model import (
     HistoryTreeRow,
     HistoryTreeState,
+    PresetSavePlan,
     ScreenerRow,
     ScreenerState,
     StrategyDepRow,
     StrategyRunRow,
     StreamCard,
 )
+from ui.viewmodels.strategy_meta_mixin import StrategyMetaMixin
 
 pytestmark = pytest.mark.unit
 
@@ -367,6 +369,8 @@ class _FakeScreenerViewModel:
         self.data_processor = MagicMock()
         # Task 3.2: 历史树状态由 VM 持有 (替代原 View use_state)
         self._history_tree_offset: int = 0
+        # R2-I12: 内存版方案存储 {strategy_key: {preset_name: params}}
+        self._presets: dict[str, dict[str, dict]] = {}
 
     @property
     def state(self) -> ScreenerState:
@@ -455,6 +459,46 @@ class _FakeScreenerViewModel:
         """
         self.method_calls.append(f"save_strategy_prompt:{strategy_key}")
         return True, None
+
+    # --- R2-I12: 筛选方案命令 (镜像真实 VM 契约) ---
+
+    def _preset_store(self, strategy_key: str) -> dict:
+        return self._presets.setdefault(strategy_key, {})
+
+    async def prepare_preset_save(self, name: str, strategy_key: str) -> PresetSavePlan:
+        self.method_calls.append(f"prepare_preset_save:{strategy_key}:{name}")
+        error_key = StrategyMetaMixin.validate_preset_name(name)
+        if error_key:
+            return PresetSavePlan(error_key=error_key)
+        store = self._preset_store(strategy_key)
+        if name in store:
+            return PresetSavePlan(exists=True, existing_params=store[name])
+        return PresetSavePlan()
+
+    async def refresh_presets(self, strategy_key: str | None) -> None:
+        self.method_calls.append(f"refresh_presets:{strategy_key}")
+        names = tuple(sorted(self._preset_store(strategy_key).keys())) if strategy_key else ()
+        self._set_state(preset_names=names)
+
+    async def apply_preset(self, name: str, strategy_key: str) -> bool:
+        self.method_calls.append(f"apply_preset:{strategy_key}:{name}")
+        store = self._preset_store(strategy_key)
+        if name not in store or self._state.selected_strategy != strategy_key:
+            return False
+        self._set_state(strategy_params={**self._state.strategy_params, **store[name]})
+        return True
+
+    async def save_preset(self, name: str, strategy_key: str, params: dict) -> None:
+        self.method_calls.append(f"save_preset:{strategy_key}:{name}")
+        self._preset_store(strategy_key)[name] = dict(params)
+
+    async def delete_preset(self, name: str, strategy_key: str) -> bool:
+        self.method_calls.append(f"delete_preset:{strategy_key}:{name}")
+        store = self._preset_store(strategy_key)
+        if name not in store:
+            return False
+        del store[name]
+        return True
 
     def get_column_alias(self, table_name: str | None, col: str) -> str:
         """Mock vm.get_column_alias (Task 5.1: 从 View 迁入 VM)."""
@@ -4450,3 +4494,316 @@ class TestExecuteLoadAiAttribution:
         with pytest.raises(asyncio.CancelledError) as excinfo:
             asyncio.run(_execute_load_ai_attribution(vm, MagicMock()))
         assert isinstance(excinfo.value, asyncio.CancelledError)  # R2: 取消信号必须传播, 不吞没
+
+
+# ============================================================================
+# R2-I12: 筛选方案入口（列出/保存/载入/删除）+ 重名/删除确认
+# ============================================================================
+
+
+class TestStrategyPresetEntry:
+    """R2-I12: 参数区方案入口与破坏性确认（不静默覆盖、不自动选股/回测）。"""
+
+    @staticmethod
+    def _field(env: dict) -> ft.TextField:
+        label = env["mock_i18n"].get("screener_preset_name_label")
+        fields = [c for c in _walk_all_controls(env["result"]) if isinstance(c, ft.TextField) and c.label == label]
+        assert len(fields) == 1, "应恰有 1 个方案名称输入框"
+        return fields[0]
+
+    @staticmethod
+    def _dropdown(env: dict) -> ft.Dropdown:
+        label = env["mock_i18n"].get("screener_preset_saved_label")
+        drops = [c for c in _walk_all_controls(env["result"]) if isinstance(c, ft.Dropdown) and c.label == label]
+        assert len(drops) == 1, "应恰有 1 个已保存方案下拉"
+        return drops[0]
+
+    @staticmethod
+    def _button(env: dict, key: str) -> ft.TextButton:
+        expected = env["mock_i18n"].get(key)
+        btns = [b for b in _get_buttons(env) if isinstance(b, ft.TextButton) and b.content == expected]
+        assert len(btns) == 1, f"应恰有 1 个按钮 {key}"
+        return btns[0]
+
+    @staticmethod
+    def _find_dialog(env: dict, title_key: str) -> Any:
+        expected = env["mock_i18n"].get(title_key)
+        for ctrl in _walk_all_controls(env["result"]):
+            if (
+                isinstance(ctrl, Component)
+                and getattr(ctrl.fn, "__name__", "") == "ConfirmDialog"
+                and ctrl.kwargs.get("title") == expected
+            ):
+                return ctrl
+        return None
+
+    def _type_name(self, env: dict, name: str) -> None:
+        _invoke(self._field(env).on_change, _make_event(name))
+        _rerender(env)
+
+    def _select(self, env: dict, name: str) -> None:
+        _invoke(self._dropdown(env).on_select, _make_event(name))
+        _rerender(env)
+
+    def _run_last_task(self, env: dict) -> None:
+        handler, args, _ = _await_run_task_handler(env["page"])
+        asyncio.run(handler(*args))
+
+    def test_format_preset_params_truncates_long_values(self) -> None:
+        """R2-I12: 旧参数摘要逐项可读，超长取值截断并标注省略号."""
+        from ui.views.screener_view import _format_preset_params
+
+        text = _format_preset_params({"prompt": "x" * 500, "pe": 15})
+        assert "pe: 15" in text
+        assert "…" in text
+        assert "x" * 200 not in text
+        assert _format_preset_params({}) == ""
+
+    def test_entry_rendered_with_empty_state(self, screener_view_with_params_env) -> None:
+        """方案区渲染：名称输入 + 保存/载入/删除入口；空列表时提示且载入/删除禁用。"""
+        env = screener_view_with_params_env
+        _rerender(env)
+
+        assert self._field(env) is not None
+        assert self._dropdown(env).options == []
+        assert self._button(env, "screener_preset_save").disabled is False
+        assert self._button(env, "screener_preset_load").disabled is True
+        assert self._button(env, "screener_preset_delete").disabled is True
+        hints = [
+            c
+            for c in _walk_all_controls(env["result"])
+            if isinstance(c, ft.Text) and c.value == env["mock_i18n"].get("screener_preset_empty")
+        ]
+        assert hints and hints[0].visible is True, "空方案列表须给出可执行提示"
+
+    def test_save_empty_name_shows_error_without_write(self, screener_view_with_params_env) -> None:
+        """空名保存 → 就地报错，不写配置、不弹确认."""
+        env = screener_view_with_params_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+        _rerender(env)
+        self._type_name(env, "   ")
+
+        page.toast.show.reset_mock()
+        _invoke(self._button(env, "screener_preset_save").on_click, _make_event())
+        self._run_last_task(env)
+
+        assert not any(c.startswith("save_preset:") for c in fake_vm.method_calls)
+        page.toast.show.assert_called_once_with(
+            "i18n[screener_preset_err_empty]", "error", action_text=None, on_action=None
+        )
+
+    def test_save_new_preset_writes_without_confirmation(self, screener_view_with_params_env) -> None:
+        """新名称保存 → 直接写盘并刷新列表；不启动选股/回测."""
+        env = screener_view_with_params_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+        _rerender(env)
+        self._type_name(env, "新方案")
+
+        page.run_task.reset_mock()
+        page.toast.show.reset_mock()
+        _invoke(self._button(env, "screener_preset_save").on_click, _make_event())
+        self._run_last_task(env)
+
+        assert "save_preset:value:新方案" in fake_vm.method_calls
+        assert "refresh_presets:value" in fake_vm.method_calls
+        assert "run_strategy:value" not in fake_vm.method_calls
+        page.toast.show.assert_called_once_with(
+            "i18n[screener_preset_saved]", "success", action_text=None, on_action=None
+        )
+
+    def test_duplicate_save_requires_confirmation_then_overwrites(self, screener_view_with_params_env) -> None:
+        """重名保存 → 先展示旧参数与替换影响；确认后才写盘."""
+        env = screener_view_with_params_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+        fake_vm._preset_store("value")["保守型"] = {"num_param": 15}
+        fake_vm._set_state(preset_names=("保守型",))
+        _rerender(env)
+        self._type_name(env, "保守型")
+
+        page.run_task.reset_mock()
+        _invoke(self._button(env, "screener_preset_save").on_click, _make_event())
+        self._run_last_task(env)
+
+        assert not any(c.startswith("save_preset:") for c in fake_vm.method_calls), "确认前不得覆盖"
+        _rerender(env)
+        dialog = self._find_dialog(env, "screener_preset_overwrite_title")
+        assert dialog is not None, "重名保存须弹确认对话框"
+        assert dialog.kwargs.get("destructive") is True
+        # 确认正文须展示原方案参数与名称（I18n mock 只回 key，参数经 kwargs 断言）
+        body_calls = [
+            c for c in env["mock_i18n"].get.call_args_list if c.args and c.args[0] == "screener_preset_overwrite_body"
+        ]
+        assert body_calls, "确认正文须经 i18n 渲染"
+        body_params = body_calls[-1].kwargs
+        assert body_params["name"] == "保守型"
+        assert "num_param: 15" in body_params["params"]
+
+        page.run_task.reset_mock()
+        page.toast.show.reset_mock()
+        _invoke(dialog.kwargs["on_confirm"])
+        self._run_last_task(env)
+
+        assert "save_preset:value:保守型" in fake_vm.method_calls
+        assert "run_strategy:value" not in fake_vm.method_calls
+        page.toast.show.assert_called_once_with(
+            "i18n[screener_preset_saved]", "success", action_text=None, on_action=None
+        )
+
+    def test_duplicate_save_cancel_keeps_existing(self, screener_view_with_params_env) -> None:
+        """取消覆盖 → 不写盘，已保存方案保持不变，对话框关闭."""
+        env = screener_view_with_params_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+        fake_vm._preset_store("value")["保守型"] = {"num_param": 15}
+        _rerender(env)
+        self._type_name(env, "保守型")
+        _invoke(self._button(env, "screener_preset_save").on_click, _make_event())
+        self._run_last_task(env)
+        _rerender(env)
+        dialog = self._find_dialog(env, "screener_preset_overwrite_title")
+        assert dialog is not None
+
+        page.run_task.reset_mock()
+        _invoke(dialog.kwargs["on_cancel"])
+        _rerender(env)
+
+        page.run_task.assert_not_called()
+        assert not any(c.startswith("save_preset:") for c in fake_vm.method_calls)
+        assert fake_vm._preset_store("value")["保守型"] == {"num_param": 15}
+        assert self._find_dialog(env, "screener_preset_overwrite_title") is None
+
+    def test_load_preset_applies_draft_without_running(self, screener_view_with_params_env) -> None:
+        """载入 → 参数草稿更新，不启动选股/回测."""
+        env = screener_view_with_params_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+        fake_vm._preset_store("value")["保守型"] = {"num_param": 99}
+        fake_vm._set_state(preset_names=("保守型",))
+        _rerender(env)
+        self._select(env, "保守型")
+
+        page.run_task.reset_mock()
+        page.toast.show.reset_mock()
+        _invoke(self._button(env, "screener_preset_load").on_click, _make_event())
+        self._run_last_task(env)
+
+        assert "apply_preset:value:保守型" in fake_vm.method_calls
+        assert fake_vm.state.strategy_params["num_param"] == 99
+        assert "update_strategy_desc:value" in fake_vm.method_calls
+        assert "run_strategy:value" not in fake_vm.method_calls
+        page.toast.show.assert_called_once_with(
+            "i18n[screener_preset_loaded]", "info", action_text=None, on_action=None
+        )
+
+    def test_load_missing_preset_warns(self, screener_view_with_params_env) -> None:
+        """载入不存在的方案（他进程已删除）→ 警示且草稿不变."""
+        env = screener_view_with_params_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+        fake_vm._set_state(preset_names=("已删除",), strategy_params={"num_param": 7})
+        _rerender(env)
+        self._select(env, "已删除")
+
+        page.toast.show.reset_mock()
+        _invoke(self._button(env, "screener_preset_load").on_click, _make_event())
+        self._run_last_task(env)
+
+        assert fake_vm.state.strategy_params["num_param"] == 7
+        page.toast.show.assert_called_once_with(
+            "i18n[screener_preset_missing]", "warning", action_text=None, on_action=None
+        )
+
+    def test_delete_requires_confirmation_then_deletes(self, screener_view_with_params_env) -> None:
+        """删除 → 破坏性确认后才删除并刷新列表."""
+        env = screener_view_with_params_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+        fake_vm._preset_store("value")["保守型"] = {"num_param": 15}
+        fake_vm._set_state(preset_names=("保守型",))
+        _rerender(env)
+        self._select(env, "保守型")
+
+        page.run_task.reset_mock()
+        _invoke(self._button(env, "screener_preset_delete").on_click, _make_event())
+        page.run_task.assert_not_called()
+        assert not any(c.startswith("delete_preset:") for c in fake_vm.method_calls)
+
+        _rerender(env)
+        dialog = self._find_dialog(env, "screener_preset_delete_title")
+        assert dialog is not None
+        assert dialog.kwargs.get("destructive") is True
+
+        page.run_task.reset_mock()
+        page.toast.show.reset_mock()
+        _invoke(dialog.kwargs["on_confirm"])
+        self._run_last_task(env)
+
+        assert "delete_preset:value:保守型" in fake_vm.method_calls
+        assert "refresh_presets:value" in fake_vm.method_calls
+        assert "保守型" not in fake_vm._preset_store("value")
+        page.toast.show.assert_called_once_with(
+            "i18n[screener_preset_deleted]", "success", action_text=None, on_action=None
+        )
+
+    def test_delete_cancel_keeps_preset(self, screener_view_with_params_env) -> None:
+        """取消删除 → 方案保留，不调度删除任务."""
+        env = screener_view_with_params_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+        fake_vm._preset_store("value")["保守型"] = {"num_param": 15}
+        fake_vm._set_state(preset_names=("保守型",))
+        _rerender(env)
+        self._select(env, "保守型")
+        _invoke(self._button(env, "screener_preset_delete").on_click, _make_event())
+        _rerender(env)
+        dialog = self._find_dialog(env, "screener_preset_delete_title")
+        assert dialog is not None
+
+        page.run_task.reset_mock()
+        _invoke(dialog.kwargs["on_cancel"])
+        _rerender(env)
+
+        page.run_task.assert_not_called()
+        assert fake_vm._preset_store("value")["保守型"] == {"num_param": 15}
+        assert self._find_dialog(env, "screener_preset_delete_title") is None
+
+    def test_switch_during_prepare_does_not_write(self, screener_view_with_params_env) -> None:
+        """准备保存期间切换策略 → 不写盘（不把旧策略方案落到新策略上下文）."""
+        env = screener_view_with_params_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+        _rerender(env)
+        self._type_name(env, "新方案")
+
+        async def _prepare_then_switch(name: str, strategy: str) -> PresetSavePlan:
+            fake_vm._set_state(selected_strategy="momentum")
+            return PresetSavePlan()
+
+        with patch.object(fake_vm, "prepare_preset_save", side_effect=_prepare_then_switch):
+            page.run_task.reset_mock()
+            _invoke(self._button(env, "screener_preset_save").on_click, _make_event())
+            self._run_last_task(env)
+
+        assert not any(c.startswith("save_preset:") for c in fake_vm.method_calls)
+
+    def test_switch_strategy_drops_preset_dialogs(self, screener_view_with_params_env) -> None:
+        """确认框打开期间切换策略 → 对话框消失（旧策略方案不得写入新策略）."""
+        env = screener_view_with_params_env
+        fake_vm = env["fake_vm"]
+        fake_vm._preset_store("value")["保守型"] = {"num_param": 15}
+        _rerender(env)
+        self._type_name(env, "保守型")
+        _invoke(self._button(env, "screener_preset_save").on_click, _make_event())
+        self._run_last_task(env)
+        _rerender(env)
+        dialog = self._find_dialog(env, "screener_preset_overwrite_title")
+        assert dialog is not None
+        assert dialog.kwargs["destructive"] is True
+
+        fake_vm._set_state(selected_strategy="momentum")
+        _rerender(env)
+
+        assert self._find_dialog(env, "screener_preset_overwrite_title") is None
