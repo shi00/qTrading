@@ -1438,6 +1438,48 @@ class AgentDao(BaseDao):
             return None
         return json_doc(payload)
 
+    async def read_execution_cost_refs(
+        self, *, user_scope: str, execution_id: str
+    ) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+        """执行全部 operation 的原账本引用（只读，供逐路费用投影）。
+
+        返回 ``(ledger_refs, attempt_refs)``（去重保序）；无引用返回两个空元组。
+        任一 ``attempt_refs`` 结构不可读返回 ``None``（未知，R21：不猜测、不按 0
+        计费）。本方法只读、不改派发或费用状态。
+        """
+
+        self._check_engine()
+        identity = f"{user_scope}/{execution_id}"
+        if not isinstance(user_scope, str) or user_scope == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "user_scope must be non-empty text", identity)
+        if not isinstance(execution_id, str) or execution_id == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "execution_id must be non-empty text", identity)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    sa.select(AgentOperation.invocation_id, AgentOperation.attempt_refs).where(
+                        AgentOperation.user_scope == user_scope,
+                        AgentOperation.execution_id == execution_id,
+                        sa.or_(
+                            AgentOperation.invocation_id.is_not(None),
+                            AgentOperation.attempt_refs.is_not(None),
+                        ),
+                    )
+                )
+            ).all()
+        ledger_refs = tuple(
+            dict.fromkeys(row.invocation_id for row in rows if isinstance(row.invocation_id, str) and row.invocation_id)
+        )
+        collected: list[str] = []
+        for row in rows:
+            decoded = self._decode_attempt_refs(row.attempt_refs)
+            if decoded is None:
+                return None
+            collected.extend(decoded)
+        return ledger_refs, tuple(dict.fromkeys(collected))
+
     async def read_source(self, query: SourceReadQuery, *, user_scope: str) -> SourceRead:
         """读**已准备**的来源选定表示（§4.2/§9.10）：只读，零解析、零扩大范围。
 

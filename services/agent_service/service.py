@@ -34,8 +34,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -52,6 +52,7 @@ from core.agent_types import (
     BusinessSourceRegistrationReceipt,
     CommandReceipt,
     CommandRef,
+    CommitState,
     CostProjection,
     DeliveryRead,
     DraftRead,
@@ -82,6 +83,7 @@ from core.agent_types import (
     SourceStopReceipt,
     SubmissionReceipt,
     derive_accept_identity,
+    stable_id,
     validate_draft_read_query,
     validate_draft_save_command,
     validate_draft_transfer_command,
@@ -93,12 +95,15 @@ from core.agent_types import (
 from data.persistence.daos.agent_dao import AgentDao
 from data.persistence.daos.ai_usage_dao import AIUsageDao
 from services.agent_service.comparison import (
+    ACCEPT_FAILED_PREFIX,
+    DISPATCH_FAILED_PREFIX,
     STOP_REASON_USER_ENDED_GROUP,
     ComparisonGroupStopPlan,
     ComparisonGroupView,
     ComparisonLaneObservation,
     ComparisonLaneReceipt,
     ComparisonReadQuery,
+    ComparisonRunReceipt,
     ComparisonSubmissionReceipt,
     ComparisonSubmissionRequest,
     FrozenComparisonGroup,
@@ -106,9 +111,11 @@ from services.agent_service.comparison import (
     build_lane_accept_request,
     comparison_export_rows,
     decode_comparison_manifest,
+    drive_comparison_group,
     freeze_comparison_group,
     observations_from_executions,
     plan_group_stop,
+    plan_lane_retry,
 )
 from services.agent_service.dispatch import DispatchOutcome, ResearchDispatcher, ResearchWorkflowResult
 from services.agent_service.sources import BusinessSourceService
@@ -143,6 +150,20 @@ class SubmissionOutcome:
 
     receipt: SubmissionReceipt
     dispatch: DispatchOutcome | None
+
+
+@dataclass(frozen=True, slots=True)
+class ComparisonLaneRetryOutcome:
+    """单路重试结果：本路新轮受理/派发事实 + 重读后的组投影（未重跑其他路）。"""
+
+    group_ref: str
+    lane_ref: str
+    execution_id: str | None
+    command_record_id: str | None
+    commit_state: CommitState | None
+    error_code: str | None
+    dispatch: DispatchOutcome | None
+    view: ComparisonGroupView
 
 
 def _require_positive_seconds(value: object, path: str, identity: str) -> None:
@@ -206,6 +227,15 @@ def _failed_cost_projection(
         unpriced_input_tokens=0,
         unpriced_output_tokens=0,
     )
+
+
+class _LaneDispatchRefused(RuntimeError):
+    """单路本次未能派发（只承载原因码，不含正文）；由编排折叠为该路缺口。"""
+
+    def __init__(self, code: str, *, note_prefix: str = DISPATCH_FAILED_PREFIX) -> None:
+        super().__init__(code)
+        self.code = code
+        self.note_prefix = note_prefix
 
 
 class AgentService:
@@ -508,17 +538,11 @@ class AgentService:
     # 多模型独立分析（F37/SQ-08）
     # ------------------------------------------------------------------
 
-    async def submit_comparison(self, request: ComparisonSubmissionRequest) -> ComparisonSubmissionReceipt:
-        """受理一组多模型独立分析（F37）：共同输入一次冻结，逐路独立完整任务。
+    async def _accept_comparison_group(
+        self, request: ComparisonSubmissionRequest
+    ) -> tuple[FrozenComparisonGroup, tuple[tuple[str, SubmissionReceipt | None, str | None], ...]]:
+        """冻结共同输入并逐路受理；返回 ``(路身份, 原受理回执或 None, 错误码)``。"""
 
-        组内各路共享同一规范 manifest（相同正文/资料/用途/cutoff/历史前缀/角色
-        Prompt/Skills/MCP 范围/输出要求），各自使用所选具体连接（冻结 ID/revision，
-        运行期不得替换）。每路是 ``comparison_lane`` 独立总执行，按用户所选顺序
-        逐路排队；某一路受理失败如实记录该路错误码，不伪造已受理，不影响其他
-        路已保存事实。组受理成功不代表已派发或已消费（INV-06）。
-        """
-
-        self._require_open("submit_comparison")
         try:
             group = freeze_comparison_group(
                 user_scope=request.user_scope,
@@ -534,7 +558,7 @@ class AgentService:
                 f"{exc.code}: {exc.field_path}",
                 f"{request.user_scope}/{request.session_id}",
             ) from exc
-        receipts: list[ComparisonLaneReceipt] = []
+        accepted: list[tuple[str, SubmissionReceipt | None, str | None]] = []
         for lane in group.lanes:
             accept = build_lane_accept_request(
                 group,
@@ -546,35 +570,241 @@ class AgentService:
             )
             try:
                 receipt = await self._dao.accept_request(accept)
+            except asyncio.CancelledError:
+                raise
             except AgentServiceError as exc:
-                receipts.append(
-                    ComparisonLaneReceipt(
-                        lane_ref=lane.lane_ref,
-                        execution_id=None,
-                        command_record_id=None,
-                        commit_state=None,
-                        error_code=exc.code.value,
-                    )
-                )
+                accepted.append((lane.lane_ref, None, exc.code.value))
                 continue
+            accepted.append((lane.lane_ref, receipt, None))
+        return group, tuple(accepted)
+
+    @staticmethod
+    def _lane_receipts(
+        accepted: tuple[tuple[str, SubmissionReceipt | None, str | None], ...],
+        dispatch_outcomes: Mapping[str, DispatchOutcome] | None = None,
+    ) -> tuple[ComparisonLaneReceipt, ...]:
+        receipts: list[ComparisonLaneReceipt] = []
+        for lane_ref, receipt, error_code in accepted:
+            outcome = dispatch_outcomes.get(lane_ref) if dispatch_outcomes is not None else None
             receipts.append(
                 ComparisonLaneReceipt(
-                    lane_ref=lane.lane_ref,
-                    execution_id=receipt.execution_id,
-                    command_record_id=receipt.command_record_id,
-                    commit_state=receipt.commit_state,
-                    error_code=None,
+                    lane_ref=lane_ref,
+                    execution_id=receipt.execution_id if receipt is not None else None,
+                    command_record_id=receipt.command_record_id if receipt is not None else None,
+                    commit_state=receipt.commit_state if receipt is not None else None,
+                    error_code=error_code,
+                    dispatch_submitted=outcome.submitted if outcome is not None else None,
+                    dispatch_reason=outcome.reason if outcome is not None else None,
                 )
             )
+        return tuple(receipts)
+
+    async def submit_comparison(self, request: ComparisonSubmissionRequest) -> ComparisonSubmissionReceipt:
+        """受理一组多模型独立分析（F37）：共同输入一次冻结，逐路独立完整任务。
+
+        组内各路共享同一规范 manifest（相同正文/资料/用途/cutoff/历史前缀/角色
+        Prompt/Skills/MCP 范围/输出要求），各自使用所选具体连接（冻结 ID/revision，
+        运行期不得替换）。每路是 ``comparison_lane`` 独立总执行，按用户所选顺序
+        逐路排队；某一路受理失败如实记录该路错误码，不伪造已受理，不影响其他
+        路已保存事实。组受理成功不代表已派发或已消费（INV-06）。
+        """
+
+        self._require_open("submit_comparison")
+        group, accepted = await self._accept_comparison_group(request)
         return ComparisonSubmissionReceipt(
             group_ref=group.group_ref,
             manifest_digest=group.manifest_digest,
             lane_count=len(group.lanes),
-            lanes=tuple(receipts),
+            lanes=self._lane_receipts(accepted),
         )
 
-    async def _load_comparison(self, query: ComparisonReadQuery) -> tuple[FrozenComparisonGroup, ComparisonGroupView]:
-        """读比较组共同 manifest + 会话内逐路事实并收敛（只读，零派发）。"""
+    async def run_comparison(
+        self,
+        request: ComparisonSubmissionRequest,
+        *,
+        active_total_executions: int = 0,
+        active_session_executions: int = 0,
+    ) -> ComparisonRunReceipt:
+        """发起/推进一组多模型比较（F37 生产入口）：受理 → 逐路派发 → 本批观察。
+
+        每路经与单模型研究相同的 ``ResearchDispatcher`` 派发（计划准入、门闩、
+        准入失败均沿用原语义；未注入派发器时零派发）。逐路按 D05 总位/会话单总
+        执行顺序推进，单路派发失败只标该路 ``dispatch_failed``，不阻断其他路；
+        本批只回传终态事实，未完成的路保持未收敛，再次调用同一输入即可接续
+        （受理与派发均幂等，不重复执行/计费）。``CancelledError`` 传播（R2）。
+        """
+
+        self._require_open("run_comparison")
+        group, accepted = await self._accept_comparison_group(request)
+        by_lane = {lane_ref: receipt for lane_ref, receipt, _ in accepted}
+        accept_errors = {lane_ref: code for lane_ref, receipt, code in accepted if receipt is None}
+        dispatcher = self._dispatcher
+        if dispatcher is None:
+            observations = tuple(
+                ComparisonLaneObservation(
+                    lane_ref=lane_ref,
+                    execution_id=receipt.execution_id if receipt is not None else None,
+                    note=f"accept_failed:{accept_errors[lane_ref]}" if receipt is None else None,
+                )
+                for lane_ref, receipt, _ in accepted
+            )
+            return ComparisonRunReceipt(
+                group_ref=group.group_ref,
+                manifest_digest=group.manifest_digest,
+                lanes=self._lane_receipts(accepted),
+                view=build_comparison_view(group, observations),
+                dispatcher_wired=False,
+            )
+
+        dispatch_outcomes: dict[str, DispatchOutcome] = {}
+
+        async def start_lane(lane: Any) -> str:
+            receipt = by_lane.get(lane.lane_ref)
+            if receipt is None:
+                raise _LaneDispatchRefused(
+                    accept_errors.get(lane.lane_ref) or "accept_failed", note_prefix=ACCEPT_FAILED_PREFIX
+                )
+            outcome = await dispatcher.dispatch(receipt, user_scope=request.user_scope, mode=group.shared.mode)
+            dispatch_outcomes[lane.lane_ref] = outcome
+            if not outcome.submitted:
+                raise _LaneDispatchRefused(outcome.reason or "not_submitted")
+            return outcome.workflow_id
+
+        async def observe_lanes(children: tuple[tuple[str, str], ...]) -> dict[str, ComparisonLaneObservation]:
+            session = await self._dao.get_session_read(
+                SessionReadQuery(session_id=group.session_id, limit=50),
+                user_scope=request.user_scope,
+            )
+            facts = observations_from_executions(group, session.executions)
+            wanted = {lane_ref for lane_ref, _ in children}
+            result: dict[str, ComparisonLaneObservation] = {}
+            for observation in facts:
+                if observation.lane_ref not in wanted:
+                    continue
+                state = observation.display_state
+                if state is None or state not in NON_RECOVERABLE_DISPLAY_STATES:
+                    # 非终态不作为本批事实：保持未收敛，下一批再观察（不伪造终态）。
+                    continue
+                result[observation.lane_ref] = await self._with_lane_cost(observation, user_scope=request.user_scope)
+            return result
+
+        view = await drive_comparison_group(
+            group,
+            start_lane,
+            observe_lanes,
+            active_total_executions=active_total_executions,
+            active_session_executions=active_session_executions,
+            idle_observation_limit=1,
+        )
+        return ComparisonRunReceipt(
+            group_ref=group.group_ref,
+            manifest_digest=group.manifest_digest,
+            lanes=self._lane_receipts(accepted, dispatch_outcomes),
+            view=view,
+            dispatcher_wired=True,
+        )
+
+    async def retry_comparison_lane(
+        self,
+        query: ComparisonReadQuery,
+        lane_ref: str,
+        *,
+        expected_revision: int,
+        node_id: str = "root",
+        source_display_name: str = "用户消息",
+    ) -> ComparisonLaneRetryOutcome:
+        """只重试某一路（F37）：本路新轮身份 + 新 workflow，不重跑其他路。
+
+        只对**可靠无成果**（``failed``/``withdrawn``）的路开放；运行中、排队/未
+        派发、结果未知、已完整的路一律拒绝（不重跑 unknown；未派发/受理失败的
+        路用同一 ``run_comparison`` 幂等推进，避免重复受理同一路）。受理与派发
+        失败逐项如实返回，不伪造已派发；``CancelledError`` 传播（R2）。
+        """
+
+        self._require_open("retry_comparison_lane")
+        group, observations, executions = await self._load_comparison_state(query)
+        identity = f"{query.user_scope}/{query.session_id}/{group.group_ref}/{lane_ref}"
+        view = build_comparison_view(group, observations)
+        lane_view = next((lane for lane in view.lanes if lane.lane_ref == lane_ref), None)
+        if lane_view is None:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "unknown comparison lane", identity)
+        retryable = lane_view.reliable_result is False
+        if not retryable:
+            raise AgentServiceError(
+                AgentErrorCode.REVISION_CONFLICT,
+                f"lane is not retryable: {lane_view.reason}",
+                identity,
+            )
+        lane = next(item for item in group.lanes if item.lane_ref == lane_ref)
+        attempts = sum(1 for row in executions if getattr(row, "comparison_lane_ref", None) == lane_ref)
+        round_id = stable_id("comparison_round", [group.group_ref, lane_ref, str(attempts + 1)])
+        retry = plan_lane_retry(group, lane_ref, round_id=round_id)
+        accept = build_lane_accept_request(
+            group,
+            lane,
+            expected_revision=expected_revision,
+            node_id=node_id,
+            workflow_id="comparison",
+            source_display_name=source_display_name,
+            business_request_id=retry.business_request_id,
+            client_command_id=retry.client_command_id,
+        )
+        try:
+            receipt = await self._dao.accept_request(accept)
+        except asyncio.CancelledError:
+            raise
+        except AgentServiceError as exc:
+            return ComparisonLaneRetryOutcome(
+                group_ref=group.group_ref,
+                lane_ref=lane_ref,
+                execution_id=None,
+                command_record_id=None,
+                commit_state=None,
+                error_code=exc.code.value,
+                dispatch=None,
+                view=view,
+            )
+        dispatch: DispatchOutcome | None = None
+        if self._dispatcher is not None:
+            dispatch = await self._dispatcher.dispatch(receipt, user_scope=query.user_scope, mode=group.shared.mode)
+        _, latest = await self._load_comparison(query)
+        return ComparisonLaneRetryOutcome(
+            group_ref=group.group_ref,
+            lane_ref=lane_ref,
+            execution_id=receipt.execution_id,
+            command_record_id=receipt.command_record_id,
+            commit_state=receipt.commit_state,
+            error_code=None,
+            dispatch=dispatch,
+            view=latest,
+        )
+
+    async def _with_lane_cost(
+        self, observation: ComparisonLaneObservation, *, user_scope: str
+    ) -> ComparisonLaneObservation:
+        """给一路观察附上原账本费用投影（只读；读取失败如实标 failed，不倒推 0）。"""
+
+        execution_id = observation.execution_id
+        if execution_id is None:
+            return observation
+        try:
+            refs = await self._dao.read_execution_cost_refs(user_scope=user_scope, execution_id=execution_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            error_code = str(classify_error(exc, context="general").get("code", type(exc).__name__))
+            return replace(observation, cost=_failed_cost_projection((), (), error_code))
+        if refs is None:
+            return replace(observation, cost=_failed_cost_projection((), (), "cost_reference_unreadable"))
+        return replace(
+            observation,
+            cost=await self.read_cost_projection(ledger_refs=refs[0], attempt_refs=refs[1]),
+        )
+
+    async def _load_comparison_state(
+        self, query: ComparisonReadQuery
+    ) -> tuple[FrozenComparisonGroup, tuple[ComparisonLaneObservation, ...], tuple[object, ...]]:
+        """读比较组共同 manifest + 会话内逐路事实（可选逐路费用，零派发）。"""
 
         self._require_open("read_comparison")
         identity = f"{query.user_scope}/{query.session_id}/{query.group_ref}"
@@ -602,13 +832,24 @@ class AgentService:
             user_scope=query.user_scope,
         )
         observations = observations_from_executions(group, session.executions)
+        if query.include_cost:
+            observations = tuple(
+                [await self._with_lane_cost(observation, user_scope=query.user_scope) for observation in observations]
+            )
+        return group, observations, session.executions
+
+    async def _load_comparison(self, query: ComparisonReadQuery) -> tuple[FrozenComparisonGroup, ComparisonGroupView]:
+        """读比较组事实并收敛（只读，零派发）。"""
+
+        group, observations, _ = await self._load_comparison_state(query)
         return group, build_comparison_view(group, observations)
 
     async def read_comparison(self, query: ComparisonReadQuery) -> ComparisonGroupView:
         """只读比较（F37）：按准确组身份查各路既有成果与状态，零模型/零新派发。
 
         未知/未启动/结果未确认逐路如实保留，不伪造成功或失败（R21）；历史按组
-        找回，不按当前设置重推连接或共同输入。
+        找回，不按当前设置重推连接或共同输入。``include_cost=True`` 时逐路读取
+        原账本费用投影（只读，不重复计价），任何一路未知都不拼成完整总费用。
         """
 
         _, view = await self._load_comparison(query)
@@ -639,6 +880,7 @@ class AgentService:
                 display_state=lane.display_state,
                 reliable_result=lane.reliable_result,
                 artifact_refs=lane.artifact_refs,
+                execution_id=lane.execution_id,
             )
             for lane in view.lanes
         )

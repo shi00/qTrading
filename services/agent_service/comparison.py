@@ -15,6 +15,11 @@
 - **组收敛**：只按各路既有事实收敛（:func:`converge_comparison_group`）；未启动/
   排队/等待/未知保持未结束，``closed_unknown`` 显示「执行已结束、部分结果未确认」，
   不伪造成功/失败（R21）。
+- **生产编排**：:func:`drive_comparison_group` 逐路启动/观察（单路启动失败隔离，
+  取消传播），:class:`ComparisonRunReceipt` 只含逐路执行事实，组本身没有执行
+  身份，不能计为一次完整成功。
+- **逐路费用**：每路只读 :class:`CostProjection`；组只给「已计价合计 + 缺口」，
+  未计价/预留/未知不拼成完整总费用（R21）。
 - **只读比较/导出**：:func:`build_comparison_view` / :func:`comparison_export_rows`
   只消费已保存事实，零模型/工具调用、零新派发。
 
@@ -24,8 +29,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Final, NoReturn
 
 from core.agent_types import (
@@ -36,6 +43,7 @@ from core.agent_types import (
     AgentValidationError,
     CanonicalJson,
     CommitState,
+    CostProjection,
     Mode,
     Purpose,
     SourceKind,
@@ -63,6 +71,17 @@ COMPARISON_SESSION_SLOTS: Final[int] = 1
 STOP_REASON_SHARED_SOURCE: Final[str] = "shared_source_stopped"
 #: 组停止原因：用户明确结束整组。
 STOP_REASON_USER_ENDED_GROUP: Final[str] = "user_ended_group"
+
+#: 组费用状态：逐路账本事实单独保留，组只提供「已计价合计」与缺口标记。
+COMPARISON_COST_KNOWN: Final[str] = "known"
+COMPARISON_COST_PARTIAL: Final[str] = "partial"
+COMPARISON_COST_RESERVED: Final[str] = "reserved"
+COMPARISON_COST_UNKNOWN: Final[str] = "unknown"
+COMPARISON_COST_FAILED: Final[str] = "failed"
+
+#: 路启动失败（未派发/受理失败）的观察备注前缀；仅承载错误码，不含正文。
+DISPATCH_FAILED_PREFIX: Final[str] = "dispatch_failed:"
+ACCEPT_FAILED_PREFIX: Final[str] = "accept_failed:"
 
 _MANIFEST_KEYS: Final = frozenset(
     {"schema_version", "group_ref", "user_scope", "session_id", "source_module", "input_digest", "shared", "lanes"}
@@ -534,25 +553,31 @@ def build_lane_accept_request(
 
     每路命令键与意图键不同（独立排队/重试），但 ``manifest_payload`` 与本组
     逐字节相同：同输入只冻结一次，后续设置/资料变化不进入已提交输入。
+
+    ``workflow_id`` 是组命名空间（可读前缀），**不是**原生执行身份：原生身份按
+    「组 + 路 + 本次意图」派生的稳定 ID 生成，保证两路不会共用同一 workflow，
+    重试本路也自然得到新身份（A 路完成时 B 路重试不会命中 A 的执行）。
     """
 
     if lane not in group.lanes:
         _fail("lane_not_in_group", "$.lane")
+    intent_id = require_identity(
+        lane.business_request_id if business_request_id is None else business_request_id,
+        "$.business_request_id",
+    )
+    lane_workflow = stable_id("comparison_lane_workflow", [group.group_ref, lane.lane_ref, intent_id])
     return AcceptRequest(
         user_scope=group.user_scope,
         session_id=group.session_id,
         source_module=group.source_module,
-        business_request_id=require_identity(
-            lane.business_request_id if business_request_id is None else business_request_id,
-            "$.business_request_id",
-        ),
+        business_request_id=intent_id,
         client_command_id=require_identity(
             lane.client_command_id if client_command_id is None else client_command_id,
             "$.client_command_id",
         ),
         expected_revision=expected_revision,
         node_id=node_id,
-        workflow_id=workflow_id,
+        workflow_id=f"{require_identity(workflow_id, '$.workflow_id')}:{lane_workflow}",
         mode=group.shared.mode,
         purpose=group.shared.purpose,
         text=group.shared.text,
@@ -655,7 +680,9 @@ class ComparisonLaneObservation:
 
     ``display_state=None`` 表示尚未观察到本路执行（未启动/排队无投影）；
     ``reliable_result`` 三态：``True`` 有可核成果、``False`` 可靠确证无成果、
-    ``None`` 未知（不得据此判成功或失败）。
+    ``None`` 未知（不得据此判成功或失败）。``execution_id`` 为该路本次尝试的
+    准确执行身份（只读费用引用的入口）；``cost`` 为该路原账本只读投影，
+    ``None`` 表示尚未读取（未知，不等同免费）。
     """
 
     lane_ref: str
@@ -663,6 +690,8 @@ class ComparisonLaneObservation:
     reliable_result: bool | None = None
     artifact_refs: tuple[tuple[str, str], ...] = ()
     note: str | None = None
+    execution_id: str | None = None
+    cost: CostProjection | None = None
 
 
 def _validate_observation(observation: ComparisonLaneObservation, path: str) -> None:
@@ -676,11 +705,19 @@ def _validate_observation(observation: ComparisonLaneObservation, path: str) -> 
     _ref_pairs(observation.artifact_refs, f"{path}.artifact_refs")
     if observation.note is not None:
         _require_text(observation.note, f"{path}.note")
+    if observation.execution_id is not None:
+        _require_text(observation.execution_id, f"{path}.execution_id")
+    if observation.cost is not None and not isinstance(observation.cost, CostProjection):
+        _fail("invalid_type", f"{path}.cost")
 
 
 @dataclass(frozen=True, slots=True)
 class ComparisonLaneView:
-    """一路只读比较视图（连接身份取自冻结 manifest，不按当前设置重推）。"""
+    """一路只读比较视图（连接身份取自冻结 manifest，不按当前设置重推）。
+
+    ``gap`` 为该路尚未覆盖的对象级缺口（``None`` 仅当该路确实完整）；``cost``
+    为该路原账本只读投影（``None`` 表示本次未读/未知，禁止按 0 展示）。
+    """
 
     lane_ref: str
     connection_id: str
@@ -690,11 +727,20 @@ class ComparisonLaneView:
     reliable_result: bool | None
     artifact_refs: tuple[tuple[str, str], ...]
     reason: str
+    execution_id: str | None = None
+    gap: str | None = None
+    cost: CostProjection | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ComparisonGroupView:
-    """组收敛/覆盖只读投影；未确认结果逐路保留，不以计数伪造结论。"""
+    """组收敛/覆盖/费用只读投影；未确认结果逐路保留，不以计数伪造结论。
+
+    ``cost_state`` 只描述**已读到的事实**：``known`` 才是全部路已计价且无缺口；
+    ``partial`` 为「已知合计 + 有未计价项」，``reserved`` 为有活跃预留未结算，
+    ``unknown`` 为未读到/无可计价引用，``failed`` 为账本读取失败。``known_cny``
+    始终只合计已读到的计价事实；为 ``None`` 才表示没有任何可用金额（禁止 0）。
+    """
 
     group_ref: str
     manifest_digest: str
@@ -709,6 +755,10 @@ class ComparisonGroupView:
     not_started_count: int
     unconfirmed_count: int
     lanes: tuple[ComparisonLaneView, ...]
+    cost_state: str = COMPARISON_COST_UNKNOWN
+    known_cny: Decimal | None = None
+    reserved_cny: Decimal | None = None
+    unpriced_attempts: int = 0
 
 
 def _observation_map(
@@ -727,6 +777,11 @@ def _observation_map(
 
 
 def _lane_reason(state: str | None, reliable: bool | None, note: str | None = None) -> str:
+    if state is None and note is not None:
+        if note.startswith(DISPATCH_FAILED_PREFIX):
+            return "dispatch_failed"
+        if note.startswith(ACCEPT_FAILED_PREFIX):
+            return "accept_failed"
     if state is None:
         return "started_no_fact" if note == "started_no_fact" else "not_started"
     if state in _UNCONFIRMED_STATES or (state in _TERMINAL_STATES and reliable is None):
@@ -740,6 +795,64 @@ def _lane_reason(state: str | None, reliable: bool | None, note: str | None = No
     if state == "withdrawn":
         return "withdrawn"
     return "preserve_result"
+
+
+def _lane_gap(state: str | None, reliable: bool | None) -> str | None:
+    """一路的对象级缺口（与 ``completion.py`` 的叶缺口口径一致）。
+
+    ``None`` 只表示该路确实完整（``complete`` 且有可靠成果）；非终态返回
+    ``no_terminal_fact``，未知结案返回 ``result_unconfirmed``，不得读成无缺口（R21）。
+    """
+
+    if state is None:
+        return "no_terminal_fact"
+    if state == "complete":
+        return None if reliable is True else "result_unconfirmed"
+    if state == "partial":
+        return "missing_data"
+    if state in {"failed", "withdrawn", "ended"}:
+        return "no_result"
+    if state == "closed_unknown":
+        return "result_unconfirmed"
+    if state in _TERMINAL_STATES:
+        return "result_unconfirmed"
+    return "no_terminal_fact"
+
+
+def _group_cost(views: list[ComparisonLaneView]) -> tuple[str, Decimal | None, Decimal | None, int]:
+    """逐路费用事实 → 组费用状态（不把未知拼成完整总费用，R21）。"""
+
+    costs = [view.cost for view in views]
+    if any(cost is None for cost in costs):
+        observed = [cost for cost in costs if cost is not None]
+        known = _sum_known(observed)
+        return COMPARISON_COST_UNKNOWN, known, _sum_reserved(observed), _sum_unpriced(observed)
+    concrete = [cost for cost in costs if cost is not None]
+    if any(cost.read_state != "ok" for cost in concrete):
+        # 读取失败不丢弃其他路的已计价事实：已知合计照常给出，缺口单列。
+        return COMPARISON_COST_FAILED, _sum_known(concrete), _sum_reserved(concrete), _sum_unpriced(concrete)
+    if _sum_unpriced(concrete) > 0:
+        return COMPARISON_COST_PARTIAL, _sum_known(concrete), _sum_reserved(concrete), _sum_unpriced(concrete)
+    if any(cost.known_cny is None for cost in concrete):
+        return COMPARISON_COST_UNKNOWN, None, _sum_reserved(concrete), 0
+    reserved = _sum_reserved(concrete)
+    if reserved is not None and reserved > 0:
+        return COMPARISON_COST_RESERVED, _sum_known(concrete), reserved, 0
+    return COMPARISON_COST_KNOWN, _sum_known(concrete), reserved, 0
+
+
+def _sum_known(costs: list[CostProjection]) -> Decimal | None:
+    priced = [cost.known_cny for cost in costs if cost.read_state == "ok" and cost.known_cny is not None]
+    return sum(priced, Decimal("0")) if priced else None
+
+
+def _sum_reserved(costs: list[CostProjection]) -> Decimal | None:
+    amounts = [cost.reserved_cny for cost in costs if cost.read_state == "ok" and cost.reserved_cny is not None]
+    return sum(amounts, Decimal("0")) if amounts else None
+
+
+def _sum_unpriced(costs: list[CostProjection]) -> int:
+    return sum(cost.unpriced_attempts for cost in costs if cost.read_state == "ok")
 
 
 def build_comparison_view(
@@ -772,8 +885,12 @@ def build_comparison_view(
                 reliable_result=observation.reliable_result,
                 artifact_refs=observation.artifact_refs,
                 reason=_lane_reason(observation.display_state, observation.reliable_result, observation.note),
+                execution_id=observation.execution_id,
+                gap=_lane_gap(observation.display_state, observation.reliable_result),
+                cost=observation.cost,
             )
         )
+    cost_state, known_cny, reserved_cny, unpriced = _group_cost(views)
     observed_states = [view.display_state for view in views]
     pending = [view for view in views if view.display_state is None or view.display_state not in _TERMINAL_STATES]
     complete_count = sum(1 for view in views if view.display_state == "complete")
@@ -799,6 +916,10 @@ def build_comparison_view(
             not_started_count=not_started_count,
             unconfirmed_count=0,
             lanes=tuple(views),
+            cost_state=cost_state,
+            known_cny=known_cny,
+            reserved_cny=reserved_cny,
+            unpriced_attempts=unpriced,
         )
     unconfirmed = [view for view in views if view.display_state in _UNCONFIRMED_STATES or view.reliable_result is None]
     if unconfirmed:
@@ -816,6 +937,10 @@ def build_comparison_view(
             not_started_count=0,
             unconfirmed_count=len(unconfirmed),
             lanes=tuple(views),
+            cost_state=cost_state,
+            known_cny=known_cny,
+            reserved_cny=reserved_cny,
+            unpriced_attempts=unpriced,
         )
     reliable = [view for view in views if view.reliable_result is True]
     if len(reliable) == len(views) and all(view.display_state == "complete" for view in views):
@@ -840,6 +965,10 @@ def build_comparison_view(
         not_started_count=0,
         unconfirmed_count=0,
         lanes=tuple(views),
+        cost_state=cost_state,
+        known_cny=known_cny,
+        reserved_cny=reserved_cny,
+        unpriced_attempts=unpriced,
     )
 
 
@@ -858,7 +987,8 @@ def observations_from_executions(
 
     ``complete``/``partial`` 为可核成果；``failed``/``withdrawn`` 为可靠确证无
     成果；``ended``/``closed_unknown``/``unknown`` 及非终态保持未知（不推断）。
-    非本组/非本路行忽略；重复路取首行（会话读取已按 user_scope 过滤）。
+    非本组/非本路行忽略；同一路有多条（本路重试）时**取最后一行**（会话按
+    ``created_at`` 升序返回，故最后一行即最新一次尝试），不把旧失败盖在新成果上。
     """
 
     lane_ids = {lane.lane_ref for lane in group.lanes}
@@ -868,8 +998,6 @@ def observations_from_executions(
         lane_ref = getattr(row, "comparison_lane_ref", None)
         if group_ref != group.group_ref or not isinstance(lane_ref, str) or lane_ref not in lane_ids:
             continue
-        if lane_ref in by_lane:
-            continue
         state = getattr(row, "display_state", None)
         reliable: bool | None
         if state in {"complete", "partial"}:
@@ -878,17 +1006,23 @@ def observations_from_executions(
             reliable = False
         else:
             reliable = None
+        execution_id = getattr(row, "execution_id", None)
         by_lane[lane_ref] = ComparisonLaneObservation(
             lane_ref=lane_ref,
             display_state=state if isinstance(state, str) else None,
             reliable_result=reliable,
             note=None,
+            execution_id=execution_id if isinstance(execution_id, str) and execution_id else None,
         )
     return tuple(by_lane.values())
 
 
 def comparison_export_rows(view: ComparisonGroupView) -> tuple[dict[str, str], ...]:
-    """只读导出（沿 F26 原成果规则）：逐路原状态，零模型/零新派发、无合并报告。"""
+    """只读导出（沿 F26 原成果规则）：逐路原状态，零模型/零新派发、无合并报告。
+
+    每路单列其执行身份、结果状态、缺口与费用状态；组级 ``known_cny`` 只作
+    「已计价合计」，未计价/预留/未知分别标出，不拼成完整总费用（R21）。
+    """
 
     rows: list[dict[str, str]] = []
     for lane in view.lanes:
@@ -908,7 +1042,14 @@ def comparison_export_rows(view: ComparisonGroupView) -> tuple[dict[str, str], .
                 if lane.reliable_result is False
                 else "unknown",
                 "reason": lane.reason,
+                "gap": lane.gap if lane.gap is not None else "",
+                "execution_id": lane.execution_id if lane.execution_id is not None else "",
                 "artifact_refs": ";".join(f"{artifact_id}@{version}" for artifact_id, version in lane.artifact_refs),
+                "cost_read_state": lane.cost.read_state if lane.cost is not None else "unread",
+                "known_cny": str(lane.cost.known_cny)
+                if lane.cost is not None and lane.cost.known_cny is not None
+                else "",
+                "unpriced_attempts": str(lane.cost.unpriced_attempts) if lane.cost is not None else "",
             }
         )
     return tuple(rows)
@@ -995,8 +1136,15 @@ async def drive_comparison_group(
 
     启动/观察由本协程顺序发出（不并发抢占），每路完成立即启动下一路（
     不按批次 gather）；同会话单总执行与全局总位同时生效，等待中的路继续占位。
+
+    **单路启动失败隔离**：``start_lane`` 抛出的普通异常只把该路记为
+    ``dispatch_failed:<错误码>`` 并继续启动其余路（不阻断、不重试其他路）；
+    ``asyncio.CancelledError`` 原样传播（R2）。该路不会被本批次重复尝试，
+    重试由调用方以本路新轮另行发起。
+
     观察为空且达到 ``idle_observation_limit`` 时：有持久等待检查点则继续，否则
-    按本批次结束（保持未收敛，不伪造终态）。``CancelledError`` 原样传播（R2）。
+    按本批次结束（保持未收敛，不伪造终态）。生产观察只回传终态事实时，本函数
+    自然在一次空观察后返回（发起/推进批次），由再次调用接续完成。
     """
 
     capacities = plan_lane_queue(
@@ -1009,16 +1157,34 @@ async def drive_comparison_group(
     capacity = sum(1 for decision in capacities if decision.decision == "dispatch")
     running: dict[str, str] = {}
     started: set[str] = set()
+    unavailable: set[str] = set()
     observed: dict[str, ComparisonLaneObservation] = {}
     idle = 0
     while True:
         for lane in group.lanes:
             if len(running) >= capacity:
                 break
-            if lane.lane_ref in started:
+            if lane.lane_ref in started or lane.lane_ref in unavailable:
+                continue
+            try:
+                workflow_id = await start_lane(lane)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                unavailable.add(lane.lane_ref)
+                code = getattr(exc, "code", None)
+                code_value = getattr(code, "value", code)
+                reason = code_value if isinstance(code_value, str) and code_value else type(exc).__name__
+                prefix = getattr(exc, "note_prefix", DISPATCH_FAILED_PREFIX)
+                observed[lane.lane_ref] = ComparisonLaneObservation(
+                    lane_ref=lane.lane_ref,
+                    display_state=None,
+                    reliable_result=None,
+                    note=f"{prefix}{reason}",
+                )
                 continue
             started.add(lane.lane_ref)
-            running[lane.lane_ref] = await start_lane(lane)
+            running[lane.lane_ref] = workflow_id
             # 已启动是可靠事实；尚无终态投影时如实标为「已启动、未观察到事实」，
             # 不冒充未启动，也不伪造运行/成功状态（R21）。
             observed[lane.lane_ref] = ComparisonLaneObservation(
@@ -1069,13 +1235,19 @@ class ComparisonSubmissionRequest:
 
 @dataclass(frozen=True, slots=True)
 class ComparisonLaneReceipt:
-    """单路受理结果（受理失败逐路如实分列，不伪造已受理）。"""
+    """单路受理结果（受理失败逐路如实分列，不伪造已受理）。
+
+    ``dispatch_submitted`` 只在真正尝试派发后有值：``False`` 表示本次零派发
+    （原因在 ``dispatch_reason``），``None`` 表示尚未尝试（只受理不派发）。
+    """
 
     lane_ref: str
     execution_id: str | None
     command_record_id: str | None
     commit_state: CommitState | None
     error_code: str | None
+    dispatch_submitted: bool | None = None
+    dispatch_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1093,20 +1265,47 @@ class ComparisonSubmissionReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class ComparisonRunReceipt:
+    """组发起/推进回执：逐路独立执行事实 + 当前组投影（无组级执行身份）。
+
+    比较组本身**不是**一次研究执行：没有 group execution_id，也没有组级完成
+    结论可被计为「一次完整成功」；成功/缺口只逐路按各自执行事实呈现。
+    """
+
+    group_ref: str
+    manifest_digest: str
+    lanes: tuple[ComparisonLaneReceipt, ...]
+    view: ComparisonGroupView
+    dispatcher_wired: bool
+
+
+@dataclass(frozen=True, slots=True)
 class ComparisonReadQuery:
-    """只读比较/导出查询（按准确组身份与主会话）。"""
+    """只读比较/导出查询（按准确组身份与主会话）。
+
+    ``include_cost`` 为真时逐路读取原账本费用投影（只读、零模型调用）；
+    缺省只读执行事实，费用保持未知而不是伪造 0。
+    """
 
     user_scope: str
     session_id: str
     group_ref: str
     limit: int = 50
+    include_cost: bool = False
 
 
 __all__ = [
+    "ACCEPT_FAILED_PREFIX",
+    "COMPARISON_COST_FAILED",
+    "COMPARISON_COST_KNOWN",
+    "COMPARISON_COST_PARTIAL",
+    "COMPARISON_COST_RESERVED",
+    "COMPARISON_COST_UNKNOWN",
     "COMPARISON_MANIFEST_VERSION",
     "COMPARISON_MIN_LANES",
     "COMPARISON_SESSION_SLOTS",
     "COMPARISON_TOTAL_SLOTS",
+    "DISPATCH_FAILED_PREFIX",
     "STOP_REASON_SHARED_SOURCE",
     "STOP_REASON_USER_ENDED_GROUP",
     "ComparisonGroupStopPlan",
@@ -1118,6 +1317,7 @@ __all__ = [
     "ComparisonLaneSelection",
     "ComparisonLaneView",
     "ComparisonReadQuery",
+    "ComparisonRunReceipt",
     "ComparisonSharedInput",
     "ComparisonSubmissionReceipt",
     "ComparisonSubmissionRequest",
