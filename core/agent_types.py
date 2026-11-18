@@ -2492,12 +2492,18 @@ class SaveAnswerRequest:
     ``expected_decision_revision`` 为决定行预期版（§9.2 通用 revision 列，
     0 表示目标决定行按调用方契约不允许——答复目标必须已存在，DAO 校验 ≥1）；
     ``answer_payload`` 为 CanonicalJson，answer digest 由规范字节派生。
+
+    ``expected_execution_id`` / ``expected_round_id``（R2-I04）为调用方作答时
+    看到的执行/轮次归属：DAO 在决定行锁内与权威行比对，不等即拒绝，证明提交的
+    是「哪一轮研究提出的哪个决定」，而非仅按 decision_id 猜归属。
     """
 
     user_scope: str
     decision_id: str
     client_command_id: str
     expected_decision_revision: int
+    expected_execution_id: str
+    expected_round_id: str
     answer_payload: CanonicalJson
 
 

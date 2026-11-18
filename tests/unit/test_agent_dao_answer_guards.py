@@ -130,6 +130,8 @@ def _save_request(payload: object | None = None, **overrides: Any) -> SaveAnswer
         "decision_id": "d-1",
         "client_command_id": "cmd-1",
         "expected_decision_revision": 1,
+        "expected_execution_id": "exec-1",
+        "expected_round_id": "round-1",
         "answer_payload": json_doc({"schema_version": 1, "approved": True} if payload is None else payload),
     }
     values.update(overrides)
@@ -154,6 +156,25 @@ class TestSaveAnswerFirstEffectGuards:
             await _dao(conn).save_answer(_save_request())
 
         _assert_rejected(excinfo, AgentErrorCode.POLICY_DENIED)
+        assert conn.writes == []
+
+    async def test_execution_round_mismatch_rejected_without_new_fact(self) -> None:
+        """R2-I04：答复必须绑定调用方看到的准确执行/轮次（异轮不得按 id 作答）。"""
+        conn = _AnswerGuardConn(decision=_decision())
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _dao(conn).save_answer(_save_request(expected_round_id="round-other"))
+
+        _assert_rejected(excinfo, AgentErrorCode.REVISION_CONFLICT)
+        assert conn.writes == []
+
+    async def test_execution_mismatch_rejected_without_new_fact(self) -> None:
+        conn = _AnswerGuardConn(decision=_decision())
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _dao(conn).save_answer(_save_request(expected_execution_id="exec-other"))
+
+        _assert_rejected(excinfo, AgentErrorCode.REVISION_CONFLICT)
         assert conn.writes == []
 
     async def test_terminated_execution_rejected_without_new_fact(self) -> None:

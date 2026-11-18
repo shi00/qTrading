@@ -430,7 +430,7 @@ def _build_body(
     state: ResearchObserverState,
     *,
     on_draft_change: Callable[[str, str], None],
-    on_submit: Callable[[str], None],
+    on_submit: Callable[[str, str, str], None],
     on_toggle_execution: Callable[[str], None],
     on_select_execution: Callable[[str | None], None],
     on_load_artifact: Callable[[str, int, str, str], None],
@@ -618,7 +618,7 @@ def _build_decision_card(
     draft: str,
     submitting: bool,
     on_draft_change: Callable[[str, str], None],
-    on_submit: Callable[[str], None],
+    on_submit: Callable[[str, str, str], None],
 ) -> ft.Control:
     """单个必要决定的阅读卡（授权类只读，不给提交入口）。"""
 
@@ -672,7 +672,7 @@ def _build_decision_card(
                     size=AppStyles.FONT_SIZE_BODY_SM,
                 ),
                 disabled=submitting,
-                on_click=lambda _e, decision_id=decision.decision_id: on_submit(decision_id),
+                on_click=lambda _e, d=decision: on_submit(d.decision_id, d.execution_id, d.round_id),
             )
         )
     else:
@@ -699,7 +699,7 @@ def ResearchObserverPanel(
     on_close: Callable[[], None],
     on_refresh: Callable[[], None],
     on_draft_change: Callable[[str, str], None],
-    on_submit: Callable[[str], None],
+    on_submit: Callable[[str, str, str], None],
     on_toggle_execution: Callable[[str], None],
     on_select_execution: Callable[[str | None], None],
     on_load_artifact: Callable[[str, int, str, str], None],

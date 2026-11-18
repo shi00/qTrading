@@ -23,6 +23,7 @@ import asyncio
 import json
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Protocol
 from core.agent_types import (
     AnswerReceipt,
@@ -151,9 +152,15 @@ class SessionDraftView:
 
 @dataclass(frozen=True)
 class PendingDecision:
-    """必要决定的只读投影（展示用；不回显完整授权参数）。"""
+    """必要决定的只读投影（展示用；不回显完整授权参数）。
+
+    ``execution_id`` / ``round_id`` 为决定的权威归属（R2-I04）：提交时随
+    ``decision_id`` 一起回传，证明作答的是用户看到的这一轮、这一决定。
+    """
 
     decision_id: str
+    execution_id: str
+    round_id: str
     decision_kind: str
     revision: int
     created_at: str
@@ -254,6 +261,8 @@ def _pending_decisions(read: SessionRead) -> tuple[PendingDecision, ...]:
         pending.append(
             PendingDecision(
                 decision_id=decision.decision_id,
+                execution_id=decision.execution_id,
+                round_id=decision.round_id,
                 decision_kind=decision.decision_kind,
                 revision=decision.revision,
                 created_at=decision.created_at,
@@ -262,6 +271,21 @@ def _pending_decisions(read: SessionRead) -> tuple[PendingDecision, ...]:
             )
         )
     return tuple(pending)
+
+
+def _is_expired(expires_at: str | None) -> bool:
+    """决定是否已过期（UTC 微秒 ISO；不可解析时不臆断，交给 DAO 新鲜核）。
+
+    过期决定在 UI 层即拒绝，避免发出注定被 ``POLICY_DENIED`` 的写调用。
+    """
+
+    if expires_at is None:
+        return False
+    try:
+        deadline = datetime.strptime(expires_at, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+    except ValueError:
+        return False
+    return deadline <= datetime.now(UTC)
 
 
 def _session_draft_view(read: DraftRead) -> SessionDraftView:
@@ -737,22 +761,27 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         drafts = tuple((key, value) for key, value in self._state.answer_drafts if key != decision_id)
         self._set_state(answer_drafts=(*drafts, (decision_id, text)))
 
-    async def submit_answer(self, decision_id: str) -> None:
+    async def submit_answer(self, decision_id: str, *, execution_id: str, round_id: str) -> None:
         """提交答复：唯一写入口经 facade ``answer``（统一决定，不直连 DAO）。
 
-        授权类决定（data_consent / tool_grant）拒绝在本层提交（需专用授权界面）；
-        空草稿不提交；facade 拒绝时保留草稿并如实给出错误码。
+        ``execution_id`` / ``round_id`` 必须是界面呈现该决定时的归属：与当前投影
+        任一不符即视为过期视图（拒绝，不按同 id 作答另一轮）；已过期决定在 UI 层
+        直接拒绝。授权类决定（data_consent / tool_grant）拒绝在本层提交（需专用
+        授权界面）；空草稿不提交；facade 拒绝时保留草稿并如实给出错误码。
         """
 
         if self._service is None or not self._state.available:
             self._set_state(error_key=self._state.unavailable_reason_key)
             return
         decision = next((item for item in self._state.decisions if item.decision_id == decision_id), None)
-        if decision is None:
+        if decision is None or decision.execution_id != execution_id or decision.round_id != round_id:
             self._set_state(error_key="agent_research_decision_stale")
             return
         if not decision.answerable:
             self._set_state(error_key="agent_research_decision_dedicated")
+            return
+        if _is_expired(decision.expires_at):
+            self._set_state(error_key="agent_research_decision_expired")
             return
         text = self._state.draft_for(decision_id).strip()
         if not text:
@@ -771,6 +800,8 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
                     decision_id=decision_id,
                     client_command_id=f"ui-{uuid.uuid4().hex}",
                     expected_decision_revision=decision.revision,
+                    expected_execution_id=execution_id,
+                    expected_round_id=round_id,
                     answer_payload=json_doc({"text": text}),
                 )
             )

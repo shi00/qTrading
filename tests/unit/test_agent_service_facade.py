@@ -716,6 +716,8 @@ def _answer_request(**overrides: Any) -> SaveAnswerRequest:
         "decision_id": "decision-1",
         "client_command_id": "client-answer-1",
         "expected_decision_revision": 1,
+        "expected_execution_id": "execution-1",
+        "expected_round_id": "round-1",
         "answer_payload": json_doc({"schema_version": 1, "choice": "a"}),
     }
     values.update(overrides)

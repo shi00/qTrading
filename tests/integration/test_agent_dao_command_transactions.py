@@ -150,12 +150,18 @@ def _bind_request(
     return BindActualInputRequest(**values)
 
 
+_SEEDED_DECISION_SCOPE: dict[str, tuple[str, str]] = {}
+
+
 def _answer_request(decision_id: str = "d-1", client_command_id: str = "ans-1", **overrides) -> SaveAnswerRequest:
+    execution_id, round_id = _SEEDED_DECISION_SCOPE.get(decision_id, ("exec-missing", "round-missing"))
     values: dict = {
         "user_scope": "u1",
         "decision_id": decision_id,
         "client_command_id": client_command_id,
         "expected_decision_revision": 1,
+        "expected_execution_id": execution_id,
+        "expected_round_id": round_id,
         "answer_payload": json_doc({"schema_version": 1, "approved": True}),
     }
     values.update(overrides)
@@ -244,6 +250,7 @@ async def _seed_decision(
         "presentation_batch_seq": 1,
     }
     values.update(overrides)
+    _SEEDED_DECISION_SCOPE[values["decision_id"]] = (values["execution_id"], values["round_id"])
     async with dao.engine.begin() as conn:  # type: ignore[union-attr]
         await conn.execute(insert(AgentDecision).values(**values))
         if values.get("grant_id") is not None:

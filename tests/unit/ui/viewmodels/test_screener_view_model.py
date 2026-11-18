@@ -11,6 +11,10 @@ import pandas as pd
 import pytest
 
 from services.task_manager import TaskManager, TaskStatus
+from ui.agent_decision_arbiter import (
+    REFUSAL_OWNER_CONFLICT,
+    get_decision_arbiter,
+)
 from ui.viewmodels import Message
 from ui.viewmodels.ai_stream_mixin import (
     _build_ai_failed_banner_message,
@@ -41,6 +45,15 @@ def vm():
         # 避免 _ensure_processor 触发真实构造 (R16)。测试行为与旧"构造期同步构造"一致。
         vm.data_processor = mock_dp_cls.return_value
         return vm
+
+
+@pytest.fixture(autouse=True)
+def _reset_decision_arbiter():
+    """R2-I04: 统一仲裁器为进程内共享状态，测试前后清空（防跨用例许可残留）。"""
+
+    get_decision_arbiter().reset()
+    yield
+    get_decision_arbiter().reset()
 
 
 class TestExcludeStToggle:
@@ -1921,6 +1934,44 @@ class TestEgressAckBridge:
         # 无待决确认时 resolve 不抛错（View 过期事件防护）
         vm.resolve_ai_egress_ack(True)
         assert vm.state.pending_egress_ack_preview == ""
+
+    @pytest.mark.asyncio
+    async def test_egress_ack_refused_when_research_decision_inflight(self, vm):
+        """R2-I04：研究决定在途时旧外发确认 fail-closed，不弹第二份人工许可。"""
+        arbiter = get_decision_arbiter()
+        assert (
+            arbiter.begin_submit(
+                "research_observer", "d-1", execution_id="e-1", round_id="r-1", has_open_modal_dialog=False
+            )
+            is None
+        )
+        try:
+            assert await vm._request_egress_ack("preview", "deepseek") is False
+            assert vm.state.pending_egress_ack_preview == ""
+        finally:
+            arbiter.end_submit("research_observer")
+
+    @pytest.mark.asyncio
+    async def test_pending_egress_ack_blocks_research_decision_until_resolved(self, vm):
+        """旧确认在途时统一决定被拒绝；结算后许可槽位释放。"""
+        task = asyncio.create_task(vm._request_egress_ack("preview", "deepseek"))
+        await asyncio.sleep(0)
+        arbiter = get_decision_arbiter()
+        assert (
+            arbiter.begin_submit(
+                "research_observer", "d-1", execution_id="e-1", round_id="r-1", has_open_modal_dialog=False
+            )
+            == REFUSAL_OWNER_CONFLICT
+        )
+        vm.resolve_ai_egress_ack(False)
+        assert await task is False
+        assert (
+            arbiter.begin_submit(
+                "research_observer", "d-1", execution_id="e-1", round_id="r-1", has_open_modal_dialog=False
+            )
+            is None
+        )
+        arbiter.end_submit("research_observer")
 
 
 # --- UIR-F07-001: 运行配置在提交时刻冻结（提交后编辑不得影响已提交任务）---

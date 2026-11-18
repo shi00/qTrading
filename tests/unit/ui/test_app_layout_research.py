@@ -41,6 +41,8 @@ pytestmark = pytest.mark.unit
 def _decision(decision_id: str = "d-1", *, kind: str = "user_choice") -> Any:
     return SimpleNamespace(
         decision_id=decision_id,
+        execution_id="e-1",
+        round_id="r-1",
         decision_kind=kind,
         revision=2,
         created_at="2026-11-17T01:02:03.000000Z",
@@ -104,13 +106,13 @@ class _FakeService:
 
 
 class _FakeDecisionVm:
-    """决定管线单测用的最小 VM：只记录 submit_answer 调用。"""
+    """决定管线单测用的最小 VM：只记录 submit_answer 调用（含归属）。"""
 
     def __init__(self) -> None:
-        self.submitted: list[str] = []
+        self.submitted: list[tuple[str, str, str]] = []
 
-    async def submit_answer(self, decision_id: str) -> None:
-        self.submitted.append(decision_id)
+    async def submit_answer(self, decision_id: str, *, execution_id: str, round_id: str) -> None:
+        self.submitted.append((decision_id, execution_id, round_id))
 
 
 @pytest.fixture(autouse=True)
@@ -419,9 +421,11 @@ class TestObservationPanelView:
 
     def test_answerable_decision_wires_explicit_callbacks(self, monkeypatch) -> None:
         drafted: list[tuple[str, str]] = []
-        submitted: list[str] = []
+        submitted: list[tuple[str, str, str]] = []
         decision = PendingDecision(
             decision_id="d-1",
+            execution_id="e-1",
+            round_id="r-1",
             decision_kind="user_choice",
             revision=2,
             created_at="2026-11-17T01:02:03.000000Z",
@@ -433,7 +437,9 @@ class TestObservationPanelView:
             monkeypatch=monkeypatch,
             callbacks={
                 "on_draft_change": lambda decision_id, text: drafted.append((decision_id, text)),
-                "on_submit": lambda decision_id: submitted.append(decision_id),
+                "on_submit": lambda decision_id, execution_id, round_id: submitted.append(
+                    (decision_id, execution_id, round_id)
+                ),
             },
         )
 
@@ -443,11 +449,13 @@ class TestObservationPanelView:
 
         button = _find_button(panel, "agent_research_submit")
         _invoke(button.on_click, MagicMock())
-        assert submitted == ["d-1"]
+        assert submitted == [("d-1", "e-1", "r-1")]
 
     def test_authorization_decision_has_no_submit_entry(self, monkeypatch) -> None:
         decision = PendingDecision(
             decision_id="d-1",
+            execution_id="e-1",
+            round_id="r-1",
             decision_kind="tool_grant",
             revision=2,
             created_at="2026-11-17T01:02:03.000000Z",
@@ -464,6 +472,8 @@ class TestObservationPanelView:
     def test_decision_card_shows_expiry(self, monkeypatch) -> None:
         decision = PendingDecision(
             decision_id="d-1",
+            execution_id="e-1",
+            round_id="r-1",
             decision_kind="user_choice",
             revision=2,
             created_at="2026-11-17T01:02:03.000000Z",
@@ -713,12 +723,14 @@ class TestDecisionSubmissionPipeline:
             vm=vm,
             owner="research_observer",
             decision_id="d-1",
+            execution_id="e-1",
+            round_id="r-1",
         )
 
         assert refusal is None
         assert page.run_task.call_count == 1
         asyncio.run(page.run_task.call_args.args[0]())
-        assert vm.submitted == ["d-1"]
+        assert vm.submitted == [("d-1", "e-1", "r-1")]
         assert agent_decision_arbiter.get_decision_arbiter().owner is None
 
     def test_open_dialog_refuses_without_scheduling(self) -> None:
@@ -731,6 +743,8 @@ class TestDecisionSubmissionPipeline:
             vm=vm,
             owner="research_observer",
             decision_id="d-1",
+            execution_id="e-1",
+            round_id="r-1",
         )
 
         assert refusal == agent_decision_arbiter.REFUSAL_DIALOG_OPEN
@@ -741,13 +755,20 @@ class TestDecisionSubmissionPipeline:
         page = _make_fake_page()
         vm = _FakeDecisionVm()
         arbiter = agent_decision_arbiter.get_decision_arbiter()
-        assert arbiter.begin_submit("other_surface", "d-9", has_open_modal_dialog=False) is None
+        assert (
+            arbiter.begin_submit(
+                "other_surface", "d-9", execution_id="e-9", round_id="r-9", has_open_modal_dialog=False
+            )
+            is None
+        )
 
         refusal = agent_decision_arbiter.submit_decision(
             page=page,
             vm=vm,
             owner="research_observer",
             decision_id="d-1",
+            execution_id="e-1",
+            round_id="r-1",
         )
 
         assert refusal == agent_decision_arbiter.REFUSAL_OWNER_CONFLICT

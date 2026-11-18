@@ -611,6 +611,7 @@
     "agent_research_decision_expires_fmt": "Expires at {expires_at}",
     "agent_research_decision_dedicated": "Needs the dedicated authorization surface; this observer does not approve it",
     "agent_research_decision_stale": "This decision changed; refresh before submitting",
+    "agent_research_decision_expired": "This decision expired; refresh before submitting",
     "agent_research_answer_hint": "Type your answer",
     "agent_research_answer_label": "Answer",
     "agent_research_submit": "Submit answer",

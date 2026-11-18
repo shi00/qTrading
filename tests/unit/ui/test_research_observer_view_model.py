@@ -33,13 +33,18 @@ def _decision(
     revision: int = 3,
     answered: bool = False,
     question_payload: str | None = '{"question": "选哪个候选？"}',
+    execution_id: str = "e-1",
+    round_id: str = "r-1",
+    expires_at: str | None = None,
 ) -> Any:
     return SimpleNamespace(
         decision_id=decision_id,
+        execution_id=execution_id,
+        round_id=round_id,
         decision_kind=kind,
         revision=revision,
         created_at="2026-11-17T01:02:03.000000Z",
-        expires_at=None,
+        expires_at=expires_at,
         question_payload=question_payload,
         answer_command_id="cmd-1" if answered else None,
     )
@@ -302,7 +307,7 @@ class TestUnavailableState:
     @pytest.mark.asyncio
     async def test_submit_without_service_reports_reason(self) -> None:
         vm = ResearchObserverViewModel(None, unavailable_reason_key=UNAVAILABLE_NOT_READY)
-        await vm.submit_answer("d-1")
+        await vm.submit_answer("d-1", execution_id="e-1", round_id="r-1")
         assert vm.state.error_key == UNAVAILABLE_NOT_READY
 
 
@@ -397,7 +402,7 @@ class TestDraftAndSubmit:
         vm = ResearchObserverViewModel(service)
         await vm.refresh()
         vm.set_answer_draft("d-1", "同意")
-        await vm.submit_answer("d-1")
+        await vm.submit_answer("d-1", execution_id="e-1", round_id="r-1")
         assert vm.state.error_key == "agent_research_decision_dedicated"
         assert service.answer_calls == []
 
@@ -406,7 +411,7 @@ class TestDraftAndSubmit:
         service = _FakeService(read=_session_read(decisions=(_decision("d-1"),)))
         vm = ResearchObserverViewModel(service)
         await vm.refresh()
-        await vm.submit_answer("d-1")
+        await vm.submit_answer("d-1", execution_id="e-1", round_id="r-1")
         assert vm.state.error_key == "agent_research_empty_draft"
         assert service.answer_calls == []
 
@@ -417,12 +422,14 @@ class TestDraftAndSubmit:
         await vm.refresh()
         vm.set_answer_draft("d-1", "  选择第一家  ")
 
-        await vm.submit_answer("d-1")
+        await vm.submit_answer("d-1", execution_id="e-1", round_id="r-1")
 
         assert len(service.answer_calls) == 1
         request = service.answer_calls[0]
         assert request.decision_id == "d-1"
         assert request.expected_decision_revision == 7
+        assert request.expected_execution_id == "e-1"
+        assert request.expected_round_id == "r-1"
         assert request.user_scope == "local-desktop"
         assert '"选择第一家"' in request.answer_payload
         assert vm.state.submitting is False
@@ -440,9 +447,37 @@ class TestDraftAndSubmit:
         vm = ResearchObserverViewModel(service)
         await vm.refresh()
         vm.set_answer_draft("d-1", "选择第一家")
-        await vm.submit_answer("d-1")
+        await vm.submit_answer("d-1", execution_id="e-1", round_id="r-1")
         assert vm.state.last_error_code == "REVISION_CONFLICT"
         assert vm.state.draft_for("d-1") == "选择第一家"
+
+    @pytest.mark.asyncio
+    async def test_submit_rejects_execution_round_mismatch_without_writing(self) -> None:
+        """异轮/异执行视图不得按同 decision_id 作答（R2-I04 归属绑定）。"""
+        service = _FakeService(read=_session_read(decisions=(_decision("d-1"),)))
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+        vm.set_answer_draft("d-1", "选择第一家")
+
+        await vm.submit_answer("d-1", execution_id="e-2", round_id="r-1")
+
+        assert vm.state.error_key == "agent_research_decision_stale"
+        assert service.answer_calls == []
+        assert vm.state.draft_for("d-1") == "选择第一家"
+
+    @pytest.mark.asyncio
+    async def test_submit_rejects_expired_decision_without_writing(self) -> None:
+        service = _FakeService(
+            read=_session_read(decisions=(_decision("d-1", expires_at="2020-01-01T00:00:00.000000Z"),))
+        )
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+        vm.set_answer_draft("d-1", "选择第一家")
+
+        await vm.submit_answer("d-1", execution_id="e-1", round_id="r-1")
+
+        assert vm.state.error_key == "agent_research_decision_expired"
+        assert service.answer_calls == []
 
 
 class TestMainSessionReadOnlyProjection:

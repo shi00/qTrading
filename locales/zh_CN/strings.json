@@ -482,6 +482,7 @@
     "agent_research_decision_expires_fmt": "有效期至 {expires_at}",
     "agent_research_decision_dedicated": "该项需专用授权界面处理，本观察层不代为批准",
     "agent_research_decision_stale": "该决定已变化，请刷新后再提交",
+    "agent_research_decision_expired": "该决定已过期，请刷新后再提交",
     "agent_research_answer_hint": "输入答复",
     "agent_research_answer_label": "答复内容",
     "agent_research_submit": "提交答复",
