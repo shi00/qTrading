@@ -6,6 +6,7 @@ XLSX 同源双表示与缓存适用性（有/无/空/错误/字符串）、sheet
 """
 
 import asyncio
+import csv
 import hashlib
 import io
 import json
@@ -174,6 +175,28 @@ class TestCsvExtraction:
         assert parsed.stats["rows"] == 2
         block = json.loads(parsed.blocks[0])
         assert block["rows"] == [["name", "note"], ["alice", "line1\nline2"]]
+
+    def test_body_text_is_frozen_by_standard_writer(self) -> None:
+        # I24：逗号/引号/CRLF/多行字段必须按标准 writer 冻结，正文可被 csv.reader 还原。
+        data = b'name,note\r\nalice,"a,b"\r\nbob,"say ""hi"""\r\ncarol,"line1\r\nline2"\r\n'
+        parsed = _parse(AttachmentKind.CSV, data)
+        assert parsed.body_text == 'name,note\nalice,"a,b"\nbob,"say ""hi"""\ncarol,"line1\r\nline2"'
+        assert list(csv.reader(io.StringIO(parsed.body_text, newline=""))) == [
+            ["name", "note"],
+            ["alice", "a,b"],
+            ["bob", 'say "hi"'],
+            ["carol", "line1\r\nline2"],
+        ]
+        assert parsed.stats["chars"] == len(parsed.body_text)
+
+    def test_codepoint_budget_counts_frozen_representation(self) -> None:
+        data = b'a,b\n"x,y",z\n'
+        parsed = _parse(AttachmentKind.CSV, data)
+        assert parsed.body_text == 'a,b\n"x,y",z'
+        assert parsed.stats["chars"] == len('a,b\n"x,y",z')
+        with pytest.raises(AttachmentParseError) as exc:
+            _parse(AttachmentKind.CSV, data, budget=AttachmentBudget(max_codepoints=len(parsed.body_text) - 1))
+        assert exc.value.code == "attachment_codepoints_exceeded"
 
     def test_rows_selection_includes_header_numbering(self) -> None:
         parsed = _parse(

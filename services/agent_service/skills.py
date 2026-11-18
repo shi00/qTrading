@@ -1065,7 +1065,12 @@ class ManagedSkillStore:
 
 
 def install_skill_version(store: ManagedSkillStore, ref: SkillVersionRef, data: bytes) -> str:
-    """安装入口：预检 → 原子发布；返回归档摘要（失败不改变旧版本）。"""
+    """安装入口：预检 → 原子发布；返回归档摘要（失败不改变旧版本）。
+
+    仅受信调用：本入口不做 frontmatter/许可准入（I41），生产导入必须经
+    ``SkillCatalogService.import_package``（解析 manifest + 许可白名单）；
+    直接调用会发布缺合法 frontmatter 的版本目录。
+    """
 
     inspection = inspect_skill_package(data)
     store.publish_package(ref, data, inspection)

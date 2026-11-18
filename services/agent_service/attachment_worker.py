@@ -216,6 +216,22 @@ def _csv_records(data: bytes) -> list[list[str]]:
         raise AttachmentParseError("invalid_structure", "CSV structure is invalid") from exc
 
 
+def _csv_representation(records: list[list[str]]) -> str:
+    """按标准 writer 冻结 CSV 正文表示（逗号分隔、双引号包裹、LF 行尾）。
+
+    I24：裸 ``",".join`` 会让含逗号/引号/CRLF 的字段在正文中产生歧义，且码点计量
+    偏离真实冻结表示；此处与 ``csv.reader`` 同源，保证「结构与正文一致」。
+    行尾沿用内部 LF 约定（字段内的 CRLF 原样保留并由标准 writer 加引号），
+    避免仅因换行风格改变既有行/码点限额的判定结果。
+    """
+
+    buffer = io.StringIO()
+    csv.writer(buffer, lineterminator="\n").writerows(records)
+    text = buffer.getvalue()
+    # 末尾行尾是记录分隔符而非内容：去掉一次，保持「无尾随换行」的既有正文形态。
+    return text[:-1] if text.endswith("\n") else text
+
+
 def _csv_header_offset(records: list[list[str]], header_confirmed: bool) -> int:
     """返回应从记录行额度中扣除的表头行数（0 或 1）。
 
@@ -264,7 +280,7 @@ def _parse_csv(data: bytes, selection: Selection, budget: AttachmentBudget, head
             selected.extend(chunk)
             read_ranges.append(to_wire_dict(atom))
 
-    representation = "\n".join(",".join(record) for record in selected)
+    representation = _csv_representation(selected)
     budget.enforce_codepoints(len(representation))
     block = json_doc({"kind": "csv", "rows": selected})
     return ParsedAttachment(

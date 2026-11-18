@@ -73,6 +73,9 @@
 | P3-AgentSource-Residual-Risks | E-01 残余：父进程范围复核缺「伪造越界/重叠 selected_range 被拒」负向用例；worker 自身 deadline 与父进程 communicate 超时同值（竞态下父进程常先 kill）；超时 limitation 硬编码「30 秒」与实际可注入超时不符；header 恰 64KiB 的 off-by-one；`_json_safe` 将 NaN→null/Decimal→字符串后求摘要（理论上与 None 同摘要） | P3 | ① 附件 worker 接入 F 系列真实链路前；② 或出现部分结果丢失/超时文案与配置不一致的报告时；③ 或扩到新解析格式需复用 `_json_safe` 摘要时 |
 | P3-AgentDelivery-Resume-NotImplemented | Agent 交付中断后的续接与残留清理未实现：中断后沿原 manifest 续接、认领前后目标身份/摘要查回与补存成功回执（HANDOFF §10.2 L581-583）、按成果维度查原 `unknown`、unknown/取消后残留清理 | P3 | ① 交付 UI（F-05）上线前须至少支持「按 `read_delivery` 查回 + 明确重导为新的 delivery」；② 或出现中断后用户重复导出/覆盖旧目标的事故时 |
 | P3-AgentSearch-IndexPlan | 历史搜索/指纹在真实数据量下的执行计划与延迟未经隔离 PG 实测，GIN 表达式索引（`to_tsvector('simple')`）与 `ILIKE` 查询的匹配方式未验证 | P3 | 验收阶段以获准隔离 PG 在 D10 规模（1000 主会话/10 万公开消息/单会话 1 万条）实测计划/延迟/峰值，P95 超 2 秒或未走索引即升级 |
+| P3-AgentSkill-VersionReadNoRehash | 已发布 Skill 版本的幂等匹配只比对 `.skill-manifest.json` 与入站 inspection，受管读取/服务侧不重算 digest（当前无正式 Harness loader 接入执行链） | P3 | ① 正式 Harness loader 接入执行链前；② 或出现已发布版本目录被就地篡改/链接替换的报告时 |
+| P3-AgentResearchBoundary-Unwired | `ResearchBoundary` 能力类已实现但生产组装从未实例化；MCP `ToolCallRequest`/claim 只绑 schema/参数/审核范围摘要，不绑 research boundary 与源 claim | P3 | ① Agent 组装接入 capability（讨论/执行模式、来源撤用、窗口）时；② 或出现禁用源仍被 MCP 派发的实例时 |
+| P3-AgentSkill-InvocationFlags-Unwired | `SKILL.md` 的 `disable-model-invocation`/`user-invocable` 已解析进 `SkillManifest`，但全仓无消费方；原文件保版可重读 | P3 | ① 正式 Harness loader/技能选择器接入时；② 或出现禁用的 Skill 被模型自动调用的实例时 |
 
 ## 技术债清单
 
@@ -800,6 +803,52 @@ PR #2281 检视 D32 指出：模型里存在 GIN 索引，不等于查询走索�
 **期望的最终解法**
 
 在获准的隔离 PG 上以 D10 规模数据（1000 主会话 / 10 万公开消息 / 单会话 1 万条）实测：① 搜索与指纹查询的 `EXPLAIN (ANALYZE, BUFFERS)` 计划是否命中索引（含表达式索引与 ILIKE 的匹配关系）；② P95 延迟与内存峰值；③ 部分快照/指纹是否需要分页上限。不得以「模型里已有 GIN 索引」代证性能，也不得以未实测的估计代替结论。upgrade 触发条件同上。
+
+### Agent 运行时检视 risk 项复核残项（PR #2281，2026-11-18）
+
+> 复核基线 `3284cf8d3`；8 项结论见 `reviews/PR2281-检视问题拓扑与调度台账.md` §7。其中 I40/I41 已关闭，I44 已被 I07 的传输守卫消除（既有 `P2-AgentMCP-Residual-Risks` 覆盖），I45 已由既有 `P3-AgentSource-Residual-Risks` 覆盖，I24 已修（标准 writer 冻结 CSV 正文）；以下 3 项为新增登记。
+
+#### P3-AgentSkill-VersionReadNoRehash：已发布 Skill 版本读取不重哈希（I39）
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-AgentSkill-VersionReadNoRehash** | 幂等匹配仅比对 `.skill-manifest.json` 与入站 inspection（`_version_matches`），受管读取/服务侧不重算 digest；`ReadOnlyWorkspace` 只护路径与普通文件，防不了已发布目录被就地篡改 | ① 正式 Harness loader 接入执行链前；② 或出现已发布版本目录被就地篡改/链接替换的报告时 |
+
+**产生背景与现状**
+
+PR #2281 检视 I39（risk）指出：导入侧已做字节/链接拒绝与版本不可覆盖，但「读取已发布版本」并不重新计算内容摘要——幂等判定只把目录内清单与本次入站预检结果比较，服务读取信任清单。当前仓库内没有正式 Harness loader（技能执行链未接线），因此篡改面限于「直接修改已发布目录」，尚未进入运行期执行路径。
+
+**期望的最终解法**
+
+正式 loader 落地时，在 `ReadOnlyWorkspace` 的同句柄读取中重算文件摘要与总量，并与 `.skill-manifest.json` 比对；不一致即拒绝加载并标记版本不可信。补充「发布后就地篡改」「链接替换」负向用例。
+
+#### P3-AgentResearchBoundary-Unwired：ResearchBoundary 未接入组装、MCP claim 未绑研究边界（I43）
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-AgentResearchBoundary-Unwired** | `ResearchBoundary` 能力类（模式/来源撤用/窗口门控）已实现但生产组装从未实例化；MCP `ToolCallRequest` 与 `ToolGrantPort.claim` 只绑 schema/参数/审核范围摘要，不绑 research boundary 与源 claim | ① Agent 组装接入 capability 时；② 或出现禁用源/旧摘要仍被 MCP 派发的实例时 |
+
+**产生背景与现状**
+
+检视 I43（risk）指出 `mcp_tools.py` 的请求/claim 结构与 `ResearchBoundary`、资料 owner、源 claim 没有真实生产组合。复核确认：能力类存在但仅测试实例化（`capabilities.py:361`），MCP 请求/claim 的摘要三元组（schema/参数/审核范围）不包含研究边界身份。未见越权实证，属「未接线」而非已证缺陷。
+
+**期望的最终解法**
+
+Agent 组装接入 capability 时，把讨论/计划模式、来源撤用、上下文窗口的判定结果绑定进 MCP 请求/claim；补「禁用源 0 派发」「claim 竞争零受影响派发」的组合用例，且不重复 M07/M19 的越权计数。
+
+#### P3-AgentSkill-InvocationFlags-Unwired：Skill 调用旗标已解析但无消费方（I47）
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-AgentSkill-InvocationFlags-Unwired** | `SKILL.md` 的 `disable-model-invocation`/`user-invocable` 已解析进 `SkillManifest`，但全仓无消费方（无 loader/技能选择器） | ① 正式 Harness loader/技能选择器接入时；② 或出现禁用的 Skill 被模型自动调用的实例时 |
+
+**产生背景与现状**
+
+检视 I47（risk）指出调用旗标未复制进资产注册。复核确认：flags 已在 `parse_skill_manifest` 中解析（`skills.py:767/770`），但除定义与解析外无任何消费方；由于没有正式 loader，旗标当前不影响行为，原 `SKILL.md` 完整保版、未来 loader 可重读。
+
+**期望的最终解法**
+
+loader/技能选择器接入时按旗标约束「模型可自动调用」与「用户可显式调用」；不得为元数据副本另建第二正本，仍以版本内 `SKILL.md` 为唯一来源。
 
 ## 已接受的权衡（Accepted Tradeoffs）
 
