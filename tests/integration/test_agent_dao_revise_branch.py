@@ -1,10 +1,12 @@
 """会话修订/分支 DAO 集成测试（F-03-2b，真实 embedded PG）。
 
-验证 §4.2 L436 + F29 的「核原消息身份/版本/范围 → 保存新因果前缀」与分支会话
-创建：
+验证 §4.2 L436 + F29 的「核原消息身份/版本/范围 → 准备新稿/新会话」：
 
-- ``revise`` 只改本会话 ``causal_head_ref``（源消息之前最近一条或显式截点；
-  首条消息 → 空前缀），不改消息、不建会话、不派发；
+- ``revise`` 只核源消息身份/版本与截点，**不改会话因果头**（R2-I25：编辑旧
+  问题只准备新稿；取消编辑不改变既有研究关联），不改消息、不建会话、不派发；
+- 因果头在新意图可靠受理时原子切换（``accept_request`` 的修订声明
+  ``revise_source_message_id``/``revise_causal_cutoff_message_id``，与意图摘要/
+  草稿版 CAS 同事务），源消息之前最近一条或显式截点；首条消息 → 空前缀；
 - ``branch`` 新建会话，``parent_session_id`` + 冻结键集 ``branch_metadata`` +
   ``causal_head_ref`` 引用原前缀，不复制正文/消息；
 - 源消息版本不符 ``REVISION_CONFLICT`` 零新事实；跨会话/跨用户域/截点晚于
@@ -24,12 +26,16 @@ from alembic import command
 from sqlalchemy import insert, select, text
 
 from core.agent_types import (
+    AcceptRequest,
     AgentErrorCode,
     AgentServiceError,
     CommandRef,
     CommandReceipt,
+    Mode,
+    Purpose,
     SessionAction,
     SessionChangeCommand,
+    json_doc,
 )
 from data.persistence.daos.agent_dao import AgentDao
 from data.persistence.embedded_postgres.protocol import ConnectionInfo
@@ -197,8 +203,47 @@ async def _seed_thread(dao: AgentDao) -> None:
     await _seed_message(dao, message_id="m3", seq=3)
 
 
+def _accept(
+    *,
+    session_id: str = "s1",
+    text: str = "修订后的问题",
+    command_id: str = "accept-rev-1",
+    business_request_id: str = "req-accept",
+    revise_source: str | None = "m3",
+    cutoff: str | None = None,
+) -> AcceptRequest:
+    manifest = json_doc(
+        {
+            "schema_version": 1,
+            "source_module": "ui",
+            "mode": "discuss",
+            "purpose": "concept",
+            "text": text,
+        }
+    )
+    return AcceptRequest(
+        user_scope=_USER,
+        session_id=session_id,
+        source_module="ui",
+        business_request_id=business_request_id,
+        client_command_id=command_id,
+        expected_revision=0,
+        node_id="root",
+        workflow_id="wf-1",
+        mode=Mode.DISCUSS,
+        purpose=Purpose.CONCEPT,
+        text=text,
+        manifest_payload=manifest,
+        source_display_name="用户消息",
+        revise_source_message_id=revise_source,
+        revise_causal_cutoff_message_id=cutoff,
+    )
+
+
 class TestRevise:
-    async def test_revise_sets_previous_message_as_causal_head(self, real_embedded_pg: ConnectionInfo) -> None:
+    async def test_revise_prepares_without_switching_causal_head(self, real_embedded_pg: ConnectionInfo) -> None:
+        """R2-I25：修订只准备新稿，不提前改变会话因果头。"""
+
         dao = await _setup(real_embedded_pg.url)
         await _seed_thread(dao)
 
@@ -209,7 +254,7 @@ class TestRevise:
         assert receipt.current_revision == 2
         row = await _session_row(real_embedded_pg.url)
         assert row.revision == 2
-        assert row.causal_head_ref == "m2"
+        assert row.causal_head_ref is None
         assert row.branch_metadata is None
         assert row.parent_session_id is None
         assert await _message_count(real_embedded_pg.url, "s1") == 3
@@ -219,13 +264,13 @@ class TestRevise:
         assert commands[0].request_payload["source_message_id"] == "m3"
         assert commands[0].request_payload["source_message_revision"] == 1
 
-    async def test_revise_explicit_cutoff(self, real_embedded_pg: ConnectionInfo) -> None:
+    async def test_revise_explicit_cutoff_is_validated_but_not_applied(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
         await _seed_thread(dao)
 
         await dao.change_session(_command(cutoff="m1"))
 
-        assert (await _session_row(real_embedded_pg.url)).causal_head_ref == "m1"
+        assert (await _session_row(real_embedded_pg.url)).causal_head_ref is None
 
     async def test_revise_first_message_yields_empty_prefix(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
@@ -283,6 +328,132 @@ class TestRevise:
         assert second == first
         assert (await _session_row(real_embedded_pg.url)).revision == 2
         assert len(await _command_rows(real_embedded_pg.url)) == 1
+
+
+class TestReviseAcceptBinding:
+    """R2-I25：因果头只在新意图受理事务内切换（取消/覆盖草稿不改既有研究关联）。"""
+
+    async def test_accept_binds_declared_causal_head(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_thread(dao)
+        await dao.change_session(_command())
+        assert (await _session_row(real_embedded_pg.url)).causal_head_ref is None
+
+        await dao.accept_request(_accept())
+
+        row = await _session_row(real_embedded_pg.url)
+        assert row.causal_head_ref == "m2"
+        assert await _message_count(real_embedded_pg.url, "s1") == 4
+
+    async def test_cancel_after_revise_keeps_existing_causal_head(self, real_embedded_pg: ConnectionInfo) -> None:
+        """修订后未发送（取消编辑）：既有研究关联保持受理时绑定的因果头。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_thread(dao)
+        await dao.accept_request(_accept())
+        assert (await _session_row(real_embedded_pg.url)).causal_head_ref == "m2"
+
+        await dao.change_session(_command(source_message_id="m1", command_id="cmd-rb-cancel"))
+
+        row = await _session_row(real_embedded_pg.url)
+        assert row.causal_head_ref == "m2"
+        assert await _message_count(real_embedded_pg.url, "s1") == 4
+
+    async def test_plain_accept_does_not_change_causal_head(self, real_embedded_pg: ConnectionInfo) -> None:
+        """未声明修订的新意图不改变（也不清空）既有因果头。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_thread(dao)
+        await dao.accept_request(_accept())
+
+        await dao.accept_request(
+            _accept(
+                text="另一个新问题",
+                command_id="accept-plain",
+                business_request_id="req-plain",
+                revise_source=None,
+            )
+        )
+
+        row = await _session_row(real_embedded_pg.url)
+        assert row.causal_head_ref == "m2"
+        assert await _message_count(real_embedded_pg.url, "s1") == 5
+
+    async def test_accept_revise_first_message_clears_causal_head(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_thread(dao)
+        await dao.accept_request(_accept())
+        assert (await _session_row(real_embedded_pg.url)).causal_head_ref == "m2"
+
+        await dao.accept_request(
+            _accept(
+                text="改成从第一问重来",
+                command_id="accept-rev-2",
+                business_request_id="req-accept-2",
+                revise_source="m1",
+            )
+        )
+
+        assert (await _session_row(real_embedded_pg.url)).causal_head_ref is None
+
+    async def test_accept_revise_source_outside_session_rejected_zero_facts(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_thread(dao)
+        await _seed_session(dao, session_id="s2")
+        await _seed_message(dao, message_id="other", session_id="s2", seq=1)
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.accept_request(_accept(revise_source="other"))
+        _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
+
+        assert await _message_count(real_embedded_pg.url, "s1") == 3
+        assert (await _session_row(real_embedded_pg.url)).causal_head_ref is None
+        assert await _command_rows(real_embedded_pg.url) == []
+
+    async def test_accept_revise_cutoff_after_source_rejected_zero_facts(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_thread(dao)
+        await _seed_message(dao, message_id="m4", seq=4)
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.accept_request(_accept(cutoff="m4"))
+        _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
+
+        assert await _message_count(real_embedded_pg.url, "s1") == 4
+        assert (await _session_row(real_embedded_pg.url)).causal_head_ref is None
+        assert await _command_rows(real_embedded_pg.url) == []
+
+    async def test_replayed_accept_does_not_rebind_causal_head(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_thread(dao)
+        request = _accept(cutoff="m1")
+
+        first = await dao.accept_request(request)
+        replay = await dao.accept_request(_accept(cutoff="m1", command_id="accept-rev-replay"))
+
+        assert replay == first
+        assert (await _session_row(real_embedded_pg.url)).causal_head_ref == "m1"
+        assert await _message_count(real_embedded_pg.url, "s1") == 4
+
+    async def test_concurrent_revise_accepts_linearize_on_session_lock(self, real_embedded_pg: ConnectionInfo) -> None:
+        """并发受理在会话行锁上串行化；因果头取最后提交者的声明值（两者均已受理）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_thread(dao)
+
+        results = await asyncio.gather(
+            dao.accept_request(_accept(command_id="accept-a", business_request_id="req-a", cutoff="m2")),
+            dao.accept_request(_accept(command_id="accept-b", business_request_id="req-b", cutoff="m1")),
+            return_exceptions=True,
+        )
+
+        assert all(not isinstance(item, BaseException) for item in results), results
+        assert await _message_count(real_embedded_pg.url, "s1") == 5
+        assert (await _session_row(real_embedded_pg.url)).causal_head_ref in {"m1", "m2"}
 
 
 class TestBranch:

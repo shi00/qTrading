@@ -21,8 +21,9 @@
   额外返回派发事实，未注入派发器时零派发并如实返回 ``dispatch=None``。
 - ``save_draft`` 只做本地草稿 CAS 持久（不产生派发/费用），随 F-03 交付；
 - ``change_session`` 只做会话元数据 CAS（create/rename/pin/archive/unarchive）与
-  修订/分支的因果前缀保存（revise 改 ``causal_head_ref``；branch 新建会话并引用
-  原消息身份/版本/截点，不复制正文、不派发）；
+  修订/分支的准备（revise 只核源消息/截点、不改会话因果头；branch 新建会话并
+  引用原消息身份/版本/截点，不复制正文、不派发）；因果头在 ``accept_request``
+  以修订声明受理新意图时随该事务原子切换（R2-I25）；
 - ``transfer_draft`` / ``read_draft_transfer`` 只做草稿跨会话移入与原阶段查回
   （不发送、不派发研究、零费用）。
 
@@ -830,8 +831,9 @@ class AgentService:
         """会话元数据命令（§4.2 ``change_session``）：元数据五动作 + 修订/分支。
 
         边界整份校验（动作自身字段、预期版与命令引用一致、源消息身份/版本）；
-        ``revise`` 只保存新因果前缀，``branch`` 只新建会话并引用原前缀，均不
-        复制正文、不派发；CAS/重放/冲突由 DAO 事务裁决。
+        ``revise`` 只准备新稿（核源消息/截点、不改因果头），``branch`` 只新建
+        会话并引用原前缀，均不复制正文、不派发；因果头由受理事务（
+        ``accept_request`` 的修订声明）原子切换，CAS/重放/冲突由 DAO 事务裁决。
         """
 
         self._require_open("change_session")
