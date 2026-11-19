@@ -7,14 +7,17 @@
 from __future__ import annotations
 
 import os
+import threading
 from typing import Any, cast
 
 import pytest
 
+import services.agent_service.mcp_fastmcp as mcp_fastmcp
 from core.agent_types import MCPBudgetProfile, MCPServiceIdentity, MCPTransportKind
 from services.agent_service.mcp import MCPServerConfig, MCPTransportConfig
 from services.agent_service.mcp_budget import MCPBudgetGuard, MCPDeadline
 from services.agent_service.mcp_fastmcp import (
+    _MAX_PROTOCOL_ERRORS,
     _STDERR_TRUNCATED_MARKER,
     FastMCPSession,
     MCPSendGate,
@@ -130,6 +133,41 @@ class TestSanitizedStderrDrain:
         assert len(tail.encode("utf-8")) <= 512
         assert "line-0199" in tail
         assert drain.retained_bytes <= 512
+
+    def test_close_does_not_block_when_child_keeps_write_end(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """子进程仍持有写端时，close 不得阻塞调用线程（读端由排空线程自行关闭）。"""
+        monkeypatch.setattr(mcp_fastmcp, "_STDERR_DRAIN_JOIN_TIMEOUT_S", 0.2)
+        drain = _SanitizedStderrDrain()
+        child_fd = os.dup(drain.fileno())  # 模拟子进程持有的 stderr 写端
+        try:
+            os.write(child_fd, f"boot token={_SECRET}\n".encode())
+            closer = threading.Thread(target=drain.close, daemon=True)
+            closer.start()
+            closer.join(timeout=5.0)
+            assert not closer.is_alive(), "close 不得在子进程仍持有 stderr 写端时阻塞"
+        finally:
+            os.close(child_fd)
+
+        tail = drain.tail()
+        assert "boot" in tail
+        assert _SECRET not in tail
+        drain.clear()
+        assert drain.retained_bytes == 0
+
+
+class TestProtocolDiagnosticsChannel:
+    def test_record_sanitizes_and_bounds_entries(self) -> None:
+        """协议错误通道同样在留存前脱敏，且条数有界（超出丢弃最旧）。"""
+        diagnostics = MCPSessionDiagnostics()
+        total = _MAX_PROTOCOL_ERRORS + 5
+        for index in range(total):
+            diagnostics.record(f"tool_failed-{index} token={_SECRET}")
+
+        assert len(diagnostics.protocol_errors) == _MAX_PROTOCOL_ERRORS
+        assert all(_SECRET not in item for item in diagnostics.protocol_errors)
+        assert diagnostics.last_error == diagnostics.protocol_errors[-1]
+        assert "tool_failed-5" in diagnostics.protocol_errors[0]  # 最旧的 5 条被丢弃
+        assert "tool_failed-0" not in diagnostics.protocol_errors[0]
 
 
 class TestSessionStderrLifecycle:

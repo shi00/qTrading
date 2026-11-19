@@ -57,7 +57,7 @@ http/SSE 的逐请求往返耗时、子进程退出码不可观测；目录/解�
 四诊断通道
 ----------
 :class:`MCPSessionDiagnostics` 固定四路：``stderr_tail``（FD 级、有界且已脱敏的尾部）、
-``last_error``（最后一次错误类别）、``protocol_errors``（按序记录）、
+``last_error``（最后一次错误类别）、``protocol_errors``（按序记录，留存前脱敏且条数有界）、
 ``exit_status``（**经 FastMCP 托管进程时不可观测，保持 None「未知」而不是 0**）。
 
 仍属残留（不得宣称已验证）
@@ -211,6 +211,8 @@ _STDERR_LINE_BYTES = 2048
 _STDERR_DRAIN_JOIN_TIMEOUT_S = 2.0
 #: 超长行截断标记。
 _STDERR_TRUNCATED_MARKER = "…[truncated]"
+#: 协议错误留存条数上限（超出丢弃最旧；条目留存前先脱敏）。
+_MAX_PROTOCOL_ERRORS = 32
 
 
 @dataclass
@@ -223,8 +225,13 @@ class MCPSessionDiagnostics:
     exit_status: int | None = None
 
     def record(self, error: str) -> None:
-        self.last_error = error
-        self.protocol_errors.append(error)
+        """记录一次协议错误：留存前脱敏，条数超上限时丢弃最旧。"""
+        sanitized = DataSanitizer.sanitize_error(error)
+        self.last_error = sanitized
+        self.protocol_errors.append(sanitized)
+        overflow = len(self.protocol_errors) - _MAX_PROTOCOL_ERRORS
+        if overflow > 0:
+            del self.protocol_errors[:overflow]
 
 
 class _SanitizedStderrDrain:
@@ -271,15 +278,22 @@ class _SanitizedStderrDrain:
     # -- 生命周期与读取 ---------------------------------------------------
 
     def close(self) -> None:
-        """关闭写端等 EOF、冻结尾部；可重复调用，不抛异常。"""
+        """关闭写端等 EOF、冻结尾部；可重复调用，不抛异常。
+
+        子进程仍持有写端时排空线程会阻塞在读取上，join 超时后**不在调用线程**关闭
+        读端：``BufferedReader`` 的 close 会等待并发 read 持有的内部锁，从而把调用方
+        （事件循环）无限期挂住。此时读端由排空线程在读到 EOF 后自行关闭，尾部已冻结。
+        """
         with suppress(OSError, ValueError):
             self._writer.close()
         if self._thread.is_alive():
             self._thread.join(timeout=_STDERR_DRAIN_JOIN_TIMEOUT_S)
         with self._lock:
             self._closing = True
-        with suppress(OSError, ValueError):
-            self._reader.close()
+        if not self._thread.is_alive():
+            # 排空线程已退出（读到 EOF），无并发读取，关闭读端不会阻塞。
+            with suppress(OSError, ValueError):
+                self._reader.close()
 
     def tail(self) -> str:
         """返回已脱敏、有界的尾部（字节总量不超过 ``max_bytes``）。"""
@@ -299,19 +313,24 @@ class _SanitizedStderrDrain:
             return self._bytes
 
     def _pump(self) -> None:
-        while True:
-            try:
-                line = self._reader.readline(self._max_line_bytes)
-            except (OSError, ValueError):
-                return
-            if not line:
-                return
-            if len(line) >= self._max_line_bytes and not line.endswith(b"\n"):
-                self._store(line, truncated=True)
-                if not self._skip_overlong_remainder():
+        """后台排空：逐行脱敏入有界缓冲；退出时由本线程关闭读端（避免跨线程 close 阻塞）。"""
+        try:
+            while True:
+                try:
+                    line = self._reader.readline(self._max_line_bytes)
+                except (OSError, ValueError):
                     return
-                continue
-            self._store(line)
+                if not line:
+                    return
+                if len(line) >= self._max_line_bytes and not line.endswith(b"\n"):
+                    self._store(line, truncated=True)
+                    if not self._skip_overlong_remainder():
+                        return
+                    continue
+                self._store(line)
+        finally:
+            with suppress(OSError, ValueError):
+                self._reader.close()
 
     def _skip_overlong_remainder(self) -> bool:
         """丢弃超长行剩余字节直到换行；返回 False 表示流已结束。"""
