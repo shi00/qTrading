@@ -677,6 +677,57 @@ def validate_chat_message(message: ChatMessage) -> None:
         call.ensure_valid()
 
 
+def validate_chat_message_sequence(messages: tuple[ChatMessage, ...]) -> None:
+    """跨消息工具配对校验（§10.1）：工具调用必须闭合且顺序合规。
+
+    单条消息的 role / part / 字段配对由 :func:`validate_chat_message` 承载；
+    本函数只校验跨消息关系，不修改消息（请求体保持不变）：
+
+    - 每条携带 ``assistant_tool_calls`` 的 assistant 消息，声明的每个
+      ``call_id`` 必须在紧随其后的连续 tool 消息块中恰好被回应一次——
+      缺返回、重复返回、返回未声明的 call（含跨轮残留）、孤立 tool 均拒绝；
+    - ``call_id`` 在整段消息内唯一（并行同 ID / 跨轮重复 ID 拒绝）；
+    - tool 消息只能作为其所属 assistant 消息的紧邻返回块出现（乱序拒绝）。
+
+    Raises:
+        ModelTurnProtocolError: 跨消息配对不闭合（``invalid_pairing``）。
+    """
+    seen_call_ids: set[str] = set()
+    index = 0
+    total = len(messages)
+    while index < total:
+        message = messages[index]
+        if message.role == "tool":
+            # 不在任何 assistant 返回块内的 tool 消息：孤立 / 乱序 / 跨轮残留
+            raise _invalid("invalid_pairing", f"$.messages[{index}].tool_call_id")
+        calls = message.assistant_tool_calls
+        if message.role != "assistant" and calls:
+            raise _invalid("invalid_pairing", f"$.messages[{index}].assistant_tool_calls")
+        if not calls:
+            index += 1
+            continue
+        declared: list[str] = []
+        for call in calls:
+            if call.call_id in seen_call_ids:
+                # 并行同 ID 或跨轮重复 ID
+                raise _invalid("invalid_pairing", f"$.messages[{index}].assistant_tool_calls")
+            seen_call_ids.add(call.call_id)
+            declared.append(call.call_id)
+        answered: set[str] = set()
+        lookahead = index + 1
+        while lookahead < total and messages[lookahead].role == "tool":
+            tool_call_id = messages[lookahead].tool_call_id
+            if tool_call_id is None or tool_call_id in answered or tool_call_id not in declared:
+                # 未声明的 call / 同一 call 多返回（含跨轮残留）
+                raise _invalid("invalid_pairing", f"$.messages[{lookahead}].tool_call_id")
+            answered.add(tool_call_id)
+            lookahead += 1
+        if len(answered) != len(declared):
+            # 声明的 call 缺返回
+            raise _invalid("invalid_pairing", f"$.messages[{index}].assistant_tool_calls")
+        index = lookahead
+
+
 @dataclass(frozen=True, slots=True)
 class FunctionToolSpec:
     """工具规范：完整 json_schema、准确 schema 版本、output_tool（结构 final）标记。
@@ -743,6 +794,9 @@ class ChatTurnRequest:
                 validate_chat_message(message)
             except ModelTurnProtocolError as exc:
                 raise ModelTurnProtocolError(exc.code, f"$.messages[{index}]{exc.field_path[1:]}") from exc
+        # 逐消息校验通过后再核跨消息工具配对（缺返回 / 多返回 / 重复 ID /
+        # 乱序 / 孤立 tool），错误请求在派发前 fail-closed（零外发）
+        validate_chat_message_sequence(self.messages)
         for spec in (*self.tools, *self.output_tools):
             spec.ensure_valid()
 

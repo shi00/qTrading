@@ -23,6 +23,7 @@ from core.model_management_types import (
     NormalizedLLMUsage,
     TextContentPart,
     validate_chat_message,
+    validate_chat_message_sequence,
     validate_closed_tool_arguments,
 )
 
@@ -184,6 +185,118 @@ class TestChatMessage:
 
 def to_parts(msg: ChatMessage) -> tuple[object, ...]:
     return msg.content_parts
+
+
+# ---------------------------------------------------------------------------
+# 跨消息工具配对（I49，§10.1）：缺返回 / 多返回 / 重复 ID / 乱序 / 孤立
+# ---------------------------------------------------------------------------
+
+
+class TestChatMessageSequencePairing:
+    @staticmethod
+    def _user(text: str = "q") -> ChatMessage:
+        return ChatMessage(role="user", content_parts=(text_part(text),))
+
+    @staticmethod
+    def _assistant(*call_ids: str) -> ChatMessage:
+        return ChatMessage(
+            role="assistant",
+            content_parts=(),
+            assistant_tool_calls=tuple(tool_call(call_id=call_id) for call_id in call_ids),
+        )
+
+    @staticmethod
+    def _tool(call_id: str) -> ChatMessage:
+        return ChatMessage(role="tool", content_parts=(text_part("结果"),), tool_call_id=call_id)
+
+    def test_closed_pairing_accepted(self) -> None:
+        messages = (
+            self._user(),
+            self._assistant("c1", "c2"),
+            self._tool("c1"),
+            self._tool("c2"),
+            ChatMessage(role="assistant", content_parts=(text_part("完成"),)),
+        )
+        validate_chat_message_sequence(messages)
+
+    def test_missing_tool_return_rejected(self) -> None:
+        messages = (self._user(), self._assistant("c1", "c2"), self._tool("c1"))
+        with pytest.raises(ModelTurnProtocolError) as exc:
+            validate_chat_message_sequence(messages)
+        assert code_of(exc) == "invalid_pairing"
+        assert exc.value.field_path == "$.messages[1].assistant_tool_calls"
+
+    def test_duplicate_tool_return_rejected(self) -> None:
+        messages = (self._user(), self._assistant("c1"), self._tool("c1"), self._tool("c1"))
+        with pytest.raises(ModelTurnProtocolError) as exc:
+            validate_chat_message_sequence(messages)
+        assert code_of(exc) == "invalid_pairing"
+        assert exc.value.field_path == "$.messages[3].tool_call_id"
+
+    def test_undeclared_tool_return_rejected(self) -> None:
+        messages = (self._user(), self._assistant("c1"), self._tool("c1"), self._tool("c2"))
+        with pytest.raises(ModelTurnProtocolError) as exc:
+            validate_chat_message_sequence(messages)
+        assert code_of(exc) == "invalid_pairing"
+        assert exc.value.field_path == "$.messages[3].tool_call_id"
+
+    def test_orphan_tool_message_rejected(self) -> None:
+        messages = (self._user(), self._tool("c1"))
+        with pytest.raises(ModelTurnProtocolError) as exc:
+            validate_chat_message_sequence(messages)
+        assert code_of(exc) == "invalid_pairing"
+        assert exc.value.field_path == "$.messages[1].tool_call_id"
+
+    def test_parallel_duplicate_call_id_rejected(self) -> None:
+        messages = (self._user(), self._assistant("c1", "c1"), self._tool("c1"))
+        with pytest.raises(ModelTurnProtocolError) as exc:
+            validate_chat_message_sequence(messages)
+        assert code_of(exc) == "invalid_pairing"
+        assert exc.value.field_path == "$.messages[1].assistant_tool_calls"
+
+    def test_cross_turn_duplicate_call_id_rejected(self) -> None:
+        messages = (
+            self._user(),
+            self._assistant("c1"),
+            self._tool("c1"),
+            self._user("继续"),
+            self._assistant("c1"),
+            self._tool("c1"),
+        )
+        with pytest.raises(ModelTurnProtocolError) as exc:
+            validate_chat_message_sequence(messages)
+        assert code_of(exc) == "invalid_pairing"
+        assert exc.value.field_path == "$.messages[4].assistant_tool_calls"
+
+    def test_tool_separated_by_intervening_message_rejected(self) -> None:
+        messages = (self._user(), self._assistant("c1"), self._user("插话"), self._tool("c1"))
+        with pytest.raises(ModelTurnProtocolError) as exc:
+            validate_chat_message_sequence(messages)
+        assert code_of(exc) == "invalid_pairing"
+        assert exc.value.field_path == "$.messages[1].assistant_tool_calls"
+
+    def test_tool_before_its_assistant_rejected(self) -> None:
+        messages = (self._tool("c1"), self._assistant("c1"), self._tool("c1"))
+        with pytest.raises(ModelTurnProtocolError) as exc:
+            validate_chat_message_sequence(messages)
+        assert code_of(exc) == "invalid_pairing"
+        assert exc.value.field_path == "$.messages[0].tool_call_id"
+
+    def test_request_ensure_valid_applies_cross_message_rules(self) -> None:
+        request = ChatTurnRequest(
+            model_call_id="mc-1",
+            messages=(self._user(), self._tool("c1")),
+            instructions=(),
+            tools=(),
+            output_schema=None,
+            frozen_params={},
+            max_output_tokens=None,
+            deadline=1.0,
+        )
+        with pytest.raises(ModelTurnProtocolError) as exc:
+            request.ensure_valid()
+        assert code_of(exc) == "invalid_pairing"
+        assert exc.value.field_path == "$.messages[1].tool_call_id"
 
 
 # ---------------------------------------------------------------------------

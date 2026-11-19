@@ -351,13 +351,14 @@ class TestBuildChatTurnRequest:
                 parts=[
                     TextPart(content="hello"),
                     ToolCallPart(tool_name="search", args={"q": 1}, tool_call_id="c1"),
+                    ToolCallPart(tool_name="search", args={"q": 2}, tool_call_id="c2"),
                     ThinkingPart(content="hmm"),
                 ]
             ),
             ModelRequest(
                 parts=[
                     ToolReturnPart(tool_name="search", content={"a": 1, "b": "中"}, tool_call_id="c1"),
-                    RetryPromptPart(content="retry feedback", tool_call_id="c1", tool_name="search"),
+                    RetryPromptPart(content="retry feedback", tool_call_id="c2", tool_name="search"),
                 ]
             ),
         ]
@@ -374,7 +375,7 @@ class TestBuildChatTurnRequest:
         part1 = request.messages[1].content_parts[0]
         assert isinstance(part1, TextContentPart)
         assert part1.text == "hello"
-        assert len(request.messages[1].assistant_tool_calls) == 1
+        assert len(request.messages[1].assistant_tool_calls) == 2
         assert request.messages[1].assistant_tool_calls[0].arguments_json == json.dumps({"q": 1}, sort_keys=True)
         assert request.messages[1].assistant_tool_calls[0].call_id == "c1"
         # tool_call_id 严格配对
@@ -382,7 +383,7 @@ class TestBuildChatTurnRequest:
         part2 = request.messages[2].content_parts[0]
         assert isinstance(part2, TextContentPart)
         assert json.loads(part2.text) == {"a": 1, "b": "中"}
-        assert request.messages[3].tool_call_id == "c1"
+        assert request.messages[3].tool_call_id == "c2"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -403,13 +404,16 @@ class TestBuildChatTurnRequest:
         ``build_chat_turn_request`` 末尾 ``ensure_valid()`` 即核心校验通过证明。
         """
         request = build_chat_turn_request(
-            [ModelRequest(parts=[ToolReturnPart(tool_name="t", content=content, tool_call_id="c1")])],
+            [
+                ModelResponse(parts=[ToolCallPart(tool_name="t", args={}, tool_call_id="c1")]),
+                ModelRequest(parts=[ToolReturnPart(tool_name="t", content=content, tool_call_id="c1")]),
+            ],
             _settings(),
             _params(),
             tool_schema_version="v1",
             model_call_id=_MC,
         )
-        tool_message = request.messages[0]
+        tool_message = request.messages[1]
         assert tool_message.role == "tool"
         assert tool_message.tool_call_id == "c1"
         assert tool_message.content_parts == expected_parts
