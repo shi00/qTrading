@@ -72,9 +72,17 @@ def _precondition(**overrides: bool) -> CleanupPrecondition:
         "closure_known": True,
         "preview_valid": True,
         "new_reference_conflict": False,
+        "unknown_deliveries": False,
     }
     values.update(overrides)
     return CleanupPrecondition(**values)  # type: ignore[arg-type]  # 测试受控覆盖
+
+
+class _AuthoritativeFacts:
+    """集成测试用权威事实替身（生产由存储面/在途/交付事实实现）。"""
+
+    async def derive_precondition(self, user_scope: str, cleanup_job_id: str) -> CleanupPrecondition | None:
+        return _precondition()
 
 
 def _record(job_id: str, **overrides: object) -> CleanupJobRecord:
@@ -274,7 +282,7 @@ async def test_cleanup_service_confirm_commits_fence_once_on_real_store(dao: Age
     job_id = _job_id()
     record = _record(job_id)
     await dao.save_cleanup_job(record)
-    service = CleanupService(DaoCleanupJobStore(dao))
+    service = CleanupService(DaoCleanupJobStore(dao), _AuthoritativeFacts())
     command = CleanupConfirmCommand(
         user_scope=_USER_SCOPE,
         cleanup_job_id=job_id,
@@ -284,26 +292,26 @@ async def test_cleanup_service_confirm_commits_fence_once_on_real_store(dao: Age
         confirmed=True,
     )
 
-    first = await service.confirm(command, _precondition())
+    first = await service.confirm(command)
     assert first.replayed is False
     assert first.exact_ids == ("wf-a", "wf-b")
     persisted = await dao.load_cleanup_job(_USER_SCOPE, job_id)
     assert persisted is not None
     assert persisted.fence_committed is True
 
-    second = await service.confirm(command, _precondition())
+    second = await service.confirm(command)
     assert second.replayed is True
     assert second.exact_ids == ("wf-a", "wf-b")
 
     await dao.save_cleanup_phase(
         _USER_SCOPE, job_id, phase=CleanupPhase.VERIFIED, verified_counts=_zeros(), complete=True
     )
-    verified = await service.confirm(command, _precondition())
+    verified = await service.confirm(command)
     assert verified.replayed is True
     assert verified.phase is CleanupPhase.VERIFIED
     assert verified.admission.reason == "already_verified"
 
-    denied = await service.confirm(command, _precondition(scope_settled=False))
+    denied = await service.confirm(command)
     assert denied.admission.reason == "already_verified"
 
 

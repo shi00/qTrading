@@ -22,7 +22,6 @@ from core.agent_types import (
     AgentErrorCode,
     AgentServiceError,
     CleanupPhase,
-    CleanupPrecondition,
     CleanupState,
 )
 from services.agent_service.cleanup import (
@@ -51,7 +50,7 @@ _RETRY_AFTER_DELETION_CATEGORIES: frozenset[str] = frozenset(
 class NativeCleanupPort(Protocol):
     """原生目标执行端口（生产接 ``NativeCleanupExecutor``）。"""
 
-    async def preflight(self, ids: Sequence[str]) -> NativePreflight: ...
+    async def preflight(self, ids: Sequence[str], *, user_scope: str) -> NativePreflight: ...
 
     async def delete(self, ids: Sequence[str]) -> NativeCleanupResult: ...
 
@@ -115,11 +114,9 @@ class CleanupExecutionService:
         self._dao = dao
         self._executor = executor
 
-    async def confirm_and_execute(
-        self, command: CleanupConfirmCommand, precondition: CleanupPrecondition
-    ) -> CleanupExecutionReceipt:
+    async def confirm_and_execute(self, command: CleanupConfirmCommand) -> CleanupExecutionReceipt:
         label = f"{command.user_scope}/{command.cleanup_job_id}"
-        confirmation = await self._jobs.confirm(command, precondition)
+        confirmation = await self._jobs.confirm(command)
         record = await self._store.load(command.user_scope, command.cleanup_job_id)
         if record is None:
             raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "cleanup job not found", label)
@@ -127,7 +124,7 @@ class CleanupExecutionService:
             return CleanupExecutionReceipt(command.cleanup_job_id, CleanupPhase.VERIFIED, True, {}, {})
 
         try:
-            preflight = await self._executor.preflight(record.exact_ids)
+            preflight = await self._executor.preflight(record.exact_ids, user_scope=record.user_scope)
             if preflight.missing_ids:
                 # §10.7：只有「已有可靠 prepared 且 fence 持续」的**重试**允许原生行已缺失。
                 # 判据是上次失败/中断发生在删除尝试之后（cleanup_execution_failed /

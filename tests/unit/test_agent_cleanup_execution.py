@@ -62,9 +62,18 @@ def _precondition(**overrides: bool) -> CleanupPrecondition:
         "closure_known": True,
         "preview_valid": True,
         "new_reference_conflict": False,
+        "unknown_deliveries": False,
     }
     values.update(overrides)
     return CleanupPrecondition(**values)  # type: ignore[arg-type]  # 测试受控覆盖
+
+
+class _Facts:
+    def __init__(self, precondition: CleanupPrecondition | None = None) -> None:
+        self._precondition = _precondition() if precondition is None else precondition
+
+    async def derive_precondition(self, user_scope: str, cleanup_job_id: str) -> CleanupPrecondition | None:
+        return self._precondition
 
 
 class _Store:
@@ -167,7 +176,7 @@ class _Executor:
         self._error = error
         self._preflight_error = preflight_error
 
-    async def preflight(self, ids) -> NativePreflight:
+    async def preflight(self, ids, *, user_scope: str) -> NativePreflight:
         self.calls.append(("preflight", tuple(ids)))
         if self._preflight_error is not None:
             raise self._preflight_error
@@ -185,11 +194,14 @@ def _service(
     *,
     executor: _Executor | None = None,
     dao: _Dao | None = None,
+    precondition: CleanupPrecondition | None = None,
 ) -> tuple[CleanupExecutionService, _Store, _Dao, _Executor]:
     store = _Store(record)
     dao = dao or _Dao()
     executor = executor or _Executor()
-    service = CleanupExecutionService(jobs=CleanupService(store), store=store, dao=dao, executor=executor)
+    service = CleanupExecutionService(
+        jobs=CleanupService(store, _Facts(precondition)), store=store, dao=dao, executor=executor
+    )
     return service, store, dao, executor
 
 
@@ -210,7 +222,7 @@ class TestCleanupExecutionHappyPath:
         record = _record()
         service, store, dao, executor = _service(record)
 
-        receipt = await service.confirm_and_execute(_command(record), _precondition())
+        receipt = await service.confirm_and_execute(_command(record))
 
         assert [call[0] for call in executor.calls] == ["preflight", "delete"]
         assert executor.calls[1][1] == ("wf-a", "wf-b")
@@ -230,7 +242,7 @@ class TestCleanupExecutionHappyPath:
         record = _record(exact_ids=())
         service, _, dao, executor = _service(record)
 
-        receipt = await service.confirm_and_execute(_command(record), _precondition())
+        receipt = await service.confirm_and_execute(_command(record))
 
         assert executor.calls[0][1] == ()
         assert dao.phases[0]["phase"] is CleanupPhase.VERIFIED
@@ -246,13 +258,29 @@ class TestCleanupExecutionFailures:
         service, _, dao, executor = _service(record, executor=executor)
 
         with pytest.raises(AgentServiceError) as exc:
-            await service.confirm_and_execute(_command(record), _precondition())
+            await service.confirm_and_execute(_command(record))
 
         assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
         assert [call[0] for call in executor.calls] == ["preflight"]
         assert dao.tombstones == []
         assert dao.phases[0]["phase"] is CleanupPhase.RETRY_PENDING
         assert dao.phases[0]["error_category"] == "native_target_missing"
+
+    @pytest.mark.asyncio
+    async def test_unknown_delivery_blocks_before_preflight(self) -> None:
+        """I81：存在未确证交付时，确认阶段即拒绝，预检/删除零调用。"""
+
+        record = _record()
+        service, store, dao, executor = _service(record, precondition=_precondition(unknown_deliveries=True))
+
+        with pytest.raises(AgentServiceError) as exc:
+            await service.confirm_and_execute(_command(record))
+
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert "unknown_delivery_pending" in str(exc.value)
+        assert executor.calls == []
+        assert store.fences == []
+        assert dao.phases == []
 
     @pytest.mark.asyncio
     async def test_retry_after_prepared_allows_missing_native_rows(self) -> None:
@@ -266,7 +294,7 @@ class TestCleanupExecutionFailures:
         executor = _Executor(missing=("wf-a",))
         service, _, dao, executor = _service(record, executor=executor)
 
-        receipt = await service.confirm_and_execute(_command(record), _precondition())
+        receipt = await service.confirm_and_execute(_command(record))
 
         assert [call[0] for call in executor.calls] == ["preflight", "delete"]
         assert receipt.phase is CleanupPhase.VERIFIED
@@ -286,7 +314,7 @@ class TestCleanupExecutionFailures:
         service, _, dao, _ = _service(record, executor=executor)
 
         with pytest.raises(AgentServiceError) as exc:
-            await service.confirm_and_execute(_command(record), _precondition())
+            await service.confirm_and_execute(_command(record))
 
         assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
         assert [call[0] for call in executor.calls] == ["preflight"]
@@ -299,7 +327,7 @@ class TestCleanupExecutionFailures:
         first = _record(phase=CleanupPhase.PREPARED, fence_committed=False)
         service, _, dao, _ = _service(first, executor=_Executor(missing=("wf-a",)))
         with pytest.raises(AgentServiceError) as first_exc:
-            await service.confirm_and_execute(_command(first), _precondition())
+            await service.confirm_and_execute(_command(first))
         assert first_exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
         recorded = dao.phases[0]["error_category"]
         assert recorded == "native_target_missing"
@@ -312,7 +340,7 @@ class TestCleanupExecutionFailures:
         retry_executor = _Executor(missing=("wf-a",))
         service2, _, dao2, _ = _service(again, executor=retry_executor)
         with pytest.raises(AgentServiceError) as retry_exc:
-            await service2.confirm_and_execute(_command(again), _precondition())
+            await service2.confirm_and_execute(_command(again))
         assert retry_exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
 
         assert [call[0] for call in retry_executor.calls] == ["preflight"]
@@ -327,7 +355,7 @@ class TestCleanupExecutionFailures:
         service, _, dao, _ = _service(record, executor=executor)
 
         with pytest.raises(RuntimeError) as exc:
-            await service.confirm_and_execute(_command(record), _precondition())
+            await service.confirm_and_execute(_command(record))
         assert str(exc.value) == "preflight boom"
 
         assert dao.phases[0]["error_category"] == "cleanup_preflight_failed"
@@ -343,7 +371,7 @@ class TestCleanupExecutionFailures:
         service, _, _, executor = _service(record, dao=dao, executor=_Executor(missing=("wf-a",)))
 
         with pytest.raises(AgentServiceError) as exc:
-            await service.confirm_and_execute(_command(record), _precondition())
+            await service.confirm_and_execute(_command(record))
 
         assert "native_target_missing" in str(exc.value)
         assert exc.value.code is AgentErrorCode.INPUT_INVALID
@@ -360,7 +388,7 @@ class TestCleanupExecutionFailures:
         service, _, dao, _ = _service(record, executor=executor)
 
         with pytest.raises(AgentServiceError) as exc:
-            await service.confirm_and_execute(_command(record), _precondition())
+            await service.confirm_and_execute(_command(record))
 
         assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
         assert [call[0] for call in executor.calls] == ["preflight"]
@@ -373,7 +401,7 @@ class TestCleanupExecutionFailures:
         counts["dbos.workflow_status"] = 1
         service, _, dao, _ = _service(record, executor=_Executor(counts=counts))
 
-        receipt = await service.confirm_and_execute(_command(record), _precondition())
+        receipt = await service.confirm_and_execute(_command(record))
 
         assert receipt.phase is CleanupPhase.RETRY_PENDING
         assert receipt.verified_counts["dbos.workflow_status"] == 1
@@ -392,7 +420,7 @@ class TestCleanupExecutionFailures:
         service, store, dao, _ = _service(record, dao=_Dao(tombstone_error=_DbError()))
 
         with pytest.raises(_DbError) as exc:
-            await service.confirm_and_execute(_command(record), _precondition())
+            await service.confirm_and_execute(_command(record))
 
         assert exc.value.sqlstate == "40001"
         assert len(store.fences) == 1
@@ -407,7 +435,7 @@ class TestCleanupExecutionFailures:
         service, _, dao, _ = _service(record, executor=_Executor(error=ConnectionError("lost")))
 
         with pytest.raises(ConnectionError) as exc:
-            await service.confirm_and_execute(_command(record), _precondition())
+            await service.confirm_and_execute(_command(record))
 
         assert str(exc.value) == "lost"
         assert dao.phases[0]["phase"] is CleanupPhase.RETRY_PENDING
@@ -424,7 +452,7 @@ class TestCleanupExecutionFailures:
             def __init__(self) -> None:
                 self.calls: list[tuple[str, tuple[str, ...]]] = []
 
-            async def preflight(self, ids) -> NativePreflight:
+            async def preflight(self, ids, *, user_scope: str) -> NativePreflight:
                 self.calls.append(("preflight", tuple(ids)))
                 return NativePreflight(tuple(ids), dict(_zeros()), ())
 
@@ -435,11 +463,11 @@ class TestCleanupExecutionFailures:
 
         dao = _Dao(fail_categories=frozenset({"cleanup_execution_failed"}))
         service = CleanupExecutionService(
-            jobs=CleanupService(store), store=store, dao=dao, executor=_VerifyingExecutor()
+            jobs=CleanupService(store, _Facts()), store=store, dao=dao, executor=_VerifyingExecutor()
         )
 
         with pytest.raises(ConnectionError) as exc:
-            await service.confirm_and_execute(_command(record), _precondition())
+            await service.confirm_and_execute(_command(record))
 
         assert str(exc.value) == "lost during delete"
         assert dao.phases == []
@@ -452,7 +480,7 @@ class TestCleanupExecutionReplays:
         record = _record(phase=CleanupPhase.VERIFIED, fence_committed=True)
         service, _, dao, executor = _service(record)
 
-        receipt = await service.confirm_and_execute(_command(record), _precondition())
+        receipt = await service.confirm_and_execute(_command(record))
 
         assert receipt.replayed is True
         assert receipt.phase is CleanupPhase.VERIFIED
@@ -466,7 +494,7 @@ class TestCleanupExecutionReplays:
         record = _record(phase=CleanupPhase.RETRY_PENDING, fence_committed=True)
         service, _, dao, executor = _service(record)
 
-        receipt = await service.confirm_and_execute(_command(record), _precondition())
+        receipt = await service.confirm_and_execute(_command(record))
 
         assert [call[1] for call in executor.calls] == [("wf-a", "wf-b"), ("wf-a", "wf-b")]
         assert dao.tombstones[0][1:] == (("session-1", "session-2"), (("asset-a", "1"), ("asset-b", "2")))
@@ -485,7 +513,7 @@ class TestCleanupAttemptStageResume:
         service, _, _, executor = _service(record, dao=dao)
 
         with pytest.raises(AgentServiceError) as exc:
-            await service.confirm_and_execute(_command(record), _precondition())
+            await service.confirm_and_execute(_command(record))
 
         assert exc.value.code is AgentErrorCode.INPUT_INVALID
         assert "cleanup_native_delete_started" in str(exc.value)
@@ -502,7 +530,7 @@ class TestCleanupAttemptStageResume:
         service, _, _, executor = _service(record, dao=dao)
 
         with pytest.raises(AgentServiceError) as exc:
-            await service.confirm_and_execute(_command(record), _precondition())
+            await service.confirm_and_execute(_command(record))
 
         assert exc.value.code is AgentErrorCode.INPUT_INVALID
         assert "cleanup_native_deleted_tombstone_pending" in str(exc.value)
@@ -519,7 +547,7 @@ class TestCleanupAttemptStageResume:
         service, _, _, _ = _service(record, dao=dao)
 
         with pytest.raises(asyncio.CancelledError) as exc:
-            await service.confirm_and_execute(_command(record), _precondition())
+            await service.confirm_and_execute(_command(record))
 
         assert str(exc.value) == "cancel-after-delete"
         assert dao.phases == []
@@ -534,7 +562,7 @@ class TestCleanupAttemptStageResume:
         )
         service2, _, dao2, executor2 = _service(retry, executor=_Executor(missing=("wf-a",)))
 
-        receipt = await service2.confirm_and_execute(_command(retry), _precondition())
+        receipt = await service2.confirm_and_execute(_command(retry))
 
         assert receipt.phase is CleanupPhase.VERIFIED
         assert [call[0] for call in executor2.calls] == ["preflight", "delete"]
@@ -549,7 +577,7 @@ class TestCleanupAttemptStageResume:
         service, _, _, _ = _service(record, dao=dao)
 
         with pytest.raises(asyncio.CancelledError) as exc:
-            await service.confirm_and_execute(_command(record), _precondition())
+            await service.confirm_and_execute(_command(record))
 
         assert str(exc.value) == "cancel-after-tombstone"
         assert dao.tombstones[0][0] == "owner-1"
@@ -561,7 +589,7 @@ class TestCleanupAttemptStageResume:
         )
         service2, _, dao2, _ = _service(retry, executor=_Executor(missing=("wf-a", "wf-b")))
 
-        receipt = await service2.confirm_and_execute(_command(retry), _precondition())
+        receipt = await service2.confirm_and_execute(_command(retry))
 
         assert receipt.phase is CleanupPhase.VERIFIED
         assert dao2.phases[-1]["phase"] is CleanupPhase.VERIFIED
@@ -575,7 +603,7 @@ class TestCleanupAttemptStageResume:
         service, _, _, executor = _service(record, dao=dao, executor=_Executor(missing=("wf-a",)))
 
         with pytest.raises(AgentServiceError) as exc:
-            await service.confirm_and_execute(_command(record), _precondition())
+            await service.confirm_and_execute(_command(record))
 
         assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
         assert [call[0] for call in executor.calls] == ["preflight"]

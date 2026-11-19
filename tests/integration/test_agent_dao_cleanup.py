@@ -63,13 +63,14 @@ from data.persistence.models import (
     AgentSourceLink,
 )
 from services.agent_service.cleanup import (
+    CleanupAdmissionFactsPort,
     CleanupConfirmCommand,
     CleanupService,
     DaoCleanupJobStore,
     preview_digest,
 )
 from services.agent_service.cleanup_execution import CleanupExecutionService
-from services.agent_service.cleanup_native import NativeCleanupExecutor
+from services.agent_service.cleanup_native import NativeCleanupExecutor, NativeVerification
 from tests._helpers import create_test_engine, make_alembic_cfg
 from tests.integration.test_agent_runtime_migrator import (
     _create_runtime_database,
@@ -150,7 +151,22 @@ def _precondition() -> CleanupPrecondition:
         closure_known=True,
         preview_valid=True,
         new_reference_conflict=False,
+        unknown_deliveries=False,
     )
+
+
+class _AuthoritativeFacts(CleanupAdmissionFactsPort):
+    """集成测试用权威事实替身（生产由存储面/在途/交付事实实现）。"""
+
+    async def derive_precondition(self, user_scope: str, cleanup_job_id: str) -> CleanupPrecondition | None:
+        return _precondition()
+
+
+class _AuthoritativeVerification:
+    """集成测试用逐 ID 核验替身（断言原生行本身，归属/终态由生产事实实现）。"""
+
+    async def verify(self, ids, *, user_scope: str) -> NativeVerification:
+        return NativeVerification(authoritative=True)
 
 
 async def _reset_and_migrate_app_schema(url: str) -> None:
@@ -215,6 +231,7 @@ def _executor(sync_url: str, control_url: str | None = None) -> tuple[NativeClea
     executor = NativeCleanupExecutor(
         store=AgentRuntimeNativeStore(store_engine),
         client=client,
+        verification=_AuthoritativeVerification(),
         run_blocking=_inline_runner,
     )
     return executor, store_engine
@@ -229,7 +246,7 @@ async def test_preflight_finds_nine_domains_and_reports_missing(runtime_sync_url
     _seed_native_rows(runtime_sync_url, [in_set])
     executor, engine = _executor(runtime_sync_url)
     try:
-        result = await executor.preflight([in_set, missing])
+        result = await executor.preflight([in_set, missing], user_scope=_USER_SCOPE)
     finally:
         engine.dispose()
 
@@ -249,7 +266,7 @@ async def test_delete_exact_set_zeroes_nine_domains_and_keeps_outside(runtime_sy
     try:
         first = await executor.delete([in_set])
         retry = await executor.delete([in_set])
-        outside = await executor.preflight([out_set])
+        outside = await executor.preflight([out_set], user_scope=_USER_SCOPE)
     finally:
         engine.dispose()
 
@@ -460,7 +477,9 @@ async def test_full_cleanup_execution_verifies_native_and_app_domains(real_embed
         executor, runtime_engine = _executor(runtime_sync_url)
         try:
             store = DaoCleanupJobStore(dao)
-            orchestrator = CleanupExecutionService(jobs=CleanupService(store), store=store, dao=dao, executor=executor)
+            orchestrator = CleanupExecutionService(
+                jobs=CleanupService(store, _AuthoritativeFacts()), store=store, dao=dao, executor=executor
+            )
             command = CleanupConfirmCommand(
                 user_scope=_USER_SCOPE,
                 cleanup_job_id=job_id,
@@ -469,7 +488,7 @@ async def test_full_cleanup_execution_verifies_native_and_app_domains(real_embed
                 expected_revision=record.expected_revision,
                 confirmed=True,
             )
-            receipt = await orchestrator.confirm_and_execute(command, _precondition())
+            receipt = await orchestrator.confirm_and_execute(command)
         finally:
             runtime_engine.dispose()
 
@@ -492,7 +511,7 @@ async def test_full_cleanup_execution_verifies_native_and_app_domains(real_embed
                     ).where(AgentAssetVersion.asset_id == asset_in)
                 )
             ).one()
-        outside = await executor.preflight([out_set])
+        outside = await executor.preflight([out_set], user_scope=_USER_SCOPE)
     finally:
         await app_engine.dispose()
 

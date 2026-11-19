@@ -36,7 +36,7 @@ from data.persistence.agent_runtime_store import (
     CLEANUP_PRIMARY_PRESENCE_SQL,
 )
 from data.persistence.daos.agent_dao import AgentDao
-from services.agent_service.cleanup_native import NativeCleanupExecutor
+from services.agent_service.cleanup_native import NativeCleanupExecutor, NativeVerification
 
 
 class _FakeStore:
@@ -59,6 +59,16 @@ class _FakeStore:
         return 1
 
 
+class _FakeVerification:
+    def __init__(self, result: NativeVerification | None = None) -> None:
+        self.result = result or NativeVerification(authoritative=True)
+        self.calls: list[tuple[tuple[str, ...], str]] = []
+
+    async def verify(self, ids, *, user_scope: str) -> NativeVerification:
+        self.calls.append((tuple(ids), user_scope))
+        return self.result
+
+
 class _FakeClient:
     def __init__(self) -> None:
         self.events: list[str] = []
@@ -73,10 +83,15 @@ async def _inline_runner(func, *args):
     return func(*args)
 
 
-def _executor(store: _FakeStore | None = None, client: _FakeClient | None = None) -> NativeCleanupExecutor:
+def _executor(
+    store: _FakeStore | None = None,
+    client: _FakeClient | None = None,
+    verification: _FakeVerification | None = None,
+) -> NativeCleanupExecutor:
     return NativeCleanupExecutor(
         store=store or _FakeStore(),
         client=client or _FakeClient(),
+        verification=verification or _FakeVerification(),
         run_blocking=_inline_runner,
     )
 
@@ -141,12 +156,41 @@ class TestNativeCleanupExecutor:
     @pytest.mark.asyncio
     async def test_preflight_returns_counts_and_missing(self) -> None:
         store = _FakeStore(counts={"dbos.workflow_status": 1})
-        result = await _executor(store).preflight(["wf-1"])
+        verification = _FakeVerification()
+        result = await _executor(store, verification=verification).preflight(["wf-1"], user_scope="owner-1")
 
         assert store.events == ["counts", "preflight"]
+        assert verification.calls == [(("wf-1",), "owner-1")]
         assert result.exact_ids == ("wf-1",)
         assert result.counts == {"dbos.workflow_status": 1}
         assert result.missing_ids == ()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("verification", "reason"),
+        [
+            (NativeVerification(authoritative=False), "verification_unavailable"),
+            (NativeVerification(authoritative=True, foreign_ids=("wf-1",)), "ownership_mismatch"),
+            (NativeVerification(authoritative=True, non_terminal_ids=("wf-1",)), "non_terminal_target"),
+            (
+                NativeVerification(authoritative=True, externally_referenced_ids=("wf-1",)),
+                "external_reference_present",
+            ),
+            (NativeVerification(authoritative=True, writers_running_ids=("wf-1",)), "writers_still_running"),
+            (NativeVerification(authoritative=True, unknown_delivery_ids=("wf-1",)), "unknown_delivery_pending"),
+        ],
+    )
+    async def test_preflight_refuses_without_authoritative_clearance(
+        self, verification: NativeVerification, reason: str
+    ) -> None:
+        store = _FakeStore()
+        with pytest.raises(AgentServiceError) as exc:
+            await _executor(store, verification=_FakeVerification(verification)).preflight(
+                ["wf-1"], user_scope="owner-1"
+            )
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert reason in str(exc.value)
+        assert store.events == []
 
     @pytest.mark.asyncio
     async def test_more_than_two_hundred_rejected_before_side_effects(self) -> None:
@@ -164,8 +208,16 @@ class TestNativeCleanupExecutor:
     @pytest.mark.asyncio
     async def test_blank_id_rejected(self) -> None:
         with pytest.raises(AgentServiceError) as exc:
-            await _executor().preflight(["wf-1", ""])
+            await _executor().preflight(["wf-1", ""], user_scope="owner-1")
         assert exc.value.code is AgentErrorCode.INPUT_INVALID
+
+    @pytest.mark.asyncio
+    async def test_blank_user_scope_rejected_before_verification(self) -> None:
+        verification = _FakeVerification()
+        with pytest.raises(AgentServiceError) as exc:
+            await _executor(verification=verification).preflight(["wf-1"], user_scope="")
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        assert verification.calls == []
 
 
 class TestCleanupTombstoneContract:

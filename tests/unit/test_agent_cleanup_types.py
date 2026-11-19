@@ -72,6 +72,7 @@ class TestAdmissionPredicate:
             "closure_known": True,
             "preview_valid": True,
             "new_reference_conflict": False,
+            "unknown_deliveries": False,
         }
         values.update(overrides)
         return CleanupPrecondition(**values)  # type: ignore[arg-type]  # 测试受控覆盖
@@ -79,6 +80,11 @@ class TestAdmissionPredicate:
     def test_all_conditions_allow(self) -> None:
         decision = evaluate_cleanup_admission(self._precondition())
         assert decision == CleanupAdmission(allowed=True, reason=None)
+
+    def test_unknown_delivery_blocks_before_other_conditions(self) -> None:
+        decision = evaluate_cleanup_admission(self._precondition(unknown_deliveries=True))
+        assert decision.allowed is False
+        assert decision.reason == "unknown_delivery_pending"
 
     @pytest.mark.parametrize(
         ("flag", "reason"),

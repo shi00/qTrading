@@ -32,6 +32,45 @@ class NativeStorePort(Protocol):
     def delete_datasource_rows(self, ids: list[str]) -> int: ...
 
 
+@dataclass(frozen=True, slots=True)
+class NativeVerification:
+    """逐 ID 权威核验结果（I81 §10.7）：归属/终态/集合外引用/writer/unknown 交付。
+
+    ``authoritative`` 为假表示事实不可得（读取失败或未实现），必须拒绝清理；
+    其余集合非空即对相应 ID 拒绝，不以「查不到」冒充「可清理」。
+    """
+
+    authoritative: bool
+    foreign_ids: tuple[str, ...] = ()
+    non_terminal_ids: tuple[str, ...] = ()
+    externally_referenced_ids: tuple[str, ...] = ()
+    writers_running_ids: tuple[str, ...] = ()
+    unknown_delivery_ids: tuple[str, ...] = ()
+
+    def refusal_reason(self) -> str | None:
+        """返回首个脱敏拒绝原因；全空且权威时返回 None。"""
+
+        if not self.authoritative:
+            return "verification_unavailable"
+        if self.foreign_ids:
+            return "ownership_mismatch"
+        if self.non_terminal_ids:
+            return "non_terminal_target"
+        if self.externally_referenced_ids:
+            return "external_reference_present"
+        if self.writers_running_ids:
+            return "writers_still_running"
+        if self.unknown_delivery_ids:
+            return "unknown_delivery_pending"
+        return None
+
+
+class NativeVerificationPort(Protocol):
+    """逐 ID 权威核验端口（生产接存储面/在途/交付事实；测试注入替身）。"""
+
+    async def verify(self, ids: Sequence[str], *, user_scope: str) -> NativeVerification: ...
+
+
 class WorkflowDeletionPort(Protocol):
     """DBOS 公开系统删除端口（生产接 ``DBOSClient.delete_workflows``）。"""
 
@@ -83,21 +122,31 @@ class NativeCleanupExecutor:
         *,
         store: NativeStorePort,
         client: WorkflowDeletionPort,
+        verification: NativeVerificationPort,
         run_blocking: BlockingRunner | None = None,
     ) -> None:
         self._store = store
         self._client = client
+        self._verification = verification
         self._run_blocking = run_blocking or _default_run_blocking
 
-    async def preflight(self, ids: Sequence[str]) -> NativePreflight:
-        """首次预检：九域计数 + 主键域缺失（禁止把缺失解释为空集合）。
+    async def preflight(self, ids: Sequence[str], *, user_scope: str) -> NativePreflight:
+        """首次预检：逐 ID 权威核验通过后，九域计数 + 主键域缺失（禁止把缺失解释为空集合）。
 
-        空集合只在「未启动计划」准入下出现：九域计数按可核零返回（不改库）。
+        核验事实不可得、归属不符、非终态、存在集合外引用/在途 writer/unknown
+        交付时一律拒绝（零出站）；空集合只在「未启动计划」准入下出现：九域计数
+        按可核零返回（不改库）。
         """
 
         normalized = self._normalize(ids)
         if not normalized:
             return NativePreflight((), _zero_counts(), ())
+        if not isinstance(user_scope, str) or not user_scope:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "invalid cleanup user scope", "cleanup")
+        verification = await self._verification.verify(normalized, user_scope=user_scope)
+        reason = verification.refusal_reason()
+        if reason is not None:
+            raise AgentServiceError(AgentErrorCode.POLICY_DENIED, f"cleanup refused: {reason}", "cleanup")
         counts, missing = await self._run_blocking(self._preflight_sync, list(normalized))
         return NativePreflight(normalized, counts, missing)
 

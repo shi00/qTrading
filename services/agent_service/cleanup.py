@@ -2,7 +2,9 @@
 
 本轮只承载**不依赖真实数据库**的确认合同：
 - 确认必须回传原 ``preview_digest`` 与 ``expected_revision``，并且 ``confirmed=true``；
-- 准入谓词（准备/确认/重试共用）未通过时零副作用、不提交 fence；
+- 准入谓词（准备/确认/重试共用）由**权威事实端口**派生（I81），不接受调用方
+  自述「已静止/闭包已知」布尔；事实不可得即拒绝；存在未确证交付即拒绝；
+- 准入谓词未通过时零副作用、不提交 fence；
 - fence 提交前不得删除；重复确认幂等（不扩大集合、不重复 fence）；
 - ``retry_pending`` 复用原不可变集合，不递归扩集合。
 
@@ -59,6 +61,16 @@ class CleanupJobStorePort(Protocol):
     async def commit_fence(self, record: CleanupJobRecord) -> None: ...
 
 
+class CleanupAdmissionFactsPort(Protocol):
+    """权威准入事实端口（I81）：由存储面/在途/交付事实派生准入谓词。
+
+    返回 ``None`` 表示事实不可得（读取失败/闭包未知），调用方必须拒绝清理，
+    不得以调用方自述布尔或空集合代替。
+    """
+
+    async def derive_precondition(self, user_scope: str, cleanup_job_id: str) -> CleanupPrecondition | None: ...
+
+
 def preview_digest(preview_fields: tuple[str, ...], exact_ids: tuple[str, ...]) -> str:
     """预览摘要绑定字段 + 准确集合（集合先规范化，顺序无关）。"""
 
@@ -69,14 +81,11 @@ def preview_digest(preview_fields: tuple[str, ...], exact_ids: tuple[str, ...]) 
 class CleanupService:
     """准备/确认共用同一准入谓词；确认前不产生任何删除副作用。"""
 
-    def __init__(self, store: CleanupJobStorePort) -> None:
+    def __init__(self, store: CleanupJobStorePort, facts: CleanupAdmissionFactsPort) -> None:
         self._store = store
+        self._facts = facts
 
-    async def confirm(
-        self,
-        command: CleanupConfirmCommand,
-        precondition: CleanupPrecondition,
-    ) -> CleanupReceipt:
+    async def confirm(self, command: CleanupConfirmCommand) -> CleanupReceipt:
         label = f"{command.user_scope}/{command.cleanup_job_id}"
         if not command.confirmed:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "cleanup requires explicit confirmation", label)
@@ -99,6 +108,9 @@ class CleanupService:
                 record.exact_ids,
                 CleanupAdmission(False, "already_verified"),
             )
+        precondition = await self._facts.derive_precondition(command.user_scope, command.cleanup_job_id)
+        if precondition is None:
+            raise AgentServiceError(AgentErrorCode.POLICY_DENIED, "cleanup refused: admission_facts_unavailable", label)
         admission = evaluate_cleanup_admission(precondition)
         if not admission.allowed:
             raise AgentServiceError(AgentErrorCode.POLICY_DENIED, f"cleanup refused: {admission.reason}", label)

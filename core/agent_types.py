@@ -7675,13 +7675,18 @@ class CleanupPhase(Enum):
 
 @dataclass(frozen=True, slots=True)
 class CleanupPrecondition:
-    """统一清理准入谓词（Q02）：准备/确认/重试共用。"""
+    """统一清理准入谓词（Q02）：准备/确认/重试共用。
+
+    必须由权威事实端口（存储面/在途/交付状态）派生（I81），不接受调用方
+    自述布尔；``unknown_deliveries`` 为真表示存在未确证交付，先于其余条件阻断。
+    """
 
     scope_settled: bool
     writers_exited: bool
     closure_known: bool
     preview_valid: bool
     new_reference_conflict: bool
+    unknown_deliveries: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -7693,6 +7698,8 @@ class CleanupAdmission:
 def evaluate_cleanup_admission(precondition: CleanupPrecondition) -> CleanupAdmission:
     """按固定顺序判定；未知不当通过，新引用按原 fence 仲裁。"""
 
+    if precondition.unknown_deliveries:
+        return CleanupAdmission(False, "unknown_delivery_pending")
     if not precondition.scope_settled:
         return CleanupAdmission(False, "scope_not_settled")
     if not precondition.writers_exited:
