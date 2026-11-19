@@ -744,6 +744,40 @@ def _read_xlsx_part(archive: zipfile.ZipFile, name: str, limit: int) -> bytes:
     return payload
 
 
+_XML_ENTITY_MARKERS: Final = (b"<!DOCTYPE", b"<!ENTITY")
+
+
+def _reject_xlsx_xml_entity_declarations(archive: zipfile.ZipFile, names: tuple[str, ...]) -> None:
+    """在 openpyxl 解析前逐条流式扫描 XML 部件，拒绝 DTD/实体声明（I85）。
+
+    openpyxl 仅在可选依赖 defusedxml 存在时使用安全 iterparse（
+    ``openpyxl.DEFUSEDXML``）；该依赖未在运行期依赖中声明时，worksheet /
+    sharedStrings 会被标准库 ``ElementTree.iterparse`` 解析并展开内部实体
+    （实测可把 ``&injected;`` 展开进单元格文本）。因此本层必须在自身边界内
+    做与解析器无关的拒绝，不只检查前 8 KiB（声明可放在长注释之后）。
+
+    逐条流式读取，内存为单块大小；总量受容器前置预算约束。
+    """
+
+    overlap = max(len(marker) for marker in _XML_ENTITY_MARKERS) - 1
+    for name in names:
+        try:
+            with archive.open(name) as handle:
+                tail = b""
+                while True:
+                    chunk = handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    window = tail + chunk
+                    if any(marker in window for marker in _XML_ENTITY_MARKERS):
+                        raise AttachmentParseError("invalid_structure", "XLSX XML entities are rejected")
+                    tail = window[-overlap:] if overlap else b""
+        except AttachmentParseError:
+            raise
+        except (zipfile.BadZipFile, OSError) as exc:
+            raise AttachmentParseError("invalid_structure", "XLSX workbook metadata is unreadable") from exc
+
+
 def _inspect_xlsx_container(data: bytes) -> XlsxMetadata:
     """在 openpyxl 分配前完成容器预算与结构门（I08）。
 
@@ -791,6 +825,12 @@ def _inspect_xlsx_container(data: bytes) -> XlsxMetadata:
         styles = by_name.get("xl/styles.xml")
         if styles is not None and styles.file_size > MAX_XLSX_STYLES_BYTES:
             raise AttachmentParseError("invalid_structure", "XLSX styles part exceeds the preflight limit")
+
+        # 实体门必须在 openpyxl 之前：解析器的实体保护取决于可选依赖（见 helper 文档）。
+        _reject_xlsx_xml_entity_declarations(
+            archive,
+            tuple(name for name in sorted(by_name) if name.endswith((".xml", ".rels"))),
+        )
 
         workbook_bytes = _read_xlsx_part(archive, "xl/workbook.xml", MAX_XLSX_METADATA_BYTES)
         rels_bytes = _read_xlsx_part(archive, "xl/_rels/workbook.xml.rels", MAX_XLSX_METADATA_BYTES)
@@ -1791,7 +1831,16 @@ def _dispatch_parse(
     if knit is AttachmentKind.JSON:
         return _parse_json(data, selection, budget, read_expansion_consent)
     if knit is AttachmentKind.XLSX:
-        return _parse_xlsx(data, selection, budget, deadline)
+        try:
+            return _parse_xlsx(data, selection, budget, deadline)
+        except AgentValidationError:
+            # D06 限额违规保持原错误码（AgentValidationError 是 ValueError 子类）。
+            raise
+        except (IndexError, ValueError, OverflowError) as exc:
+            # openpyxl 在单元格惰性迭代时按缓存值做类型转换（共享字符串索引、
+            # 数值/日期序列）；坏缓存会抛裸第三方异常。此处统一转译为稳定错误码，
+            # 不把 IndexError/ValueError 泄漏出解析边界（worker 否则无 JSON 结果）。
+            raise AttachmentParseError("invalid_structure", "XLSX cached cell values are unreadable") from exc
     if knit is AttachmentKind.PDF:
         return _parse_pdf(data, selection, budget)
     if knit in (AttachmentKind.PNG, AttachmentKind.JPEG):

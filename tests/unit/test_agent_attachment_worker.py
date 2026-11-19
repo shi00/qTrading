@@ -18,6 +18,7 @@ import zipfile
 import zlib
 from dataclasses import replace
 from typing import Any, cast
+from xml.etree import ElementTree
 
 import pytest
 from PIL import Image
@@ -1299,6 +1300,112 @@ class TestXlsxPreflightBudget:
 
 
 # ---------------------------------------------------------------------------
+# XLSX XML 实体门与坏缓存稳定错误码（I85）
+# ---------------------------------------------------------------------------
+
+_ENTITY_SHARED_STRINGS = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    '<!DOCTYPE sst [<!ENTITY injected "INJECTED">]>\n'
+    f"<sst {_NS}><si><t>&injected;</t></si></sst>"
+)
+
+_SHARED_STRING_CELL = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    f'<worksheet {_NS}><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c>'
+    "</row></sheetData></worksheet>"
+)
+
+_ENTITY_SHEET_AFTER_HEADER = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    "<!--" + "p" * 9000 + "-->\n"
+    '<!DOCTYPE worksheet [<!ENTITY injected "INJECTED">]>\n'
+    f'<worksheet {_NS}><sheetData><row r="1">'
+    '<c r="A1" t="inlineStr"><is><t>&injected;</t></is></c>'
+    "</row></sheetData></worksheet>"
+)
+
+
+class TestXlsxXmlEntityGate:
+    def test_shared_strings_entity_rejected_before_load(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        data = _xlsx_bytes(shared_strings=_ENTITY_SHARED_STRINGS)
+        _assert_rejected_before_load(monkeypatch, data)
+
+    def test_sheet_entity_declaration_after_header_window_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 实体声明可放在长注释之后：只扫前 8 KiB 的检查拦不住，必须在完整部件上拒绝。
+        data = _rewrite_xlsx(
+            _xlsx_bytes(),
+            replace={"xl/worksheets/sheet1.xml": _ENTITY_SHEET_AFTER_HEADER.encode("utf-8")},
+        )
+        _assert_rejected_before_load(monkeypatch, data)
+
+    def test_external_entity_rejected_before_load(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        shared_strings = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            '<!DOCTYPE sst [<!ENTITY ext SYSTEM "file:///C:/Windows/win.ini">]>\n'
+            f"<sst {_NS}><si><t>&ext;</t></si></sst>"
+        )
+        _assert_rejected_before_load(monkeypatch, _xlsx_bytes(shared_strings=shared_strings))
+
+    def test_rejection_does_not_depend_on_optional_parser(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 模拟运行期缺少 defusedxml（openpyxl 回落到标准库 iterparse，会展开内部实体）：
+        # 本层必须在自身边界内拒绝，而不是依赖 openpyxl 的可选依赖。
+        import openpyxl.reader.strings as ox_strings
+        import openpyxl.worksheet._reader as ox_sheet_reader
+
+        for module in (ox_sheet_reader, ox_strings):
+            monkeypatch.setattr(module, "iterparse", ElementTree.iterparse)
+        data = _xlsx_bytes(shared_strings=_ENTITY_SHARED_STRINGS, sheet1=_SHARED_STRING_CELL)
+        with pytest.raises(AttachmentParseError) as exc:
+            _parse(AttachmentKind.XLSX, data)
+        assert exc.value.code == "invalid_structure"
+        assert "INJECTED" not in str(exc.value)
+
+    def test_cumulative_declared_size_limit_covers_all_entries(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        data = _xlsx_bytes(shared_strings=_SHARED_STRINGS)
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            declared_total = sum(info.file_size for info in archive.infolist())
+        monkeypatch.setattr(attachment_worker, "MAX_XLSX_TOTAL_BYTES", declared_total - 1)
+        _assert_rejected_before_load(monkeypatch, data)
+
+
+class TestXlsxBadCacheStableErrors:
+    def test_out_of_range_shared_string_index_is_stable_error(self) -> None:
+        # openpyxl 惰性迭代时抛 IndexError；不得把裸第三方异常泄漏出解析边界。
+        sheet = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            f'<worksheet {_NS}><sheetData><row r="1"><c r="A1" t="s"><v>99</v></c>'
+            "</row></sheetData></worksheet>"
+        )
+        data = _xlsx_bytes(shared_strings=_SHARED_STRINGS, sheet1=sheet)
+        with pytest.raises(AttachmentParseError) as exc:
+            _parse(AttachmentKind.XLSX, data)
+        assert exc.value.code == "invalid_structure"
+        assert "cached cell values" in exc.value.message
+
+    def test_non_numeric_cached_value_is_stable_error(self) -> None:
+        # XML 声明数值但缓存值非数值：openpyxl 抛 ValueError，同样必须转译为稳定码。
+        sheet = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            f'<worksheet {_NS}><sheetData><row r="1"><c r="A1"><f>1+1</f><v>abc</v></c>'
+            "</row></sheetData></worksheet>"
+        )
+        with pytest.raises(AttachmentParseError) as exc:
+            _parse(AttachmentKind.XLSX, _xlsx_bytes(sheet1=sheet))
+        assert exc.value.code == "invalid_structure"
+        assert "cached cell values" in exc.value.message
+
+    def test_out_of_range_date_serial_marked_error_not_applicable(self) -> None:
+        # 日期序列越界：openpyxl 以 Excel 错误词法返回 #VALUE!，缓存必须记为 error 且不宣称可适用。
+        rows = '<row r="1"><c r="A1" s="1"><f>1+1</f><v>999999999999999</v></c></row>'
+        cell = _xlsx_cells(_parse(AttachmentKind.XLSX, _typed_rows(rows, styles=_DATE_STYLES)))["A1"]
+        meta = cell["xlsx_cell_meta"]
+        assert meta["cache_present"] is True
+        assert meta["cache_applicable"] is None
+        assert meta["cache_missing_reason"] == "cache_error"
+        assert meta["cache_raw_type"] == "error"
+
+
+# ---------------------------------------------------------------------------
 # XLSX 双视图打开的清理契约（I38）
 # ---------------------------------------------------------------------------
 
@@ -1540,6 +1647,22 @@ class TestImageExtraction:
         with pytest.raises(AttachmentParseError) as exc:
             _parse(AttachmentKind.PNG, data)
         assert exc.value.code == "image_pixels_exceeded"
+        assert load_calls == []
+
+    def test_decoded_bytes_budget_rejected_before_decode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        data = _encode_image("PNG", (16, 16))
+        load_calls: list[str] = []
+        original_load = Image.Image.load
+
+        def _spy_load(self: Image.Image, *args: Any, **kwargs: Any) -> None:
+            load_calls.append(self.mode)
+            original_load(self, *args, **kwargs)
+
+        monkeypatch.setattr(attachment_worker, "MAX_IMAGE_DECODED_BYTES", 1)
+        monkeypatch.setattr(Image.Image, "load", _spy_load)
+        with pytest.raises(AttachmentParseError) as exc:
+            _parse(AttachmentKind.PNG, data)
+        assert exc.value.code == "image_decoded_bytes_exceeded"
         assert load_calls == []
 
     def test_zero_char_stats_does_not_change_image_state(self) -> None:
