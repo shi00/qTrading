@@ -2204,6 +2204,103 @@ class TestWorkerLifecycle:
         assert worker.active_pids() == ()
 
     @pytest.mark.asyncio
+    async def test_stdout_overflow_is_bounded_and_terminates_worker(self) -> None:
+        # 超长单行（无换行）且随后长睡：父进程必须流式超限即停并终止，而不是等 30s
+        # 超时或把输出全部缓存后才发现超限（I74）。
+        script = "import sys, time\nsys.stdout.buffer.write(b'x' * 4096)\nsys.stdout.buffer.flush()\ntime.sleep(30)\n"
+        worker = SubprocessAttachmentWorker(
+            command=(sys.executable, "-c", script),
+            timeout_s=30.0,
+            max_result_bytes=1024,
+        )
+        started = time.monotonic()
+        with pytest.raises(AttachmentWorkerError) as exc:
+            await worker.extract(_request(b"hello"))
+        assert exc.value.code == "result_too_large"
+        assert time.monotonic() - started < 15.0
+        assert worker.active_pids() == ()
+        assert worker.residual_threads() == ()
+
+    @pytest.mark.asyncio
+    async def test_stderr_flood_is_bounded_and_terminates_worker(self) -> None:
+        script = "import sys, time\nsys.stderr.buffer.write(b'e' * 8192)\nsys.stderr.buffer.flush()\ntime.sleep(30)\n"
+        worker = SubprocessAttachmentWorker(
+            command=(sys.executable, "-c", script),
+            timeout_s=30.0,
+            max_stderr_bytes=1024,
+        )
+        started = time.monotonic()
+        with pytest.raises(AttachmentWorkerError) as exc:
+            await worker.extract(_request(b"hello"))
+        assert exc.value.code == "worker_stderr_exceeded"
+        assert time.monotonic() - started < 15.0
+        assert worker.active_pids() == ()
+        assert worker.residual_threads() == ()
+
+    @pytest.mark.asyncio
+    async def test_complete_result_then_stderr_flood_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # stderr 超限不因 stdout 已有完整结果而被放过：先终止，再按协议失败。
+        valid = json.dumps(
+            _worker_entry(monkeypatch, b"hello", kind=AttachmentKind.TXT, selection=Selection(kind="all"))
+        ).encode("utf-8")
+        script = (
+            f"import sys, time\nsys.stdout.buffer.write({valid!r})\nsys.stdout.buffer.flush()\n"
+            "sys.stderr.buffer.write(b'e' * 8192)\nsys.stderr.buffer.flush()\ntime.sleep(30)\n"
+        )
+        worker = SubprocessAttachmentWorker(
+            command=(sys.executable, "-c", script),
+            timeout_s=30.0,
+            max_stderr_bytes=1024,
+        )
+        with pytest.raises(AttachmentWorkerError) as exc:
+            await worker.extract(_request(b"hello"))
+        assert exc.value.code == "worker_stderr_exceeded"
+        assert worker.active_pids() == ()
+
+    @pytest.mark.asyncio
+    async def test_large_valid_result_streams_through_bounded_reader(self) -> None:
+        data = b"a" * 90_000
+        worker = SubprocessAttachmentWorker()
+        result = await worker.extract(_request(data))
+        assert result.body_text == "a" * 90_000
+        assert worker.residual_threads() == ()
+
+    @pytest.mark.asyncio
+    async def test_cancel_confirms_process_and_threads_really_exit(self) -> None:
+        worker = SubprocessAttachmentWorker(
+            command=(sys.executable, "-c", "import time; time.sleep(30)"),
+            timeout_s=30.0,
+        )
+        task = asyncio.create_task(worker.extract(_request(b"hello")))
+        await asyncio.sleep(0.5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert task.cancelled() is True
+        # 取消只取消等待；worker 线程必须随后真正终止进程并 join 管道线程。
+        for _ in range(50):
+            if worker.active_pids() == ():
+                break
+            await asyncio.sleep(0.1)
+        assert worker.active_pids() == ()
+        assert worker.residual_threads() == ()
+
+    @pytest.mark.asyncio
+    async def test_residual_pipe_thread_is_recorded_and_fails_run(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            SubprocessAttachmentWorker,
+            "_join_threads",
+            lambda self, _threads: ("attachment-worker-stdout",),
+        )
+        worker = SubprocessAttachmentWorker(command=(sys.executable, "-c", "pass"), timeout_s=5.0)
+        with pytest.raises(AttachmentWorkerError) as exc:
+            await worker.extract(_request(b"hello"))
+        # 进程已退出但管道线程未收尾：作为残留事实失败，不得静默当成完整结果。
+        assert exc.value.code == "worker_thread_residual"
+        assert worker.residual_threads() == ("attachment-worker-stdout",)
+
+    @pytest.mark.asyncio
     async def test_nonzero_exit_with_complete_result_keeps_current_semantics(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
