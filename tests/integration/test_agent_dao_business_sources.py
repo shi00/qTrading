@@ -290,3 +290,61 @@ class TestBusinessSourceRegistration:
         assert exc_scope.value.code is AgentErrorCode.INPUT_INVALID
         assert await _count(dao, AgentAssetVersion) == 0
         assert await _count(dao, AgentSourceLink) == 0
+
+
+async def _asset_body(dao: AgentDao, asset_id: str = "src-1") -> str | None:
+    async with dao.engine.connect() as conn:  # type: ignore[union-attr]  # 测试断言读取
+        result = await conn.execute(
+            sa.select(AgentAssetVersion.body_text).where(AgentAssetVersion.asset_id == asset_id)
+        )
+    return result.scalar_one()
+
+
+class TestBusinessSourceBody:
+    """I75：受管正文随源版内联登记（读源可直接取到，不退化为元数据摘要）。"""
+
+    @pytest.mark.asyncio
+    async def test_body_is_registered_inline_and_replays_idempotently(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_execution(dao)
+        item = BusinessSourceItem(
+            source=_source(),
+            verification=VerificationState.PROGRAM_VERIFIED,
+            body_text="## 指标\n- 夏普比率：未提供\n",
+        )
+        first = await dao.register_business_sources(_dao_request(item))
+        assert first.replayed is False
+        assert await _asset_body(dao) == "## 指标\n- 夏普比率：未提供\n"
+        second = await dao.register_business_sources(_dao_request(item))
+        assert second.replayed is True
+        assert await _asset_body(dao) == "## 指标\n- 夏普比率：未提供\n"
+
+    @pytest.mark.asyncio
+    async def test_first_prepared_body_is_frozen_on_replay(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_execution(dao)
+        await dao.register_business_sources(
+            _dao_request(BusinessSourceItem(source=_source(), verification=VerificationState.UNVERIFIED, body_text="A"))
+        )
+        receipt = await dao.register_business_sources(
+            _dao_request(BusinessSourceItem(source=_source(), verification=VerificationState.UNVERIFIED, body_text="B"))
+        )
+        # 资产版本为冻结快照：既有正文不被重放改写（也不因表示差异阻断登记）。
+        assert receipt.replayed is True
+        assert await _asset_body(dao) == "A"
+
+    @pytest.mark.asyncio
+    async def test_existing_version_without_body_gets_backfilled(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_execution(dao)
+        await dao.register_business_sources(_dao_request())
+        assert await _asset_body(dao) is None
+        receipt = await dao.register_business_sources(
+            _dao_request(
+                BusinessSourceItem(source=_source(), verification=VerificationState.UNVERIFIED, body_text="正文")
+            )
+        )
+        # 补写正文是一次写入，不冒充「零新事实」的重放；版本身份/行数不变。
+        assert receipt.replayed is False
+        assert await _asset_body(dao) == "正文"
+        assert await _count(dao, AgentAssetVersion) == 1

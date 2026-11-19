@@ -7173,10 +7173,17 @@ SOURCE_REGISTRATION_CONSUMER_KINDS: Final[frozenset[str]] = frozenset({"executio
 
 @dataclass(frozen=True, slots=True)
 class BusinessSourceItem:
-    """一条业务来源（元数据 + 核验状态）：登记事实，不等同读取或支持断言。"""
+    """一条业务来源（元数据 + 核验状态 + 可选受管正文）：登记事实，不等同读取或支持断言。
+
+    ``body_text`` 是该源版**已准备的选定表示**（内联受管正文，随 asset 版本存放，
+    读源时原样返回）；``None`` 表示未准备正文，读取方须按「表示不可用」处理，
+    不得回退到元数据摘要冒充正文（R21）。本字段只支持内联正文，不承载外置
+    ``body_ref``；确需外置时必须走既有受管正文存储（``agent_body_payload``）。
+    """
 
     source: SourceRef
     verification: VerificationState
+    body_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

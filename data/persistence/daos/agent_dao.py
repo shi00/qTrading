@@ -9795,7 +9795,10 @@ class AgentDao(BaseDao):
           摘要/元数据/定位不一致 → ``INPUT_CONFLICT``（不静默覆盖）；
         - ``available_at`` 必须为带时区 UTC 文本或 NULL；时点策略（PIT）由服务层
           在执行本事务前拒绝，DAO 只落已核事实；
-        - 来源正文不在此复制（asset 只保存元数据与引用）。
+        - 来源正文以 ``item.body_text`` 内联落在 asset 版本上（已准备的选定表示），
+          不在本方法内渲染或推断；外置 ``body_ref`` 不由本方法写入（须走既有
+          受管正文存储）。已有正文的资产版本按冻结快照保留首次表示，不因重放改写；
+          存量版本未准备正文时以本次正文补写（源版身份/摘要不变，非新版本）。
 
         Raises:
             AgentServiceError: INPUT_INVALID / INPUT_CONFLICT / SOURCE_DISABLED。
@@ -9822,6 +9825,8 @@ class AgentDao(BaseDao):
                 raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "source user_scope mismatch", item_identity)
             if source.read_state is ReadState.DISABLED:
                 raise AgentServiceError(AgentErrorCode.SOURCE_DISABLED, "source version is disabled", item_identity)
+            if item.body_text is not None and not isinstance(item.body_text, str):
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "source body must be text", item_identity)
             key = (source.source_id, source.version)
             if key in seen:
                 raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "duplicate source in request", item_identity)
@@ -9844,7 +9849,11 @@ class AgentDao(BaseDao):
                 available_at = _wire_timestamp_or_none(source.available_at, asset_identity)
                 asset_row = (
                     await conn.execute(
-                        sa.select(AgentAssetVersion.digest, AgentAssetVersion.metadata_payload)
+                        sa.select(
+                            AgentAssetVersion.digest,
+                            AgentAssetVersion.metadata_payload,
+                            AgentAssetVersion.body_text,
+                        )
                         .where(
                             AgentAssetVersion.user_scope == request.user_scope,
                             AgentAssetVersion.asset_id == source.source_id,
@@ -9868,6 +9877,8 @@ class AgentDao(BaseDao):
                                 f"{source.locator.origin_ref.source_id}@{source.locator.origin_ref.source_version}"
                             ),
                             metadata_payload=payload,
+                            # 已准备正文内联存放；读源时原样返回（缺失时读取方按表示不可用处理）。
+                            body_text=item.body_text,
                             read_state=source.read_state.value,
                             verification_state=item.verification.value,
                             available_at=available_at,
@@ -9877,6 +9888,19 @@ class AgentDao(BaseDao):
                     payload
                 ):
                     raise AgentServiceError(AgentErrorCode.INPUT_CONFLICT, "source version differs", asset_identity)
+                elif item.body_text is not None and asset_row.body_text is None:
+                    # 存量登记未准备正文：按本次已准备正文补写（版本身份/摘要不变，不新增版本）。
+                    # 已有正文时保持首次准备的表示不变（资产版本是冻结快照，不因重放改写）。
+                    replayed = False
+                    await conn.execute(
+                        sa.update(AgentAssetVersion)
+                        .where(
+                            AgentAssetVersion.user_scope == request.user_scope,
+                            AgentAssetVersion.asset_id == source.source_id,
+                            AgentAssetVersion.asset_version == source.version,
+                        )
+                        .values(body_text=item.body_text)
+                    )
 
                 link_id = stable_id(
                     "source_link",
