@@ -51,8 +51,10 @@ SSE 兼容模式下若服务端上报的消息端点路径与配置端点不同�
 
 仍属残留（不得宣称已验证）
 --------------------------
-http/SSE 的逐请求往返耗时、子进程退出码不可观测；目录/解码/schema/单条/留存五族按
-「收到后再计、超限即不保留/不外传」执行（这些族按定义只能在收到后计量）。
+http/SSE 的逐请求往返耗时、子进程退出码不可观测。目录/解码/schema/单条/留存五族只能
+在解析后得到（条目数、规范长度无法从字节流预知），故其拒绝点必然晚于接收；但计量本身
+改为**增量计数**：累计超过该族剩余额度即中止，不再为比较而完整物化规范 JSON 文本，
+且总接收量仍由解析前的 ``receive_bytes`` 门约束（超出的字节不会交给 SDK）。
 
 四诊断通道
 ----------
@@ -70,7 +72,6 @@ P2-AgentMCP-Residual-Risks。
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import shutil
 import tempfile
@@ -93,7 +94,13 @@ from services.agent_service.mcp import (
     MCPToolDescriptor,
     validate_mcp_server_config,
 )
-from services.agent_service.mcp_budget import JsonDepthScanner, MCPBudgetGuard, MCPDeadline
+from services.agent_service.mcp_budget import (
+    JsonDepthScanner,
+    MCPBudgetGuard,
+    MCPDeadline,
+    encode_json_text_capped,
+    measure_json_bytes,
+)
 from utils.sanitizers import DataSanitizer
 
 if TYPE_CHECKING:
@@ -632,10 +639,19 @@ class FastMCPSession:
             raise
         descriptors: list[MCPToolDescriptor] = []
         for tool in tools:
-            schema_json = json.dumps(tool.input_schema, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+            # 先计入条目数，再以增量编码在剩余额度内产出 schema：超限即中止，
+            # 超限 schema 不会被完整物化（账本不记未通过计量的字节）。
+            name_cost = len(tool.name.encode("utf-8"))
             self._guard.catalog_item()
-            self._guard.catalog_bytes(len(tool.name.encode("utf-8")) + len(schema_json.encode("utf-8")))
-            self._guard.schema_bytes(len(schema_json.encode("utf-8")))
+            schema_room = self._guard.remaining("schema_bytes")
+            catalog_room = self._guard.remaining("catalog_bytes") - name_cost
+            if catalog_room < 0:
+                self._guard.exceed("catalog_bytes")
+            schema_json, schema_size = encode_json_text_capped(tool.input_schema, limit=min(schema_room, catalog_room))
+            if schema_json is None:
+                self._guard.exceed("catalog_bytes" if catalog_room < schema_room else "schema_bytes")
+            self._guard.catalog_bytes(name_cost + schema_size)
+            self._guard.schema_bytes(schema_size)
             descriptors.append(MCPToolDescriptor(name=tool.name, schema_json=schema_json))
         return tuple(descriptors)
 
@@ -653,8 +669,12 @@ class FastMCPSession:
             self._diagnostics.record(f"call_tool_failed:{type(exc).__name__}")
             raise
         payload = _result_payload(result)
-        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True, default=str)
-        self._guard.decoded_bytes(len(encoded.encode("utf-8")))
+        # 结果对象已由 SDK 解析；此处只做增量计量：超限即在片段边界中止，
+        # 不为比较而物化整条结果的规范 JSON 文本或 UTF-8 副本（I56）。
+        decoded_size = measure_json_bytes(payload, limit=self._guard.remaining("decoded_bytes"), default=str)
+        if decoded_size is None:
+            self._guard.exceed("decoded_bytes")
+        self._guard.decoded_bytes(decoded_size)
         return payload
 
     async def aclose(self) -> None:

@@ -2,21 +2,33 @@
 
 设计（§10.4 / HANDOFF §9）要求上述预算在大量分配之前冻结并执行，恰等通过、
 超一拒绝；本测试只验证计量与早拒绝合同，不声明任何产品数值已批准。
-入站字节/深度的真实插入点（HTTP 响应流）见 ``test_agent_mcp_inbound_limits.py``。
+入站字节/深度的真实插入点（HTTP 响应流）见 ``test_agent_mcp_inbound_limits.py``；
+只能解析后得到的族（目录/解码/schema/单条/留存）的增量计量（超限即中止、不为比较
+物化完整文本）见本文件 ``TestIncrementalJsonMetering`` 与 ``TestPreAllocationMetering``。
 """
 
 from __future__ import annotations
 
+import json
+from typing import Any, cast
+
 import pytest
 
-from core.agent_types import MCPBudgetProfile
-from services.agent_service.mcp import MCPServiceIdentity
+from core.agent_types import (
+    MCPBudgetProfile,
+    MCPServiceIdentity,
+    MCPTransportKind,
+)
+from services.agent_service.mcp import MCPServerConfig, MCPTransportConfig
 from services.agent_service.mcp_budget import (
     JsonDepthScanner,
     MCPBudgetExceeded,
     MCPBudgetGuard,
     MCPDeadline,
+    encode_json_text_capped,
+    measure_json_bytes,
 )
+from services.agent_service.mcp_fastmcp import FastMCPSession, MCPSendGate, MCPSessionDiagnostics
 
 _IDENTITY = MCPServiceIdentity(service_id="svc-local-fs", config_version=1)
 
@@ -167,3 +179,129 @@ class TestDeadline:
 @pytest.fixture(autouse=True)
 def _no_side_effects() -> None:
     """本模块不触达真实 SDK/网络/数据库。"""
+
+
+class TestIncrementalJsonMetering:
+    """I56：计量必须增量推进，超限即中止，不为比较而物化完整规范文本。"""
+
+    def test_measure_matches_canonical_json_length(self) -> None:
+        payload = {"b": [1, 2, {"c": "é"}], "a": None}
+        expected = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        size = len(expected.encode("utf-8"))
+        assert measure_json_bytes(payload, limit=size) == size
+
+    def test_measure_returns_none_once_over_limit(self) -> None:
+        assert measure_json_bytes({"a": "x" * 100}, limit=10) is None
+
+    def test_exhausted_limit_does_not_encode_anything(self) -> None:
+        assert measure_json_bytes({"a": 1}, limit=-1) is None
+        assert encode_json_text_capped({"a": 1}, limit=-1) == (None, 0)
+
+    def test_capped_text_within_limit_is_identical_to_canonical_json(self) -> None:
+        schema = {"type": "object", "properties": {"path": {"type": "string"}}}
+        expected = json.dumps(schema, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        text, size = encode_json_text_capped(schema, limit=len(expected.encode("utf-8")))
+        assert text == expected
+        assert size == len(expected.encode("utf-8"))
+
+    def test_capped_text_over_limit_yields_no_text(self) -> None:
+        text, measured = encode_json_text_capped({"type": "object", "description": "x" * 50}, limit=10)
+        assert text is None
+        assert measured > 10
+
+
+class _Tool:
+    """最小工具描述（``FastMCPSession`` 只读取 ``name`` / ``input_schema``）。"""
+
+    def __init__(self, name: str, input_schema: dict[str, Any]) -> None:
+        self.name = name
+        self.input_schema = input_schema
+
+
+class _CallResult:
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.data = data
+
+
+class _FakeClient:
+    """返回固定目录/结果的假客户端（不触达 SDK/网络）。"""
+
+    def __init__(self, *, tools: list[_Tool] | None = None, result: dict[str, Any] | None = None) -> None:
+        self._tools = list(tools or [])
+        self._result: dict[str, Any] = {"content": []} if result is None else result
+
+    async def list_tools(self) -> list[_Tool]:
+        return list(self._tools)
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> _CallResult:
+        return _CallResult(self._result)
+
+
+def _session(
+    client: _FakeClient,
+    *,
+    profile: MCPBudgetProfile,
+) -> FastMCPSession:
+    return FastMCPSession(
+        cast(Any, client),
+        config=MCPServerConfig(
+            identity=_IDENTITY,
+            display_name="svc-local-fs",
+            transport=MCPTransportConfig(kind=MCPTransportKind.STDIO, command="server.exe"),
+            budget=profile,
+        ),
+        guard=MCPBudgetGuard(profile, identity="svc-local-fs@1"),
+        gate=MCPSendGate(
+            alive=lambda: True,
+            deadline_factory=lambda seconds: MCPDeadline(seconds=seconds),
+            identity="svc-local-fs@1",
+        ),
+        diagnostics=MCPSessionDiagnostics(),
+        stderr_drain=None,
+        on_close=lambda: None,
+    )
+
+
+class TestPreAllocationMetering:
+    """I56：目录/schema/解码在超限时于增量计量处拒绝（不先物化完整文本）。"""
+
+    async def test_oversized_schema_is_rejected_without_full_text(self) -> None:
+        schema = {"type": "object", "description": "x" * 200}
+        session = _session(_FakeClient(tools=[_Tool("read_file", schema)]), profile=_profile(schema_bytes=20))
+
+        with pytest.raises(MCPBudgetExceeded) as exc:
+            await session.list_tools(deadline_s=30)
+
+        assert exc.value.family == "schema_bytes"
+
+    async def test_catalog_item_beyond_limit_is_rejected(self) -> None:
+        tools = [_Tool(f"tool-{index}", {}) for index in range(3)]
+        session = _session(_FakeClient(tools=tools), profile=_profile(catalog_items=2))
+
+        with pytest.raises(MCPBudgetExceeded) as exc:
+            await session.list_tools(deadline_s=30)
+
+        assert exc.value.family == "catalog_items"
+
+    async def test_catalog_items_exactly_at_limit_pass(self) -> None:
+        tools = [_Tool(f"tool-{index}", {}) for index in range(2)]
+        session = _session(_FakeClient(tools=tools), profile=_profile(catalog_items=2))
+
+        descriptors = await session.list_tools(deadline_s=30)
+
+        assert [descriptor.name for descriptor in descriptors] == ["tool-0", "tool-1"]
+
+    async def test_decoded_bytes_exact_boundary_passes(self) -> None:
+        payload = {"echo": "a"}
+        session = _session(_FakeClient(result=payload), profile=_profile(decoded_bytes=len(b'{"echo":"a"}')))
+
+        assert await session.call_tool("echo", {"text": "a"}, deadline_s=30) == payload
+
+    async def test_decoded_bytes_one_over_is_rejected(self) -> None:
+        payload = {"echo": "a"}
+        session = _session(_FakeClient(result=payload), profile=_profile(decoded_bytes=len(b'{"echo":"a"}') - 1))
+
+        with pytest.raises(MCPBudgetExceeded) as exc:
+            await session.call_tool("echo", {"text": "a"}, deadline_s=30)
+
+        assert exc.value.family == "decoded_bytes"

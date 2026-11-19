@@ -49,7 +49,7 @@ from services.agent_service.mcp import (
     MCPToolDescriptor,
     SharedMCPConnectionManager,
 )
-from services.agent_service.mcp_budget import MCPBudgetExceeded, MCPBudgetGuard
+from services.agent_service.mcp_budget import MCPBudgetExceeded, MCPBudgetGuard, measure_json_bytes
 
 __all__ = [
     "MCPBudgetExceeded",
@@ -324,11 +324,16 @@ class MCPToolDispatcher:
             # 一律保持 unknown 并保留原 operation 身份，避免调用方把「后效未知」当作「确定失败」重发（I15）。
             return ToolCallOutcome(ToolCallState.UNKNOWN, None, request.operation_id)
         try:
-            encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-            size = len(encoded.encode("utf-8"))
+            # 单条结果族按单条比较：以本族上限为增量计数阈值，超限即中止，
+            # 不为比较而物化完整结果文本（I56）。
+            size = measure_json_bytes(result, limit=guard.limit("single_result_bytes"))
         except (TypeError, ValueError, RecursionError):
             # 效果已发生但结果无法进入类型化契约（二进制/自定义对象/孤立代理项/超深结构）：无确证，不重试。
             return ToolCallOutcome(ToolCallState.UNKNOWN, None, request.operation_id)
+        if size is None:
+            guard.exceed("single_result_bytes")
         guard.single_result_bytes(size)
+        if size > guard.remaining("retention_bytes"):
+            guard.exceed("retention_bytes")
         guard.retention_bytes(size)
         return ToolCallOutcome(ToolCallState.COMPLETED, result, request.operation_id)

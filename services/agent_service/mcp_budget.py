@@ -7,15 +7,19 @@
   （见 :data:`MCP_INBOUND_LIMIT_BINDINGS`，每条证据标出 SDK/Hook 的符号位置），
   否则准入显式拒绝（``CAPABILITY_UNVERIFIED``）；
 - 结构深度以增量扫描器在字节到达时判定，不做完整 JSON 解析；
+- 只能在解析后得到的族（目录/解码/schema/单条/留存）以**增量计数**计量：累计一旦
+  超过该族剩余额度立即中止，不为比较而完整物化规范 JSON 文本（见
+  :func:`measure_json_bytes` / :func:`encode_json_text_capped`）；
 - 单一总 deadline 不因 progress/分片续期；
 - 本模块不新增任何产品预算数值，数值由冻结的 :class:`MCPBudgetProfile` 提供。
 """
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable, Mapping
-from typing import NoReturn
+from typing import Any, NoReturn
 
 from core.agent_types import (
     AgentErrorCode,
@@ -69,6 +73,21 @@ class MCPBudgetGuard:
 
     def used(self, family: str) -> int:
         return self._used[family]
+
+    def limit(self, family: str) -> int:
+        """族上限（已冻结；未冻结即拒绝，不按「无上限」放行）。"""
+
+        limit = getattr(self._profile, family)
+        if limit is None:
+            raise AgentServiceError(
+                AgentErrorCode.CAPABILITY_UNVERIFIED, f"mcp budget not frozen: {family}", self._identity
+            )
+        return limit
+
+    def remaining(self, family: str) -> int:
+        """族剩余额度（增量计量的提前中止阈值；``0`` 表示再收一个字节即超限）。"""
+
+        return self.limit(family) - self._used[family]
 
     def exceed(self, family: str) -> NoReturn:
         raise MCPBudgetExceeded(family, self._identity)
@@ -130,6 +149,51 @@ class MCPBudgetGuard:
 
     def retention_bytes(self, amount: int) -> None:
         self._charge("retention_bytes", amount)
+
+
+#: 规范 JSON 分隔符（无空白；与调用门/参数摘要同一形态）。
+_JSON_SEPARATORS = (",", ":")
+
+
+def _canonical_encoder(default: Callable[[Any], Any] | None = None) -> json.JSONEncoder:
+    """规范 JSON 编码器：键序排序、无空白、保留非 ASCII 原字符。"""
+
+    return json.JSONEncoder(ensure_ascii=False, separators=_JSON_SEPARATORS, sort_keys=True, default=default)
+
+
+def measure_json_bytes(obj: Any, *, limit: int, default: Callable[[Any], Any] | None = None) -> int | None:
+    """增量测量规范 JSON 的 UTF-8 字节数；超过 ``limit`` 立即返回 ``None``。
+
+    逐编码片段累计，超限即停止推进——调用方据此拒绝，故超限对象不会被完整序列化。
+    ``limit`` 为负表示该族额度已耗尽（同样不推进编码）。
+    """
+
+    if limit < 0:
+        return None
+    total = 0
+    for piece in _canonical_encoder(default).iterencode(obj):
+        total += len(piece.encode("utf-8"))
+        if total > limit:
+            return None
+    return total
+
+
+def encode_json_text_capped(obj: Any, *, limit: int) -> tuple[str | None, int]:
+    """在不超过 ``limit`` 字节时产出规范 JSON 文本；超限返回 ``(None, 已计字节)``。
+
+    保留的片段总量不超过 ``limit``（加单个编码片段），超限对象不会被完整物化。
+    """
+
+    if limit < 0:
+        return None, 0
+    total = 0
+    pieces: list[str] = []
+    for piece in _canonical_encoder().iterencode(obj):
+        total += len(piece.encode("utf-8"))
+        if total > limit:
+            return None, total
+        pieces.append(piece)
+    return "".join(pieces), total
 
 
 class JsonDepthScanner:
