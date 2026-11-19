@@ -193,3 +193,60 @@ class TestSkillSelection:
             is_child=False,
         )
         assert forward == backward == (_ref("a", 1), _ref("b", 2), _ref("c", 3))
+
+    def test_defaults_internal_version_conflict_rejected(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            resolve_skill_selection(
+                enabled=(_ref("a", 1), _ref("a", 2)),
+                defaults=(_ref("a", 1), _ref("a", 2)),
+                hand_picked=(),
+                is_child=False,
+            )
+        assert exc.value.code == "skill_version_conflict"
+        assert exc.value.field_path == "$.agent.skills[a]"
+
+    def test_hand_picked_version_not_enabled_is_rejected_not_silently_replaced(self) -> None:
+        # 手选 a@2 未启用时不得静默回落到默认 a@1：显式手选被换版即冲突（I60）。
+        with pytest.raises(AgentValidationError) as exc:
+            resolve_skill_selection(
+                enabled=(_ref("a", 1),),
+                defaults=(_ref("a", 1),),
+                hand_picked=(_ref("a", 2),),
+                is_child=False,
+            )
+        assert exc.value.code == "skill_version_conflict"
+        assert exc.value.field_path == "$.agent.skills[a]"
+
+    def test_hand_picked_two_versions_one_disabled_rejected_for_generator_input(self) -> None:
+        # 生成器形态的手选只可消费一次：两版本一启用一未启用仍须判冲突。
+        hand_picked = (_ref(skill_id, version) for skill_id, version in (("a", 1), ("a", 2)))
+        with pytest.raises(AgentValidationError) as exc:
+            resolve_skill_selection(
+                enabled=(_ref("a", 1),),
+                defaults=(),
+                hand_picked=hand_picked,
+                is_child=False,
+            )
+        assert exc.value.code == "skill_version_conflict"
+
+    def test_hand_picked_single_version_not_enabled_still_dropped(self) -> None:
+        # 单一手选版本未启用时只按「启用集合内取交集」丢弃，不构成跨版冲突。
+        assert (
+            resolve_skill_selection(
+                enabled=(_ref("a", 1),),
+                defaults=(),
+                hand_picked=(_ref("a", 2),),
+                is_child=False,
+            )
+            == ()
+        )
+
+    def test_hand_picked_enabled_version_replaces_stale_default(self) -> None:
+        # 历史默认 a@1 已不在启用集合，手选 a@2 生效：可用版本顶替陈旧默认不算冲突。
+        selected = resolve_skill_selection(
+            enabled=(_ref("a", 2),),
+            defaults=(_ref("a", 1),),
+            hand_picked=(_ref("a", 2),),
+            is_child=False,
+        )
+        assert selected == (_ref("a", 2),)
