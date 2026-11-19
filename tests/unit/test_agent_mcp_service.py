@@ -174,13 +174,35 @@ class _FakeProbe:
         return self.fingerprint
 
 
+class _FrozenUsers:
+    """持久化使用者查询替身：按身份（服务+配置版）注入排队/暂停研究标识或查询故障。"""
+
+    def __init__(self, users: dict[str, tuple[str, ...]] | None = None) -> None:
+        self.by_key: dict[str, tuple[str, ...]] = dict(users or {})
+        self.fail: Exception | None = None
+        self.calls: list[str] = []
+
+    def freeze(self, identity: MCPServiceIdentity, *users: str) -> None:
+        self.by_key[identity.stable_key()] = users
+
+    async def frozen_users(self, identity: MCPServiceIdentity) -> tuple[str, ...]:
+        key = identity.stable_key()
+        self.calls.append(key)
+        if self.fail is not None:
+            raise self.fail
+        return self.by_key.get(key, ())
+
+
 def _manager(
-    *, session: _FakeSession | None = None, fingerprint: str | None = _FINGERPRINT
+    *,
+    session: _FakeSession | None = None,
+    fingerprint: str | None = _FINGERPRINT,
+    usage: _FrozenUsers | None = None,
 ) -> tuple[SharedMCPConnectionManager, _FakeStore, _FakeFactory, _FakeProbe]:
     store = _FakeStore()
     factory = _FakeFactory(session or _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),)))
     probe = _FakeProbe(fingerprint)
-    manager = SharedMCPConnectionManager(store=store, factory=factory, probe=probe)
+    manager = SharedMCPConnectionManager(store=store, factory=factory, probe=probe, usage=usage or _FrozenUsers())
     return manager, store, factory, probe
 
 
@@ -285,6 +307,65 @@ class TestConnectionTest:
             await manager.connection_test(_identity())
         assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
         assert factory.opened == 0
+
+    @pytest.mark.asyncio
+    async def test_test_close_failure_keeps_locatable_residue(self) -> None:
+        session = _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),), close_failures=1)
+        manager, _store, _factory, _probe = _manager(session=session)
+        await manager.save_config(_config())
+
+        with pytest.raises(AgentServiceError) as exc:
+            await manager.connection_test(_identity())
+
+        # 不回执 closed=True，也不谎称已关闭：错误类型化，残留含身份+错误类型+句柄。
+        assert exc.value.code is AgentErrorCode.OPERATION_UNKNOWN
+        assert "close is unconfirmed" in exc.value.sanitized_message
+        residue = manager.connection_test_residue(_identity())
+        assert len(residue) == 1
+        assert residue[0].identity == _identity()
+        assert residue[0].error == "RuntimeError"
+        assert residue[0].session is session
+        assert session.closed is False
+        assert manager.is_connected(_identity()) is False  # 测试不建立共享连接
+
+    @pytest.mark.asyncio
+    async def test_test_discovery_failure_is_not_masked_by_close_failure(self) -> None:
+        session = _FakeSession((), fail_list=True, close_failures=1)
+        manager, _store, _factory, _probe = _manager(session=session)
+        await manager.save_config(_config())
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await manager.connection_test(_identity())
+
+        assert "transport dropped" in str(excinfo.value)  # 主失败原因优先
+        assert [item.error for item in manager.connection_test_residue(_identity())] == ["RuntimeError"]
+        assert session.closed is False
+
+    @pytest.mark.asyncio
+    async def test_test_manages_only_its_own_session(self) -> None:
+        shared = _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),))
+        scratch = _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),))
+
+        class _TwoSessionFactory:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def open(self, config: MCPServerConfig) -> _FakeSession:
+                self.calls += 1
+                return shared if self.calls == 1 else scratch
+
+        manager = SharedMCPConnectionManager(
+            store=_FakeStore(), factory=_TwoSessionFactory(), probe=_FakeProbe(_FINGERPRINT), usage=_FrozenUsers()
+        )
+        await manager.save_config(_config())
+        await manager.connect(_identity())
+
+        receipt = await manager.connection_test(_identity())
+
+        assert receipt.closed is True
+        assert scratch.closed is True
+        assert shared.closed is False  # 测试不关闭共享连接
+        assert manager.session(_identity()) is shared
 
 
 class TestExplicitConnectAdmission:
@@ -522,7 +603,9 @@ class _GatedFactory:
 
 def _factory_manager(factory: MCPClientFactoryPort) -> tuple[SharedMCPConnectionManager, _FakeStore]:
     store = _FakeStore()
-    manager = SharedMCPConnectionManager(store=store, factory=factory, probe=_FakeProbe(_FINGERPRINT))
+    manager = SharedMCPConnectionManager(
+        store=store, factory=factory, probe=_FakeProbe(_FINGERPRINT), usage=_FrozenUsers()
+    )
     return manager, store
 
 
@@ -727,6 +810,118 @@ class TestUnknownOutcomeHoldsOwnership:
         assert second.closed is False
 
 
+class TestFrozenUsageGuard:
+    """I59：断开/更新共享配置前核持久化使用者；内存计数为 0 不构成无使用者证据。"""
+
+    @pytest.mark.asyncio
+    async def test_disconnect_refused_while_queued_research_freezes_config(self) -> None:
+        session = _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),))
+        usage = _FrozenUsers()
+        manager, _store, _factory, _probe = _manager(session=session, usage=usage)
+        await manager.save_config(_config())
+        await manager.connect(_identity())
+        usage.freeze(_identity(), "research-queued-1")  # 研究已排队并冻结该配置版（持久化记录）
+        assert manager.in_flight_operations(_identity()) == ()  # 无执行中调用，足以说明必须另有持久化核对
+
+        with pytest.raises(AgentServiceError) as exc:
+            await manager.disconnect(_identity())
+
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert "research-queued-1" in exc.value.sanitized_message
+        assert manager.is_connected(_identity()) is True
+        assert session.closed is False
+        assert usage.calls  # 持久化端口被实际查询
+
+    @pytest.mark.asyncio
+    async def test_disconnect_proceeds_when_no_persisted_user_references_config(self) -> None:
+        session = _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),))
+        manager, _store, _factory, _probe = _manager(session=session)
+        await manager.save_config(_config())
+        await manager.connect(_identity())
+
+        await manager.disconnect(_identity())
+
+        assert session.closed is True
+        assert manager.is_connected(_identity()) is False
+
+    @pytest.mark.asyncio
+    async def test_disconnect_refused_when_usage_store_is_unreadable(self) -> None:
+        usage = _FrozenUsers()
+        manager, _store, _factory, _probe = _manager(usage=usage)
+        await manager.save_config(_config())
+        await manager.connect(_identity())
+        usage.fail = RuntimeError("research index unavailable")
+
+        with pytest.raises(AgentServiceError) as exc:
+            await manager.disconnect(_identity())
+
+        # 无法证明无使用者即拒绝（fail-closed），不把未知当空。
+        assert exc.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        assert manager.is_connected(_identity()) is True
+
+    @pytest.mark.asyncio
+    async def test_disconnect_rechecks_in_flight_after_usage_query(self) -> None:
+        """并发对抗：持久化查询期间新登记的调用不得被「检查通过 → 摘下会话」缝隙漏掉。"""
+
+        class _RacingUsage:
+            def __init__(self) -> None:
+                self.manager: SharedMCPConnectionManager | None = None
+
+            async def frozen_users(self, identity: MCPServiceIdentity) -> tuple[str, ...]:
+                assert self.manager is not None
+                self.manager.register_in_flight(identity, "op-raced")
+                return ()
+
+        session = _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),))
+        usage = _RacingUsage()
+        manager = SharedMCPConnectionManager(
+            store=_FakeStore(),
+            factory=_FakeFactory(session),
+            probe=_FakeProbe(_FINGERPRINT),
+            usage=usage,
+        )
+        usage.manager = manager
+        await manager.save_config(_config())
+        await manager.connect(_identity())
+
+        with pytest.raises(AgentServiceError) as exc:
+            await manager.disconnect(_identity())
+
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert manager.is_connected(_identity()) is True
+        assert session.closed is False
+
+    @pytest.mark.asyncio
+    async def test_save_config_refused_while_research_freezes_same_version(self) -> None:
+        usage = _FrozenUsers()
+        manager, store, _factory, _probe = _manager(usage=usage)
+        await manager.save_config(_config())
+        usage.freeze(_identity(), "research-paused-7")
+
+        with pytest.raises(AgentServiceError) as exc:
+            await manager.save_config(_config(display_name="改名后的服务"))
+
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert "research-paused-7" in exc.value.sanitized_message
+        stored = await store.load(_identity())
+        assert stored is not None and stored.display_name == "本地文件服务"  # 未被就地改写
+
+    @pytest.mark.asyncio
+    async def test_new_config_version_is_not_blocked_by_old_version_users(self) -> None:
+        usage = _FrozenUsers()
+        manager, store, _factory, _probe = _manager(usage=usage)
+        await manager.save_config(_config())
+        usage.freeze(_identity(), "research-paused-7")
+
+        receipt = await manager.save_config(
+            _config(identity=_identity(config_version=2), audit=_audit(_identity(config_version=2)))
+        )
+
+        assert receipt.connections_opened == 0
+        new_identity = _identity(config_version=2)
+        assert await store.load(new_identity) == _config(identity=new_identity, audit=_audit(new_identity))
+
+
 class TestConnectTotalDeadline:
     """I13：启动/初始化/鉴权/发现共用同一总期限，发现只拿剩余额度。"""
 
@@ -803,7 +998,11 @@ class TestConnectTotalDeadline:
         factory = _GatedTimedFactory(clock)
         store = _FakeStore()
         manager = SharedMCPConnectionManager(
-            store=store, factory=factory, probe=_FakeProbe(_FINGERPRINT), monotonic=clock
+            store=store,
+            factory=factory,
+            probe=_FakeProbe(_FINGERPRINT),
+            usage=_FrozenUsers(),
+            monotonic=clock,
         )
         await store.save(_config(connect_deadline_s=10))
 
@@ -897,7 +1096,9 @@ def _deadline_manager(
     session = _TimedSession(clock, work_s)
     factory = _TimedFactory(clock, open_s=open_s, session=session)
     store = _FakeStore()
-    manager = SharedMCPConnectionManager(store=store, factory=factory, probe=_FakeProbe(_FINGERPRINT), monotonic=clock)
+    manager = SharedMCPConnectionManager(
+        store=store, factory=factory, probe=_FakeProbe(_FINGERPRINT), usage=_FrozenUsers(), monotonic=clock
+    )
     return manager, store, factory, session, clock
 
 

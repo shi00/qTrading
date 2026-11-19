@@ -2,7 +2,10 @@
 
 本模块只承载**静态可验证**的准入合同：保存不启连、连接测试只发现（0 研究工具
 调用）、预算与只读审核证据不足拒启、显式断开且在途时拒停（后效未知的 operation
-保留归属到 owner 真实退出被确认）、断线不自动重连。
+保留归属到 owner 真实退出被确认）、断线不自动重连。断开与更新共享配置前必须核
+**持久化**引用该配置版（service_id + config_version）的未终结研究（排队/暂停/可恢复），
+该核对不得以管理器内存计数代答（I59）。连接测试只持有并关闭自己的临时会话，
+关闭失败保留可定位残留（身份 + 错误类型 + 句柄）。
 研究启连时由连接 owner 完成一次发现并**冻结工具目录 + 连接代次**，工具调用门据此
 服务端核验目录/审核范围/schema，不采信请求自报（I04）。审核证据不是一次性结论：
 每次工具调用前重新加载配置、重新观测实现指纹并重判只读准入，未准入即零新调用（I06）。
@@ -281,12 +284,37 @@ class MCPConnectionTestReceipt:
     closed: bool
 
 
+@dataclass(frozen=True, slots=True)
+class MCPConnectionTestResidue:
+    """连接测试关闭未确认的残留：身份 + 错误类型 + 仍持有的临时会话句柄。
+
+    连接测试只管理自己的会话：关闭失败时不伪装已关闭、不把句柄交给共享连接状态，
+    而是保留该句柄供重试关闭与定位（``error`` 只记异常类型名，不含异常文本，
+    避免外部传输错误消息携带端点/凭据进入回执）。
+    """
+
+    identity: MCPServiceIdentity
+    error: str
+    session: MCPClientSessionPort
+
+
 class MCPConfigStorePort(Protocol):
     """配置持久化端口（生产复用原配置管理域，不新建 Agent 表）。"""
 
     async def load(self, identity: MCPServiceIdentity) -> MCPServerConfig | None: ...
 
     async def save(self, config: MCPServerConfig) -> None: ...
+
+
+class MCPFrozenUsagePort(Protocol):
+    """已冻结该配置版的研究查询端口（I59：必须读持久化记录，不得用内存计数代答）。
+
+    实现须返回引用 ``identity``（service_id + config_version）且尚未终结的研究稳定
+    标识，至少覆盖排队（queued）、暂停（paused）与可恢复（未知/等待）状态；这些
+    研究在重启后依然持有该配置版，故只有持久化查询才能证明「无使用者」。
+    """
+
+    async def frozen_users(self, identity: MCPServiceIdentity) -> tuple[str, ...]: ...
 
 
 class MCPClientSessionPort(Protocol):
@@ -341,11 +369,14 @@ class SharedMCPConnectionManager:
         store: MCPConfigStorePort,
         factory: MCPClientFactoryPort,
         probe: MCPImplementationProbe,
+        usage: MCPFrozenUsagePort,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._store = store
         self._factory = factory
         self._probe = probe
+        #: 已冻结该配置版的研究查询端口（持久化，不能以内存计数替代；I59）。
+        self._usage = usage
         #: 启连总期限的单调时钟（可注入以便确定性测试；不得回退到墙钟）。
         self._monotonic = monotonic
         self._sessions: dict[str, MCPClientSessionPort] = {}
@@ -367,15 +398,23 @@ class SharedMCPConnectionManager:
         self._catalogs: dict[str, tuple[MCPToolDescriptor, ...]] = {}
         self._generations: dict[str, int] = {}
         self._generation_seq = 0
+        #: 连接测试关闭未确认的临时会话（身份/错误/句柄）：只影响测试自身，不并入共享状态。
+        self._test_residue: dict[str, list[MCPConnectionTestResidue]] = {}
 
     # -- 配置 ---------------------------------------------------------------
 
     async def save_config(self, config: MCPServerConfig) -> MCPConfigSaveReceipt:
-        """保存配置：校验合同并持久化，**不打开连接、不发现工具**。"""
+        """保存配置：校验合同并持久化，**不打开连接、不发现工具**。
+
+        同一身份/版本的更新不得就地改写已被研究冻结的配置：先核持久化使用者，
+        存在未终结研究引用即拒绝（I59）；新建版本（``config_version`` 变更）身份
+        不同，天然不命中已冻结研究。
+        """
 
         identity = config.identity
         label = _identity_text(identity)
         self._admit_config(config, label)
+        await self._require_no_frozen_users(identity, label, "update")
         await self._store.save(config)
         return MCPConfigSaveReceipt(identity=identity, connections_opened=0)
 
@@ -406,6 +445,9 @@ class SharedMCPConnectionManager:
         启动/初始化/鉴权（``open``）与发现（``list_tools``）共用**同一**总期限：
         总预算自 open 起按单调时钟计，发现阶段只拿到剩余额度，故两段串联不会
         各得一个完整 ``connect_deadline_s``（I13）。预算耗尽即以明确错误码拒绝。
+
+        临时会话只归本测试所有：不登记/不替换/不关闭共享连接；关闭失败或取消时
+        保留残留（身份 + 错误类型 + 句柄）供重试关闭与定位，不回执 ``closed=True``。
         """
 
         config = await self._require_config(identity)
@@ -414,8 +456,25 @@ class SharedMCPConnectionManager:
         session = await self._factory.open(config)
         try:
             tools = await session.list_tools(deadline_s=self._remaining_deadline_s(deadline, "discovery", label))
-        finally:
-            await session.aclose()
+        except BaseException:
+            # 主失败优先传播；关闭失败只登记残留，不覆盖发现阶段的原因。
+            try:
+                await self._close_test_session(identity, session)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass  # 残留已登记（`_test_residue`），主异常照常抛出。
+            raise
+        try:
+            await self._close_test_session(identity, session)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                "connection test session close is unconfirmed",
+                label,
+            ) from exc
         return MCPConnectionTestReceipt(
             identity=identity,
             tool_names=tuple(sorted(tool.name for tool in tools)),
@@ -423,6 +482,31 @@ class SharedMCPConnectionManager:
             research_calls=0,
             closed=True,
         )
+
+    def connection_test_residue(self, identity: MCPServiceIdentity) -> tuple[MCPConnectionTestResidue, ...]:
+        """连接测试未确认关闭的残留（身份/错误类型/句柄）；已确认关闭则不含该项。"""
+
+        return tuple(self._test_residue.get(_identity_text(identity), ()))
+
+    async def _close_test_session(self, identity: MCPServiceIdentity, session: MCPClientSessionPort) -> None:
+        """关闭测试自有会话；失败/取消即登记残留（身份+错误+句柄）并按类型传播。"""
+
+        label = _identity_text(identity)
+        try:
+            await session.aclose()
+        except asyncio.CancelledError:
+            self._record_test_residue(identity, label, session, "CancelledError")
+            raise
+        except Exception as exc:
+            self._record_test_residue(identity, label, session, type(exc).__name__)
+            raise
+
+    def _record_test_residue(
+        self, identity: MCPServiceIdentity, label: str, session: MCPClientSessionPort, error: str
+    ) -> None:
+        residue = self._test_residue.setdefault(label, [])
+        if not any(item.session is session for item in residue):
+            residue.append(MCPConnectionTestResidue(identity=identity, error=error, session=session))
 
     # -- 显式启连与断开 -----------------------------------------------------
 
@@ -504,9 +588,15 @@ class SharedMCPConnectionManager:
         已判后效未知（UNKNOWN）的 operation 不阻塞断开（关闭是确认其真实退出的唯一
         途径），但其归属**不在此处释放**：只有 owner 句柄关闭成功后才一并清除，故
         关闭失败/取消期间仍按原 operation 核对，也不会为用户释放重连重发机会。
+
+        断开前另须核对持久化引用该配置版的排队/暂停/可恢复研究（I59）：内存
+        ``_in_flight`` 为 0 只说明此刻没有执行中的调用，不构成「无使用者」的证据。
         """
 
         label = _identity_text(identity)
+        await self._require_no_frozen_users(identity, label, "disconnect")
+        # 持久化查询含 await：其后必须重新做同步在途复核，且该复核到 pop 之间不得再 await，
+        # 否则等待查询期间新登记的调用会在「检查通过 → 摘下会话」缝隙里被执行中关闭（I17）。
         if self._executing_operations(label):
             raise AgentServiceError(AgentErrorCode.POLICY_DENIED, "connection still has in-flight operations", label)
         session = self._sessions.pop(label, None)
@@ -622,6 +712,30 @@ class SharedMCPConnectionManager:
         return tuple(sorted(self._in_flight.get(_identity_text(identity), set())))
 
     # -- 内部 ---------------------------------------------------------------
+
+    async def _require_no_frozen_users(self, identity: MCPServiceIdentity, label: str, action: str) -> None:
+        """断开/更新共享配置前核持久化使用者；查询不可用时同样拒绝（fail-closed，I59）。
+
+        ``action`` 只用于区分拒绝入口（``disconnect`` / ``update``），不改变判定。
+        使用者标识来自持久化研究记录，故不依赖管理器内存计数。
+        """
+
+        try:
+            users = await self._usage.frozen_users(identity)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                f"mcp config frozen users are unverifiable before {action}",
+                label,
+            ) from exc
+        if users:
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                f"mcp config is still frozen by queued/paused researches before {action}: {','.join(sorted(users))}",
+                label,
+            )
 
     def _forget_connection_state(self, label: str) -> None:
         """连接不再可用：清 config/guard/catalog/generation；会话句柄另行保留。"""

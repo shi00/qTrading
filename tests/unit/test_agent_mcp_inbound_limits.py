@@ -285,10 +285,21 @@ class _Probe:
         return _FINGERPRINT
 
 
+class _NoFrozenUsers:
+    """无研究冻结该配置版（入站限额用例不涉及断开/改配置）。"""
+
+    async def frozen_users(self, identity: MCPServiceIdentity) -> tuple[str, ...]:
+        return ()
+
+
 def _manager(config: MCPServerConfig | None) -> tuple[SharedMCPConnectionManager, _Store, _Factory]:
     store = _Store(config)
     factory = _Factory()
-    return SharedMCPConnectionManager(store=store, factory=factory, probe=_Probe()), store, factory
+    return (
+        SharedMCPConnectionManager(store=store, factory=factory, probe=_Probe(), usage=_NoFrozenUsers()),
+        store,
+        factory,
+    )
 
 
 class TestInsertionPointAdmission:

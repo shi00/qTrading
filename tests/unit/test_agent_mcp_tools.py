@@ -120,6 +120,13 @@ class _Probe:
         return self.fingerprint
 
 
+class _NoFrozenUsers:
+    """无研究冻结该配置版（调用门用例不涉及断开/改配置）。"""
+
+    async def frozen_users(self, identity: MCPServiceIdentity) -> tuple[str, ...]:
+        return ()
+
+
 class _Session:
     def __init__(
         self,
@@ -222,7 +229,9 @@ async def _dispatcher(
 ) -> tuple[MCPToolDispatcher, _Session, _Grants, SharedMCPConnectionManager]:
     config = _config(budget, deadline_s=deadline_s)
     session = session or _Session()
-    manager = SharedMCPConnectionManager(store=_Store(config), factory=_Factory(session), probe=_Probe())
+    manager = SharedMCPConnectionManager(
+        store=_Store(config), factory=_Factory(session), probe=_Probe(), usage=_NoFrozenUsers()
+    )
     await manager.connect(_IDENTITY)
     grants = grants or _Grants(verdict)
     dispatcher = MCPToolDispatcher(manager=manager, validator=validator or _Validator(), grants=grants)
@@ -254,7 +263,7 @@ async def _dispatcher_with_store(
     store = _Store(config or _config())
     session = _Session()
     probe = probe or _Probe()
-    manager = SharedMCPConnectionManager(store=store, factory=_Factory(session), probe=probe)
+    manager = SharedMCPConnectionManager(store=store, factory=_Factory(session), probe=probe, usage=_NoFrozenUsers())
     await manager.connect(_IDENTITY)
     grants = _Grants()
     dispatcher = MCPToolDispatcher(manager=manager, validator=_Validator(), grants=grants)
