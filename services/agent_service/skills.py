@@ -58,6 +58,7 @@ from core.agent_types import (
     SkillVersionRef,
     json_doc,
     require_identity,
+    resolve_skill_selection,
     sha256_hex,
     stable_id,
     validate_role_skill_assignment,
@@ -1126,6 +1127,14 @@ class SkillCatalogPort(Protocol):
         display_name: str,
     ) -> RoleSkillAssignmentReceipt: ...
 
+    async def read_role_skill_assignment(
+        self, *, user_scope: str, role_id: str, role_version: str
+    ) -> RoleSkillAssignment | None: ...
+
+    async def set_skill_availability(
+        self, *, user_scope: str, skill_id: str, version: int, enabled: bool
+    ) -> tuple[str, bool]: ...
+
 
 @dataclass(frozen=True, slots=True)
 class SkillPackageImportRequest:
@@ -1155,6 +1164,18 @@ class SkillImportReceipt:
     missing_dependencies: tuple[str, ...]
     requires_confirmation: bool
     source_kind: str = "zip"
+
+
+@dataclass(frozen=True, slots=True)
+class SkillAvailabilityReceipt:
+    """Skill 版本可用性切换结果：``read_state`` 为切换后的投影（ready/disabled）。"""
+
+    user_scope: str
+    skill_id: str
+    version: int
+    enabled: bool
+    read_state: str
+    replayed: bool
 
 
 async def _run_blocking(func: Callable[..., Any], /, *args: Any) -> Any:
@@ -1375,6 +1396,87 @@ class SkillCatalogService:
         except AgentValidationError as exc:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
         return await self._dao.save_role_skill_assignment(assignment, user_scope=user_scope, display_name=display_name)
+
+    async def set_skill_enabled(
+        self, ref: SkillVersionRef, *, user_scope: str, enabled: bool
+    ) -> SkillAvailabilityReceipt:
+        """用户级启用/停用 Skill 版本（F12）。
+
+        停用受活动引用保护：该版本仍被角色版本绑定（研究配置引用）时由持久层
+        拒绝（``POLICY_DENIED``），不静默打断既有选择；导入更新的不可变版本不
+        受启停影响，旧版本目录始终可读（替换不覆盖活动版本）。
+        """
+
+        if not isinstance(ref, SkillVersionRef):
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "invalid_type: $.skill.ref", "skill_availability")
+        identity = f"{user_scope}/skill/{ref.skill_id}@{ref.version}"
+        try:
+            require_identity(user_scope, "$.skill.user_scope")
+            ref.stable_key()
+            if not isinstance(enabled, bool):
+                _fail("invalid_type", "$.skill.enabled")
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+        read_state, replayed = await self._dao.set_skill_availability(
+            user_scope=user_scope,
+            skill_id=ref.skill_id,
+            version=ref.version,
+            enabled=enabled,
+        )
+        return SkillAvailabilityReceipt(
+            user_scope=user_scope,
+            skill_id=ref.skill_id,
+            version=ref.version,
+            enabled=enabled,
+            read_state=read_state,
+            replayed=replayed,
+        )
+
+    async def resolve_role_skill_selection(
+        self,
+        *,
+        user_scope: str,
+        role_id: str,
+        role_version: str,
+        hand_picked: Sequence[SkillVersionRef] = (),
+        is_child: bool = False,
+    ) -> tuple[SkillVersionRef, ...]:
+        """解析角色实际使用的 Skill 版本：主角色 = 默认 ∪ 手选，子角色仅自身默认。
+
+        只在角色启用集合内取交集；同一 ``skill_id`` 的默认与手选版本不同即冲突
+        （``INPUT_INVALID``，不静默择一）；角色版本未配置绑定 → ``INPUT_INVALID``。
+        """
+
+        identity = f"{user_scope}/{role_id}@{role_version}"
+        try:
+            require_identity(user_scope, "$.role.user_scope")
+            require_identity(role_id, "$.role.role_id")
+            require_identity(role_version, "$.role.role_version")
+            if not isinstance(is_child, bool):
+                _fail("invalid_type", "$.agent.skills.is_child")
+            picked: tuple[SkillVersionRef, ...] = tuple(hand_picked)
+            for index, ref in enumerate(picked):
+                if not isinstance(ref, SkillVersionRef):
+                    _fail("invalid_type", f"$.agent.skills.hand_picked[{index}]")
+                ref.stable_key()
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+        assignment = await self._dao.read_role_skill_assignment(
+            user_scope=user_scope,
+            role_id=role_id,
+            role_version=role_version,
+        )
+        if assignment is None:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "role skill assignment not found", identity)
+        try:
+            return resolve_skill_selection(
+                enabled=assignment.enabled,
+                defaults=assignment.defaults,
+                hand_picked=picked,
+                is_child=is_child,
+            )
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
 
     async def _run_worker(
         self,

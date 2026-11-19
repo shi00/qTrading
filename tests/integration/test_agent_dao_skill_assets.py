@@ -23,6 +23,7 @@ from core.agent_types import (
     RoleSkillAssignment,
     SkillAssetRegistration,
     SkillVersionRef,
+    SourceStopCommand,
     sha256_hex,
 )
 from data.persistence.daos.agent_dao import AgentDao
@@ -315,6 +316,119 @@ class TestRoleSkillAssignmentPersistence:
             assert "agent_source_link" in str(exc.value).lower()
         async with dao.engine.connect() as conn:  # type: ignore[union-attr]  # 原文仍可查
             assert await _count(conn, AgentAssetVersion, "base-skill") == 1
+
+
+class TestSkillAvailabilityLifecycle:
+    @pytest.mark.asyncio
+    async def test_disable_then_enable_restores_ready(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await dao.register_skill_asset(_registration("demo"))
+
+        assert await dao.set_skill_availability(user_scope=USER_SCOPE, skill_id="demo", version=1, enabled=False) == (
+            "disabled",
+            False,
+        )
+        assert await dao.set_skill_availability(user_scope=USER_SCOPE, skill_id="demo", version=1, enabled=False) == (
+            "disabled",
+            True,
+        )
+        async with dao.engine.connect() as conn:  # type: ignore[union-attr]  # 测试断言读取
+            disabled_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentAssetVersion.read_state,
+                        AgentAssetVersion.disabled_at,
+                        AgentAssetVersion.disabled_revision,
+                    ).where(AgentAssetVersion.asset_id == "demo")
+                )
+            ).one()
+        assert disabled_row.read_state == "disabled"
+        assert disabled_row.disabled_at is not None
+        assert disabled_row.disabled_revision > 0
+
+        assert await dao.set_skill_availability(user_scope=USER_SCOPE, skill_id="demo", version=1, enabled=True) == (
+            "ready",
+            False,
+        )
+        async with dao.engine.connect() as conn:  # type: ignore[union-attr]  # 测试断言读取
+            ready_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentAssetVersion.read_state,
+                        AgentAssetVersion.disabled_at,
+                        AgentAssetVersion.disabled_revision,
+                    ).where(AgentAssetVersion.asset_id == "demo")
+                )
+            ).one()
+        assert ready_row.read_state == "ready"
+        assert ready_row.disabled_at is None
+        assert ready_row.disabled_revision == 0
+
+    @pytest.mark.asyncio
+    async def test_disable_referenced_version_is_denied(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await dao.register_skill_asset(_registration("demo"))
+        await dao.save_role_skill_assignment(
+            _assignment((SkillVersionRef("demo", 1),), (SkillVersionRef("demo", 1),)),
+            user_scope=USER_SCOPE,
+            display_name="角色",
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.set_skill_availability(user_scope=USER_SCOPE, skill_id="demo", version=1, enabled=False)
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        async with dao.engine.connect() as conn:  # type: ignore[union-attr]  # 引用保护不落半态
+            state = (
+                await conn.execute(sa.select(AgentAssetVersion.read_state).where(AgentAssetVersion.asset_id == "demo"))
+            ).scalar_one()
+        assert state == "ready"
+
+    @pytest.mark.asyncio
+    async def test_unavailable_version_cannot_be_toggled(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await dao.register_skill_asset(_registration("demo"))
+        async with dao.engine.begin() as conn:  # type: ignore[union-attr]  # 测试直接置不可用事实
+            await conn.execute(
+                sa.update(AgentAssetVersion)
+                .where(AgentAssetVersion.asset_id == "demo")
+                .values(read_state="unavailable")
+            )
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.set_skill_availability(user_scope=USER_SCOPE, skill_id="demo", version=1, enabled=True)
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+
+    @pytest.mark.asyncio
+    async def test_stop_source_use_cannot_bypass_reference_protection(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await dao.register_skill_asset(_registration("demo"))
+        await dao.save_role_skill_assignment(
+            _assignment((SkillVersionRef("demo", 1),), (SkillVersionRef("demo", 1),)),
+            user_scope=USER_SCOPE,
+            display_name="角色",
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.stop_source_use(
+                SourceStopCommand(user_scope=USER_SCOPE, source_id="demo", source_version="1", command_id="cmd-1")
+            )
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+
+    @pytest.mark.asyncio
+    async def test_missing_version_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.set_skill_availability(user_scope=USER_SCOPE, skill_id="ghost", version=1, enabled=False)
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+
+    @pytest.mark.asyncio
+    async def test_read_role_skill_assignment_roundtrip(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        assert (
+            await dao.read_role_skill_assignment(user_scope=USER_SCOPE, role_id="role-main", role_version="1") is None
+        )
+        await dao.register_skill_asset(_registration("demo"))
+        assignment = _assignment((SkillVersionRef("demo", 1),), (SkillVersionRef("demo", 1),))
+        await dao.save_role_skill_assignment(assignment, user_scope=USER_SCOPE, display_name="角色")
+        stored = await dao.read_role_skill_assignment(user_scope=USER_SCOPE, role_id="role-main", role_version="1")
+        assert stored == assignment
 
 
 async def _count(conn: AsyncConnection, model: type[object], asset_id: str | None) -> int:

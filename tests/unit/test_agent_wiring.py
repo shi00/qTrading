@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -22,6 +23,7 @@ from app.agent_wiring import (
 )
 from core.agent_types import DispatchCloseFact, stable_id
 from services.agent_service import AgentService, CloseReadinessReceipt
+from services.agent_service.skills import SkillCatalogService
 from services.agent_service.recovery import InstanceGuardEvidence
 from services.agent_service.runtime import OwnerLoopBridge
 
@@ -123,6 +125,7 @@ async def _wire(
     client: _FakeClient | None = None,
     launch_allowed: bool | None = None,
     handle: _FakeHandle | None = None,
+    skills_root: str | None = None,
 ) -> tuple[AgentWiring, _FakeHandle, _FakeGuard]:
     fake_client = client or _FakeClient()
     fake_handle = handle or _FakeHandle(client=fake_client)
@@ -134,6 +137,7 @@ async def _wire(
         instance_guard=guard,
         blocking_runner=_direct_runner,
         launch_allowed=launch_allowed,
+        skills_root=skills_root,
     )
     return wiring, fake_handle, guard
 
@@ -157,6 +161,24 @@ async def test_facade_reuses_shared_engine_and_ledger(monkeypatch: pytest.Monkey
     assert wiring.service._dao is cache.agent_dao  # 共享引擎/账本，不另起连接池
     assert isinstance(wiring.bridge, OwnerLoopBridge)
     assert launched == []  # needs-spike 门闩：不提前 launch
+
+
+async def test_skills_root_wires_catalog_into_facade(tmp_path: Path) -> None:
+    wiring, _handle, _guard = await _wire(skills_root=str(tmp_path / "skills"))
+
+    assert isinstance(wiring.service, AgentService)
+    assert isinstance(wiring.service._skills, SkillCatalogService)  # 用户级启停/角色版本选择已接线
+    assert (tmp_path / "skills").is_dir()
+
+
+async def test_unusable_skills_root_degrades_without_blocking(tmp_path: Path) -> None:
+    blocker = tmp_path / "skills"
+    blocker.write_text("not a directory")
+
+    wiring, _handle, _guard = await _wire(skills_root=str(blocker))
+
+    assert isinstance(wiring.service, AgentService)  # 目录不可用不阻断既有运行链
+    assert wiring.service._skills is None
 
 
 async def test_wiring_installs_leaf_runner_and_closed_dispatcher(monkeypatch: pytest.MonkeyPatch) -> None:

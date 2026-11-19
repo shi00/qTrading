@@ -41,6 +41,7 @@ from dataclasses import dataclass
 from importlib.metadata import version
 from typing import Any, Final, cast
 
+from core.agent_types import AgentValidationError
 from services.agent_service import (
     AgentRuntime,
     AgentRuntimeHandle,
@@ -61,6 +62,7 @@ from services.agent_service.dispatch import (
     RootWorkflowSubmitter,
 )
 from services.agent_service.runtime import CloseCommandIdentity, CloseFactOutcome, OwnerLoopBridge
+from services.agent_service.skills import ManagedSkillStore, SkillCatalogService
 from services.agent_service.units import UnitConversion
 from services.agent_service.workflows import submit_research_workflow
 from utils.config.db import (
@@ -408,6 +410,18 @@ def _migration_credentials(migration_url: str | None) -> tuple[str | None, bool]
     return None, True
 
 
+def _build_skill_catalog(dao: Any, root: str | None) -> SkillCatalogService | None:
+    """构造本地受管 Skill 目录服务；根目录不可用时降级为未接线（不阻断运行链）。"""
+
+    if not root:
+        return None
+    try:
+        return SkillCatalogService(ManagedSkillStore(root), dao)
+    except (OSError, ValueError, AgentValidationError) as e:
+        logger.warning("[AgentWiring] skill catalog unavailable: %s (skill lifecycle disabled)", type(e).__name__)
+        return None
+
+
 async def wire_agent_runtime(
     cache_manager: Any,
     *,
@@ -422,6 +436,7 @@ async def wire_agent_runtime(
     plan_provider: PlanSpecProvider | None = None,
     workflow_submitter: RootWorkflowSubmitter | None = None,
     workflow_result_reader: RootWorkflowResultReader | None = None,
+    skills_root: str | None = None,
 ) -> AgentWiring:
     """生产组合根接线（P01/R2-I01）：facade + 共享桥 + 叶运行链 + 宿主/派发。
 
@@ -434,6 +449,8 @@ async def wire_agent_runtime(
       未 launch 时派发门闩保持关闭（零派发）；
     - 宿主就绪后构造 ``ResearchDispatcher``：受理成功后把请求投递给持久父研究
       workflow，结果经原生状态/输出读回；计划来源不可得时零派发。
+    - ``skills_root`` 给定时接线上本地受管 Skill 目录（用户级启停/角色版本选择）；
+      目录不可用降级为未接线，不阻断既有启动。
 
     接线失败降级为零派发（``failure`` 如实记录），不阻断既有业务启动。
     ``CancelledError`` 继续传播（R2）。
@@ -447,7 +464,8 @@ async def wire_agent_runtime(
         return AgentWiring(service=None, bridge=bridge, failure="shared_ledger_unavailable")
 
     usage_dao = getattr(cache_manager, "ai_usage_dao", None)
-    service = AgentService(dao, usage_dao)
+    skills = _build_skill_catalog(dao, skills_root)
+    service = AgentService(dao, usage_dao, skills=skills)
     try:
         runtime_url = _agent_runtime_sync_url(engine)
     except Exception as e:
@@ -555,7 +573,7 @@ async def wire_agent_runtime(
         outcome.isolation.ready if outcome.isolation is not None else None,
     )
     return AgentWiring(
-        service=AgentService(dao, usage_dao, dispatcher=dispatcher),
+        service=AgentService(dao, usage_dao, dispatcher=dispatcher, skills=skills),
         bridge=bridge,
         isolation=outcome.isolation,
         launched=launched,

@@ -97,6 +97,7 @@ from services.agent_service.service import (
     SubmissionOutcome,
     WaitResult,
 )
+from services.agent_service.skills import SkillAvailabilityReceipt
 from services.agent_service.sources import BusinessSourceService
 
 __all__ = [
@@ -153,6 +154,7 @@ __all__ = [
     "ResearchDispatcher",
     "ResearchResultProducer",
     "ResearchWorkflowResult",
+    "SkillAvailabilityReceipt",
     "StartupIsolationReceipt",
     "StartupOutcome",
     "SubmissionOutcome",

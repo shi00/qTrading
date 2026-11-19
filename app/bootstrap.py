@@ -458,8 +458,12 @@ async def initialize_services(
     agent_wiring: Any | None = None
     try:
         from app.agent_wiring import wire_agent_runtime
+        from config import USER_DATA_ROOT
 
-        agent_wiring = await wire_agent_runtime(cache_manager)
+        agent_wiring = await wire_agent_runtime(
+            cache_manager,
+            skills_root=str(Path(USER_DATA_ROOT) / "agent" / "skills"),
+        )
     except asyncio.CancelledError:
         raise
     except Exception as e:

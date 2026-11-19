@@ -12,6 +12,7 @@ import io
 import threading
 import zipfile
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -37,6 +38,7 @@ from services.agent_service.skills import (
     SkillOperationTicket,
     SkillPackageImportRequest,
 )
+from services.agent_service.service import AgentService
 
 pytestmark = pytest.mark.asyncio
 
@@ -69,6 +71,8 @@ class FakeCatalogDao:
     def __init__(self) -> None:
         self.assets: dict[tuple[str, str, int], tuple[str, dict[str, object]]] = {}
         self.roles: dict[tuple[str, str, str], tuple[str, dict[str, object]]] = {}
+        self.role_assignments: dict[tuple[str, str, str], RoleSkillAssignment] = {}
+        self.skill_states: dict[tuple[str, str, int], str] = {}
         self.fail_register = False
         self.role_requests: list[RoleSkillAssignment] = []
 
@@ -119,6 +123,7 @@ class FakeCatalogDao:
         display_name: str,
     ) -> RoleSkillAssignmentReceipt:
         self.role_requests.append(assignment)
+        self.role_assignments[(user_scope, assignment.role_id, assignment.role_version)] = assignment
         refs = tuple(sorted({(ref.skill_id, ref.version) for ref in (*assignment.enabled, *assignment.defaults)}))
         return RoleSkillAssignmentReceipt(
             user_scope=user_scope,
@@ -128,6 +133,29 @@ class FakeCatalogDao:
             linked_skill_versions=tuple(SkillVersionRef(skill_id=item[0], version=item[1]) for item in refs),
             replayed=False,
         )
+
+    async def read_role_skill_assignment(
+        self, *, user_scope: str, role_id: str, role_version: str
+    ) -> RoleSkillAssignment | None:
+        return self.role_assignments.get((user_scope, role_id, role_version))
+
+    async def set_skill_availability(
+        self, *, user_scope: str, skill_id: str, version: int, enabled: bool
+    ) -> tuple[str, bool]:
+        key = (user_scope, skill_id, version)
+        if key not in self.assets:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "skill version does not exist", "test")
+        desired = "ready" if enabled else "disabled"
+        if self.skill_states.get(key, "ready") == desired:
+            return desired, True
+        if not enabled:
+            for (scope, _role_id, _role_version), assignment in self.role_assignments.items():
+                if scope != user_scope:
+                    continue
+                if any((ref.skill_id, ref.version) == (skill_id, version) for ref in assignment.enabled):
+                    raise AgentServiceError(AgentErrorCode.POLICY_DENIED, "skill version is referenced by role", "test")
+        self.skill_states[key] = desired
+        return desired, False
 
 
 def _service(tmp_path: Path) -> tuple[SkillCatalogService, FakeCatalogDao, ManagedSkillStore]:
@@ -678,3 +706,151 @@ class TestRoleSkillAssignmentService:
         assignment = RoleSkillAssignment(role_id="role-child", role_version="1", enabled=(), defaults=())
         receipt = await service.assign_role_skills(assignment, user_scope="scope", display_name="子角色")
         assert receipt.linked_skill_versions == ()
+
+
+class TestSkillLifecycleService:
+    """F12：用户级启停 Skill 版本；活动角色绑定引用时拒绝停用（引用保护）。"""
+
+    async def test_disable_then_enable_roundtrip(self, tmp_path: Path) -> None:
+        service, dao, _ = _service(tmp_path)
+        imported = await _import(service, _package())
+        ref = SkillVersionRef(imported.skill_id, 1)
+
+        disabled = await service.set_skill_enabled(ref, user_scope="scope", enabled=False)
+        assert disabled.read_state == "disabled"
+        assert disabled.enabled is False
+        assert disabled.replayed is False
+
+        again = await service.set_skill_enabled(ref, user_scope="scope", enabled=False)
+        assert again.replayed is True
+
+        enabled = await service.set_skill_enabled(ref, user_scope="scope", enabled=True)
+        assert enabled.read_state == "ready"
+        assert dao.skill_states[("scope", imported.skill_id, 1)] == "ready"
+
+    async def test_disable_version_bound_to_role_is_denied(self, tmp_path: Path) -> None:
+        service, dao, _ = _service(tmp_path)
+        imported = await _import(service, _package())
+        ref = SkillVersionRef(imported.skill_id, 1)
+        await service.assign_role_skills(
+            RoleSkillAssignment(role_id="role-main", role_version="1", enabled=(ref,), defaults=(ref,)),
+            user_scope="scope",
+            display_name="主研究角色",
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await service.set_skill_enabled(ref, user_scope="scope", enabled=False)
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert dao.skill_states.get(("scope", imported.skill_id, 1), "ready") == "ready"
+
+    async def test_update_keeps_active_version_and_binding(self, tmp_path: Path) -> None:
+        service, _, store = _service(tmp_path)
+        first = await _import(service, _package())
+        ref = SkillVersionRef(first.skill_id, 1)
+        await service.assign_role_skills(
+            RoleSkillAssignment(role_id="role-main", role_version="2", enabled=(ref,), defaults=(ref,)),
+            user_scope="scope",
+            display_name="主研究角色",
+        )
+        updated = await _import(service, _package(body=b"# Changed"), confirm_update=True)
+        assert updated.version == 2
+        # 替换不覆盖活动版本：v1 目录仍可读，角色绑定仍指向 v1 且不得被停用。
+        assert b"# Instructions" in store.read_file(ref, "SKILL.md")
+        with pytest.raises(AgentServiceError) as exc:
+            await service.set_skill_enabled(ref, user_scope="scope", enabled=False)
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+
+    async def test_invalid_target_rejected_before_dao(self, tmp_path: Path) -> None:
+        service, dao, _ = _service(tmp_path)
+        with pytest.raises(AgentServiceError) as exc:
+            await service.set_skill_enabled(SkillVersionRef(skill_id="", version=1), user_scope="scope", enabled=False)
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        with pytest.raises(AgentServiceError) as exc2:
+            await service.set_skill_enabled(SkillVersionRef("a", 1), user_scope="scope", enabled=cast(Any, "yes"))
+        assert exc2.value.code is AgentErrorCode.INPUT_INVALID
+        with pytest.raises(AgentServiceError) as exc3:
+            await service.resolve_role_skill_selection(
+                user_scope="scope", role_id="role-main", role_version="1", hand_picked=(cast(Any, object()),)
+            )
+        assert exc3.value.code is AgentErrorCode.INPUT_INVALID
+        assert dao.skill_states == {}
+
+
+class TestRoleSkillSelectionService:
+    """F28/I60：默认 ∪ 手选解析；同 skill 版本冲突拒绝、子角色不继承手选。"""
+
+    async def _assign(
+        self, service: SkillCatalogService, enabled: tuple[SkillVersionRef, ...], defaults: tuple[SkillVersionRef, ...]
+    ) -> None:
+        await service.assign_role_skills(
+            RoleSkillAssignment(role_id="role-main", role_version="1", enabled=enabled, defaults=defaults),
+            user_scope="scope",
+            display_name="主研究角色",
+        )
+
+    async def test_defaults_only_when_no_hand_pick(self, tmp_path: Path) -> None:
+        service, _, _ = _service(tmp_path)
+        a1, b1 = SkillVersionRef("a", 1), SkillVersionRef("b", 1)
+        await self._assign(service, (a1, b1), (a1,))
+        selection = await service.resolve_role_skill_selection(
+            user_scope="scope", role_id="role-main", role_version="1"
+        )
+        assert selection == (a1,)
+
+    async def test_hand_picked_conflict_with_default_is_rejected(self, tmp_path: Path) -> None:
+        service, _, _ = _service(tmp_path)
+        a1, a2 = SkillVersionRef("a", 1), SkillVersionRef("a", 2)
+        await self._assign(service, (a1, a2), (a1,))
+        with pytest.raises(AgentServiceError) as exc:
+            await service.resolve_role_skill_selection(
+                user_scope="scope", role_id="role-main", role_version="1", hand_picked=(a2,)
+            )
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        assert "skill_version_conflict" in str(exc.value)
+
+    async def test_child_role_ignores_hand_picked(self, tmp_path: Path) -> None:
+        service, _, _ = _service(tmp_path)
+        a1, a2 = SkillVersionRef("a", 1), SkillVersionRef("a", 2)
+        await self._assign(service, (a1, a2), (a1,))
+        selection = await service.resolve_role_skill_selection(
+            user_scope="scope",
+            role_id="role-main",
+            role_version="1",
+            hand_picked=(a2,),
+            is_child=True,
+        )
+        assert selection == (a1,)
+
+    async def test_missing_assignment_is_rejected(self, tmp_path: Path) -> None:
+        service, _, _ = _service(tmp_path)
+        with pytest.raises(AgentServiceError) as exc:
+            await service.resolve_role_skill_selection(user_scope="scope", role_id="role-x", role_version="1")
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+
+
+class TestAgentServiceSkillLifecycle:
+    """AgentService 承载用户级启停与角色版本选择；未接线时如实报不可用。"""
+
+    async def test_facade_delegates_lifecycle_calls(self, tmp_path: Path) -> None:
+        skills, dao, _ = _service(tmp_path)
+        imported = await _import(skills, _package())
+        ref = SkillVersionRef(imported.skill_id, 1)
+        await skills.assign_role_skills(
+            RoleSkillAssignment(role_id="role-main", role_version="1", enabled=(), defaults=()),
+            user_scope="scope",
+            display_name="主研究角色",
+        )
+        facade = AgentService(cast(Any, dao), skills=skills)
+
+        disabled = await facade.set_skill_enabled(ref, user_scope="scope", enabled=False)
+        assert disabled.read_state == "disabled"
+        selection = await facade.resolve_role_skill_selection(user_scope="scope", role_id="role-main", role_version="1")
+        assert selection == ()
+
+    async def test_unwired_facade_reports_unavailable(self) -> None:
+        facade = AgentService(cast(Any, FakeCatalogDao()))
+        with pytest.raises(AgentServiceError) as exc:
+            await facade.set_skill_enabled(SkillVersionRef("a", 1), user_scope="scope", enabled=False)
+        assert exc.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        with pytest.raises(AgentServiceError) as exc2:
+            await facade.resolve_role_skill_selection(user_scope="scope", role_id="role-main", role_version="1")
+        assert exc2.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE

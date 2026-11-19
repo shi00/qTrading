@@ -19,6 +19,8 @@
   注入 ``ResearchDispatcher`` 时，受理成功后立即把回执投递给持久父研究 workflow
   （派发失败/门闩关闭只产生零派发事实，不改写受理）；``submit_and_dispatch``
   额外返回派发事实，未注入派发器时零派发并如实返回 ``dispatch=None``。
+- ``set_skill_enabled`` / ``resolve_role_skill_selection`` 承载用户级 Skill 启停与
+  角色默认/手选版本解析（F12/F13），只委托 ``SkillCatalogService`` 与既有 DAO；
 - ``save_draft`` 只做本地草稿 CAS 持久（不产生派发/费用），随 F-03 交付；
 - ``change_session`` 只做会话元数据 CAS（create/rename/pin/archive/unarchive）与
   修订/分支的准备（revise 只核源消息/截点、不改会话因果头；branch 新建会话并
@@ -77,6 +79,7 @@ from core.agent_types import (
     SessionRead,
     SessionReadQuery,
     SessionChangeCommand,
+    SkillVersionRef,
     SourceRead,
     SourceReadQuery,
     SourceStopCommand,
@@ -118,6 +121,7 @@ from services.agent_service.comparison import (
     plan_lane_retry,
 )
 from services.agent_service.dispatch import DispatchOutcome, ResearchDispatcher, ResearchWorkflowResult
+from services.agent_service.skills import SkillAvailabilityReceipt, SkillCatalogService
 from services.agent_service.sources import BusinessSourceService
 from utils.error_classifier import classify_error
 
@@ -247,16 +251,20 @@ class AgentService:
         usage_dao: AIUsageDao | None = None,
         *,
         dispatcher: ResearchDispatcher | None = None,
+        skills: SkillCatalogService | None = None,
     ) -> None:
         """``usage_dao`` 为共享模型调度账本（同一引擎）；缺省时费用投影如实报读取失败。
 
         ``dispatcher`` 由组合根在宿主就绪后注入（受理 → 持久 workflow 派发）；
-        缺省时服务只提供受理事实与读取面（零派发，不伪造投递）。
+        缺省时服务只提供受理事实与读取面（零派发，不伪造投递）。``skills`` 承载
+        用户级 Skill 启停与角色版本选择（F12/F13），未接线时相关入口如实报
+        ``PERSISTENCE_UNAVAILABLE``，不伪造已生效。
         """
 
         self._dao = dao
         self._usage_dao = usage_dao
         self._dispatcher = dispatcher
+        self._skills = skills
         self._closed = False
 
     # ------------------------------------------------------------------
@@ -1010,6 +1018,56 @@ class AgentService:
 
         self._require_open("stop_using")
         return await self._dao.stop_source_use(request)
+
+    async def set_skill_enabled(
+        self, ref: SkillVersionRef, *, user_scope: str, enabled: bool
+    ) -> SkillAvailabilityReceipt:
+        """用户级 Skill 版本启停（F12）：委托 ``SkillCatalogService``。
+
+        停用受活动引用保护（版本仍被角色版本绑定时 ``POLICY_DENIED``）；未注入
+        Skill 目录服务时如实返回未接线，不伪造已生效。``CancelledError`` 传播（R2）。
+        """
+
+        self._require_open("set_skill_enabled")
+        skills = self._skills
+        if skills is None:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "skill catalog is not wired",
+                "agent_service",
+            )
+        return await skills.set_skill_enabled(ref, user_scope=user_scope, enabled=enabled)
+
+    async def resolve_role_skill_selection(
+        self,
+        *,
+        user_scope: str,
+        role_id: str,
+        role_version: str,
+        hand_picked: Sequence[SkillVersionRef] = (),
+        is_child: bool = False,
+    ) -> tuple[SkillVersionRef, ...]:
+        """角色默认/手选 Skill 版本解析（F28/I60）：委托 ``SkillCatalogService``。
+
+        主角色取默认 ∪ 手选、子角色仅自身默认；同 ``skill_id`` 版本冲突与未配置
+        绑定均为 ``INPUT_INVALID``。未注入 Skill 目录服务时如实返回未接线。
+        """
+
+        self._require_open("resolve_role_skill_selection")
+        skills = self._skills
+        if skills is None:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "skill catalog is not wired",
+                "agent_service",
+            )
+        return await skills.resolve_role_skill_selection(
+            user_scope=user_scope,
+            role_id=role_id,
+            role_version=role_version,
+            hand_picked=hand_picked,
+            is_child=is_child,
+        )
 
     async def mark_read(self, command: ReadMarkCommand) -> ReadMarkReceipt:
         """已读标记入口（§4.1 ``mark_read``）：委托 GREATEST/并集合并事务。

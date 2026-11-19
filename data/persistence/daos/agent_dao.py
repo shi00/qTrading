@@ -91,6 +91,7 @@ from core.agent_types import (
     DeliveryRead,
     DeliveryState,
     decode_delivery_manifest,
+    decode_role_skill_assignment,
     encode_delivery_manifest,
     validate_cleanup_phase_write,
     validate_delivery_transition,
@@ -8566,6 +8567,7 @@ class AgentDao(BaseDao):
             asset_row = (
                 await conn.execute(
                     sa.select(
+                        AgentAssetVersion.asset_kind,
                         AgentAssetVersion.read_state,
                         AgentAssetVersion.revision,
                         AgentAssetVersion.disabled_revision,
@@ -8591,6 +8593,21 @@ class AgentDao(BaseDao):
                     if asset_row.disabled_at is not None
                     else _utc_now_wire(),
                 )
+            if asset_row.asset_kind == "skill":
+                # 启停与销毁共用同一活动引用保护：角色/研究配置仍指向的版本不得
+                # 经来源停止路径绕过 set_skill_availability 被静默停用。
+                bound = await _lock_role_skill_references(
+                    conn,
+                    user_scope=request.user_scope,
+                    skill_id=request.source_id,
+                    source_version=request.source_version,
+                )
+                if bound:
+                    raise AgentServiceError(
+                        AgentErrorCode.POLICY_DENIED,
+                        f"skill version is referenced by role: {','.join(bound)}",
+                        identity,
+                    )
             now = datetime.now(UTC)
             new_revision = asset_row.revision + 1
             disabled_revision = max(asset_row.disabled_revision, new_revision)
@@ -12342,6 +12359,140 @@ class AgentDao(BaseDao):
             replayed=False,
         )
 
+    async def read_role_skill_assignment(
+        self, *, user_scope: str, role_id: str, role_version: str
+    ) -> RoleSkillAssignment | None:
+        """读回角色版本的 Skill 启用/默认集合（F13）。
+
+        无该角色版本 → ``None``（调用方据此判定未配置，不猜默认）；身份属于其他
+        资产类别 → ``INPUT_INVALID``；绑定载荷坏 → ``OPERATION_UNKNOWN``。
+        """
+
+        self._check_engine()
+        identity = f"{user_scope}/{role_id}@{role_version}"
+        _require_text_field(user_scope, "user_scope", identity)
+        _require_text_field(role_id, "role_id", identity)
+        _require_text_field(role_version, "role_version", identity)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(AgentAssetVersion.asset_kind, AgentAssetVersion.metadata_payload).where(
+                        AgentAssetVersion.user_scope == user_scope,
+                        AgentAssetVersion.asset_id == role_id,
+                        AgentAssetVersion.asset_version == role_version,
+                    )
+                )
+            ).first()
+        if row is None:
+            return None
+        if row.asset_kind != "role":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "asset identity belongs to another kind", identity)
+        payload = (row.metadata_payload or {}).get("role_skill_assignment")
+        try:
+            return decode_role_skill_assignment(payload)
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN, "role skill assignment unreadable", identity
+            ) from exc
+
+    async def set_skill_availability(
+        self, *, user_scope: str, skill_id: str, version: int, enabled: bool
+    ) -> tuple[str, bool]:
+        """用户级启用/停用 Skill 版本（§9.10 / F12-F13，单事务）。
+
+        - 只改 ``agent_asset_version`` 的可用性投影（``read_state`` /
+          ``disabled_at`` / ``disabled_revision`` / ``revision``），不删除版本目录、
+          不改冻结元数据（导入的不可变版本保持可读）；
+        - **活动引用保护**：停用前在同一事务、同一技能行 ``FOR UPDATE`` 下核
+          ``agent_source_link`` 中引用该版本的角色绑定边（``ROLE_SKILL_BINDING``），
+          存在即 ``POLICY_DENIED``——角色/研究配置仍指向的版本不得先被停用，
+          不静默打断既有选择；
+        - **并发**：角色绑定保存与启停都先锁同一 skill 行，二者串行化，避免
+          「绑定已提交、版本恰被停用」的写偏斜；
+        - 启用只解除用户停用（``disabled`` → ``ready``），``unavailable`` 不复活；
+          状态不可迁移时 ``POLICY_DENIED``；
+        - 幂等：目标状态已是当前状态时返回 ``replayed=True``，零新事实。
+        """
+
+        self._check_engine()
+        identity = f"{user_scope}/skill/{skill_id}@{version}"
+        _require_text_field(user_scope, "user_scope", identity)
+        _require_text_field(skill_id, "skill_id", identity)
+        if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "version must be a positive integer", identity)
+        if not isinstance(enabled, bool):
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "enabled must be a boolean", identity)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(
+                        AgentAssetVersion.asset_kind,
+                        AgentAssetVersion.read_state,
+                        AgentAssetVersion.revision,
+                        AgentAssetVersion.disabled_revision,
+                    )
+                    .where(
+                        AgentAssetVersion.user_scope == user_scope,
+                        AgentAssetVersion.asset_id == skill_id,
+                        AgentAssetVersion.asset_version == str(version),
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if row is None or row.asset_kind != "skill":
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "skill version does not exist", identity)
+            if row.read_state == "unavailable":
+                raise AgentServiceError(AgentErrorCode.POLICY_DENIED, "skill version is unavailable", identity)
+            desired = "ready" if enabled else "disabled"
+            if row.read_state == desired:
+                return desired, True
+            if enabled and row.read_state != "disabled":
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    f"skill version state cannot be enabled: {row.read_state}",
+                    identity,
+                )
+            if not enabled and row.read_state != "ready":
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    f"skill version state cannot be disabled: {row.read_state}",
+                    identity,
+                )
+            if not enabled:
+                bound = await _lock_role_skill_references(
+                    conn,
+                    user_scope=user_scope,
+                    skill_id=skill_id,
+                    source_version=str(version),
+                )
+                if bound:
+                    raise AgentServiceError(
+                        AgentErrorCode.POLICY_DENIED,
+                        f"skill version is referenced by role: {','.join(bound)}",
+                        identity,
+                    )
+            now = datetime.now(UTC)
+            new_revision = row.revision + 1
+            values: dict[str, Any] = {"read_state": desired, "revision": new_revision, "updated_at": now}
+            if enabled:
+                values.update(disabled_at=None, disabled_revision=0)
+            else:
+                values.update(disabled_at=now, disabled_revision=max(row.disabled_revision, new_revision))
+            await conn.execute(
+                sa.update(AgentAssetVersion)
+                .where(
+                    AgentAssetVersion.user_scope == user_scope,
+                    AgentAssetVersion.asset_id == skill_id,
+                    AgentAssetVersion.asset_version == str(version),
+                )
+                .values(**values)
+            )
+        return desired, False
+
     # ------------------------------------------------------------------
     # R2-I08 研究成果保存（唯一执行循环的成果生产者端口）
     # ------------------------------------------------------------------
@@ -12589,6 +12740,27 @@ async def _read_asset_row(
             .with_for_update()
         )
     ).first()
+
+
+async def _lock_role_skill_references(
+    conn: AsyncConnection, *, user_scope: str, skill_id: str, source_version: str
+) -> tuple[str, ...]:
+    """锁定并返回引用该 Skill 版本的角色版本（活动配置引用保护，§9.10 / F12-F13）。"""
+
+    rows = (
+        await conn.execute(
+            sa.select(AgentSourceLink.consumer_id, AgentSourceLink.consumer_version)
+            .where(
+                AgentSourceLink.user_scope == user_scope,
+                AgentSourceLink.source_id == skill_id,
+                AgentSourceLink.source_version == source_version,
+                AgentSourceLink.relation_kind == SourceRelationKind.ROLE_SKILL_BINDING.value,
+            )
+            .order_by(AgentSourceLink.consumer_id, AgentSourceLink.consumer_version)
+            .with_for_update()
+        )
+    ).all()
+    return tuple(f"{row.consumer_id}@{row.consumer_version}" for row in rows)
 
 
 def _compare_skill_asset_row(
