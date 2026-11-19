@@ -6863,12 +6863,37 @@ def validate_artifact_read_query(query: ArtifactReadQuery) -> ArtifactReadQuery:
 
 
 @dataclass(frozen=True, slots=True)
+class ArtifactSourceState:
+    """成果引用的**单个**来源版本在本次读取时点的当前可得性（逐项，非聚合）。
+
+    ``state`` 取 ``DELIVERY_SOURCE_STATES`` 四值；来源行缺失/摘要不符/读取态不可
+    解码一律 ``unknown``（未核 ≠ 可用，R21），不把聚合列或历史快照当单项结论。
+    """
+
+    source_kind: str
+    source_id: str
+    source_version: str
+    source_digest: str
+    state: str
+
+    def __post_init__(self) -> None:
+        if self.source_kind not in {kind.value for kind in SourceKind}:
+            _fail("invalid_tag", "$.artifact_source_state.source_kind")
+        _require_str(self.source_id, "$.artifact_source_state.source_id")
+        _require_str(self.source_version, "$.artifact_source_state.source_version")
+        _require_digest(self.source_digest, "$.artifact_source_state.source_digest")
+        if self.state not in DELIVERY_SOURCE_STATES:
+            _fail("invalid_source_state", "$.artifact_source_state.state")
+
+
+@dataclass(frozen=True, slots=True)
 class ArtifactRead:
     """准确成果版本与（分块）完整正文（§4.2 ``ArtifactRead``）。
 
     ``body_available=False`` 时 ``unavailable_reason`` 说明是正文未保存还是已按
     用户确认清理删除；``next_cursor`` 只在正文还有后续码点时给出。``result_payload``
-    保留结构/限制/证据等元数据，不复制整份正文（§9.7）。
+    保留结构/限制/证据等元数据，不复制整份正文（§9.7）。``source_ref_states`` 为
+    成果引用的每个来源版本的当前可得性（逐项核定；无来源引用时为空元组）。
     """
 
     artifact_id: str
@@ -6892,6 +6917,7 @@ class ArtifactRead:
     next_cursor: str | None
     body_available: bool
     unavailable_reason: str | None
+    source_ref_states: tuple[ArtifactSourceState, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -9202,6 +9228,22 @@ def canonical_delivery_source_state(value: object) -> str:
     return value if isinstance(value, str) and value in DELIVERY_SOURCE_STATES else "unknown"
 
 
+def aggregate_delivery_source_state(states: tuple[ArtifactSourceState, ...]) -> str:
+    """逐项来源状态 → 交付单列聚合（仅为兼容摘要，逐项 ``states`` 才是权威）。
+
+    聚合从不升级任何单项：任一 ``unknown`` 即 ``unknown``（未核定不得被其他
+    可用项掩盖），其次 ``disabled`` / ``unavailable``；仅当全部可用且至少一项
+    时才为 ``available``。无来源引用返回 ``unknown``（未核 ≠ 可用，R21）。
+    """
+
+    if not states:
+        return "unknown"
+    for candidate in ("unknown", "disabled", "unavailable"):
+        if any(state.state == candidate for state in states):
+            return candidate
+    return "available"
+
+
 #: 发布效果（未尝试 / 已发布 / 取消先胜 / 无法确证）。
 DELIVERY_PUBLISH_EFFECTS: Final[frozenset[str]] = frozenset(
     {"not_attempted", "published", "cancelled_before_publish", "unknown"}
@@ -9997,8 +10039,8 @@ class DeliveryRead:
 # E-05-3 三格式渲染与逐字段回读契约（DD-F26 / §10.5 / HANDOFF §10.2）
 # ---------------------------------------------------------------------------
 
-#: 交付文件记录域：成果元数据、完整正文、``result_payload`` 结构字段。
-DELIVERY_RENDER_RECORDS: Final[frozenset[str]] = frozenset({"metadata", "body", "payload"})
+#: 交付文件记录域：成果元数据、逐项来源核定、完整正文、``result_payload`` 结构字段。
+DELIVERY_RENDER_RECORDS: Final[frozenset[str]] = frozenset({"metadata", "source", "body", "payload"})
 
 #: 显式值类型（None/0/False/空串互不混同；数字保留原词法）。
 DELIVERY_VALUE_TYPES: Final[frozenset[str]] = frozenset({"null", "string", "int", "float", "bool", "object", "array"})
@@ -10218,17 +10260,23 @@ def validate_delivery_fields(fields: object) -> tuple[DeliveryField, ...]:
 
 
 def build_delivery_fields(
-    read: object, *, body_text: str | None = None, current_source_state: str | None = None
+    read: object,
+    *,
+    body_text: str | None = None,
+    current_source_state: str | None = None,
+    current_source_states: tuple[ArtifactSourceState, ...] = (),
 ) -> tuple[DeliveryField, ...]:
-    """把已保存成果版本转换为交付字段（完整正文 + 元数据 + 结构字段）。
+    """把已保存成果版本转换为交付字段（完整正文 + 元数据 + 来源核定 + 结构字段）。
 
     ``body_text`` 提供跨页组装后的完整正文；读取结果仍有 ``next_cursor`` 且
     未提供完整正文时拒绝（导出分页正文等同静默截断）。``result_payload`` 为
     ``None`` 表示未保存结构字段，与保存了空容器不同，不补造字段（R21）。
 
-    来源状态分列两列，不得混同：``source_available_state`` 是成果保存时记录
-    的历史状态；``current_source_state`` 是本次交付的核定状态，未显式提供时
-    按 ``unknown``（未核 ≠ 可用，R21）。两者都按统一词表口径规范化。
+    来源状态分列，不得混同：``source_available_state`` 是成果保存时记录的历史
+    状态；``current_source_states`` 是本次交付对每个来源版本**逐项**核定的当前
+    状态（写入 ``source`` 记录域，一项一行，缺来源行不得被聚合列掩盖）；
+    ``current_source_state`` 是该集合的聚合单列，只在无逐项引用时直接采用。
+    未显式提供时按 ``unknown``（未核 ≠ 可用，R21）。三者都按统一词表口径规范化。
     """
 
     if not isinstance(read, ArtifactRead):
@@ -10238,6 +10286,17 @@ def build_delivery_fields(
     full_body = body_text if body_text is not None else read.body_text
     if read.body_available and full_body is None:
         _fail("body_missing", "$.delivery.artifact_read.body_text")
+
+    states = tuple(current_source_states)
+    if any(not isinstance(state, ArtifactSourceState) for state in states):
+        _fail("invalid_type", "$.delivery.current_source_states")
+    if states:
+        aggregate_state = aggregate_delivery_source_state(states)
+        explicit = None if current_source_state is None else canonical_delivery_source_state(current_source_state)
+        if explicit is not None and explicit != aggregate_state:
+            _fail("inconsistent_source_state", "$.delivery.current_source_state")
+    else:
+        aggregate_state = canonical_delivery_source_state(current_source_state)
 
     fields: list[DeliveryField] = []
     metadata: dict[str, object] = {
@@ -10252,7 +10311,7 @@ def build_delivery_fields(
         "actual_model_ref": read.actual_model_ref,
         "result_digest": read.result_digest,
         "source_available_state": canonical_delivery_source_state(read.source_available_state),
-        "current_source_state": canonical_delivery_source_state(current_source_state),
+        "current_source_state": aggregate_state,
         "summary": read.summary,
         "published_at": read.published_at,
         "cleaned_at": read.cleaned_at,
@@ -10263,6 +10322,9 @@ def build_delivery_fields(
     }
     for key in _DELIVERY_METADATA_ORDER:
         fields.extend(_scalar_field("metadata", key, metadata[key], f"$.delivery.metadata.{key}"))
+    for index, state in enumerate(states):
+        for name in ("source_kind", "source_id", "source_version", "source_digest", "state"):
+            fields.extend(_chunked_fields("source", f"/{index}/{name}", "string", cast(str, getattr(state, name))))
     if read.body_available and full_body is not None:
         fields.extend(_chunked_fields("body", "", "string", full_body))
     if read.result_payload is not None:

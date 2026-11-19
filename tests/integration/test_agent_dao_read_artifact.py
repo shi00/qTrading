@@ -33,7 +33,14 @@ from core.agent_types import (
 )
 from data.persistence.daos.agent_dao import AgentDao
 from data.persistence.embedded_postgres.protocol import ConnectionInfo
-from data.persistence.models import AgentArtifact, AgentBodyPayload, AgentExecution, AgentRound, AgentSession
+from data.persistence.models import (
+    AgentArtifact,
+    AgentAssetVersion,
+    AgentBodyPayload,
+    AgentExecution,
+    AgentRound,
+    AgentSession,
+)
 from tests._helpers import create_test_engine, make_alembic_cfg
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedded_real]
@@ -107,6 +114,7 @@ async def _seed_artifact(
     payload_tamper: str | None = None,
     cleaned: bool = False,
     artifact_kind: str = "plan",
+    result_payload: dict[str, object] | None = None,
 ) -> None:
     async with dao.engine.begin() as conn:  # type: ignore[union-attr]
         if body_ref is not None and payload_text is not None:
@@ -149,7 +157,7 @@ async def _seed_artifact(
                 summary="成果摘要",
                 body_text=body_text,
                 body_ref=body_ref,
-                result_payload={"evidence": ["src-1"]},
+                result_payload={"evidence": ["src-1"]} if result_payload is None else result_payload,
                 cleaned_at=datetime(2026, 6, 3, tzinfo=UTC) if cleaned else None,
             )
         )
@@ -164,6 +172,51 @@ def _query(**overrides: object) -> ArtifactReadQuery:
     }
     values.update(overrides)
     return ArtifactReadQuery(**values)  # pyright: ignore[reportArgumentType]
+
+
+def _ref(source_id: str, *, version: str = "1", digest: str = "a" * 64, kind: str = "attachment") -> dict[str, str]:
+    """成果载荷 trace.source_refs 单项（四值源身份，§3.3.1）。"""
+
+    return {
+        "source_kind": kind,
+        "source_id": source_id,
+        "source_version": version,
+        "source_digest": digest,
+    }
+
+
+def _payload_with_refs(*refs: dict[str, str]) -> dict[str, object]:
+    return {"trace": {"plan_version": 1, "parent_artifact_refs": [], "source_refs": list(refs)}}
+
+
+async def _seed_source_version(
+    dao: AgentDao,
+    *,
+    source_id: str,
+    version: str = "1",
+    digest: str = "a" * 64,
+    read_state: str = "ready",
+    disabled: bool = False,
+    cleaned: bool = False,
+    tombstoned: bool = False,
+) -> None:
+    async with dao.engine.begin() as conn:  # type: ignore[union-attr]
+        await conn.execute(
+            sa.insert(AgentAssetVersion).values(
+                user_scope=_USER,
+                asset_id=source_id,
+                asset_version=version,
+                asset_kind="source",
+                display_name=source_id,
+                digest=digest,
+                read_state=read_state,
+                verification_state="program_verified",
+                available_at=datetime(2026, 11, 1, tzinfo=UTC),
+                disabled_at=datetime(2026, 11, 2, tzinfo=UTC) if disabled else None,
+                cleaned_at=datetime(2026, 11, 2, tzinfo=UTC) if cleaned else None,
+                tombstoned=tombstoned,
+            )
+        )
 
 
 class TestReadArtifactContent:
@@ -341,4 +394,86 @@ class TestReadArtifactFailures:
         with pytest.raises(AgentServiceError) as excinfo:
             await dao.read_artifact(_query(), user_scope=_USER)
         assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+
+class TestReadArtifactSourceRefStates:
+    """I80：``read_artifact`` 逐原 source_ref 核定当前可得性（不读聚合列当单项结论）。"""
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_reports_current_availability_per_ref(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+        await _seed_source_version(dao, source_id="src-a", read_state="ready")
+        await _seed_source_version(dao, source_id="src-b", read_state="unread")
+        await _seed_artifact(dao, result_payload=_payload_with_refs(_ref("src-a"), _ref("src-b")))
+
+        read = await dao.read_artifact(_query(), user_scope=_USER)
+
+        assert [(state.source_id, state.source_version, state.state) for state in read.source_ref_states] == [
+            ("src-a", "1", "available"),
+            ("src-b", "1", "unknown"),
+        ]
+        # 聚合列仍是成果保存时的历史投影，不被逐项核定改写。
+        assert read.source_available_state == "current"
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_disabled_and_cleaned_sources_are_distinct(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+        await _seed_source_version(dao, source_id="src-a", disabled=True)
+        await _seed_source_version(dao, source_id="src-b", tombstoned=True)
+        await _seed_source_version(dao, source_id="src-c", cleaned=True)
+        await _seed_artifact(dao, result_payload=_payload_with_refs(_ref("src-a"), _ref("src-b"), _ref("src-c")))
+
+        read = await dao.read_artifact(_query(), user_scope=_USER)
+
+        assert [state.state for state in read.source_ref_states] == ["disabled", "unavailable", "unavailable"]
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_digest_mismatch_and_missing_rows_are_unknown(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+        await _seed_source_version(dao, source_id="src-a", digest="b" * 64)
+        await _seed_artifact(dao, result_payload=_payload_with_refs(_ref("src-a"), _ref("src-missing")))
+
+        read = await dao.read_artifact(_query(), user_scope=_USER)
+
+        assert [state.state for state in read.source_ref_states] == ["unknown", "unknown"]
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_duplicate_refs_are_deduplicated_in_order(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+        await _seed_source_version(dao, source_id="src-a")
+        await _seed_artifact(dao, result_payload=_payload_with_refs(_ref("src-a"), _ref("src-a")))
+
+        read = await dao.read_artifact(_query(), user_scope=_USER)
+
+        assert [state.source_id for state in read.source_ref_states] == ["src-a"]
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_artifact_without_source_refs_reports_nothing(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+        await _seed_artifact(dao)
+
+        read = await dao.read_artifact(_query(), user_scope=_USER)
+
+        assert read.source_ref_states == ()
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_malformed_source_refs_are_reported_not_masked(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+        await _seed_artifact(dao, result_payload={"trace": {"source_refs": "src-1"}})
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.read_artifact(_query(), user_scope=_USER)
+        assert excinfo.value.code is AgentErrorCode.OPERATION_UNKNOWN
         await dao.engine.dispose()  # type: ignore[union-attr]

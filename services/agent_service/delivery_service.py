@@ -1,7 +1,7 @@
 """成果交付编排（E-05-4b / DD SQ-09 / 详细设计 §10.5 / HANDOFF §10.2）。
 
 可靠顺序冻结（每步事实未保存即不进入下一阶段）：
-读全成果 → 保存 ``manifest_saved``（历史状态）→ 新鲜核定本次来源状态 →
+读全成果 → 保存 ``manifest_saved``（历史状态）→ 逐原 source_ref 新鲜核定本次来源状态 →
 渲染（历史/本次状态分列，三格式同口径）→ 专属同卷暂存（核回读摘要）→
 保存 ``staged`` → 逐字段回读 → 保存 ``validated`` → 发布前复核状态未变 →
 保存 ``publish_claimed`` → 原子替换并核回目标身份/摘要 → 保存 ``published_confirmed``；
@@ -28,12 +28,14 @@ from core.agent_types import (
     ArtifactDeliveryCommand,
     ArtifactRead,
     ArtifactReadQuery,
+    ArtifactSourceState,
     CommandRef,
     DeliveryField,
     DeliveryManifest,
     DeliveryPhaseReceipt,
     DeliveryReceipt,
     DeliveryTarget,
+    aggregate_delivery_source_state,
     build_delivery_fields,
     canonical_delivery_source_state,
     sha256_hex,
@@ -81,12 +83,12 @@ def _manifest_source_state(value: object) -> str:
 
 
 def _current_source_state(value: object) -> str:
-    """本次交付核定状态：``available`` 只说明保存时记录可用，不能证明当前可交付。
+    """无逐原来源引用时的回退口径：``available`` 只说明保存时记录可用，不能证明当前可交付。
 
-    ``read_artifact`` 回读的是成果行保存时记录的投影，真实 DAO 并未新鲜复核
-    全部上游来源；因此回读为 ``available`` 时按 ``unknown`` 显式标注（R21，
-    不把历史允许导出冒充当次可交付）。明确受限的 ``unavailable`` / ``disabled``
-    / ``unknown`` 如实采用，不升级为可用。
+    ``read_artifact`` 对成果引用的每个来源版本逐项新鲜核定（``source_ref_states``）；
+    仅当成果没有 ``trace.source_refs``（旧成果）时退回聚合列。此时 ``available``
+    按 ``unknown`` 显式标注（R21，不把历史允许导出冒充当次可交付）；明确受限的
+    ``unavailable`` / ``disabled`` / ``unknown`` 如实采用，不升级为可用。
     """
 
     state = _manifest_source_state(value)
@@ -171,6 +173,19 @@ class DeliveryOutcome:
 
     receipt: DeliveryReceipt
     staged_cleaned: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _FreshSourceState:
+    """本次交付逐项核定的来源状态：``states`` 权威，``aggregate`` 仅为单列摘要。
+
+    ``states`` 是原成果引用每个来源版本的当前可得性（一项一条，写入交付文件
+    ``source`` 记录域）；``aggregate`` 只用于 manifest 与 ``metadata`` 单列，
+    任一 ``unknown`` 不得被其他可用项掩盖（R21）。
+    """
+
+    aggregate: str
+    states: tuple[ArtifactSourceState, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,13 +290,13 @@ class DeliveryCommandService:
         revision = saved.revision
 
         # 本次状态在渲染前新鲜核定；文件分列历史（成果保存时）与本次状态，互不冒充。
-        state = history_state
+        verification = _FreshSourceState(aggregate=history_state, states=())
         fields: tuple[DeliveryField, ...] | None = None
         rendered: RenderedDelivery | None = None
         staged: StagedFile | None = None
         for attempt in range(_SOURCE_STATE_ATTEMPTS):
             try:
-                state = await self._read_current_source_state(read, context, user_scope=user_scope)
+                verification = await self._read_current_source_state(read, context, user_scope=user_scope)
             except AgentServiceError as exc:
                 return self._failed(
                     base,
@@ -292,7 +307,11 @@ class DeliveryCommandService:
                 )
             try:
                 fields = await self._run_blocking(
-                    build_delivery_fields, read, body_text=body_text, current_source_state=state
+                    build_delivery_fields,
+                    read,
+                    body_text=body_text,
+                    current_source_state=verification.aggregate,
+                    current_source_states=verification.states,
                 )
                 rendered = await self._run_blocking(render_delivery, fields, command.format)
             except (AgentValidationError, DeliveryRenderError) as exc:
@@ -325,7 +344,7 @@ class DeliveryCommandService:
                     staged_cleaned=cleaned,
                 )
             try:
-                confirmed = await self._read_current_source_state(read, context, user_scope=user_scope)
+                rechecked = await self._read_current_source_state(read, context, user_scope=user_scope)
             except AgentServiceError as exc:
                 cleaned = await self._discard(candidate)
                 return self._failed(
@@ -336,7 +355,7 @@ class DeliveryCommandService:
                     error_code=f"{_SOURCE_RECHECK_FAILED}:{exc.code}",
                     staged_cleaned=cleaned,
                 )
-            if confirmed == state:
+            if rechecked == verification:
                 staged = candidate
                 break
             # 渲染/暂存期间状态已变：废弃本次输出，按最新状态重渲染、重暂存、重回读。
@@ -358,7 +377,7 @@ class DeliveryCommandService:
             staged_saved = await self._save(
                 base.build(
                     phase="staged",
-                    source_state=state,
+                    source_state=verification.aggregate,
                     verified_at=self._clock(),
                     output_digest=digest,
                     output_bytes=size,
@@ -383,7 +402,7 @@ class DeliveryCommandService:
         validated = await self._save(
             base.build(
                 phase="validated",
-                source_state=state,
+                source_state=verification.aggregate,
                 verified_at=self._clock(),
                 output_digest=digest,
                 output_bytes=size,
@@ -400,7 +419,7 @@ class DeliveryCommandService:
             cancelled = await self._save(
                 base.build(
                     phase="cancelled_before_publish",
-                    source_state=state,
+                    source_state=verification.aggregate,
                     verified_at=self._clock(),
                     output_digest=digest,
                     output_bytes=size,
@@ -433,7 +452,7 @@ class DeliveryCommandService:
                 phase="validated",
                 error_code=f"{_SOURCE_RECHECK_FAILED}:{exc.code}",
             )
-        if claimed_state != state:
+        if claimed_state != verification:
             # 阶段机不允许 validated 后回写已验证输出摘要；发布旧状态文件即伪当前状态。
             return self._failed(
                 base,
@@ -447,7 +466,7 @@ class DeliveryCommandService:
             claimed = await self._save(
                 base.build(
                     phase="publish_claimed",
-                    source_state=state,
+                    source_state=verification.aggregate,
                     verified_at=self._clock(),
                     output_digest=digest,
                     output_bytes=size,
@@ -472,7 +491,7 @@ class DeliveryCommandService:
                 context,
                 rendered=rendered,
                 staged=staged,
-                state=state,
+                state=verification.aggregate,
                 expected_revision=revision,
                 error_code=exc.code,
             )
@@ -491,7 +510,7 @@ class DeliveryCommandService:
                 context,
                 rendered=rendered,
                 staged=staged,
-                state=state,
+                state=verification.aggregate,
                 expected_revision=revision,
                 error_code=_UNVERIFIED_CODE,
             )
@@ -501,7 +520,7 @@ class DeliveryCommandService:
                 context,
                 rendered=rendered,
                 staged=staged,
-                state=state,
+                state=verification.aggregate,
                 expected_revision=revision,
                 error_code=_UNVERIFIED_CODE,
             )
@@ -510,7 +529,7 @@ class DeliveryCommandService:
             confirmed = await self._save(
                 base.build(
                     phase="published_confirmed",
-                    source_state=state,
+                    source_state=verification.aggregate,
                     verified_at=self._clock(),
                     output_digest=digest,
                     output_bytes=size,
@@ -525,7 +544,7 @@ class DeliveryCommandService:
                 context,
                 rendered=rendered,
                 staged=staged,
-                state=state,
+                state=verification.aggregate,
                 expected_revision=revision,
                 error_code=_RECEIPT_SAVE_FAILED,
             )
@@ -615,12 +634,15 @@ class DeliveryCommandService:
         context: DeliveryContext,
         *,
         user_scope: str,
-    ) -> str:
-        """新鲜读取本次来源状态；读取失败上抛，由调用点转成发布前失败。
+    ) -> _FreshSourceState:
+        """新鲜核定本成果引用的**每个**来源版本的当前可得性（不把聚合列当唯一依据）。
 
-        生产 DAO 的 ``read_artifact`` 只回读成果行保存时记录的投影，并不新鲜
-        复核全部上游来源；回读为 ``available`` 时按 ``unknown`` 记录（见
-        :func:`_current_source_state`），明确受限状态如实采用。
+        ``read_artifact`` 逐 ``trace.source_refs`` 回读 ``source_ref_states``：禁用 /
+        清理 / 未读 / 坏行分开标注，行缺失或摘要不符记 ``unknown``。逐项非空时聚合
+        单列只作 manifest 与 ``metadata`` 的兼容摘要，逐项状态才是交付文件权威
+        （R21：任一 ``unknown`` 不得被其他可用项掩盖）。旧成果无来源引用时退回
+        原聚合列，但 ``available`` 按 ``unknown`` 记录（见 :func:`_current_source_state`），
+        保存时可用不能证明本次可交付。
         """
 
         fresh = await self._artifacts.read_artifact(
@@ -633,7 +655,10 @@ class DeliveryCommandService:
             ),
             user_scope=user_scope,
         )
-        return _current_source_state(fresh.source_available_state)
+        states = tuple(fresh.source_ref_states)
+        if states:
+            return _FreshSourceState(aggregate=aggregate_delivery_source_state(states), states=states)
+        return _FreshSourceState(aggregate=_current_source_state(fresh.source_available_state), states=())
 
     async def _save(
         self,

@@ -25,6 +25,7 @@ from core.agent_types import (
     ArtifactDeliveryCommand,
     ArtifactRead,
     ArtifactReadQuery,
+    ArtifactSourceState,
     CommandRef,
     DeliveryField,
     DeliveryManifest,
@@ -146,6 +147,24 @@ def _context() -> DeliveryContext:
     )
 
 
+def _ref_state(
+    source_id: str,
+    state: str,
+    *,
+    version: str = "1",
+    kind: str = "attachment",
+) -> ArtifactSourceState:
+    """逐项来源状态（单测夹具）：摘要与源身份一一对应，便于断言不被聚合掩盖。"""
+
+    return ArtifactSourceState(
+        source_kind=kind,
+        source_id=source_id,
+        source_version=version,
+        source_digest=sha256_hex(f"{source_id}@{version}".encode()),
+        state=state,
+    )
+
+
 class FakeArtifacts:
     """分页成果读取：正文按游标顺序取页，``limit=1`` 走「新鲜核来源」分支。"""
 
@@ -155,16 +174,21 @@ class FakeArtifacts:
         *,
         fresh: ArtifactRead | None = None,
         fresh_states: list[str] | None = None,
+        fresh_ref_states: list[list[ArtifactSourceState]] | None = None,
     ) -> None:
         self.pages = pages
         self.fresh = fresh
         self.fresh_states = list(fresh_states) if fresh_states is not None else None
+        self.fresh_ref_states = [list(states) for states in fresh_ref_states] if fresh_ref_states is not None else None
         self.queries: list[ArtifactReadQuery] = []
         self._page_index = 0
 
     async def read_artifact(self, query: ArtifactReadQuery, *, user_scope: str) -> ArtifactRead:
         self.queries.append(query)
         if query.limit == 1:
+            if self.fresh_ref_states is not None:
+                states = self.fresh_ref_states.pop(0) if len(self.fresh_ref_states) > 1 else self.fresh_ref_states[0]
+                return replace(self.pages[0], source_ref_states=tuple(states))
             if self.fresh_states is not None:
                 state = self.fresh_states.pop(0) if len(self.fresh_states) > 1 else self.fresh_states[0]
                 return replace(self.pages[0], source_available_state=state)
@@ -732,6 +756,94 @@ class TestFreshSourceState:
         assert len(store.cancelled) == 3
         assert outcome.receipt.error_code == "delivery_source_state_unstable"
         assert outcome.staged_cleaned is True
+
+    async def test_each_source_ref_state_is_written_and_unknown_is_not_masked(self) -> None:
+        store = FakeStore()
+        dao = FakePhaseDao()
+        artifacts = FakeArtifacts(
+            [_read()],
+            fresh_ref_states=[[_ref_state("src-a", "available"), _ref_state("src-b", "unknown")]],
+        )
+
+        outcome = await _service(artifacts=artifacts, dao=dao, store=store).deliver(_command(), _context())
+
+        index = {field.path: field for field in read_delivery_fields(store.staged_contents[0], "md")}
+        assert index["metadata:source_available_state"].value_text == "available"
+        assert index["source:/0/source_id"].value_text == "src-a"
+        assert index["source:/0/source_kind"].value_text == "attachment"
+        assert index["source:/0/source_version"].value_text == "1"
+        assert index["source:/0/state"].value_text == "available"
+        assert index["source:/1/source_id"].value_text == "src-b"
+        assert index["source:/1/state"].value_text == "unknown"
+        # 逐项权威：一个未知项不得被另一个可用项掩盖成 available（R21）。
+        assert index["metadata:current_source_state"].value_text == "unknown"
+        assert dao.saved[0].source_state == "available"
+        assert [manifest.source_state for manifest in dao.saved[1:]] == ["unknown"] * 4
+        assert outcome.receipt.phase == "published_confirmed"
+
+    @pytest.mark.parametrize("format_name", ["md", "csv", "xlsx"])
+    async def test_disabled_source_ref_is_written_in_all_formats(self, format_name: str) -> None:
+        store = FakeStore()
+        dao = FakePhaseDao()
+        artifacts = FakeArtifacts(
+            [_read()],
+            fresh_ref_states=[[_ref_state("src-a", "available"), _ref_state("src-b", "disabled")]],
+        )
+
+        outcome = await _service(artifacts=artifacts, dao=dao, store=store).deliver(
+            _command(format=format_name), _context()
+        )
+
+        index = {field.path: field for field in read_delivery_fields(store.staged_contents[0], format_name)}
+        assert index["metadata:current_source_state"].value_text == "disabled"
+        assert index["source:/1/state"].value_text == "disabled"
+        assert dao.saved[1].source_state == "disabled"
+        assert outcome.receipt.phase == "published_confirmed"
+
+    async def test_per_ref_change_between_render_and_recheck_rebuilds_file(self) -> None:
+        store = FakeStore()
+        dao = FakePhaseDao()
+        artifacts = FakeArtifacts(
+            [_read()],
+            fresh_ref_states=[
+                [_ref_state("src-a", "available")],
+                [_ref_state("src-a", "disabled")],
+                [_ref_state("src-a", "disabled")],
+                [_ref_state("src-a", "disabled")],
+            ],
+        )
+
+        outcome = await _service(artifacts=artifacts, dao=dao, store=store).deliver(_command(), _context())
+
+        assert len(store.staged_contents) == 2
+        assert len(store.cancelled) == 1
+        index = {field.path: field for field in read_delivery_fields(store.staged_contents[-1], "md")}
+        assert index["source:/0/state"].value_text == "disabled"
+        assert index["metadata:current_source_state"].value_text == "disabled"
+        assert outcome.receipt.phase == "published_confirmed"
+
+    async def test_restored_source_can_be_exported_again(self) -> None:
+        blocked_store = FakeStore()
+        blocked = await _service(
+            artifacts=FakeArtifacts([_read()], fresh_ref_states=[[_ref_state("src-a", "disabled")]]),
+            dao=FakePhaseDao(),
+            store=blocked_store,
+        ).deliver(_command(), _context())
+
+        restored_store = FakeStore()
+        restored = await _service(
+            artifacts=FakeArtifacts([_read()], fresh_ref_states=[[_ref_state("src-a", "available")]]),
+            dao=FakePhaseDao(),
+            store=restored_store,
+        ).deliver(_command(), _context())
+
+        assert blocked.receipt.phase == "published_confirmed"
+        blocked_index = {field.path: field for field in read_delivery_fields(blocked_store.staged_contents[0], "md")}
+        assert blocked_index["source:/0/state"].value_text == "disabled"
+        restored_index = {field.path: field for field in read_delivery_fields(restored_store.staged_contents[0], "md")}
+        assert restored_index["source:/0/state"].value_text == "available"
+        assert restored_index["metadata:current_source_state"].value_text == "available"
+        assert restored.receipt.phase == "published_confirmed"
 
 
 class TestCsvAndXlsxFormats:

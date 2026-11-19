@@ -51,6 +51,7 @@ from core.agent_types import (
     ArtifactPageItem,
     ArtifactRead,
     ArtifactReadQuery,
+    ArtifactSourceState,
     BindActualInputReceipt,
     BindActualInputRequest,
     BusinessSourceRegistrationReceipt,
@@ -214,6 +215,7 @@ from core.agent_types import (
     decode_snapshot_identity,
     decode_source_read_summary,
     decode_source_ref,
+    decode_source_version_ref,
     decode_submission_receipt,
     DraftRead,
     DraftReadQuery,
@@ -2196,6 +2198,9 @@ class AgentDao(BaseDao):
                     ) from exc
             else:
                 unavailable_reason = "body_cleaned" if item.cleaned_at is not None else "body_not_saved"
+            source_ref_states = await self._artifact_source_states(
+                conn, payload=item.result_payload, user_scope=user_scope, identity=identity
+            )
             return ArtifactRead(
                 artifact_id=item.artifact_id,
                 artifact_version=item.artifact_version,
@@ -2218,7 +2223,109 @@ class AgentDao(BaseDao):
                 next_cursor=next_cursor,
                 body_available=body_available,
                 unavailable_reason=unavailable_reason,
+                source_ref_states=source_ref_states,
             )
+
+    @staticmethod
+    def _artifact_source_refs(payload: CanonicalJson | None, identity: str) -> tuple[SourceVersionRef, ...]:
+        """成果载荷 ``trace.source_refs`` → 来源版本引用（去重保序；缺键即空）。
+
+        载荷结构未冻结的既有取值不在此强行解释：无 ``trace.source_refs`` 即无逐项
+        可核来源（聚合列不得被当作单项结论）；该键存在但形状不合契约 → 坏行
+        ``OPERATION_UNKNOWN``（fail-closed，R21）。
+        """
+
+        if payload is None:
+            return ()
+        try:
+            document = decode_json_doc(payload)
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN, "artifact result payload is unreadable", identity
+            ) from exc
+        if not isinstance(document, dict):
+            return ()
+        trace = document.get("trace")
+        if not isinstance(trace, dict):
+            return ()
+        raw_refs = trace.get("source_refs")
+        if raw_refs is None:
+            return ()
+        if not isinstance(raw_refs, list):
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "artifact source refs are unreadable", identity)
+        decoded: list[SourceVersionRef] = []
+        for position, raw in enumerate(raw_refs):
+            try:
+                decoded.append(decode_source_version_ref(raw, f"$.result_payload.trace.source_refs[{position}]"))
+            except AgentValidationError as exc:
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN, "artifact source refs are unreadable", identity
+                ) from exc
+        return tuple(dict.fromkeys(decoded))
+
+    @staticmethod
+    def _delivery_source_state(row: Any, ref: SourceVersionRef) -> str:
+        """单个来源版本当前可得性：禁用/清理/未读/坏行分开标注，不升级为可用。"""
+
+        if row is None:
+            return "unknown"
+        try:
+            read_state = ReadState(row.read_state)
+        except ValueError:
+            return "unknown"
+        if row.disabled_at is not None or read_state is ReadState.DISABLED:
+            return "disabled"
+        if row.tombstoned or row.cleaned_at is not None or read_state is ReadState.UNAVAILABLE:
+            return "unavailable"
+        if read_state in (ReadState.UNREAD, ReadState.UNKNOWN) or row.digest != ref.source_digest:
+            return "unknown"
+        return "available"
+
+    async def _artifact_source_states(
+        self,
+        conn: AsyncConnection,
+        *,
+        payload: CanonicalJson | None,
+        user_scope: str,
+        identity: str,
+    ) -> tuple[ArtifactSourceState, ...]:
+        """逐项核定成果引用的每个来源版本当前可得性（不读聚合列、不复用旧快照）。
+
+        来源行缺失/摘要不符/读取态不可解码一律 ``unknown``（未核 ≠ 可用，R21）；
+        禁用与清理分别标 ``disabled`` / ``unavailable``。聚合由调用方从逐项结果
+        导出，任一 ``unknown`` 不会被其他可用项掩盖。
+        """
+
+        refs = self._artifact_source_refs(payload, identity)
+        if not refs:
+            return ()
+        rows = (
+            await conn.execute(
+                sa.select(
+                    AgentAssetVersion.asset_id,
+                    AgentAssetVersion.asset_version,
+                    AgentAssetVersion.digest,
+                    AgentAssetVersion.read_state,
+                    AgentAssetVersion.disabled_at,
+                    AgentAssetVersion.cleaned_at,
+                    AgentAssetVersion.tombstoned,
+                ).where(
+                    AgentAssetVersion.user_scope == user_scope,
+                    AgentAssetVersion.asset_id.in_({ref.source_id for ref in refs}),
+                )
+            )
+        ).all()
+        index = {(row.asset_id, row.asset_version): row for row in rows}
+        return tuple(
+            ArtifactSourceState(
+                source_kind=ref.source_kind.value,
+                source_id=ref.source_id,
+                source_version=ref.source_version,
+                source_digest=ref.source_digest,
+                state=self._delivery_source_state(index.get((ref.source_id, ref.source_version)), ref),
+            )
+            for ref in refs
+        )
 
     # ------------------------------------------------------------------
     # F-02-3：操作精确读取（§4.2 read_operation）

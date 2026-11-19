@@ -22,7 +22,9 @@ from core.agent_types import (
     DELIVERY_CHUNK_MAX_UTF16,
     AgentValidationError,
     ArtifactRead,
+    ArtifactSourceState,
     DeliveryField,
+    aggregate_delivery_source_state,
     build_delivery_fields,
     json_doc,
     validate_delivery_fields,
@@ -69,6 +71,22 @@ def _by_path(fields: tuple[DeliveryField, ...]) -> dict[str, DeliveryField]:
     return {field.path: field for field in fields}
 
 
+def _ref_state(
+    source_id: str,
+    state: str,
+    *,
+    version: str = "1",
+    kind: str = "attachment",
+) -> ArtifactSourceState:
+    return ArtifactSourceState(
+        source_kind=kind,
+        source_id=source_id,
+        source_version=version,
+        source_digest="c" * 64,
+        state=state,
+    )
+
+
 class TestBuildDeliveryFields:
     def test_metadata_and_body_are_explicit(self) -> None:
         fields = build_delivery_fields(_read(published_at=None, cleaned_at=None))
@@ -97,6 +115,51 @@ class TestBuildDeliveryFields:
 
         assert index["metadata:source_available_state"].value_text == "unknown"
         assert index["metadata:current_source_state"].value_text == "disabled"
+
+    def test_each_source_ref_state_is_written_and_unknown_is_not_masked(self) -> None:
+        fields = build_delivery_fields(
+            _read(),
+            current_source_state="unknown",
+            current_source_states=(_ref_state("src-a", "available"), _ref_state("src-b", "unknown")),
+        )
+        index = _by_path(fields)
+
+        assert index["metadata:current_source_state"].value_text == "unknown"
+        assert index["source:/0/source_kind"].value_text == "attachment"
+        assert index["source:/0/source_id"].value_text == "src-a"
+        assert index["source:/0/source_version"].value_text == "1"
+        assert index["source:/0/source_digest"].value_text == "c" * 64
+        assert index["source:/0/state"].value_text == "available"
+        assert index["source:/1/source_id"].value_text == "src-b"
+        assert index["source:/1/state"].value_text == "unknown"
+        # 记录域顺序：metadata → source → body → payload（渲染按记录分段）。
+        records = [field.record for field in fields]
+        metadata_count = records.count("metadata")
+        source_count = records.count("source")
+        assert records.index("source") == metadata_count
+        assert source_count == 10
+        assert records[metadata_count : metadata_count + source_count] == ["source"] * source_count
+        assert records.index("body") == metadata_count + source_count
+
+    def test_source_state_aggregate_mismatch_is_rejected(self) -> None:
+        with pytest.raises(AgentValidationError) as error:
+            build_delivery_fields(
+                _read(),
+                current_source_state="available",
+                current_source_states=(_ref_state("src-a", "unknown"),),
+            )
+        assert error.value.code == "inconsistent_source_state"
+
+    def test_aggregate_never_upgrades_any_single_state(self) -> None:
+        assert aggregate_delivery_source_state(()) == "unknown"
+        assert aggregate_delivery_source_state((_ref_state("a", "available"), _ref_state("b", "unknown"))) == "unknown"
+        assert (
+            aggregate_delivery_source_state((_ref_state("a", "available"), _ref_state("b", "disabled"))) == "disabled"
+        )
+        assert (
+            aggregate_delivery_source_state((_ref_state("a", "unavailable"), _ref_state("b", "disabled"))) == "disabled"
+        )
+        assert aggregate_delivery_source_state((_ref_state("a", "available"),)) == "available"
 
     def test_metadata_order_is_stable(self) -> None:
         fields = build_delivery_fields(_read())
@@ -283,6 +346,23 @@ class TestRenderRoundTrip:
         with pytest.raises(DeliveryRenderError) as error:
             render_delivery(self._fields(), "pdf")
         assert error.value.code == "invalid_format"
+
+    def test_source_records_roundtrip_in_all_formats(self) -> None:
+        fields = build_delivery_fields(
+            _read(),
+            current_source_state="disabled",
+            current_source_states=(
+                _ref_state("src-a", "available"),
+                _ref_state("src-b", "disabled", version="2", kind="mcp_return"),
+            ),
+        )
+        for format_name in ("md", "csv", "xlsx"):
+            rendered = render_delivery(fields, format_name)
+            verify_delivery_readback(fields, rendered.content, format_name)
+            index = _by_path(read_delivery_fields(rendered.content, format_name))
+            assert index["source:/1/source_kind"].value_text == "mcp_return"
+            assert index["source:/1/source_version"].value_text == "2"
+            assert index["source:/1/state"].value_text == "disabled"
 
 
 class TestCsvTextProtection:

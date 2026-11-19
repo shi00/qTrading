@@ -18,6 +18,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from core.agent_types import AgentErrorCode, AgentServiceError, SourceKind, SourceVersionRef, json_doc
 from data.cache.cache_manager import CacheManager
 from data.persistence import engine_provider
 from data.persistence.daos.agent_dao import AgentDao
@@ -214,3 +215,87 @@ class TestBacktestDaoStrictRead:
         dao._read_db_select = AsyncMock(return_value=df)
         result = await dao.get_result("run-1")
         assert result is None
+
+
+_DIGEST = "a" * 64
+
+
+def _ref_wire(source_id: str, *, version: str = "1", digest: str = _DIGEST) -> dict[str, str]:
+    return {
+        "source_kind": "attachment",
+        "source_id": source_id,
+        "source_version": version,
+        "source_digest": digest,
+    }
+
+
+def _ref(source_id: str, *, version: str = "1", digest: str = _DIGEST) -> SourceVersionRef:
+    return SourceVersionRef(
+        source_kind=SourceKind.ATTACHMENT,
+        source_id=source_id,
+        source_version=version,
+        source_digest=digest,
+    )
+
+
+def _asset_row(**overrides: object) -> SimpleNamespace:
+    values: dict[str, object] = {
+        "read_state": "ready",
+        "digest": _DIGEST,
+        "disabled_at": None,
+        "cleaned_at": None,
+        "tombstoned": False,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+class TestArtifactSourceRefs:
+    """I80：成果载荷逐原 source_ref 解析（缺键即空，坏形状 fail-closed）。"""
+
+    def test_payload_without_trace_has_no_refs(self):
+        assert AgentDao._artifact_source_refs(None, "op-1") == ()
+        assert AgentDao._artifact_source_refs(json_doc({"evidence": ["src-1"]}), "op-1") == ()
+        assert AgentDao._artifact_source_refs(json_doc({"trace": {"source_refs": []}}), "op-1") == ()
+
+    def test_refs_are_decoded_and_deduplicated_in_order(self):
+        payload = json_doc({"trace": {"source_refs": [_ref_wire("src-a"), _ref_wire("src-b"), _ref_wire("src-a")]}})
+        assert AgentDao._artifact_source_refs(payload, "op-1") == (_ref("src-a"), _ref("src-b"))
+
+    def test_unreadable_or_malformed_refs_are_operation_unknown(self):
+        payloads = (
+            "{not-json",
+            json_doc({"trace": {"source_refs": "src-1"}}),
+            json_doc({"trace": {"source_refs": [{"source_id": "src-a"}]}}),
+        )
+        for payload in payloads:
+            with pytest.raises(AgentServiceError) as error:
+                AgentDao._artifact_source_refs(payload, "op-1")
+            assert error.value.code is AgentErrorCode.OPERATION_UNKNOWN
+
+
+class TestDeliverySourceState:
+    """I80：单项来源状态映射——缺失/未读/坏行一律 unknown，绝不上调为 available。"""
+
+    def test_missing_row_is_unknown(self):
+        assert AgentDao._delivery_source_state(None, _ref("src-a")) == "unknown"
+
+    def test_ready_matching_digest_is_available(self):
+        assert AgentDao._delivery_source_state(_asset_row(), _ref("src-a")) == "available"
+
+    def test_disabled_wins_over_cleaned_or_tombstoned(self):
+        row = _asset_row(disabled_at=object(), cleaned_at=object(), tombstoned=True)
+        assert AgentDao._delivery_source_state(row, _ref("src-a")) == "disabled"
+        assert AgentDao._delivery_source_state(_asset_row(read_state="disabled"), _ref("src-a")) == "disabled"
+
+    def test_cleaned_or_tombstoned_is_unavailable(self):
+        assert AgentDao._delivery_source_state(_asset_row(cleaned_at=object()), _ref("src-a")) == "unavailable"
+        assert AgentDao._delivery_source_state(_asset_row(tombstoned=True), _ref("src-a")) == "unavailable"
+        assert AgentDao._delivery_source_state(_asset_row(read_state="unavailable"), _ref("src-a")) == "unavailable"
+
+    def test_unread_unknown_or_bad_read_state_is_unknown(self):
+        for read_state in ("unread", "unknown", "weird"):
+            assert AgentDao._delivery_source_state(_asset_row(read_state=read_state), _ref("src-a")) == "unknown"
+
+    def test_digest_mismatch_is_unknown(self):
+        assert AgentDao._delivery_source_state(_asset_row(digest="b" * 64), _ref("src-a")) == "unknown"

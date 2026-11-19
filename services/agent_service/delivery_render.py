@@ -43,7 +43,7 @@ from core.agent_types import (
     validate_delivery_fields,
 )
 
-_SECTION_TITLES = {"metadata": "元数据", "body": "正文", "payload": "结构字段"}
+_SECTION_TITLES = {"metadata": "元数据", "source": "来源核定", "body": "正文", "payload": "结构字段"}
 _XLSX_SHEET = "delivery"
 _CSV_BOM = b"\xef\xbb\xbf"
 #: 表格软件的文本前缀：前导 ``'`` 让单元格按文本落盘，不按公式/数字解释。
