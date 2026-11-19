@@ -4,7 +4,11 @@
 - 本模块既作为受监督子进程入口（``python -m services.agent_service.attachment_worker``），
   也提供纯解析函数供单元测试直接调用；
 - 解析只读取显式选择范围；未选范围不解析、不计数；超限明确拒绝或按超时返回
-  真实已读/未读（不截断冒完整）；
+  真实已读/未读（不截断冒完整）。CSV 按行增量解码、读满所需行即停；JSON 按
+  pointer 定向下钻、未选子树只做结构跳过不建对象（I70）；
+- 若定位所选范围在结构上必须读到选区外内容（CSV 前置行/区间空档、JSON
+  pointer 前导扫描），须请求方显式给出 ``read_expansion_consent``，否则拒绝；
+  已同意时把实际扩张量记入 limitation，不静默全量读取后仅裁输出；
 - XLSX 先做容器级前置预算与 workbook 元数据结构门（zip 条目数/声明解压量/
   sharedStrings 尺寸等），通过后才创建公式与缓存两个只读视图（共享同一
   sharedStrings 解析），按 ``(sheet, coordinate)`` 逐行逐格核配公式与缓存
@@ -20,6 +24,7 @@
 
 from __future__ import annotations
 
+import codecs
 import contextlib
 import csv
 import hashlib
@@ -31,6 +36,7 @@ import time
 import unicodedata
 import warnings
 import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dt_time
 from pathlib import PurePosixPath
@@ -205,15 +211,81 @@ def _parse_text(data: bytes, selection: Selection, budget: AttachmentBudget) -> 
 # ---------------------------------------------------------------------------
 
 
-def _csv_records(data: bytes) -> list[list[str]]:
+def _csv_requires_expansion(selection: Selection) -> bool:
+    """定位所选行是否必须读到选区外的行（I70）：前置行或行段间空档。
+
+    纯几何判定，不读源；``all`` 选择整份读取，不构成扩张。
+    """
+
+    if selection.kind == "all":
+        return False
+    previous_end = 0
+    for atom in sorted(
+        (atom for atom in selection.ranges if isinstance(atom, RowsRange)), key=lambda item: (item.start, item.end)
+    ):
+        if atom.start > previous_end + 1:
+            return True
+        previous_end = max(previous_end, atom.end)
+    return False
+
+
+def _csv_stream_records(data: bytes, stop_row: int | None) -> tuple[list[list[str]], list[tuple[int, int]]]:
+    """按物理行增量解码并解析 CSV，读到 ``stop_row`` 条记录即停止（I70）。
+
+    返回已读记录与每条记录占用的源字节区间；``stop_row`` 之后的源字节不读取，
+    也不解码。字段内换行由 ``csv.reader`` 跨物理行拼接，与整份读取同源。
+    """
+
+    buffer = io.BytesIO(data)
+    decoder = codecs.getincrementaldecoder("utf-8-sig")()
+    spans: list[tuple[int, int]] = []
+
+    def _lines() -> Iterator[str]:
+        while True:
+            raw_start = buffer.tell()
+            raw = buffer.readline()
+            if not raw:
+                tail = decoder.decode(b"", final=True)
+                if tail:
+                    spans.append((raw_start, buffer.tell()))
+                    yield tail
+                return
+            offset = 0
+            while offset < len(raw):
+                # 与 ``io.StringIO(text, newline="")`` 同源：\r、\n、\r\n 都是行边界，
+                # 逐「物理行」交给 csv.reader（含终止符），字段内换行由 reader 跨行拼接。
+                cr = raw.find(b"\r", offset)
+                if cr == -1:
+                    end = len(raw)
+                elif cr + 1 < len(raw) and raw[cr + 1] == 0x0A:
+                    end = cr + 2
+                else:
+                    end = cr + 1
+                text = decoder.decode(raw[offset:end])
+                spans.append((raw_start + offset, raw_start + end))
+                if text:
+                    yield text
+                offset = end
+
+    reader = csv.reader(_lines())
+    records: list[list[str]] = []
+    record_spans: list[tuple[int, int]] = []
     try:
-        text = data.decode("utf-8-sig")
+        while stop_row is None or len(records) < stop_row:
+            record = next(reader, None)
+            if record is None:
+                break
+            # 记录在源中连续：起点即上一条记录的终点；单行可含多条记录（仅 \r 行尾时），
+            # 因而不能按下标取行段。
+            start = record_spans[-1][1] if record_spans else 0
+            end = spans[-1][1] if spans else start
+            record_spans.append((start, end))
+            records.append(record)
     except UnicodeDecodeError as exc:
         raise AttachmentParseError("invalid_encoding", "CSV is not valid UTF-8 text") from exc
-    try:
-        return list(csv.reader(io.StringIO(text, newline="")))
     except csv.Error as exc:
         raise AttachmentParseError("invalid_structure", "CSV structure is invalid") from exc
+    return records, record_spans
 
 
 def _csv_representation(records: list[list[str]]) -> str:
@@ -251,34 +323,81 @@ def _csv_count_data_rows(records: list[list[str]], start_index: int, end_index: 
     return sum(1 for index in range(start_index, end_index) if index >= header_offset and records[index])
 
 
-def _parse_csv(data: bytes, selection: Selection, budget: AttachmentBudget, header_confirmed: bool) -> ParsedAttachment:
+def _covered_length(spans: list[tuple[int, int]]) -> int:
+    """区间并集长度（扣除已选内容时用；重叠不重复计）。"""
+
+    covered = 0
+    ordered = sorted(spans)
+    index = 0
+    while index < len(ordered):
+        start, end = ordered[index]
+        index += 1
+        while index < len(ordered) and ordered[index][0] <= end:
+            end = max(end, ordered[index][1])
+            index += 1
+        covered += end - start
+    return covered
+
+
+def _parse_csv(
+    data: bytes,
+    selection: Selection,
+    budget: AttachmentBudget,
+    header_confirmed: bool,
+    read_expansion_consent: bool,
+) -> ParsedAttachment:
     _reject_unsupported_selection(selection, (RowsRange,))
     _check_no_overlap(selection, RowsRange)
-    records = _csv_records(data)
-    # 行号含表头（§3.3.1 rows：「表头不隐式排除」）；记录行限额只扣除已确认且实际存在的表头。
-    total_records = len(records)
-    header_offset = _csv_header_offset(records, header_confirmed)
+    limitations: list[dict[str, str]] = []
 
     if selection.kind == "all":
-        budget.enforce_rows(_csv_count_data_rows(records, 0, total_records, header_offset))
+        records, _spans = _csv_stream_records(data, None)
+        # 行号含表头（§3.3.1 rows：「表头不隐式排除」）；记录行限额只扣除已确认且实际存在的表头。
+        header_offset = _csv_header_offset(records, header_confirmed)
+        budget.enforce_rows(_csv_count_data_rows(records, 0, len(records), header_offset))
         selected = records
         read_ranges: list[dict[str, Any]] = [to_wire_dict(AllAtom())]
     else:
-        selected = []
-        read_ranges = []
-        selected_data_rows = 0
+        atoms: list[RowsRange] = []
         for atom in selection.ranges:
             assert isinstance(atom, RowsRange)
             if atom.sheet is not None:
                 raise AttachmentParseError("invalid_selection", "CSV rows must not name a sheet")
-            if atom.end > total_records:
-                raise AttachmentParseError("invalid_selection", "rows range exceeds selected source")
+            atoms.append(atom)
+        if _csv_requires_expansion(selection) and not read_expansion_consent:
+            raise AttachmentParseError(
+                "read_expansion_not_permitted",
+                "locating the selected rows requires reading rows outside the selection; "
+                "explicit read expansion consent is required",
+            )
+        stop_row = max(atom.end for atom in atoms)
+        records, record_spans = _csv_stream_records(data, stop_row)
+        if len(records) < stop_row:
+            raise AttachmentParseError("invalid_selection", "rows range exceeds selected source")
+        header_offset = _csv_header_offset(records, header_confirmed)
+        selected = []
+        read_ranges = []
+        selected_data_rows = 0
+        selected_spans: list[tuple[int, int]] = []
+        for atom in atoms:
             chunk = records[atom.start - 1 : atom.end]
             # D06 记录行限额按本文件累计（不按每个行段重置）；仅已确认表头不计入额度。
             selected_data_rows += _csv_count_data_rows(records, atom.start - 1, atom.end, header_offset)
             budget.enforce_rows(selected_data_rows)
             selected.extend(chunk)
             read_ranges.append(to_wire_dict(atom))
+            selected_spans.extend(record_spans[atom.start - 1 : atom.end])
+        # I70：只把「为定位选区而读到的区外字节」如实记为扩张量，不静默当成整份已读。
+        scanned_bytes = record_spans[-1][1] if record_spans else 0
+        expansion_bytes = max(scanned_bytes - _covered_length(selected_spans), 0)
+        if expansion_bytes > 0:
+            limitations.append(
+                _limitation(
+                    "read_expansion",
+                    f"read {expansion_bytes} bytes outside the selected rows to locate the selection "
+                    "(read expansion consent granted)",
+                )
+            )
 
     representation = _csv_representation(selected)
     budget.enforce_codepoints(len(representation))
@@ -288,7 +407,7 @@ def _parse_csv(data: bytes, selection: Selection, budget: AttachmentBudget, head
         coverage="full",
         body_text=representation,
         blocks=[block],
-        limitations=[],
+        limitations=limitations,
         stats=_stats(source_bytes=len(data), rows=len(selected), chars=len(representation)),
         read_ranges=read_ranges,
     )
@@ -331,45 +450,210 @@ def _json_pointer_tokens(pointer: str) -> list[str]:
     return [token.replace("~1", "/").replace("~0", "~") for token in pointer.split("/")[1:]]
 
 
-def _resolve_pointer(document: Any, pointer: str) -> Any:
-    current = document
-    for token in _json_pointer_tokens(pointer):
-        if isinstance(current, dict):
-            if token not in current:
-                raise AttachmentParseError("invalid_selection", "json_pointer does not exist in source")
-            current = current[token]
-        elif isinstance(current, list):
-            # RFC6901 数组索引：仅 "0" 或非零开头数字；"01" 只能是对象键。
-            if not token.isdigit() or (len(token) > 1 and token[0] == "0"):
-                raise AttachmentParseError("invalid_selection", "json_pointer array index is invalid")
-            index = int(token)
-            if index >= len(current):
-                raise AttachmentParseError("invalid_selection", "json_pointer is out of range")
-            current = current[index]
-        else:
-            raise AttachmentParseError("invalid_selection", "json_pointer crosses a scalar value")
-    return current
+_JSON_WS: Final = " \t\r\n"
 
 
-def _parse_json(data: bytes, selection: Selection, budget: AttachmentBudget) -> ParsedAttachment:
-    _reject_unsupported_selection(selection, (JsonPointerRange,))
-    text = decode_json_text(data)
-    try:
-        document = parse_preserving_numbers(text)
-    except ValueError as exc:
-        raise AttachmentParseError("invalid_structure", "JSON structure is invalid") from exc
+def _json_requires_expansion(selection: Selection) -> bool:
+    """定位所选子树是否必须先扫描选区外内容（I70）：非根 pointer 必须自文档首部下钻。"""
 
     if selection.kind == "all":
-        value = document
+        return False
+    return any(_json_pointer_tokens(atom.pointer) for atom in selection.ranges if isinstance(atom, JsonPointerRange))
+
+
+def _json_skip_ws(text: str, index: int) -> int:
+    while index < len(text) and text[index] in _JSON_WS:
+        index += 1
+    return index
+
+
+def _json_skip_string(text: str, index: int) -> int:
+    """跳过以 ``"`` 开头的字符串字面量，返回闭引号之后的位置。"""
+
+    index += 1
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == '"':
+            return index + 1
+        index += 1
+    raise ValueError("unterminated_json_string")
+
+
+def _json_skip_container(text: str, index: int) -> int:
+    """用显式栈跳过整个对象/数组（不建对象、不递归，深嵌套不受递归上限影响）。"""
+
+    stack = [text[index]]
+    index += 1
+    while stack:
+        if index >= len(text):
+            raise ValueError("unterminated_json_container")
+        char = text[index]
+        if char == '"':
+            index = _json_skip_string(text, index)
+        elif char in "[{":
+            stack.append(char)
+            index += 1
+        elif char in "]}":
+            if char != ("}" if stack[-1] == "{" else "]"):
+                raise ValueError("mismatched_json_container")
+            stack.pop()
+            index += 1
+        else:
+            index += 1
+    return index
+
+
+def _json_skip_value(text: str, index: int) -> int:
+    """跳过一个值的字符区间（未选子树只做结构跳过，不解析其内容）。"""
+
+    index = _json_skip_ws(text, index)
+    if index >= len(text):
+        raise ValueError("missing_json_value")
+    char = text[index]
+    if char == '"':
+        return _json_skip_string(text, index)
+    if char in "[{":
+        return _json_skip_container(text, index)
+    start = index
+    while index < len(text) and text[index] not in ",]} \t\r\n":
+        index += 1
+    if index == start:
+        raise ValueError("missing_json_value")
+    return index
+
+
+def _json_object_member_start(text: str, index: int, token: str) -> int:
+    """在 ``{`` 处按成员序查找键为 ``token`` 的值起点；缺失即 ``invalid_selection``。"""
+
+    index += 1
+    while True:
+        index = _json_skip_ws(text, index)
+        if index >= len(text):
+            raise ValueError("unterminated_json_object")
+        char = text[index]
+        if char == "}":
+            raise AttachmentParseError("invalid_selection", "json_pointer does not exist in source")
+        if char == ",":
+            index += 1
+            continue
+        if char != '"':
+            raise ValueError("invalid_json_object")
+        key_end = _json_skip_string(text, index)
+        try:
+            key = json.loads(text[index:key_end])
+        except json.JSONDecodeError as exc:
+            raise ValueError("invalid_json_key") from exc
+        index = _json_skip_ws(text, key_end)
+        if index >= len(text) or text[index] != ":":
+            raise ValueError("invalid_json_object")
+        index = _json_skip_ws(text, index + 1)
+        if key == token:
+            return index
+        index = _json_skip_value(text, index)
+
+
+def _json_array_element_start(text: str, index: int, token: str) -> int:
+    """在 ``[`` 处按序号定位元素值起点；越界即 ``invalid_selection``。
+
+    RFC6901 数组索引：仅 ``"0"`` 或非零开头的数字；``"01"`` 只能作为对象键（I67），
+    故索引语法校验放在按真实容器类型下钻时进行，而非 decode 阶段。
+    """
+
+    if not (token.isascii() and token.isdigit()) or (len(token) > 1 and token[0] == "0"):
+        raise AttachmentParseError("invalid_selection", "json_pointer array index is invalid")
+    target = int(token)
+    index += 1
+    position = 0
+    while True:
+        index = _json_skip_ws(text, index)
+        if index >= len(text):
+            raise ValueError("unterminated_json_array")
+        char = text[index]
+        if char == "]":
+            raise AttachmentParseError("invalid_selection", "json_pointer is out of range")
+        if char == ",":
+            index += 1
+            continue
+        if position == target:
+            return index
+        index = _json_skip_value(text, index)
+        position += 1
+
+
+def _json_select_value(text: str, pointer: str) -> tuple[Any, int, int]:
+    """按 pointer 定向下钻并只解析选中子树（I70）。
+
+    返回 ``(值, 起始偏移, 结束偏移)``；路径上的兄弟值只跳过、不建对象，未选正文
+    因此不进入解析结果。受读取范围所限，未选尾部不做整份结构校验。
+    """
+
+    tokens = _json_pointer_tokens(pointer)
+    index = _json_skip_ws(text, 0)
+    if not tokens:
+        return parse_preserving_numbers(text[index:]), index, len(text)
+    for token in tokens:
+        index = _json_skip_ws(text, index)
+        if index >= len(text):
+            raise ValueError("missing_json_value")
+        char = text[index]
+        if char == "{":
+            index = _json_object_member_start(text, index, token)
+        elif char == "[":
+            index = _json_array_element_start(text, index, token)
+        else:
+            raise AttachmentParseError("invalid_selection", "json_pointer crosses a scalar value")
+    end = _json_skip_value(text, index)
+    return parse_preserving_numbers(text[index:end]), index, end
+
+
+def _parse_json(
+    data: bytes, selection: Selection, budget: AttachmentBudget, read_expansion_consent: bool
+) -> ParsedAttachment:
+    _reject_unsupported_selection(selection, (JsonPointerRange,))
+    text = decode_json_text(data)
+    limitations: list[dict[str, str]] = []
+
+    if selection.kind == "all":
+        try:
+            value = parse_preserving_numbers(text)
+        except ValueError as exc:
+            raise AttachmentParseError("invalid_structure", "JSON structure is invalid") from exc
         read_ranges: list[dict[str, Any]] = [to_wire_dict(AllAtom())]
     else:
+        atoms = [atom for atom in selection.ranges if isinstance(atom, JsonPointerRange)]
+        if _json_requires_expansion(selection) and not read_expansion_consent:
+            raise AttachmentParseError(
+                "read_expansion_not_permitted",
+                "locating the selected subtree requires scanning content outside the selection; "
+                "explicit read expansion consent is required",
+            )
         values = []
         read_ranges = []
-        for atom in selection.ranges:
-            assert isinstance(atom, JsonPointerRange)
-            values.append(_resolve_pointer(document, atom.pointer))
+        spans: list[tuple[int, int]] = []
+        for atom in atoms:
+            try:
+                selected_value, start, end = _json_select_value(text, atom.pointer)
+            except ValueError as exc:
+                raise AttachmentParseError("invalid_structure", "JSON structure is invalid") from exc
+            values.append(selected_value)
             read_ranges.append(to_wire_dict(atom))
+            spans.append((start, end))
         value = values[0] if len(values) == 1 else values
+        # I70：只把「为定位 pointer 而扫描到的区外字符」记为扩张量；其中未选子树不解析。
+        scan_start = _json_skip_ws(text, 0)
+        scan_end = max(end for _start, end in spans) if spans else scan_start
+        expansion_chars = max(scan_end - scan_start - _covered_length(spans), 0)
+        if expansion_chars > 0:
+            limitations.append(
+                _limitation(
+                    "read_expansion",
+                    f"scanned {expansion_chars} characters outside the selected subtree to resolve the pointer; "
+                    "unselected subtrees are skipped, not parsed (read expansion consent granted)",
+                )
+            )
 
     block = json_doc({"kind": "json", "value": value})
     budget.enforce_codepoints(len(block))
@@ -378,7 +662,7 @@ def _parse_json(data: bytes, selection: Selection, budget: AttachmentBudget) -> 
         coverage="full",
         body_text=None,
         blocks=[block],
-        limitations=[],
+        limitations=limitations,
         stats=_stats(source_bytes=len(data), chars=len(block)),
         read_ranges=read_ranges,
     )
@@ -1463,11 +1747,15 @@ def parse_attachment(
     budget: AttachmentBudget,
     deadline: float,
     csv_header_confirmed: bool = False,
+    read_expansion_consent: bool = False,
 ) -> ParsedAttachment:
     """按种类解析显式选择范围（纯函数；不读写外部路径）。
 
     ``csv_header_confirmed`` 由请求方显式传递「用户已确认 CSV 首条为表头」；
     缺省 False 表示未知/未确认，首条按数据行计入记录行限额（I23）。
+    ``read_expansion_consent`` 由请求方显式传递「已同意为定位选区读取选区外内容」
+    （I70）；缺省 False 时，结构上必须扩张读取的选择（CSV 前置行/行段空档、
+    JSON 非根 pointer）明确拒绝，不静默全量读取。
     """
 
     try:
@@ -1478,6 +1766,7 @@ def parse_attachment(
             budget=budget,
             deadline=deadline,
             csv_header_confirmed=csv_header_confirmed,
+            read_expansion_consent=read_expansion_consent,
         )
     except AgentValidationError as exc:
         # D06 限额违规统一转为解析错误码（保持稳定 code，不冒充完整读取）。
@@ -1492,14 +1781,15 @@ def _dispatch_parse(
     budget: AttachmentBudget,
     deadline: float,
     csv_header_confirmed: bool,
+    read_expansion_consent: bool,
 ) -> ParsedAttachment:
     knit = kind
     if knit in (AttachmentKind.TXT, AttachmentKind.MD):
         return _parse_text(data, selection, budget)
     if knit is AttachmentKind.CSV:
-        return _parse_csv(data, selection, budget, csv_header_confirmed)
+        return _parse_csv(data, selection, budget, csv_header_confirmed, read_expansion_consent)
     if knit is AttachmentKind.JSON:
-        return _parse_json(data, selection, budget)
+        return _parse_json(data, selection, budget, read_expansion_consent)
     if knit is AttachmentKind.XLSX:
         return _parse_xlsx(data, selection, budget, deadline)
     if knit is AttachmentKind.PDF:
@@ -1536,6 +1826,9 @@ def _handle_request(header: dict[str, Any], payload: bytes) -> dict[str, Any]:
         csv_header_confirmed = header.get("csv_header_confirmed", False)
         if not isinstance(csv_header_confirmed, bool):
             raise AttachmentParseError("invalid_request", "worker csv_header_confirmed is invalid")
+        read_expansion_consent = header.get("read_expansion_consent", False)
+        if not isinstance(read_expansion_consent, bool):
+            raise AttachmentParseError("invalid_request", "worker read_expansion_consent is invalid")
         deadline = time.monotonic() + float(header.get("timeout_s", 30.0))
         parsed = parse_attachment(
             kind=kind,
@@ -1544,6 +1837,7 @@ def _handle_request(header: dict[str, Any], payload: bytes) -> dict[str, Any]:
             budget=budget,
             deadline=deadline,
             csv_header_confirmed=csv_header_confirmed,
+            read_expansion_consent=read_expansion_consent,
         )
         return {"ok": True, "schema_version": 1, "result": parsed.to_wire()}
     except AttachmentParseError as exc:

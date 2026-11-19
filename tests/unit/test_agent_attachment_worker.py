@@ -64,6 +64,7 @@ def _parse(
     budget: AttachmentBudget | None = None,
     *,
     csv_header_confirmed: bool = False,
+    read_expansion_consent: bool = False,
 ):
     return parse_attachment(
         kind=kind,
@@ -72,6 +73,7 @@ def _parse(
         budget=budget or AttachmentBudget(),
         deadline=_deadline(),
         csv_header_confirmed=csv_header_confirmed,
+        read_expansion_consent=read_expansion_consent,
     )
 
 
@@ -111,9 +113,17 @@ def _limit_of(
     kind: AttachmentKind,
     *,
     csv_header_confirmed: bool = False,
+    read_expansion_consent: bool = False,
 ) -> str:
     with pytest.raises(AttachmentParseError) as exc:
-        _parse(kind, data, selection, budget, csv_header_confirmed=csv_header_confirmed)
+        _parse(
+            kind,
+            data,
+            selection,
+            budget,
+            csv_header_confirmed=csv_header_confirmed,
+            read_expansion_consent=read_expansion_consent,
+        )
     return exc.value.code
 
 
@@ -204,6 +214,7 @@ class TestCsvExtraction:
             AttachmentKind.CSV,
             b"h1,h2\na,1\nb,2\n",
             Selection(kind="limited", ranges=(RowsRange(kind="rows", sheet=None, start=2, end=3),)),
+            read_expansion_consent=True,
         )
         assert json.loads(parsed.blocks[0])["rows"] == [["a", "1"], ["b", "2"]]
 
@@ -282,10 +293,11 @@ class TestCsvExtraction:
             ),
         )
         # 两段各 2 条，合计 4 条：max_rows=3 必须拒绝（不能按段重置）。
-        assert _limit_of(data, selection, AttachmentBudget(max_rows=3), AttachmentKind.CSV) == (
-            "attachment_rows_exceeded"
+        assert (
+            _limit_of(data, selection, AttachmentBudget(max_rows=3), AttachmentKind.CSV, read_expansion_consent=True)
+            == "attachment_rows_exceeded"
         )
-        exact = _parse(AttachmentKind.CSV, data, selection, AttachmentBudget(max_rows=4))
+        exact = _parse(AttachmentKind.CSV, data, selection, AttachmentBudget(max_rows=4), read_expansion_consent=True)
         assert exact.stats["rows"] == 4
 
 
@@ -311,6 +323,7 @@ class TestJsonExtraction:
             AttachmentKind.JSON,
             b'{"a": {"b": 2}, "c": 3}',
             Selection(kind="limited", ranges=(JsonPointerRange(kind="json_pointer", pointer="/a"),)),
+            read_expansion_consent=True,
         )
         assert json.loads(parsed.blocks[0])["value"] == {
             "b": {
@@ -327,6 +340,7 @@ class TestJsonExtraction:
             Selection(kind="limited", ranges=(JsonPointerRange(kind="json_pointer", pointer="/missing"),)),
             AttachmentBudget(),
             AttachmentKind.JSON,
+            read_expansion_consent=True,
         )
         assert code == "invalid_selection"
 
@@ -336,6 +350,7 @@ class TestJsonExtraction:
             AttachmentKind.JSON,
             b'{"01": 1}',
             Selection(kind="limited", ranges=(JsonPointerRange(kind="json_pointer", pointer="/01"),)),
+            read_expansion_consent=True,
         )
         assert json.loads(parsed.blocks[0])["value"]["lexeme"] == "1"
 
@@ -345,6 +360,7 @@ class TestJsonExtraction:
             Selection(kind="limited", ranges=(JsonPointerRange(kind="json_pointer", pointer="/a/01"),)),
             AttachmentBudget(),
             AttachmentKind.JSON,
+            read_expansion_consent=True,
         )
         assert code == "invalid_selection"
 
@@ -352,6 +368,125 @@ class TestJsonExtraction:
         with pytest.raises(AttachmentParseError) as exc:
             _parse(AttachmentKind.JSON, b"{not json")
         assert exc.value.code == "invalid_structure"
+
+
+# ---------------------------------------------------------------------------
+# I70：未选正文零读取（CSV 流式按行 / JSON pointer 定向 + 扩张同意）
+# ---------------------------------------------------------------------------
+
+
+class TestSelectionReadIsolation:
+    def test_csv_stops_reading_after_last_selected_row(self) -> None:
+        # 选区之后的字节非法 UTF-8：整份解码会报 invalid_encoding，流式读取不得触碰。
+        data = b"a,1\nb,2\n\xff\xfe"
+        parsed = _parse(
+            AttachmentKind.CSV,
+            data,
+            Selection(kind="limited", ranges=(RowsRange(kind="rows", sheet=None, start=1, end=2),)),
+        )
+        assert json.loads(parsed.blocks[0])["rows"] == [["a", "1"], ["b", "2"]]
+        assert parsed.limitations == []
+
+    def test_csv_prefix_read_requires_explicit_consent_and_reports_amount(self) -> None:
+        data = b"h\n1\n2\n3\n"
+        selection = Selection(kind="limited", ranges=(RowsRange(kind="rows", sheet=None, start=3, end=4),))
+        assert _limit_of(data, selection, AttachmentBudget(), AttachmentKind.CSV) == "read_expansion_not_permitted"
+        parsed = _parse(AttachmentKind.CSV, data, selection, read_expansion_consent=True)
+        assert json.loads(parsed.blocks[0])["rows"] == [["2"], ["3"]]
+        assert [item["code"] for item in parsed.limitations] == ["read_expansion"]
+        # 前置两条记录各 2 字节：扩张量必须等于真实读到的区外字节数。
+        assert "read 4 bytes" in parsed.limitations[0]["message"]
+
+    def test_csv_gap_between_ranges_counts_as_expansion(self) -> None:
+        data = b"a\nb\nc\nd\n"
+        selection = Selection(
+            kind="limited",
+            ranges=(
+                RowsRange(kind="rows", sheet=None, start=1, end=1),
+                RowsRange(kind="rows", sheet=None, start=3, end=3),
+            ),
+        )
+        assert _limit_of(data, selection, AttachmentBudget(), AttachmentKind.CSV) == "read_expansion_not_permitted"
+        parsed = _parse(AttachmentKind.CSV, data, selection, read_expansion_consent=True)
+        assert json.loads(parsed.blocks[0])["rows"] == [["a"], ["c"]]
+        assert "read 2 bytes" in parsed.limitations[0]["message"]
+
+    def test_csv_quoted_multiline_field_survives_streaming(self) -> None:
+        data = b'id,note\n1,"l1\nl2"\n2,x\n'
+        parsed = _parse(
+            AttachmentKind.CSV,
+            data,
+            Selection(kind="limited", ranges=(RowsRange(kind="rows", sheet=None, start=1, end=2),)),
+        )
+        assert json.loads(parsed.blocks[0])["rows"] == [["id", "note"], ["1", "l1\nl2"]]
+
+    def test_csv_bom_is_stripped_in_streaming_reader(self) -> None:
+        parsed = _parse(AttachmentKind.CSV, b"\xef\xbb\xbfa,b\n")
+        assert json.loads(parsed.blocks[0])["rows"] == [["a", "b"]]
+
+    def test_csv_cr_only_line_endings_still_split_records(self) -> None:
+        # 仅 \r 行尾时单条物理行含多条记录，读取区间仍须按记录连续推进。
+        parsed = _parse(AttachmentKind.CSV, b"a\rb\r")
+        assert json.loads(parsed.blocks[0])["rows"] == [["a"], ["b"]]
+
+    def test_csv_range_beyond_source_is_rejected_while_streaming(self) -> None:
+        selection = Selection(kind="limited", ranges=(RowsRange(kind="rows", sheet=None, start=2, end=3),))
+        assert (
+            _limit_of(b"a\nb\n", selection, AttachmentBudget(), AttachmentKind.CSV, read_expansion_consent=True)
+            == "invalid_selection"
+        )
+
+    def test_json_pointer_does_not_parse_unselected_tail(self) -> None:
+        # 选区之后的尾部结构非法（未闭合数组）：整份解析会报 invalid_structure，定向扫描必须成功。
+        data = b'{"a": {"b": 1}, "c": [1,'
+        parsed = _parse(
+            AttachmentKind.JSON,
+            data,
+            Selection(kind="limited", ranges=(JsonPointerRange(kind="json_pointer", pointer="/a"),)),
+            read_expansion_consent=True,
+        )
+        assert json.loads(parsed.blocks[0])["value"] == {"b": _exact("json_integer", "1")}
+        assert [item["code"] for item in parsed.limitations] == ["read_expansion"]
+
+    def test_json_pointer_requires_explicit_consent(self) -> None:
+        selection = Selection(kind="limited", ranges=(JsonPointerRange(kind="json_pointer", pointer="/a"),))
+        assert (
+            _limit_of(b'{"a": 1}', selection, AttachmentBudget(), AttachmentKind.JSON) == "read_expansion_not_permitted"
+        )
+
+    def test_json_skips_deep_unselected_sibling_without_recursion(self) -> None:
+        depth = 5_000
+        data = ('{"skip": ' + "[" * depth + "]" * depth + ', "keep": 7}').encode()
+        parsed = _parse(
+            AttachmentKind.JSON,
+            data,
+            Selection(kind="limited", ranges=(JsonPointerRange(kind="json_pointer", pointer="/keep"),)),
+            read_expansion_consent=True,
+        )
+        assert json.loads(parsed.blocks[0])["value"] == _exact("json_integer", "7")
+
+    def test_json_array_pointer_with_bom(self) -> None:
+        parsed = _parse(
+            AttachmentKind.JSON,
+            b'\xef\xbb\xbf[{"k": 1}, {"k": 2}]',
+            Selection(kind="limited", ranges=(JsonPointerRange(kind="json_pointer", pointer="/1/k"),)),
+            read_expansion_consent=True,
+        )
+        assert json.loads(parsed.blocks[0])["value"] == _exact("json_integer", "2")
+
+    def test_json_pointer_crossing_scalar_is_rejected(self) -> None:
+        selection = Selection(kind="limited", ranges=(JsonPointerRange(kind="json_pointer", pointer="/a/b"),))
+        assert (
+            _limit_of(b'{"a": 1}', selection, AttachmentBudget(), AttachmentKind.JSON, read_expansion_consent=True)
+            == "invalid_selection"
+        )
+
+    def test_json_array_index_out_of_range_is_rejected(self) -> None:
+        selection = Selection(kind="limited", ranges=(JsonPointerRange(kind="json_pointer", pointer="/2"),))
+        assert (
+            _limit_of(b"[1, 2]", selection, AttachmentBudget(), AttachmentKind.JSON, read_expansion_consent=True)
+            == "invalid_selection"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1474,7 +1609,12 @@ def _run_worker_main(monkeypatch: pytest.MonkeyPatch, wire: bytes) -> dict[str, 
 
 
 def _worker_entry(
-    monkeypatch: pytest.MonkeyPatch, data: bytes, *, kind: AttachmentKind, selection: Selection
+    monkeypatch: pytest.MonkeyPatch,
+    data: bytes,
+    *,
+    kind: AttachmentKind,
+    selection: Selection,
+    read_expansion_consent: bool = False,
 ) -> dict[str, Any]:
     """经真实 worker 模块入口 ``main()`` 提取，返回 wire 响应。
 
@@ -1488,6 +1628,7 @@ def _worker_entry(
         "kind": kind.value,
         "selection": to_wire_dict(selection),
         "csv_header_confirmed": False,
+        "read_expansion_consent": read_expansion_consent,
         "source_digest": hashlib.sha256(data).hexdigest(),
         "timeout_s": 30.0,
         "payload_bytes": len(data),
@@ -1531,6 +1672,26 @@ class TestHeaderByteBoundary:
         assert response["ok"] is False
         assert response["error"] == {"code": "invalid_request", "message": "worker header is too large"}
 
+    def test_worker_rejects_non_bool_read_expansion_consent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        data = b"hello"
+        header = {
+            "schema_version": 1,
+            "kind": AttachmentKind.TXT.value,
+            "selection": to_wire_dict(Selection(kind="all")),
+            "csv_header_confirmed": False,
+            "read_expansion_consent": "yes",
+            "source_digest": hashlib.sha256(data).hexdigest(),
+            "timeout_s": 30.0,
+            "payload_bytes": len(data),
+        }
+        header_bytes = json.dumps(header, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        response = _run_worker_main(monkeypatch, header_bytes + b"\n" + data)
+        assert response["ok"] is False
+        assert response["error"] == {
+            "code": "invalid_request",
+            "message": "worker read_expansion_consent is invalid",
+        }
+
 
 _JSON_ACCEPTED_CASES = [
     (b'\xef\xbb\xbf{"a": 1}', {"a": _exact("json_integer", "1")}),
@@ -1569,9 +1730,19 @@ class TestJsonSupportParity:
         data = b'{"": {"x": 1}, "a": 2}'
         selection = Selection(kind="limited", ranges=(JsonPointerRange(kind="json_pointer", pointer="/"),))
         parent = await SubprocessAttachmentWorker().extract(
-            replace(_request(data, name="a.json", kind=AttachmentKind.JSON), selection=selection)
+            replace(
+                _request(data, name="a.json", kind=AttachmentKind.JSON),
+                selection=selection,
+                read_expansion_consent=True,
+            )
         )
-        worker = _worker_entry(monkeypatch, data, kind=AttachmentKind.JSON, selection=selection)
+        worker = _worker_entry(
+            monkeypatch,
+            data,
+            kind=AttachmentKind.JSON,
+            selection=selection,
+            read_expansion_consent=True,
+        )
         assert worker["ok"] is True
         assert parent.blocks == tuple(worker["result"]["blocks"])
         assert json.loads(parent.blocks[0])["value"] == {"x": _exact("json_integer", "1")}
@@ -1773,6 +1944,35 @@ class TestWorkerLifecycle:
         result = await worker.extract(replace(request, csv_header_confirmed=True))
         assert result.read_state is ReadState.READY
         assert result.stats.rows == 50_001
+
+    @pytest.mark.asyncio
+    async def test_read_expansion_consent_is_carried_to_worker(self) -> None:
+        # 子进程冷启动的模块导入开销占满默认 30 秒预算与环境无关；此处放宽 worker 时限，
+        # 只验证同意字段是否真正到达 worker 解析入口。
+        worker = SubprocessAttachmentWorker(
+            budget=AttachmentBudget(extract_timeout_s=180.0),
+            timeout_s=180.0,
+        )
+        data = b"h\n1\n2\n"
+        selection = Selection(kind="limited", ranges=(RowsRange(kind="rows", sheet=None, start=2, end=2),))
+        with pytest.raises(AttachmentWorkerError) as exc:
+            await worker.extract(replace(_request(data, "a.csv", AttachmentKind.CSV), selection=selection))
+        assert exc.value.code == "read_expansion_not_permitted"
+        result = await worker.extract(
+            replace(
+                _request(data, "a.csv", AttachmentKind.CSV),
+                selection=selection,
+                read_expansion_consent=True,
+            )
+        )
+        assert result.body_text == "1"
+
+    def test_parent_rejects_non_bool_read_expansion_consent(self) -> None:
+        worker = SubprocessAttachmentWorker()
+        with pytest.raises(AttachmentWorkerError) as exc:
+            # noqa: SLF001  # 直接验证请求前置校验路径
+            worker._validate_request(replace(_request(b"x"), read_expansion_consent=cast(Any, "yes")))
+        assert exc.value.code == "attachment_request_invalid"
 
     @pytest.mark.asyncio
     async def test_worker_rejects_digest_mismatch(self) -> None:

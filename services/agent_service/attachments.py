@@ -98,6 +98,8 @@ class AttachmentExtractionRequest:
     selection: Selection
     #: 用户已确认 CSV 首条为表头；缺省 False 表示未知/未确认，首条按数据行计入限额（I23）。
     csv_header_confirmed: bool = False
+    #: 请求方已取得「为定位所选范围必须读取选区外内容」的同意；缺省 False 即拒绝扩张读取（I70）。
+    read_expansion_consent: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,6 +254,7 @@ class SubprocessAttachmentWorker:
             "kind": request.kind.value,
             "selection": to_wire_dict(request.selection),
             "csv_header_confirmed": request.csv_header_confirmed,
+            "read_expansion_consent": request.read_expansion_consent,
             "source_digest": request.source_digest,
             "budget": {
                 "max_files": self._budget.max_files,
@@ -349,6 +352,8 @@ class SubprocessAttachmentWorker:
                 raise AttachmentWorkerError("attachment_request_invalid", f"{field_name} must be a non-empty string")
         if not isinstance(request.data, bytes):
             raise AttachmentWorkerError("attachment_request_invalid", "attachment data must be bytes")
+        if not isinstance(request.read_expansion_consent, bool):
+            raise AttachmentWorkerError("attachment_request_invalid", "read_expansion_consent must be a bool")
         try:
             self._budget.enforce_source_bytes(len(request.data))
         except AgentValidationError as exc:
