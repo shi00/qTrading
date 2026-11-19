@@ -6527,14 +6527,52 @@ def _decode_fact_raw_lexeme(raw_type: str, text: CanonicalJson, path: str) -> st
     return None
 
 
+_VERIFIED_STATES: Final[frozenset[str]] = frozenset(
+    {VerificationState.PROGRAM_VERIFIED.value, VerificationState.HUMAN_VERIFIED.value}
+)
+
+
+def _close_fact_cache_payload(raw_type: str, numeric_lexeme: str | None, meta: dict[str, object], path: str) -> None:
+    """事实数值载荷与 XLSX 缓存载荷交叉闭合（I68）。
+
+    ``raw_value`` 与 ``cache_raw_value`` 是同一单元格数值的冗余承载：事实为数值时
+    缓存必须同为数值（``datetime`` 日期序列号例外）、内层 ``raw_type`` 一致且词法
+    逐字符相同，否则同一事实存在互相矛盾的数值载荷；``cache_verification`` 为已核态
+    时必须带 ``cache_present=True`` 与缓存载荷，不得在无载荷时宣称已核（R21）。
+    """
+
+    if meta["cache_verification"] in _VERIFIED_STATES and (
+        meta["cache_present"] is not True or meta["cache_raw_value"] is None
+    ):
+        _fail("invalid_cache_state", f"{path}.cache_verification")
+    cache_type = meta["cache_raw_type"]
+    cache_value = meta["cache_raw_value"]
+    if cache_type is None or cache_value is None:
+        return
+    numeric_types = (INTEGER_RAW_TYPE, DECIMAL_RAW_TYPE)
+    if raw_type not in numeric_types:
+        return
+    if cache_type not in numeric_types:
+        if cache_type == "datetime":
+            # 日期缓存以序列号承载，与数值事实互不矛盾。
+            return
+        _fail("invalid_number", f"{path}.cache_raw_type")
+    if cache_type != raw_type:
+        _fail("invalid_number", f"{path}.cache_raw_type")
+    cached = decode_json_doc(cast(CanonicalJson, cache_value))
+    if not isinstance(cached, dict) or cached.get("lexeme") != numeric_lexeme:
+        _fail("invalid_number", f"{path}.cache_raw_value")
+
+
 def decode_fact_value(value: object, path: str = "$.fact") -> FactValue:
     """严格解码事实值（16 键全必填、禁额外键；raw_type 限封闭值域）。
 
     ``raw_value`` 按 ``raw_type`` 闭合：数值须为 agent-number-v1 记录且内外
     ``raw_type`` 一致，``numeric_lexeme`` / ``numeric_encoding`` 与内层逐值一致；
     非数值禁止携带数值元数据。``xlsx_cell_meta`` 非 null 时须整键整值通过
-    :func:`decode_xlsx_cell_meta`。闭合失败即拒绝，``program_verified`` 不会
-    随未核闭合的内层值或空 meta 幸存（R21）。
+    :func:`decode_xlsx_cell_meta`，且其数值缓存载荷与 ``raw_value`` 交叉闭合
+    （I68：同一单元格不得出现互相矛盾的数值载荷）。闭合失败即拒绝，
+    ``program_verified`` 不会随未核闭合的内层值、矛盾缓存或空 meta 幸存（R21）。
     """
 
     if not isinstance(value, dict):
@@ -6550,6 +6588,11 @@ def decode_fact_value(value: object, path: str = "$.fact") -> FactValue:
             _fail("invalid_number", f"{path}.numeric_lexeme")
     elif numeric_lexeme is not None or numeric_encoding is not None:
         _fail("invalid_raw_type", f"{path}.numeric_encoding")
+    meta_path = f"{path}.xlsx_cell_meta"
+    xlsx_cell_meta = _decode_xlsx_cell_meta_text(value["xlsx_cell_meta"], meta_path)
+    if xlsx_cell_meta is not None:
+        meta = decode_json_doc(xlsx_cell_meta)
+        _close_fact_cache_payload(raw_type, numeric_lexeme, cast(dict[str, object], meta), meta_path)
     return FactValue(
         field_key=_require_str(value["field_key"], f"{path}.field_key"),
         object_ref=_require_str(value["object_ref"], f"{path}.object_ref"),
@@ -6568,7 +6611,7 @@ def decode_fact_value(value: object, path: str = "$.fact") -> FactValue:
             value["verification"], VerificationState, f"{path}.verification", "invalid_verification_state"
         ),
         missing_reason=_opt_str(value["missing_reason"], f"{path}.missing_reason"),
-        xlsx_cell_meta=_decode_xlsx_cell_meta_text(value["xlsx_cell_meta"], f"{path}.xlsx_cell_meta"),
+        xlsx_cell_meta=xlsx_cell_meta,
     )
 
 

@@ -1,4 +1,6 @@
-"""E-01-4 单位换算注入网关：币种拒绝、金额失败分类、数量未核（R21）。"""
+"""E-01-4 单位换算注入网关：币种拒绝、金额失败分类、数量未核（R21）、精确换算（I68）。"""
+
+from decimal import Decimal
 
 import pytest
 
@@ -16,7 +18,7 @@ from core.agent_types import (
 )
 from core.errors import StrategyParamError
 from core.i18n import Message
-from services.agent_service.units import CONVERSION_REF, UnitConversionGateway
+from services.agent_service.units import CONVERSION_REF, PRECISION_POLICY, UnitConversionGateway
 from typing import Any
 
 _DIGEST = sha256_hex(b"e01-units")
@@ -67,16 +69,84 @@ class RecordingConverter:
 
 
 class TestUnitConversionGateway:
-    def test_success_carries_conversion_reference(self) -> None:
+    def test_success_returns_exact_decimal_with_lineage(self) -> None:
         converter = RecordingConverter(result=5000.0)
         outcome = UnitConversionGateway(converter).convert(
             _fact(), value=50, value_unit="yi_cny", df=object(), declared_unit="million_cny"
         )
-        assert outcome.value == 5000.0
+        assert outcome.value == Decimal("5000")
+        assert outcome.exact_decimal == "5000"
         assert outcome.verification is VerificationState.PROGRAM_VERIFIED
-        assert outcome.conversion_ref == CONVERSION_REF
+        assert outcome.precision == PRECISION_POLICY
+        assert outcome.conversion_ref == (
+            f"{CONVERSION_REF}|policy={PRECISION_POLICY}|yi_cny->million_cny|scale=1e+2|in=50|out=5000"
+        )
         assert outcome.reason is None
-        assert converter.calls[0][1:] == ("amount", "million_cny", 50, "yi_cny")
+        assert converter.calls[0][1:] == ("amount", "million_cny", 50.0, "yi_cny")
+
+    def test_float_input_rejected_before_conversion(self) -> None:
+        # I68：float 已丢精度，不得进入精确核验路径；转换器不得被调用。
+        converter = RecordingConverter()
+        with pytest.raises(AgentServiceError) as exc:
+            UnitConversionGateway(converter).convert(
+                _fact(),
+                value=50.5,  # pyright: ignore[reportArgumentType]  # float 入口须被拒绝（I68）
+                value_unit="yi_cny",
+                df=object(),
+                declared_unit="million_cny",
+            )
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        assert "unit_rejected:inexact_input" in str(exc.value)
+        assert converter.calls == []
+
+    def test_exact_decimal_input_survives_float_witness_noise(self) -> None:
+        # 0.1*100 的浮点见证带噪声，但精确值仍是 10；结果不经 float 承载。
+        converter = RecordingConverter(result=10.000000000000002)
+        outcome = UnitConversionGateway(converter).convert(
+            _fact(), value=Decimal("0.1"), value_unit="yi_cny", df=object(), declared_unit="million_cny"
+        )
+        assert outcome.value == Decimal("10")
+        assert outcome.exact_decimal == "10"
+        assert outcome.verification is VerificationState.PROGRAM_VERIFIED
+
+    def test_non_power_of_ten_scaling_is_unverified_not_verified(self) -> None:
+        # 注入 callable 不是纯十进制缩放时，无法用十进制重算：不宣称已核（R21）。
+        converter = RecordingConverter(result=7.5)
+        outcome = UnitConversionGateway(converter).convert(
+            _fact(), value=50, value_unit="yi_cny", df=object(), declared_unit="million_cny"
+        )
+        assert outcome.value is None
+        assert outcome.exact_decimal is None
+        assert outcome.verification is VerificationState.UNVERIFIED
+        assert outcome.conversion_ref is None
+        assert outcome.reason == "conversion_not_exact_scale"
+
+    def test_witness_mismatch_beyond_policy_is_unverified(self) -> None:
+        # 位移指数可辨识但见证偏离超过 1e-12 相对精度：不宣称已核。
+        converter = RecordingConverter(result=5000.000001)
+        outcome = UnitConversionGateway(converter).convert(
+            _fact(), value=50, value_unit="yi_cny", df=object(), declared_unit="million_cny"
+        )
+        assert outcome.verification is VerificationState.UNVERIFIED
+        assert outcome.reason == "conversion_witness_mismatch"
+
+    def test_zero_input_is_exact_zero(self) -> None:
+        converter = RecordingConverter(result=0.0)
+        outcome = UnitConversionGateway(converter).convert(
+            _fact(), value=0, value_unit="yi_cny", df=object(), declared_unit="million_cny"
+        )
+        assert outcome.value == Decimal(0)
+        assert outcome.verification is VerificationState.PROGRAM_VERIFIED
+        assert "|scale=unknown|" in str(outcome.conversion_ref)
+
+    def test_non_finite_result_rejected(self) -> None:
+        converter = RecordingConverter(result=float("inf"))
+        with pytest.raises(AgentServiceError) as exc:
+            UnitConversionGateway(converter).convert(
+                _fact(), value=1, value_unit="yi_cny", df=object(), declared_unit="million_cny"
+            )
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        assert "unit_rejected:non_finite_result" in str(exc.value)
 
     def test_unknown_currency_rejected_before_conversion(self) -> None:
         converter = RecordingConverter()

@@ -282,12 +282,12 @@ class TestFactValueCodec:
             cache_applicable=False,
             cache_raw_type="json_decimal",
             cache_raw_value='{"numeric_encoding":"agent-number-v1","raw_type":"json_decimal",'
-            '"lexeme":"2.50","exact_decimal":"2.50"}',
+            '"lexeme":"0.1","exact_decimal":"0.1"}',
             cache_verification=VerificationState.UNVERIFIED,
             cache_missing_reason=None,
             date_epoch=None,
             number_format="0.00",
-            xml_value_lexeme="2.5",
+            xml_value_lexeme="0.1",
         )
         fact = _fact(xlsx_cell_meta=json_doc(to_wire_dict(meta)))
         wire = encode_fact_value(fact)
@@ -448,6 +448,69 @@ class TestFactValueCodec:
         with pytest.raises(AgentValidationError) as exc_meta:
             decode_fact_value({**wire, "xlsx_cell_meta": "{}"})
         expect_code(exc_meta, "missing_field")
+
+    @staticmethod
+    def _numeric_cache(cache_type: str, lexeme: str, exact: str) -> str:
+        return json_doc(
+            {
+                "numeric_encoding": "agent-number-v1",
+                "raw_type": cache_type,
+                "lexeme": lexeme,
+                "exact_decimal": exact,
+            }
+        )
+
+    def test_conflicting_numeric_cache_payload_rejected(self) -> None:
+        # I68：同一单元格的 raw_value 与数值缓存互为矛盾承载时，不得标 program_verified。
+        wire = encode_fact_value(_fact())
+        for cache_type, cache_value in (
+            ("json_decimal", self._numeric_cache("json_decimal", "2.50", "2.50")),
+            ("json_integer", self._numeric_cache("json_integer", "1", "1")),
+            ("string", '{"raw_type":"string","lexeme":"0.1"}'),
+        ):
+            meta = to_wire_dict(
+                XlsxCellMeta(
+                    sheet="Sheet1",
+                    cell="C3",
+                    cache_present=True,
+                    cache_raw_type=cache_type,
+                    cache_raw_value=cache_value,
+                )
+            )
+            with pytest.raises(AgentValidationError) as exc:
+                decode_fact_value({**wire, "xlsx_cell_meta": json_doc(meta)})
+            expect_code(exc, "invalid_number")
+
+    def test_matching_numeric_cache_payload_accepted(self) -> None:
+        wire = encode_fact_value(_fact())
+        meta = to_wire_dict(
+            XlsxCellMeta(
+                sheet="Sheet1",
+                cell="C3",
+                cache_present=True,
+                cache_raw_type="json_decimal",
+                cache_raw_value=self._numeric_cache("json_decimal", "0.1", "0.1"),
+                cache_verification=VerificationState.PROGRAM_VERIFIED,
+            )
+        )
+        decoded = decode_fact_value({**wire, "xlsx_cell_meta": json_doc(meta)})
+        assert decoded.xlsx_cell_meta == json_doc(meta)
+        assert decoded.numeric_lexeme == "0.1"
+
+    def test_cache_verification_without_payload_rejected(self) -> None:
+        # R21：缓存无载荷却宣称 program_verified 即拒绝，不把未知伪装成已核。
+        wire = encode_fact_value(_fact())
+        meta = to_wire_dict(
+            XlsxCellMeta(
+                sheet="Sheet1",
+                cell="C3",
+                cache_present=False,
+                cache_verification=VerificationState.PROGRAM_VERIFIED,
+            )
+        )
+        with pytest.raises(AgentValidationError) as exc:
+            decode_fact_value({**wire, "xlsx_cell_meta": json_doc(meta)})
+        expect_code(exc, "invalid_cache_state")
 
 
 class TestSourceReadAndEvidenceLinkCodec:
