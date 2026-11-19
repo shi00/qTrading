@@ -149,6 +149,7 @@ async def test_assemble_refuses_future_datasource_version(runtime_db_url: str) -
                 system_database_url=runtime_db_url,
                 application_version="0.11.7",
                 executor_id="epoch-test",
+                allow_shared_migration_credentials=True,  # 集成环境单 superuser 实例：显式共用
             )
         )
     # 强断言：拒绝消息点名冻结合同值与实际值，且不含连接 URL（R9 脱敏边界）

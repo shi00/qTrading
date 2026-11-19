@@ -40,7 +40,7 @@ from core.agent_types import (
 )
 from data.persistence.daos.agent_dao import AgentDao
 from data.persistence.embedded_postgres.protocol import ConnectionInfo
-from data.persistence.models import AgentAssetVersion, AgentSession
+from data.persistence.models import AgentAssetVersion, AgentCommand, AgentSession
 from tests._helpers import create_test_engine, make_alembic_cfg
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedded_real]
@@ -164,6 +164,36 @@ def _expect_error(excinfo: pytest.ExceptionInfo[AgentServiceError], code: AgentE
     assert err.code == code, f"expect {code.value}, got {err.code.value}: {err.sanitized_message}"
 
 
+async def _seed_transfer_command(url: str, command_record_id: str = "cmd-transfer") -> None:
+    """建草稿转移 fence 命令行。
+
+    ``agent_session.draft_transfer_ref`` 有 RESTRICT 外键指向
+    ``agent_command(user_scope, command_record_id)``（§9.3 循环 FK），
+    伪造转移引用必须先有真实命令事实，否则插入即被外键拒绝。
+    """
+
+    engine = create_test_engine(url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                insert(AgentCommand).values(
+                    user_scope=_USER,
+                    command_record_id=command_record_id,
+                    client_command_id=f"client-{command_record_id}",
+                    target_id="s1",
+                    command_kind="transfer_draft",
+                    session_id="s1",
+                    expected_revision=1,
+                    input_digest="0" * 64,
+                    commit_state="committed",
+                    delivery_state="not_delivered",
+                    consumption_state="not_consumed",
+                )
+            )
+    finally:
+        await engine.dispose()
+
+
 async def _mutate_session(url: str, **values: Any) -> None:
     engine = create_test_engine(url)
     try:
@@ -271,6 +301,7 @@ class TestReadDraft:
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao)
         await dao.save_draft(_save_command())
+        await _seed_transfer_command(real_embedded_pg.url)
         await _mutate_session(
             real_embedded_pg.url,
             draft_payload=None,

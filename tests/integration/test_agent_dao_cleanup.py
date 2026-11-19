@@ -502,7 +502,9 @@ async def test_full_cleanup_execution_verifies_native_and_app_domains(real_embed
     assert set(receipt.verified_counts.values()) == {0}
     assert receipt.tombstoned["agent_session"] == 1
     assert receipt.tombstoned["agent_asset_version"] == 1
-    assert receipt.tombstoned["agent_message"] == 0
+    # R2-I21：清理路径为集合内会话同事务追加 cleanup_changed 事件消息（1 会话 → 1 行），
+    # 该事件行同样在本次清理中被清空正文，故计数为 1 而非 0。
+    assert receipt.tombstoned["agent_message"] == 1
     assert receipt.tombstoned["agent_body_payload"] == 0
     assert loaded is not None
     assert loaded.phase is CleanupPhase.VERIFIED
