@@ -1480,12 +1480,24 @@ class TestI84ExternalBodyTailAndPagingLiveness:
         await _seed_execution(dao, "exec-a", "s-a")
         await _seed_round(dao, "round-a", "exec-a")
         await _seed_artifact(
-            dao, "art-page", "s-a", "exec-a", "round-a", created_at=datetime(2026, 6, 1, 11, 0, 0, tzinfo=UTC)
+            dao,
+            "art-page",
+            "s-a",
+            "exec-a",
+            "round-a",
+            created_at=datetime(2026, 6, 1, 11, 0, 0, tzinfo=UTC),
+            summary="原始成果摘要乙 ORIGINALSUMMARYTOKENEN",
         )
         for index in range(1, 8):
             await _seed_message(
                 dao, "s-a", f"pg{index}", execution_id="exec-a", round_id="round-a", body_text=f"分页消息{index}"
             )
+
+        # 修订前：降级正文的新词不可命中（证明后续命中来自修订，而非存量噪声）
+        before_revision = await dao.search_history(
+            _q(scope="current_session", session_id="s-a", query_text="REVISEDSUMMARYTOKENEN"), user_scope=USER_SCOPE
+        )
+        assert not before_revision.hits
 
         query = _q(scope="current_session", session_id="s-a", sort="oldest_first", limit=2)
         page1 = await dao.search_history(query, user_scope=USER_SCOPE)
@@ -1504,7 +1516,7 @@ class TestI84ExternalBodyTailAndPagingLiveness:
                     "UPDATE agent_artifact SET summary = :summary, updated_at = now(), "
                     "revision = revision + 1 WHERE user_scope = :u AND artifact_id = :a AND artifact_version = 1"
                 ),
-                {"summary": "修订后的成果摘要", "u": USER_SCOPE, "a": "art-page"},
+                {"summary": "修订成果摘要甲 REVISEDSUMMARYTOKENEN", "u": USER_SCOPE, "a": "art-page"},
             )
 
         seen: list[str] = [hit.message_id or hit.artifact_id or "" for hit in page1.hits]
@@ -1536,7 +1548,21 @@ class TestI84ExternalBodyTailAndPagingLiveness:
         assert "m-late" in fresh_message_ids
         assert len(fresh_message_ids) == 8
         art_hit = next(hit for hit in fresh.hits if hit.artifact_id == "art-page")
-        assert art_hit.summary_text == "修订后的成果摘要"
+        assert art_hit.summary_text == "修订成果摘要甲 REVISEDSUMMARYTOKENEN"
+
+        # 修订后可命中新内容（中英末段词），且旧正文词不再命中
+        revised_cn = await dao.search_history(
+            _q(scope="current_session", session_id="s-a", query_text="修订成果摘要甲"), user_scope=USER_SCOPE
+        )
+        assert [(hit.hit_kind, hit.artifact_id) for hit in revised_cn.hits] == [("artifact", "art-page")]
+        revised_en = await dao.search_history(
+            _q(scope="current_session", session_id="s-a", query_text="REVISEDSUMMARYTOKENEN"), user_scope=USER_SCOPE
+        )
+        assert [(hit.hit_kind, hit.artifact_id) for hit in revised_en.hits] == [("artifact", "art-page")]
+        stale = await dao.search_history(
+            _q(scope="current_session", session_id="s-a", query_text="ORIGINALSUMMARYTOKENEN"), user_scope=USER_SCOPE
+        )
+        assert not stale.hits
 
     async def test_external_body_without_search_projection_fails_closed(self, real_embedded_pg) -> None:
         dao = await _setup(real_embedded_pg.url)
