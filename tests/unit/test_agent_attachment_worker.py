@@ -534,9 +534,11 @@ def _xlsx_bytes(
     shared_strings: str | None = None,
     styles: str | None = None,
     sheet1: str | None = None,
+    sheet_state: str | None = None,
 ) -> bytes:
+    state = f' state="{sheet_state}"' if sheet_state else ""
     sheet_entries = "".join(
-        f'<sheet name="S{index}" sheetId="{index}" r:id="rId{index}"/>' for index in range(1, sheets + 1)
+        f'<sheet name="S{index}" sheetId="{index}"{state} r:id="rId{index}"/>' for index in range(1, sheets + 1)
     )
     workbook = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook {_NS} xmlns:r="{_OFFICE_REL}">
@@ -835,13 +837,13 @@ class TestXlsxExtraction:
 # ---------------------------------------------------------------------------
 
 
-def _xlsx_sheet1(rows_xml: str, *, dimension: str | None = None) -> bytes:
+def _xlsx_sheet1(rows_xml: str, *, dimension: str | None = None, cols_xml: str = "") -> bytes:
     """以自定义 sheet1.xml 构造最小样本（可声明与实际内容不符的 dimension）。"""
 
     dimension_tag = f'<dimension ref="{dimension}"/>' if dimension is not None else ""
     sheet = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-        f"<worksheet {_NS}>{dimension_tag}<sheetData>{rows_xml}</sheetData></worksheet>"
+        f"<worksheet {_NS}>{dimension_tag}{cols_xml}<sheetData>{rows_xml}</sheetData></worksheet>"
     )
     return _rewrite_xlsx(_xlsx_bytes(), replace={"xl/worksheets/sheet1.xml": sheet.encode("utf-8")})
 
@@ -1585,6 +1587,128 @@ class TestXlsxDualViewCleanup:
         assert parsed.read_state is ReadState.READY
         assert parsed.coverage == "full"
         assert parsed.stats["rows"] == 3
+
+
+# ---------------------------------------------------------------------------
+# XLSX 双视图按坐标配对与隐藏属性取证（I72）
+# ---------------------------------------------------------------------------
+
+
+class _CloseFailingWorkbook(_CountingWorkbook):
+    def close(self) -> None:
+        super().close()
+        raise RuntimeError("first view close failed")
+
+
+class TestXlsxDualViewClosePropagation:
+    def test_probe_close_error_still_closes_both_views(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 探针关闭抛错不得跳过两个 workbook 的释放，且异常要上报（不吞）。
+        formula_view = _CountingWorkbook(S1=_ProbeSheet([(_FakeCell(1, 1, "=1+1", "f"),)]))
+        cached_view = _CountingWorkbook(S1=_ProbeSheet([(_FakeCell(1, 1, 2),)]))
+
+        def _boom(self: Any) -> None:
+            raise RuntimeError("probe close failed")
+
+        monkeypatch.setattr(attachment_worker, "_load_openpyxl", lambda data: (formula_view, cached_view))
+        monkeypatch.setattr(attachment_worker.XlsxCacheProbe, "close", _boom)
+        with pytest.raises(RuntimeError, match="probe close failed"):
+            _parse(AttachmentKind.XLSX, _xlsx_sheet1('<row r="1"><c r="A1"><v>2</v></c></row>'))
+        assert formula_view.close_calls == 1
+        assert cached_view.close_calls == 1
+
+    def test_first_view_close_error_still_closes_second(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        formula_view = _CloseFailingWorkbook(S1=_ProbeSheet([(_FakeCell(1, 1, "=1+1", "f"),)]))
+        cached_view = _CountingWorkbook(S1=_ProbeSheet([(_FakeCell(1, 1, 2),)]))
+        monkeypatch.setattr(attachment_worker, "_load_openpyxl", lambda data: (formula_view, cached_view))
+        with pytest.raises(RuntimeError, match="first view close failed"):
+            _parse(AttachmentKind.XLSX, _xlsx_sheet1('<row r="1"><c r="A1"><v>2</v></c></row>'))
+        assert cached_view.close_calls == 1
+
+
+class TestXlsxDualViewCoordinates:
+    def test_missing_rows_do_not_shift_following_row_numbers(self) -> None:
+        # 物理行 2/3 不存在、行 4 首格不在 A 列：不得补造空行，也不得把 C4 记成 C3。
+        data = _xlsx_sheet1('<row r="1"><c r="A1"><v>1</v></c></row><row r="4"><c r="C4"><v>4</v></c></row>')
+        parsed = _parse(AttachmentKind.XLSX, data)
+        block = json.loads(parsed.blocks[0])
+        assert [row["row"] for row in block["rows"]] == [1, 4]
+        assert [cell["cell"] for cell in block["rows"][1]["cells"]] == ["C4"]
+        assert block["rows"][1]["cells"][0]["value"]["lexeme"] == "4"
+        assert parsed.stats["rows"] == 2
+        assert parsed.read_state is ReadState.READY
+
+    def test_row_starting_below_column_a_keeps_physical_row(self) -> None:
+        data = _xlsx_sheet1('<row r="2"><c r="B2"><v>2</v></c></row>')
+        parsed = _parse(AttachmentKind.XLSX, data)
+        block = json.loads(parsed.blocks[0])
+        assert [row["row"] for row in block["rows"]] == [2]
+        assert [cell["cell"] for cell in block["rows"][0]["cells"]] == ["B2"]
+
+    def test_extra_trailing_cell_is_not_silently_truncated(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 行尾多出一格：按坐标无法一对一核配，必须整表记未读而不是截短配对。
+        _patch_dual_views(
+            monkeypatch,
+            [(_FakeCell(1, 1, "=1+1", "f"),)],
+            [(_FakeCell(1, 1, 2), _FakeCell(1, 2, 3))],
+        )
+        atom = RowsRange(kind="rows", sheet="S1", start=1, end=1)
+        selection = Selection(kind="limited", ranges=(atom,))
+        parsed = _parse(AttachmentKind.XLSX, _xlsx_sheet1('<row r="1"><c r="A1"><v>2</v></c></row>'), selection)
+        assert parsed.read_state is ReadState.UNREAD
+        assert parsed.blocks == []
+        assert parsed.unread_ranges == [to_wire_dict(atom)]
+        assert any(item["code"] == "xlsx_dual_stream_mismatch" for item in parsed.limitations)
+
+
+class TestXlsxHiddenAttributes:
+    def _codes(self, parsed: Any) -> list[str]:
+        return [item["code"] for item in parsed.limitations]
+
+    def test_hidden_sheet_is_reported_without_blocking_read(self) -> None:
+        parsed = _parse(AttachmentKind.XLSX, _xlsx_bytes(sheet_state="hidden"))
+        assert parsed.read_state is ReadState.READY
+        assert parsed.stats["rows"] == 3
+        assert "xlsx_sheet_hidden" in self._codes(parsed)
+        limitation = next(item for item in parsed.limitations if item["code"] == "xlsx_sheet_hidden")
+        assert "hidden" in limitation["message"]
+
+    def test_hidden_rows_and_columns_are_reported(self) -> None:
+        rows = (
+            '<row r="1"><c r="A1"><v>1</v></c></row>'
+            '<row r="2" hidden="1"><c r="A2"><v>2</v></c></row>'
+            '<row r="3"><c r="A3"><v>3</v></c></row>'
+        )
+        cols = '<cols><col min="2" max="3" hidden="1"/></cols>'
+        parsed = _parse(AttachmentKind.XLSX, _xlsx_sheet1(rows, cols_xml=cols))
+        codes = self._codes(parsed)
+        assert "xlsx_hidden_rows" in codes
+        assert "xlsx_hidden_columns" in codes
+        row_message = next(item["message"] for item in parsed.limitations if item["code"] == "xlsx_hidden_rows")
+        column_message = next(item["message"] for item in parsed.limitations if item["code"] == "xlsx_hidden_columns")
+        assert "隐藏行：2" in row_message
+        assert "隐藏列：B-C" in column_message
+
+    def test_hidden_row_outside_selected_rows_is_not_reported(self) -> None:
+        rows = (
+            '<row r="1"><c r="A1"><v>1</v></c></row>'
+            '<row r="2" hidden="1"><c r="A2"><v>2</v></c></row>'
+            '<row r="3"><c r="A3"><v>3</v></c></row>'
+        )
+        selection = Selection(kind="limited", ranges=(RowsRange(kind="rows", sheet="S1", start=3, end=3),))
+        parsed = _parse(AttachmentKind.XLSX, _xlsx_sheet1(rows), selection)
+        assert "xlsx_hidden_rows" not in self._codes(parsed)
+
+    def test_unverifiable_hidden_attributes_are_reported_as_unknown(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 结构超界时不能把「隐藏属性未知」当成「全部可见」。
+        monkeypatch.setattr(attachment_worker, "MAX_SHEET_XML_BYTES", 10)
+        atom = RowsRange(kind="rows", sheet="S1", start=1, end=1)
+        parsed = _parse(
+            AttachmentKind.XLSX,
+            _xlsx_sheet1('<row r="1"><c r="A1"><v>1</v></c></row>'),
+            Selection(kind="limited", ranges=(atom,)),
+        )
+        assert parsed.read_state is ReadState.UNREAD
+        assert "xlsx_hidden_attributes_unverified" in self._codes(parsed)
 
 
 # ---------------------------------------------------------------------------

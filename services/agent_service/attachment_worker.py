@@ -678,6 +678,9 @@ MAX_SHEET_XML_BYTES: Final = 64 * 1024 * 1024
 MAX_PROBED_CELLS: Final = 200_000
 #: 实际行范围核定的行元素扫描上限（Excel 单表最大行数为 1,048,576）。
 MAX_PROBED_ROWS: Final = 1_048_576
+#: 单表上报的隐藏行/隐藏列区间样本上限（超出以计数与截断标记如实上报，I72）。
+MAX_REPORTED_HIDDEN_ROWS: Final = 256
+MAX_REPORTED_HIDDEN_COLUMNS: Final = 64
 #: XLSX 容器前置预算（I08）：在 openpyxl 分配前按中央目录声明值拒绝解压炸弹。
 MAX_XLSX_ENTRIES: Final = 4_096
 MAX_XLSX_ENTRY_BYTES: Final = 64 * 1024 * 1024
@@ -689,10 +692,16 @@ MAX_XLSX_STYLES_BYTES: Final = 16 * 1024 * 1024
 
 @dataclass(frozen=True, slots=True)
 class XlsxMetadata:
-    """容器预检得到的 workbook 元数据（只在预算门通过后解析一次）。"""
+    """容器预检得到的 workbook 元数据（只在预算门通过后解析一次）。
+
+    ``hidden_sheets`` 记录 workbook.xml 中 ``<sheet state=...>`` 为 hidden /
+    veryHidden 的表名与状态：openpyxl 的只读视图不保留该事实，必须由本层取证，
+    否则隐藏表会被当成普通可见表投递（I72）。
+    """
 
     sheet_paths: dict[str, str]
     date_epoch: str
+    hidden_sheets: dict[str, str] = field(default_factory=dict)
 
 
 def _xlsx_entry_key(name: str) -> str:
@@ -848,6 +857,7 @@ def _inspect_xlsx_container(data: bytes) -> XlsxMetadata:
         rel.get("Id"): (rel.get("Target", ""), rel.get("Type", "")) for rel in rels.findall(f"{_NS_REL}Relationship")
     }
     sheet_paths: dict[str, str] = {}
+    hidden_sheets: dict[str, str] = {}
     for sheet in workbook.findall(f"{_NS_MAIN}sheets/{_NS_MAIN}sheet"):
         name = sheet.get("name", "")
         rel_id = sheet.get(f"{_NS_OFFICE_REL}id", "")
@@ -865,7 +875,39 @@ def _inspect_xlsx_container(data: bytes) -> XlsxMetadata:
         if normalized not in by_name:
             continue
         sheet_paths[name] = normalized
-    return XlsxMetadata(sheet_paths=sheet_paths, date_epoch=date_epoch)
+        state = sheet.get("state", "")
+        if state in {"hidden", "veryHidden"}:
+            hidden_sheets[name] = state
+    return XlsxMetadata(sheet_paths=sheet_paths, date_epoch=date_epoch, hidden_sheets=hidden_sheets)
+
+
+def _xlsx_hidden_flag(value: str | None) -> bool:
+    """XML 布尔属性（``hidden="1"`` / ``"true"``）按真值判定。"""
+
+    return value in {"1", "true"}
+
+
+def _xlsx_column_span(min_text: str | None, max_text: str | None) -> tuple[int, int] | None:
+    """把 ``<col min max>`` 转成 1 基列区间；声明非法时返回 None（不猜）。"""
+
+    if not min_text or not max_text or not min_text.isdigit() or not max_text.isdigit():
+        return None
+    start, end = int(min_text), int(max_text)
+    if start < 1 or end < start:
+        return None
+    return start, end
+
+
+def _xlsx_merge_column_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """合并重叠/相邻的隐藏列区间（呈现用，保持升序）。"""
+
+    merged: list[list[int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(start, end) for start, end in merged]
 
 
 class XlsxCacheProbe:
@@ -876,6 +918,8 @@ class XlsxCacheProbe:
         self._sheet_paths = dict(metadata.sheet_paths)
         self._cache: dict[tuple[str, str], dict[str, Any] | None] = {}
         self._row_extents: dict[str, int | None] = {}
+        #: 每表隐藏行列取证结果；None 表示结构超界/不可读（未知，不等于可见）。
+        self._hidden: dict[str, dict[str, Any] | None] = {}
         self._probed_cells = 0
         self.date_epoch = metadata.date_epoch
 
@@ -937,12 +981,17 @@ class XlsxCacheProbe:
         声明可能大于实际内容（openpyxl 会按声明补空行）或小于实际内容
         （openpyxl 会按声明提前截断）。无法核定时返回 None，调用方必须按
         未读/部分真实上报，不得据此宣称完整读取（I20）。
+
+        同一遍扫描顺带取证隐藏行（``<row hidden>``）与隐藏列（``<col hidden>``）：
+        只读视图不暴露这两类属性，不在此处取证就等于把「源文件里不可见」伪装成
+        「可见」（I72）。
         """
 
         if sheet in self._row_extents:
             return self._row_extents[sheet]
         path = self._sheet_paths.get(sheet)
         extent: int | None = None
+        self._hidden[sheet] = None
         if path is not None:
             try:
                 info = self._zip.getinfo(path)
@@ -956,21 +1005,47 @@ class XlsxCacheProbe:
                     best = 0
                     current = 0
                     scanned = 0
+                    hidden_rows: list[int] = []
+                    hidden_columns: list[tuple[int, int]] = []
                     for _event, element in ElementTree.iterparse(handle, events=("end",)):
+                        if element.tag == f"{_NS_MAIN}col":
+                            # <cols> 位于 <sheetData> 之前；end 事件顺序即文档顺序。
+                            if _xlsx_hidden_flag(element.get("hidden")):
+                                span = _xlsx_column_span(element.get("min"), element.get("max"))
+                                if span is not None:
+                                    hidden_columns.append(span)
+                            element.clear()
+                            continue
                         if element.tag != f"{_NS_MAIN}row":
                             continue
                         ref = element.get("r")
                         current = int(ref) if ref and ref.isdigit() else current + 1
                         best = max(best, current)
                         scanned += 1
+                        if _xlsx_hidden_flag(element.get("hidden")) and len(hidden_rows) <= MAX_REPORTED_HIDDEN_ROWS:
+                            hidden_rows.append(current)
                         element.clear()
                         if scanned > MAX_PROBED_ROWS:
                             raise KeyError(path)
                     extent = best
+                    merged_columns = _xlsx_merge_column_spans(hidden_columns)
+                    self._hidden[sheet] = {
+                        "rows": tuple(hidden_rows[:MAX_REPORTED_HIDDEN_ROWS]),
+                        "rows_truncated": len(hidden_rows) > MAX_REPORTED_HIDDEN_ROWS,
+                        "columns": tuple(merged_columns[:MAX_REPORTED_HIDDEN_COLUMNS]),
+                        "columns_truncated": len(merged_columns) > MAX_REPORTED_HIDDEN_COLUMNS,
+                    }
             except (KeyError, zipfile.BadZipFile, ElementTree.ParseError, OSError):
+                # 结构不可核：行范围与隐藏属性都按未知上报，不冒充「可见/已读」。
                 extent = None
+                self._hidden[sheet] = None
         self._row_extents[sheet] = extent
         return extent
+
+    def hidden_attributes(self, sheet: str) -> dict[str, Any] | None:
+        """返回 ``row_extent`` 同遍取证到的隐藏行列；未知返回 None。"""
+
+        return self._hidden.get(sheet)
 
     def _scan_sheet(self, path: str, targets: set[str]) -> dict[str, dict[str, Any]]:
         found: dict[str, dict[str, Any]] = {}
@@ -1072,20 +1147,38 @@ def _formula_text(formula_cell: Any, xml_has_formula: bool | None) -> str | None
     return candidate if is_formula else None
 
 
-def _row_streams_aligned(formula_row: Any, cached_row: Any) -> bool:
-    """按坐标核配同一行的公式视图与缓存视图；长度或坐标不一致即不可核配。"""
+def _pair_row_cells(formula_row: Any, cached_row: Any) -> tuple[int | None, list[tuple[str, Any, Any]]] | None:
+    """按单元格坐标配对同一物理行的公式视图与缓存视图（I72）。
+
+    返回 ``None`` 表示不可核配（长度不等、仅一侧有坐标、坐标不同、同一行内
+    出现多个行号）；返回 ``(None, [])`` 表示两侧都是无坐标的填充空行（物理上
+    不存在此行内容，调用方跳过，不得补造行号）。否则返回该行真实行号与按坐标
+    配好的 ``(cell_ref, formula_cell, cached_cell)`` 列表。
+
+    不按索引截短配对：``zip(strict=False)`` 会把行尾多出的单元格静默丢弃，
+    使缓存视图与公式视图错位而无人发现。
+    """
 
     if len(formula_row) != len(cached_row):
-        return False
-    for formula_cell, cached_cell in zip(formula_row, cached_row, strict=False):
+        return None
+    pairs: list[tuple[str, Any, Any]] = []
+    row_number: int | None = None
+    for formula_cell, cached_cell in zip(formula_row, cached_row, strict=True):
         left = getattr(formula_cell, "coordinate", None)
         right = getattr(cached_cell, "coordinate", None)
         if left is None and right is None:
-            # 空单元格填充（openpyxl ``EMPTY_CELL``）无坐标，按索引对齐。
             continue
-        if left != right:
-            return False
-    return True
+        if not isinstance(left, str) or left != right:
+            return None
+        cell_row = getattr(formula_cell, "row", None)
+        if not isinstance(cell_row, int):
+            return None
+        if row_number is None:
+            row_number = cell_row
+        elif cell_row != row_number:
+            return None
+        pairs.append((left, formula_cell, cached_cell))
+    return row_number, pairs
 
 
 def _cache_meta(
@@ -1281,6 +1374,8 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
                 else (min(span[0] for span in target_spans), max(span[1] for span in target_spans))
             )
             extent = probe.row_extent(sheet_name)
+            visibility = probe.hidden_attributes(sheet_name)
+            limitations.extend(_xlsx_hidden_limitations(metadata.hidden_sheets, sheet_name, visibility, target_rows))
             formula_sheet = formulas[sheet_name]
             cached_sheet = cached[sheet_name]
             rows: list[dict[str, Any]] = []
@@ -1288,7 +1383,6 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
             # 长度 + 行间逗号，与 ``len(block)`` 同一口径（码点）。
             sheet_base_chars = len(json_doc({"kind": "xlsx_sheet", "sheet": sheet_name, "rows": []}))
             rows_chars = 0
-            row_number = 0
             last_completed_row = 0
             timed_out = False
             if extent is None:
@@ -1301,15 +1395,22 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
             formula_rows = formula_sheet.iter_rows(max_row=extent) if extent > 0 else ()
             cached_rows = cached_sheet.iter_rows(max_row=extent) if extent > 0 else ()
             stream_mismatch = False
-            # 双流必须按坐标逐行核配：任一视图行数不足或单元格坐标不一致都不得
-            # 静默截断/错位配对（I22），否则投递值会张冠李戴。
+            # 双流必须按坐标查对：任一视图行数不足、单元格坐标不一致或行号漂移都
+            # 不得静默截断/错位配对（I22/I72），否则投递值会张冠李戴。
             for formula_row, cached_row in itertools.zip_longest(formula_rows, cached_rows):
-                if formula_row is None or cached_row is None or not _row_streams_aligned(formula_row, cached_row):
+                if formula_row is None or cached_row is None:
                     stream_mismatch = True
                     break
-                first_cell = formula_row[0] if formula_row else None
-                physical_row = getattr(first_cell, "row", None)
-                row_number = physical_row if isinstance(physical_row, int) else row_number + 1
+                paired = _pair_row_cells(formula_row, cached_row)
+                if paired is None:
+                    stream_mismatch = True
+                    break
+                physical_row, cell_pairs = paired
+                if physical_row is None:
+                    # 两侧都是无坐标的填充空行：物理上不存在此行，补造行号会把缺行
+                    # 伪装成已读内容（I72）。
+                    continue
+                row_number = physical_row
                 if target_rows is not None and not (target_rows[0] <= row_number <= target_rows[1]):
                     continue
                 if time.monotonic() > deadline:
@@ -1327,13 +1428,6 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
                     break
                 total_rows += 1
                 budget.enforce_rows(total_rows)
-                cell_pairs: list[tuple[str, Any, Any]] = []
-                for index, (formula_cell, cached_cell) in enumerate(
-                    zip(formula_row, cached_row, strict=False), start=1
-                ):
-                    column = getattr(formula_cell, "column", None)
-                    column_index = column if isinstance(column, int) else index
-                    cell_pairs.append((f"{_column_letter(column_index)}{row_number}", formula_cell, cached_cell))
                 if probe is not None and cell_pairs:
                     # 全部单元格都需要 XML 证据（类型/原 lexeme/serial），不只公式格。
                     probe.prefetch(sheet_name, {cell_ref for cell_ref, _formula, _cached in cell_pairs})
@@ -1468,10 +1562,15 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
             unread_ranges=unread_ranges,
         )
     finally:
-        if probe is not None:
-            probe.close()
-        formulas.close()
-        cached.close()
+        # 任一 close 抛错都不得跳过其余已打开资源的释放，异常本身照常上报（不吞）。
+        try:
+            if probe is not None:
+                probe.close()
+        finally:
+            try:
+                formulas.close()
+            finally:
+                cached.close()
 
 
 def _xlsx_read_unread_atoms(
@@ -1582,6 +1681,67 @@ def _xlsx_row_spans(selection: Selection, sheet_name: str) -> list[tuple[int, in
                 "disjoint XLSX row ranges are not supported; only adjacent segments forming one continuous range",
             )
     return spans
+
+
+def _xlsx_hidden_limitations(
+    hidden_sheets: dict[str, str],
+    sheet_name: str,
+    visibility: dict[str, Any] | None,
+    target_rows: tuple[int, int] | None,
+) -> list[dict[str, str]]:
+    """把隐藏表/隐藏行/隐藏列取证结果转成选择结果里的限制记录（I72）。
+
+    ``visibility is None``（结构超界/不可读）按「无法核定」上报，不能静默当作
+    全部可见；隐藏行按所选行范围过滤，隐藏列对行轴选择意味着整表可见列都隐藏。
+    """
+
+    items: list[dict[str, str]] = []
+    state = hidden_sheets.get(sheet_name)
+    if state is not None:
+        items.append(_limitation("xlsx_sheet_hidden", f"工作表在源文件中被隐藏（state={state}），内容仍按所选范围读取"))
+    if visibility is None:
+        items.append(
+            _limitation(
+                "xlsx_hidden_attributes_unverified",
+                "工作表隐藏行列无法核定（结构超界或不可读），不能视为全部可见",
+            )
+        )
+        return items
+    hidden_rows = [row for row in visibility["rows"] if target_rows is None or target_rows[0] <= row <= target_rows[1]]
+    if hidden_rows:
+        message = f"所选范围包含隐藏行：{_xlsx_format_row_ranges(hidden_rows)}"
+        if visibility["rows_truncated"]:
+            message += f"（本表隐藏行超过 {MAX_REPORTED_HIDDEN_ROWS} 个，仅列前 {MAX_REPORTED_HIDDEN_ROWS} 个）"
+        items.append(_limitation("xlsx_hidden_rows", message))
+    if visibility["columns"]:
+        message = f"所选范围包含隐藏列：{_xlsx_format_column_ranges(visibility['columns'])}"
+        if visibility["columns_truncated"]:
+            message += (
+                f"（本表隐藏列区间超过 {MAX_REPORTED_HIDDEN_COLUMNS} 个，仅列前 {MAX_REPORTED_HIDDEN_COLUMNS} 个）"
+            )
+        items.append(_limitation("xlsx_hidden_columns", message))
+    return items
+
+
+def _xlsx_format_row_ranges(rows: list[int]) -> str:
+    """把行号压缩成 ``1,3-5`` 形式（呈现用，保持升序）。"""
+
+    spans: list[list[int]] = []
+    for row in sorted(rows):
+        if spans and row == spans[-1][1] + 1:
+            spans[-1][1] = row
+        else:
+            spans.append([row, row])
+    return ", ".join(str(start) if start == end else f"{start}-{end}" for start, end in spans)
+
+
+def _xlsx_format_column_ranges(spans: tuple[tuple[int, int], ...]) -> str:
+    """把列区间压缩成 ``B, D-F`` 形式（呈现用）。"""
+
+    return ", ".join(
+        _column_letter(start) if start == end else f"{_column_letter(start)}-{_column_letter(end)}"
+        for start, end in spans
+    )
 
 
 def _column_letter(index: int) -> str:
