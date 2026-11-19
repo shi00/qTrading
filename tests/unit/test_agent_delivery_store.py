@@ -309,6 +309,135 @@ class TestPublish:
         assert list(store_env.glob("*.superseded.*")) == []
 
 
+class TestConditionalSupersede:
+    """「移开已确认目标」的条件性：核验后窗口内的外部新文件不得被当旧目标移走或删除。"""
+
+    @staticmethod
+    def _identity(path: Path) -> tuple[int, int]:
+        stat_result = os.stat(path)
+        return int(stat_result.st_dev), _file_identity(stat_result)
+
+    @staticmethod
+    def _verified_guard(path: Path) -> _GuardedFile:
+        """核验后即释放句柄：无独占共享语义的平台不以句柄加锁，复现「核验之后」的窗口。"""
+
+        guard = _GuardedFile(path=path, fd=os.open(path, os.O_RDONLY))
+        guard.close()
+        return guard
+
+    @pytest.mark.parametrize("foreign", [b"external-new", b"old"])
+    def test_supersede_returns_foreign_file_in_window(
+        self, store_env: Path, monkeypatch: pytest.MonkeyPatch, foreign: bytes
+    ):
+        """核验后目标被外部置换：移走的不是已确认文件，必须放回并失败（同内容换文件同此）。"""
+
+        monkeypatch.setattr(delivery_module, "_IS_WINDOWS", False)
+        target_file = store_env / "out.txt"
+        target_file.write_bytes(b"old")
+        confirmed_identity = self._identity(target_file)
+        guard = self._verified_guard(target_file)
+        replacement = store_env / "external.tmp"
+        replacement.write_bytes(foreign)
+        os.replace(replacement, target_file)
+        backup = store_env / ".out.txt.superseded.0123456789abcdef"
+        with pytest.raises(DeliveryFileError) as exc:
+            guard.supersede_to(backup, expected_identity=confirmed_identity)
+        assert exc.value.code == "delivery_target_changed"
+        assert target_file.read_bytes() == foreign
+        assert not backup.exists()
+
+    def test_supersede_moves_the_verified_file(self, store_env: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(delivery_module, "_IS_WINDOWS", False)
+        target_file = store_env / "out.txt"
+        target_file.write_bytes(b"old")
+        identity = self._identity(target_file)
+        guard = self._verified_guard(target_file)
+        backup = store_env / ".out.txt.superseded.0123456789abcdef"
+        guard.supersede_to(backup, expected_identity=identity)
+        assert not target_file.exists()
+        assert backup.read_bytes() == b"old"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Windows 由独占句柄阻断，见下方 win32 用例")
+    def test_publish_posix_window_refuses_foreign_file(self, store_env: Path, monkeypatch: pytest.MonkeyPatch):
+        """发布流程：身份核验后、移开之前被外部置换 → 拒绝发布，外部新文件保持原位。"""
+
+        monkeypatch.setattr(delivery_module, "_IS_WINDOWS", False)
+        target_file = store_env / "out.txt"
+        target_file.write_bytes(b"old")
+        old_digest = hashlib.sha256(b"old").hexdigest()
+        store = WindowsManagedFileStore()
+        target = _target(store_env, exists=True, digest=old_digest)
+        staged = store.stage(target=target, content=_CONTENT, expected_digest=_DIGEST)
+        real_replace = os.replace
+        injected = {"done": False}
+
+        def racing_replace(source: str | os.PathLike[str], destination: str | os.PathLike[str]) -> None:
+            if not injected["done"] and Path(source) == target_file:
+                injected["done"] = True
+                replacement = store_env / "external.tmp"
+                replacement.write_bytes(b"external-new")
+                real_replace(replacement, target_file)
+            real_replace(source, destination)
+
+        monkeypatch.setattr(delivery_module.os, "replace", racing_replace)
+        with pytest.raises(DeliveryFileError) as exc:
+            store.publish(target=target, staged=staged)
+        assert exc.value.code == "delivery_target_changed"
+        assert target_file.read_bytes() == b"external-new"
+        assert staged.path.read_bytes() == _CONTENT
+        assert list(store_env.glob("*.superseded.*")) == []
+
+    def test_publish_refuses_when_backup_name_is_taken(self, store_env: Path, monkeypatch: pytest.MonkeyPatch):
+        """备份名已被他人占用：拒绝发布且不覆盖该文件、不移走已确认目标。"""
+
+        target_file = store_env / "out.txt"
+        target_file.write_bytes(b"old")
+        old_digest = hashlib.sha256(b"old").hexdigest()
+        occupied = store_env / ".out.txt.superseded.occupied"
+        occupied.write_bytes(b"someone-else")
+        monkeypatch.setattr(delivery_module, "_superseded_name", lambda path: occupied)
+        store = WindowsManagedFileStore()
+        target = _target(store_env, exists=True, digest=old_digest)
+        staged = store.stage(target=target, content=_CONTENT, expected_digest=_DIGEST)
+        with pytest.raises(DeliveryFileError) as exc:
+            store.publish(target=target, staged=staged)
+        assert exc.value.code == "delivery_target_changed"
+        assert occupied.read_bytes() == b"someone-else"
+        assert target_file.read_bytes() == b"old"
+        assert staged.path.read_bytes() == _CONTENT
+
+    def test_publish_windows_exclusive_handle_blocks_foreign_replace(
+        self, store_env: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Windows：独占句柄期间外部替换被拒，发布仍作用于已确认文件且不触碰外部文件。"""
+
+        if sys.platform != "win32":
+            pytest.skip("独占共享语义仅在 Windows 成立")
+        target_file = store_env / "out.txt"
+        target_file.write_bytes(b"old")
+        old_digest = hashlib.sha256(b"old").hexdigest()
+        store = WindowsManagedFileStore()
+        target = _target(store_env, exists=True, digest=old_digest)
+        staged = store.stage(target=target, content=_CONTENT, expected_digest=_DIGEST)
+        replacement = store_env / "external.tmp"
+        blocked: list[OSError] = []
+        real_supersede = _GuardedFile.supersede_to
+
+        def probe(self: _GuardedFile, destination: Path, *, expected_identity: tuple[int, int]) -> None:
+            replacement.write_bytes(b"external-new")
+            try:
+                os.replace(replacement, target_file)
+            except OSError as exc:
+                blocked.append(exc)
+            real_supersede(self, destination, expected_identity=expected_identity)
+
+        monkeypatch.setattr(_GuardedFile, "supersede_to", probe)
+        store.publish(target=target, staged=staged)
+        assert blocked and isinstance(blocked[0], PermissionError)
+        assert target_file.read_bytes() == _CONTENT
+        assert replacement.read_bytes() == b"external-new"
+
+
 class TestCancel:
     def test_cancel_removes_staged(self, store_env: Path):
         store = WindowsManagedFileStore()

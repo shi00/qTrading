@@ -7,6 +7,8 @@
 - 覆盖只作用于「用户确认过的那个文件」：句柄身份不符（同摘要异文件、预检后被
   置换）即拒绝，绝不按路径重新猜测；确认过的目标先移到同目录私有备份名，再把
   暂存文件以「不覆盖」方式移入，因此任何第三方新文件都不会被本次发布覆掉；
+  「移开已确认目标」本身也是条件替换：移开后按备份名复核身份，窗口内被外部
+  置换的就不是已确认文件，必须放回原处并失败（见 ``_GuardedFile.supersede_to``）；
 - 发布后用目标重新计算摘要与文件身份；无法确证即 ``unknown``——不把无法确证的
   结果报告成发布成功；
 - 取消只清理「身份与摘要均与暂存记录一致」的暂存文件；路径被他人替换或文件被
@@ -18,8 +20,10 @@
   身份即路径身份。改名与删除经 ``SetFileInformationByHandle``（``FileRenameInfo``
   / ``FileDispositionInfo``）作用在句柄上，不再按路径重开；移入目标用
   ``ReplaceIfExists=0``，目标已存在即失败（不覆盖）。
-- POSIX：无独占共享语义，退化为描述符 ``fstat`` 核对身份 + ``link``/``rename``
-  不覆盖移入（尽力而为；本模块的产品平台为 Windows）。
+- POSIX：无独占共享语义，描述符 ``fstat`` 只能证明「核验时该路径是谁」，不能阻止
+  核验后被置换；因此「移开已确认目标」改为原子改名后立即按新名复核身份，不符即
+  放回原处并失败（放回失败也只是把外部文件留在私有备份名，绝不删除或覆盖），
+  移入仍用 ``link`` 不覆盖（本模块的产品平台为 Windows）。
 
 禁止事项：不执行任意 Shell、不写确认范围外路径、不把暂存文件当成功成果、
 不在事件循环线程直接调用本模块（调用方须经 ``ThreadPoolManager``）。
@@ -314,9 +318,9 @@ def _win32_api() -> _Win32FileApi:
 class _GuardedFile:
     """持有已核身份的文件句柄；Windows 上独占期间路径不可被他人替换。
 
-    改名/删除都作用在句柄上（Windows）或先经 ``fstat`` 核对再按路径执行
-    （POSIX），因此调用方可以先核身份、再执行变更，而不会把「核验过的文件」
-    与「真正被变更的文件」分开。
+    改名/删除都作用在句柄上（Windows），或先经 ``fstat`` 核对身份、再按路径执行
+    并在变更后复核身份（POSIX），因此调用方可以先核身份、再执行变更，而不会把
+    「核验过的文件」与「真正被变更的文件」分开。
     """
 
     def __init__(self, *, path: Path, fd: int) -> None:
@@ -347,9 +351,48 @@ class _GuardedFile:
 
         if _IS_WINDOWS:
             _win32_api().rename(self._fd, destination)
+            self._path = destination
             return
         os.link(self._path, destination)
         os.unlink(self._path)
+        self._path = destination
+
+    def supersede_to(self, destination: Path, *, expected_identity: tuple[int, int]) -> None:
+        """把已核身份的目标移为私有备份，并复核「移走的仍是已核文件」。
+
+        Windows 独占句柄期间该路径条目不可被他人替换或删除，句柄改名必然作用于
+        已核文件（平台保证条件性）；无独占共享语义的平台只能在改名后复核：窗口
+        内被外部置换的文件不是已核文件，即原样放回并失败，绝不删除或覆盖它。
+        """
+
+        original = self._path
+        if _IS_WINDOWS:
+            _win32_api().rename(self._fd, destination)
+            self._path = destination
+            return
+        # 备份名先以 O_EXCL 由本进程建立（绝不覆盖既有文件），再原子改名覆盖这个空占位。
+        placeholder = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(placeholder)
+        try:
+            os.replace(original, destination)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(destination)
+            raise
+        self._path = destination
+        try:
+            moved_stat = os.lstat(destination)
+            moved_identity: tuple[int, int] | None = (int(moved_stat.st_dev), _file_identity(moved_stat))
+        except (OSError, DeliveryFileError):
+            moved_identity = None
+        if moved_identity == expected_identity:
+            return
+        self._path = original
+        # 放回窗口内被移开的外部文件；原目标名已被再次占用时保留在私有备份名，不删除。
+        with contextlib.suppress(OSError):
+            os.link(destination, original)
+            os.unlink(destination)
+        raise DeliveryFileError("delivery_target_changed", "target changed between verification and supersede")
 
     def delete(self) -> None:
         if _IS_WINDOWS:
@@ -455,10 +498,10 @@ class WindowsManagedFileStore:
                 message="staged content changed before publish",
             )
             if target.expected_existing:
-                superseded = self._open_confirmed_target(target_path, target, staged)
+                superseded, confirmed_identity = self._open_confirmed_target(target_path, target, staged)
                 backup_path = _superseded_name(target_path)
                 try:
-                    superseded.move_to(backup_path)
+                    superseded.supersede_to(backup_path, expected_identity=confirmed_identity)
                 except OSError as exc:
                     raise DeliveryFileError(
                         "delivery_target_changed", "target cannot be superseded by the confirmed publish"
@@ -553,7 +596,7 @@ class WindowsManagedFileStore:
         target_path: Path,
         target: DeliveryTarget,
         staged: StagedFile,
-    ) -> _GuardedFile:
+    ) -> tuple[_GuardedFile, tuple[int, int]]:
         """独占打开目标并核验「就是确认时那个文件」；不符即拒绝，绝不按路径臆测。"""
 
         if staged.confirmed_target_volume_serial is None or staged.confirmed_target_file_id is None:
@@ -576,7 +619,7 @@ class WindowsManagedFileStore:
             with contextlib.suppress(OSError):
                 guard.close()
             raise
-        return guard
+        return guard, identity
 
     @staticmethod
     def _restore_superseded(
