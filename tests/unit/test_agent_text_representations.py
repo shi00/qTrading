@@ -99,6 +99,13 @@ class TestRecordEventTextRepresentations:
             await _dao(conn).record_event(_request(body_text="正文", body_untrusted="yes"))
         assert exc_info.value.code == AgentErrorCode.INPUT_INVALID
 
+    async def test_untrusted_without_inline_text_rejected(self) -> None:
+        """外置正文无法派生模型可见投影：不静默丢弃不可信标记。"""
+        conn = _CaptureConn()
+        with pytest.raises(AgentServiceError) as exc_info:
+            await _dao(conn).record_event(_request(body_ref="body-1", body_untrusted=True))
+        assert exc_info.value.code == AgentErrorCode.INPUT_INVALID
+
     async def test_body_ref_row_projects_public_search_text(self) -> None:
         conn = _CaptureConn()
         await _dao(conn).record_event(_request(body_ref="body-1", search_text="摘录 token=secret-value"))

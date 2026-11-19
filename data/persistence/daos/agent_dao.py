@@ -4992,6 +4992,10 @@ class AgentDao(BaseDao):
             )
         if not isinstance(request.body_untrusted, bool):
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "body_untrusted must be bool", identity_str)
+        if request.body_untrusted and request.body_text is None:
+            # 外置正文（body_ref）无法在此处派生模型可见投影；静默丢弃来源标记会让
+            # 不可信文本被当作无标记内容，故显式拒绝。
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "body_untrusted requires body_text", identity_str)
         # 三表示单一转换点（I76）：原值落 body_text，模型可见/公开导出分别落
         # model_text / search_text；不信任调用方自行处理的投影。
         representations = _text_representations(request.body_text, untrusted=request.body_untrusted)
