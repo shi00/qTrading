@@ -28,6 +28,7 @@ import pytest
 from mcp.client.stdio import get_default_environment
 
 from core.agent_types import AgentErrorCode, AgentServiceError, MCPBudgetProfile, MCPServiceIdentity, MCPTransportKind
+from services.agent_service import mcp_fastmcp
 from services.agent_service.mcp import MCPServerConfig, MCPTransportConfig
 from services.agent_service.mcp_budget import MCPBudgetGuard, MCPDeadline
 from services.agent_service.mcp_fastmcp import (
@@ -138,6 +139,18 @@ class TestStdioEnvironmentBaseline:
         # 白名单不得漏掉解释器启动必需项，否则子进程根本起不来（上方 subprocess 已能启动）。
         assert "PATH" in keys
 
+    def test_proxy_and_sdk_variables_are_not_inherited(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """父进程的代理与 SDK 注入变量（非进程启动必需）不得进入子进程环境。"""
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:8080")
+        monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:8080")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", _SENTINEL_VALUE)
+        monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "synthetic-sdk-entrypoint")
+
+        env = _build_stdio_env((), temp_dir=tmp_path)
+
+        for key in ("HTTPS_PROXY", "HTTP_PROXY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_ENTRYPOINT"):
+            assert key not in env
+
 
 class TestManagedTempDirectory:
     def test_temp_and_tmp_point_to_managed_directory(self) -> None:
@@ -235,3 +248,22 @@ class TestManagedTempDirectory:
         assert excinfo.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
         assert created
         assert not created[0].temp_dir.exists()
+
+    async def test_temp_directory_creation_failure_fails_before_any_spawn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """受管目录创建失败须在派发前显式失败，不得静默降级或启动子进程。"""
+
+        def _fail_mkdtemp(*args: Any, **kwargs: Any) -> str:
+            raise OSError("mkdtemp boom")
+
+        def _no_client(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("临时目录创建失败时不得构造 client / 启动子进程")
+
+        monkeypatch.setattr(mcp_fastmcp.tempfile, "mkdtemp", _fail_mkdtemp)
+        monkeypatch.setattr(mcp_fastmcp, "Client", _no_client)
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await FastMCPClientFactory().open(_config())
+
+        assert excinfo.value.code is AgentErrorCode.CONFIG_UNAVAILABLE

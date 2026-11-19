@@ -171,6 +171,33 @@ class TestStdioFieldAdmission:
         assert exc.value.code == "invalid_transport"
         assert ".cwd" in str(exc.value)
 
+    def test_cwd_must_exist(self, tmp_path: Path) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            validate_transport_config(_stdio_transport(cwd=str(tmp_path / "missing-dir")))
+        assert exc.value.code == "invalid_transport"
+        assert ".cwd" in str(exc.value)
+
+    def test_cwd_must_be_a_directory(self, tmp_path: Path) -> None:
+        target = tmp_path / "not-a-dir"
+        target.write_text("x", encoding="utf-8")
+        with pytest.raises(AgentValidationError) as exc:
+            validate_transport_config(_stdio_transport(cwd=str(target)))
+        assert exc.value.code == "invalid_transport"
+        assert ".cwd" in str(exc.value)
+
+    def test_cwd_must_be_accessible(self, tmp_path: Path) -> None:
+        directory = tmp_path / "locked-dir"
+        directory.mkdir()
+        directory.chmod(0o000)
+        try:
+            if os.access(directory, os.R_OK | os.X_OK):
+                pytest.skip("permission bits not enforced (root/superuser or non-POSIX)")
+            with pytest.raises(AgentValidationError) as exc:
+                validate_transport_config(_stdio_transport(cwd=str(directory)))
+            assert "not accessible" in str(exc.value)
+        finally:
+            directory.chmod(0o700)
+
     def test_command_must_exist(self, tmp_path: Path) -> None:
         with pytest.raises(AgentValidationError) as exc:
             validate_transport_config(_stdio_transport(command=str(tmp_path / "missing.exe")))
@@ -274,6 +301,7 @@ class TestLoadRecheckBeforeConnect:
             _config(display_name="   "),
             _config(transport=_http_transport(http_risk_approved=False)),
             _config(transport=_stdio_transport(command=str(Path(sys.executable).parent / "missing.exe"))),
+            _config(transport=_stdio_transport(cwd=str(Path(sys.executable).parent / "missing-cwd"))),
         ],
     )
     async def test_tampered_stored_config_is_refused_with_zero_open(self, tampered: MCPServerConfig) -> None:

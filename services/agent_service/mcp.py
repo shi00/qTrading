@@ -132,8 +132,9 @@ def _validate_http_headers(headers: tuple[tuple[str, str], ...], path: str) -> N
 def validate_transport_config(config: MCPTransportConfig, path: str = "$.mcp.transport") -> None:
     """传输配置校验：只接受合同内形状，不做 shell 展开或隐式协议互换。
 
-    静态可判定项在此一次查清（cwd 必填/绝对、可执行文件存在且可执行、Header 安全引用、
-    HTTP 风险显式确认）；OS 仍可能拒绝启动坏程序，故本函数不主张「必成功启动」。
+    静态可判定项在此一次查清（cwd 必填/绝对/存在且为可访问目录、可执行文件存在且可执行、
+    Header 安全引用、HTTP 风险显式确认）；无效工作目录在派发前即拒绝，不等到 spawn
+    失败才暴露。OS 仍可能拒绝启动坏程序，故本函数不主张「必成功启动」。
     """
 
     if not isinstance(config.kind, MCPTransportKind):
@@ -157,8 +158,13 @@ def validate_transport_config(config: MCPTransportConfig, path: str = "$.mcp.tra
             _fail_transport("stdio must not carry a url", f"{path}.url")
         if not isinstance(config.cwd, str) or not config.cwd:
             _fail_transport("stdio requires a working directory", f"{path}.cwd")
-        if not Path(config.cwd).is_absolute():
+        cwd_path = Path(config.cwd)
+        if not cwd_path.is_absolute():
             _fail_transport("stdio cwd must be an absolute path", f"{path}.cwd")
+        if not cwd_path.is_dir():
+            _fail_transport("stdio cwd must be an existing directory", f"{path}.cwd")
+        if not os.access(cwd_path, os.R_OK | os.X_OK):
+            _fail_transport("stdio cwd is not accessible", f"{path}.cwd")
         if config.headers or config.http_risk_approved:
             _fail_transport("stdio must not carry http-only fields", path)
         for arg in config.args:
