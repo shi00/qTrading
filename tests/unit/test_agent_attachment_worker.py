@@ -699,6 +699,30 @@ class TestXlsxExtraction:
         assert chars is not None
         assert chars > len(" a \n b ")
 
+    def test_empty_sheet_block_participates_in_codepoint_budget(self) -> None:
+        # I71：零行工作表的投递块（{"kind":"xlsx_sheet","rows":[]...}）没有逐行增量检查，
+        # 其块长同样必须计入字符预算，否则「送出/保存的全部表示」可绕过限额。
+        empty_sheet = (
+            f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet {_NS}><sheetData/></worksheet>'
+        )
+        data = _xlsx_bytes(sheet1=empty_sheet)
+        parsed = _parse(AttachmentKind.XLSX, data)
+        assert len(parsed.blocks) == 1
+        block_chars = len(parsed.blocks[0])
+        assert parsed.stats["chars"] == block_chars
+        assert block_chars > 0
+        # 恰等通过、少一码点拒绝（此前该块完全不经预算判定，少一也会通过）。
+        assert (
+            _parse(AttachmentKind.XLSX, data, budget=AttachmentBudget(max_codepoints=block_chars)).stats["chars"]
+            == block_chars
+        )
+        assert (
+            _limit_of(
+                data, Selection(kind="all"), AttachmentBudget(max_codepoints=block_chars - 1), AttachmentKind.XLSX
+            )
+            == "attachment_codepoints_exceeded"
+        )
+
     def test_sheet_limit_exact_passes_and_plus_one_rejected(self) -> None:
         data = _xlsx_bytes(sheets=2)
         exact = _parse(

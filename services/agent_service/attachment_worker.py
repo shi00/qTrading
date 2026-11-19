@@ -1407,6 +1407,8 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
             if timed_out:
                 if rows_axis and rows:
                     # rows 轴：已完成行是真实已读内容，必须与 read_ranges 的前缀一致地投递。
+                    # 预算按投递块整体复核：空行块与增量检查外的块长也计入（I71）。
+                    budget.enforce_codepoints(frozen_chars + len(block))
                     blocks.append(block)
                     frozen_chars += len(block)
                 else:
@@ -1424,10 +1426,12 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
                 if read_end >= target_rows[0]:
                     row_read_ends[sheet_name] = read_end
                     read_sheets.append(sheet_name)
+                    budget.enforce_codepoints(frozen_chars + len(block))
                     blocks.append(block)
                     frozen_chars += len(block)
                 continue
             read_sheets.append(sheet_name)
+            budget.enforce_codepoints(frozen_chars + len(block))
             blocks.append(block)
             frozen_chars += len(block)
 
