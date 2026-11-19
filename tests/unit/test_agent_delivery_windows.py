@@ -29,11 +29,21 @@ _DIGEST = hashlib.sha256(_CONTENT).hexdigest()
 def _target(
     path: Path, *, existing: bool = False, digest: str | None = None, confirmed: bool = False
 ) -> DeliveryTarget:
+    """``existing=True`` 时绑定当前文件身份（覆盖确认必须带原文件身份）。"""
+
+    volume_serial: int | None = None
+    file_id: int | None = None
+    if existing:
+        stat_result = os.stat(path)
+        volume_serial = int(stat_result.st_dev)
+        file_id = _file_identity(stat_result)
     return DeliveryTarget(
         target_path=str(path),
         expected_existing=existing,
         expected_existing_digest=digest,
         overwrite_confirmed=confirmed,
+        expected_volume_serial=volume_serial,
+        expected_file_id=file_id,
     )
 
 

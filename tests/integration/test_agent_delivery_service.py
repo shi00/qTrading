@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -265,6 +266,9 @@ class TestCancelKeepsOldTarget:
                 expected_existing=True,
                 expected_existing_digest=old_digest,
                 overwrite_confirmed=True,
+                # 覆盖确认绑定原文件身份：同摘要异文件不得沿用本次确认（I79）。
+                expected_volume_serial=int(os.stat(target).st_dev),
+                expected_file_id=int(os.stat(target).st_ino),
             ),
         )
 

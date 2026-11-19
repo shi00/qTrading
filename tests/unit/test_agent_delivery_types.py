@@ -32,6 +32,10 @@ from core.agent_types import (
 _TIMESTAMP = "2026-11-15T08:00:00.000000Z"
 
 
+_VOLUME_SERIAL = 7
+_FILE_ID = 11
+
+
 def _target(**overrides: object) -> DeliveryTarget:
     base = DeliveryTarget(
         target_path="C:\\Users\\admin\\Desktop\\result.md",
@@ -39,7 +43,11 @@ def _target(**overrides: object) -> DeliveryTarget:
         expected_existing_digest=None,
         overwrite_confirmed=False,
     )
-    return replace(base, **overrides)
+    target = replace(base, **overrides)
+    if target.expected_existing and target.expected_volume_serial is None and target.expected_file_id is None:
+        # 覆盖确认必须绑定原文件身份（I79）；旧记录只带摘要时由使用方 fail-closed。
+        target = replace(target, expected_volume_serial=_VOLUME_SERIAL, expected_file_id=_FILE_ID)
+    return target
 
 
 def _command(**overrides: object) -> ArtifactDeliveryCommand:
@@ -124,6 +132,8 @@ class TestDeliveryTarget:
             "expected_existing": False,
             "expected_existing_digest": None,
             "overwrite_confirmed": False,
+            "expected_volume_serial": None,
+            "expected_file_id": None,
         }
         assert decode_delivery_target(wire) == target
 
@@ -136,6 +146,50 @@ class TestDeliveryTarget:
         with pytest.raises(AgentValidationError) as unconfirmed:
             encode_delivery_target(replace(existing, overwrite_confirmed=False))
         assert unconfirmed.value.code == "unconfirmed_overwrite"
+
+    def test_existing_target_requires_file_identity(self) -> None:
+        """覆盖确认缺文件身份即拒绝编码：只凭摘要会让「同内容异文件」沿用旧确认（I79）。"""
+
+        existing = _target(expected_existing=True, expected_existing_digest="c" * 64, overwrite_confirmed=True)
+        no_volume = replace(existing, expected_volume_serial=None)
+        with pytest.raises(AgentValidationError) as volume:
+            encode_delivery_target(no_volume)
+        assert volume.value.code == "invalid_value"
+        no_file_id = replace(existing, expected_file_id=None)
+        with pytest.raises(AgentValidationError) as file_id:
+            encode_delivery_target(no_file_id)
+        assert file_id.value.code == "invalid_value"
+        zero_file_id = replace(existing, expected_file_id=0)
+        with pytest.raises(AgentValidationError) as zero:
+            encode_delivery_target(zero_file_id)
+        assert zero.value.code == "invalid_value"
+
+    def test_non_existing_target_rejects_file_identity(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            encode_delivery_target(_target(expected_volume_serial=_VOLUME_SERIAL, expected_file_id=_FILE_ID))
+        assert exc.value.code == "invalid_value"
+
+    def test_legacy_wire_without_identity_decodes(self) -> None:
+        """旧记录只有 4 键：解码成功且身份为 None（使用方必须 fail-closed 拒绝覆盖）。"""
+
+        wire = {
+            "target_path": "C:\\Users\\admin\\Desktop\\result.md",
+            "expected_existing": True,
+            "expected_existing_digest": "c" * 64,
+            "overwrite_confirmed": True,
+        }
+        decoded = decode_delivery_target(wire)
+        assert decoded.expected_volume_serial is None
+        assert decoded.expected_file_id is None
+
+    def test_half_identity_rejected(self) -> None:
+        wire = encode_delivery_target(
+            _target(expected_existing=True, expected_existing_digest="c" * 64, overwrite_confirmed=True)
+        )
+        wire["expected_file_id"] = None
+        with pytest.raises(AgentValidationError) as exc:
+            decode_delivery_target(wire)
+        assert exc.value.code == "invalid_value"
 
     def test_non_existing_target_rejects_digest_or_confirmation(self) -> None:
         with pytest.raises(AgentValidationError) as digest:
@@ -266,6 +320,14 @@ class TestDeliveryReceipt:
 
 
 _STAGED_PATH = "C:\\Users\\admin\\Desktop\\.result.md.abc.staged"
+#: ``staged`` 起的阶段字段：输出摘要/字节、暂存路径与暂存句柄身份（I79）。
+_STAGED_FIELDS: dict[str, object] = {
+    "output_digest": "e" * 64,
+    "output_bytes": 12,
+    "staged_path": _STAGED_PATH,
+    "staged_volume_serial": _VOLUME_SERIAL,
+    "staged_file_id": _FILE_ID,
+}
 
 
 def _manifest(**overrides: object) -> DeliveryManifest:
@@ -294,15 +356,68 @@ class TestDeliveryManifest:
     def test_roundtrip_across_phases(self) -> None:
         samples = (
             _manifest(),
-            _manifest(phase="staged", output_digest="e" * 64, output_bytes=12, staged_path=_STAGED_PATH),
-            _manifest(phase="validated", output_digest="e" * 64, output_bytes=12, staged_path=_STAGED_PATH),
-            _manifest(phase="publish_claimed", output_digest="e" * 64, output_bytes=12, staged_path=_STAGED_PATH),
+            _manifest(phase="staged", **_STAGED_FIELDS),
+            _manifest(phase="validated", **_STAGED_FIELDS),
+            _manifest(phase="publish_claimed", **_STAGED_FIELDS),
             _manifest(phase="published_confirmed", output_digest="e" * 64, output_bytes=12),
             _manifest(phase="cancelled_before_publish"),
+            _manifest(phase="unknown", **_STAGED_FIELDS, error_code="delivery_publish_unverified"),
             _manifest(phase="unknown", error_code="delivery_publish_unverified"),
         )
         for manifest in samples:
             assert decode_delivery_manifest(encode_delivery_manifest(manifest)) == manifest
+
+    def test_staged_phases_require_staged_identity(self) -> None:
+        """``staged`` 起必须带暂存句柄身份：中断后只能按身份核对原交付（I79）。"""
+
+        for phase in ("staged", "validated", "publish_claimed"):
+            with pytest.raises(AgentValidationError) as exc:
+                encode_delivery_manifest(
+                    _manifest(
+                        phase=phase,
+                        output_digest="e" * 64,
+                        output_bytes=12,
+                        staged_path=_STAGED_PATH,
+                    )
+                )
+            assert exc.value.code == "missing_field"
+
+    def test_half_staged_identity_rejected(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            encode_delivery_manifest(
+                _manifest(
+                    phase="staged",
+                    output_digest="e" * 64,
+                    output_bytes=12,
+                    staged_path=_STAGED_PATH,
+                    staged_volume_serial=_VOLUME_SERIAL,
+                )
+            )
+        assert exc.value.code == "invalid_value"
+
+    def test_published_rejects_staged_identity(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            encode_delivery_manifest(
+                _manifest(
+                    phase="published_confirmed",
+                    output_digest="e" * 64,
+                    output_bytes=12,
+                    staged_volume_serial=_VOLUME_SERIAL,
+                    staged_file_id=_FILE_ID,
+                )
+            )
+        assert exc.value.code == "invalid_delivery_phase"
+
+    def test_legacy_wire_without_staged_identity_decodes(self) -> None:
+        """旧记录（16 键）仍可查回：缺暂存身份时解码为 None，不得因读失败丢弃证据。"""
+
+        wire = encode_delivery_manifest(_manifest())
+        assert "staged_volume_serial" in wire and "staged_file_id" in wire
+        wire.pop("staged_volume_serial")
+        wire.pop("staged_file_id")
+        decoded = decode_delivery_manifest(wire)
+        assert decoded.staged_volume_serial is None
+        assert decoded.staged_file_id is None
 
     def test_staged_phase_requires_output_and_staged_path(self) -> None:
         with pytest.raises(AgentValidationError) as missing_output:

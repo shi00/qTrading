@@ -135,16 +135,6 @@ def _file_identity(stat_result: os.stat_result) -> int:
     return file_id
 
 
-def _require_identity(snapshot: FileSnapshot) -> tuple[int, int]:
-    """快照 → (卷序列号, 文件 ID)；身份缺失即拒绝（不得退化为「同内容即同一文件」）。"""
-
-    if snapshot.volume_serial is None or snapshot.file_id is None or snapshot.file_id == 0:
-        raise DeliveryFileError(
-            "delivery_file_identity_unavailable", "target volume does not expose a stable file identity"
-        )
-    return int(snapshot.volume_serial), int(snapshot.file_id)
-
-
 def _stage_prefix(target_name: str, name_hint: str | None) -> str:
     if name_hint is None:
         return f".{target_name}."
@@ -434,7 +424,19 @@ class WindowsManagedFileStore:
         parent_id = _file_identity(parent_stat)
         snapshot = _snapshot(target_path)
         self._assert_target_matches(snapshot, target, phase="stage")
-        confirmed_identity = _require_identity(snapshot) if snapshot.exists else (None, None)
+        # 发布只允许覆盖「用户确认时那个文件」：身份取自确认，不取暂存时的快照。
+        confirmed_identity: tuple[int, int] | tuple[None, None]
+        if target.expected_existing:
+            volume_serial = target.expected_volume_serial
+            file_id = target.expected_file_id
+            if volume_serial is None or file_id is None:  # pragma: no cover - _assert_target_matches 已拒绝该情形
+                raise DeliveryFileError(
+                    "delivery_confirmation_identity_missing",
+                    "overwrite confirmation does not carry the confirmed target file identity",
+                )
+            confirmed_identity = (volume_serial, file_id)
+        else:
+            confirmed_identity = (None, None)
         prefix = _stage_prefix(target_path.name, name_hint)
         handle, raw_path = tempfile.mkstemp(
             prefix=prefix,
@@ -599,9 +601,20 @@ class WindowsManagedFileStore:
     ) -> tuple[_GuardedFile, tuple[int, int]]:
         """独占打开目标并核验「就是确认时那个文件」；不符即拒绝，绝不按路径臆测。"""
 
-        if staged.confirmed_target_volume_serial is None or staged.confirmed_target_file_id is None:
-            raise DeliveryFileError("delivery_target_changed", "staged record has no confirmed target identity")
-        identity = (staged.confirmed_target_volume_serial, staged.confirmed_target_file_id)
+        if target.expected_volume_serial is None or target.expected_file_id is None:
+            raise DeliveryFileError(
+                "delivery_confirmation_identity_missing",
+                "overwrite confirmation does not carry the confirmed target file identity",
+            )
+        if (staged.confirmed_target_volume_serial, staged.confirmed_target_file_id) != (
+            target.expected_volume_serial,
+            target.expected_file_id,
+        ):
+            # 暂存记录与本次确认必须指向同一个文件；否则不是同一次确认，不得覆盖。
+            raise DeliveryFileError(
+                "delivery_target_changed", "staged record was confirmed against another target file"
+            )
+        identity = (target.expected_volume_serial, target.expected_file_id)
         try:
             guard = _GuardedFile.open_exclusive(target_path)
         except FileNotFoundError as exc:
@@ -647,9 +660,22 @@ class WindowsManagedFileStore:
         if snapshot.is_reparse_point or snapshot.parent_is_reparse_point:
             raise DeliveryFileError("delivery_target_reparse", "target or its parent is a reparse point")
         if target.expected_existing:
+            if target.expected_volume_serial is None or target.expected_file_id is None:
+                # 覆盖确认必须绑定原文件身份：仅凭摘要会让「同内容异文件」沿用旧确认（I79）。
+                raise DeliveryFileError(
+                    "delivery_confirmation_identity_missing",
+                    "overwrite confirmation does not carry the confirmed target file identity",
+                )
             if not snapshot.exists:
                 raise DeliveryFileError("delivery_target_changed", f"target disappeared before {phase}")
             if snapshot.digest != target.expected_existing_digest:
                 raise DeliveryFileError("delivery_target_changed", f"target content changed before {phase}")
+            if (snapshot.volume_serial, snapshot.file_id) != (
+                target.expected_volume_serial,
+                target.expected_file_id,
+            ):
+                raise DeliveryFileError(
+                    "delivery_target_changed", f"target is not the file confirmed by the user before {phase}"
+                )
         elif snapshot.exists:
             raise DeliveryFileError("delivery_target_changed", f"target appeared before {phase}")

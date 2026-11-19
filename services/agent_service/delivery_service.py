@@ -196,7 +196,10 @@ class _ManifestBase:
         output_bytes: int | None = None,
         staged_path: str | None = None,
         error_code: str | None = None,
+        staged_identity: tuple[int, int] | None = None,
     ) -> DeliveryManifest:
+        """阶段记录；``staged_identity`` 为暂存文件句柄身份（自 ``staged`` 起必填）。"""
+
         return DeliveryManifest(
             delivery_id=self.delivery_id,
             command=self.command,
@@ -213,6 +216,8 @@ class _ManifestBase:
             staged_path=staged_path,
             verified_at=verified_at,
             error_code=error_code,
+            staged_volume_serial=None if staged_identity is None else staged_identity[0],
+            staged_file_id=None if staged_identity is None else staged_identity[1],
         )
 
 
@@ -358,6 +363,7 @@ class DeliveryCommandService:
                     output_digest=digest,
                     output_bytes=size,
                     staged_path=str(staged.path),
+                    staged_identity=(staged.volume_serial, staged.file_id),
                 ),
                 user_scope=user_scope,
                 context=context,
@@ -382,6 +388,7 @@ class DeliveryCommandService:
                 output_digest=digest,
                 output_bytes=size,
                 staged_path=str(staged.path),
+                staged_identity=(staged.volume_serial, staged.file_id),
             ),
             user_scope=user_scope,
             context=context,
@@ -445,6 +452,7 @@ class DeliveryCommandService:
                     output_digest=digest,
                     output_bytes=size,
                     staged_path=str(staged.path),
+                    staged_identity=(staged.volume_serial, staged.file_id),
                 ),
                 user_scope=user_scope,
                 context=context,
@@ -460,7 +468,13 @@ class DeliveryCommandService:
             published = await self._run_blocking(self._store.publish, target=command.target, staged=staged)
         except DeliveryUnknownError as exc:
             return await self._unknown(
-                base, context, rendered=rendered, state=state, expected_revision=revision, error_code=exc.code
+                base,
+                context,
+                rendered=rendered,
+                staged=staged,
+                state=state,
+                expected_revision=revision,
+                error_code=exc.code,
             )
         except DeliveryFileError as exc:
             return self._failed(
@@ -473,11 +487,23 @@ class DeliveryCommandService:
         except OSError:
             # 替换前/中本地 IO 异常：无法区分是否已生效，只能 unknown。
             return await self._unknown(
-                base, context, rendered=rendered, state=state, expected_revision=revision, error_code=_UNVERIFIED_CODE
+                base,
+                context,
+                rendered=rendered,
+                staged=staged,
+                state=state,
+                expected_revision=revision,
+                error_code=_UNVERIFIED_CODE,
             )
         if published.snapshot.digest != digest:
             return await self._unknown(
-                base, context, rendered=rendered, state=state, expected_revision=revision, error_code=_UNVERIFIED_CODE
+                base,
+                context,
+                rendered=rendered,
+                staged=staged,
+                state=state,
+                expected_revision=revision,
+                error_code=_UNVERIFIED_CODE,
             )
 
         try:
@@ -498,6 +524,7 @@ class DeliveryCommandService:
                 base,
                 context,
                 rendered=rendered,
+                staged=staged,
                 state=state,
                 expected_revision=revision,
                 error_code=_RECEIPT_SAVE_FAILED,
@@ -637,11 +664,16 @@ class DeliveryCommandService:
         context: DeliveryContext,
         *,
         rendered: RenderedDelivery,
+        staged: StagedFile,
         state: str,
         expected_revision: int,
         error_code: str,
     ) -> DeliveryOutcome:
-        """发布效果不可确证：落 ``unknown`` 并禁止重试，不用失败/取消伪装。"""
+        """发布效果不可确证：落 ``unknown`` 并禁止重试，不用失败/取消伪装。
+
+        ``unknown`` 记录暂存路径与句柄身份：中断后只能按原 manifest 核对该暂存
+        文件，不从当前表单重推、不盲目再覆盖；缺证时也不得改写成失败/成功。
+        """
 
         await self._save(
             base.build(
@@ -650,7 +682,9 @@ class DeliveryCommandService:
                 verified_at=self._clock(),
                 output_digest=rendered.digest,
                 output_bytes=len(rendered.content),
+                staged_path=str(staged.path),
                 error_code=error_code,
+                staged_identity=(staged.volume_serial, staged.file_id),
             ),
             user_scope=base.command.user_scope,
             context=context,

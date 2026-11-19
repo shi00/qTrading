@@ -167,7 +167,18 @@ def _manifest(*, command_id: str = "cmd-1", user_scope: str = USER_SCOPE, **over
         verified_at=_TIMESTAMP,
         error_code=None,
     )
-    return replace(base, **overrides)
+    return _with_staged_identity(replace(base, **overrides))
+
+
+def _with_staged_identity(manifest: DeliveryManifest) -> DeliveryManifest:
+    """``staged`` 起补齐暂存句柄身份（中断后按身份核对原交付，I79）。"""
+
+    needs_identity = manifest.phase in {"staged", "validated", "publish_claimed"} or (
+        manifest.phase == "unknown" and manifest.staged_path is not None
+    )
+    if needs_identity and manifest.staged_volume_serial is None:
+        return replace(manifest, staged_volume_serial=7, staged_file_id=11)
+    return manifest
 
 
 class TestDeliveryPhaseCas:
@@ -263,6 +274,34 @@ class TestDeliveryPhaseCas:
                 user_scope=USER_SCOPE, operation_id="op-deliver", expected_revision=3, manifest=staged
             )
         assert exc.value.code is AgentErrorCode.INPUT_INVALID
+
+    @pytest.mark.asyncio
+    async def test_unknown_records_staged_identity_for_later_checks(self, real_embedded_pg) -> None:
+        """发布后中断只查原交付：unknown 保留暂存路径与句柄身份作为唯一核对依据（I79）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_operation(dao)
+        await dao.save_delivery_phase(
+            user_scope=USER_SCOPE, operation_id="op-deliver", expected_revision=1, manifest=_manifest()
+        )
+        staged = _manifest(phase="staged", output_digest="b" * 64, output_bytes=10, staged_path=_STAGED)
+        await dao.save_delivery_phase(
+            user_scope=USER_SCOPE, operation_id="op-deliver", expected_revision=2, manifest=staged
+        )
+        unknown = _manifest(
+            phase="unknown",
+            output_digest="b" * 64,
+            output_bytes=10,
+            staged_path=_STAGED,
+            error_code="delivery_publish_unverified",
+        )
+        await dao.save_delivery_phase(
+            user_scope=USER_SCOPE, operation_id="op-deliver", expected_revision=3, manifest=unknown
+        )
+        read = await dao.read_delivery(user_scope=USER_SCOPE, operation_id="op-deliver")
+        assert read.manifest is not None and read.manifest.phase == "unknown"
+        assert read.manifest.staged_path == _STAGED
+        assert (read.manifest.staged_volume_serial, read.manifest.staged_file_id) == (7, 11)
 
     @pytest.mark.asyncio
     async def test_same_phase_rewrite_with_other_facts_is_rejected(self, real_embedded_pg) -> None:

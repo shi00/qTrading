@@ -579,6 +579,9 @@ class TestCancelAndUnknown:
 
         assert dao.phases[-1] == "unknown"
         assert dao.saved[-1].error_code == "delivery_publish_unverified"
+        # 中断后只按原交付核对：unknown 必须保留暂存路径与句柄身份（I79）。
+        assert dao.saved[-1].staged_path == str(_STAGED_PATH)
+        assert (dao.saved[-1].staged_volume_serial, dao.saved[-1].staged_file_id) == (7, 11)
         assert store.publish_attempts == 1
         assert outcome.receipt.phase == "unknown"
         assert outcome.receipt.publish_effect == "unknown"

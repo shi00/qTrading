@@ -9230,22 +9230,36 @@ class DeliveryTarget:
     """用户确认的本机目标（HANDOFF §10.2「规范目标/覆盖依据」）。
 
     ``expected_existing`` 为 False 表示确认时目标不存在；True 时必须带当时
-    文件内容摘要，且必须已确认覆盖。目标随后变化即原确认失效（由交付编排核验）。
+    文件内容摘要**与文件身份**（``expected_volume_serial`` / ``expected_file_id``），
+    且必须已确认覆盖。身份是覆盖确认的组成部分：同摘要异文件（内容一致但文件
+    ID 不同）即原确认失效，必须重新确认；只凭摘要会沿用旧确认（R21/I79）。
     """
 
     target_path: str
     expected_existing: bool
     expected_existing_digest: str | None
     overwrite_confirmed: bool
+    expected_volume_serial: int | None = None
+    expected_file_id: int | None = None
 
 
 _DELIVERY_TARGET_KEYS: Final = frozenset(
     {"target_path", "expected_existing", "expected_existing_digest", "overwrite_confirmed"}
 )
+#: 确认时目标文件身份（可选键：旧记录缺此二键，解码后为 ``None``；新写入必须带）。
+_DELIVERY_TARGET_IDENTITY_KEYS: Final = frozenset({"expected_volume_serial", "expected_file_id"})
+
+
+def _require_identity_int(value: object, path: str, *, allow_zero: bool) -> int:
+    """文件身份整数：拒布尔；``allow_zero`` 为 False 时 0 视为「无身份」。"""
+
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or (value == 0 and not allow_zero):
+        _fail("invalid_value", path)
+    return value
 
 
 def encode_delivery_target(target: DeliveryTarget) -> dict[str, Any]:
-    """DeliveryTarget → wire 4 键（覆盖依据与确认位必须一致）。"""
+    """DeliveryTarget → wire 6 键（覆盖依据、确认位与文件身份必须一致）。"""
 
     target_path = validate_delivery_target_path(target.target_path)
     if not isinstance(target.expected_existing, bool) or not isinstance(target.overwrite_confirmed, bool):
@@ -9254,42 +9268,77 @@ def encode_delivery_target(target: DeliveryTarget) -> dict[str, Any]:
         digest = _require_digest(target.expected_existing_digest, "$.delivery.target.expected_existing_digest")
         if not target.overwrite_confirmed:
             _fail("unconfirmed_overwrite", "$.delivery.target.overwrite_confirmed")
+        volume_serial = _require_identity_int(
+            target.expected_volume_serial, "$.delivery.target.expected_volume_serial", allow_zero=True
+        )
+        file_id = _require_identity_int(target.expected_file_id, "$.delivery.target.expected_file_id", allow_zero=False)
     else:
         if target.expected_existing_digest is not None:
             _fail("invalid_value", "$.delivery.target.expected_existing_digest")
         if target.overwrite_confirmed:
             _fail("invalid_value", "$.delivery.target.overwrite_confirmed")
+        if target.expected_volume_serial is not None or target.expected_file_id is not None:
+            _fail("invalid_value", "$.delivery.target.expected_file_id")
         digest = None
+        volume_serial = None
+        file_id = None
     return {
         "target_path": target_path,
         "expected_existing": target.expected_existing,
         "expected_existing_digest": digest,
         "overwrite_confirmed": target.overwrite_confirmed,
+        "expected_volume_serial": volume_serial,
+        "expected_file_id": file_id,
     }
 
 
 def decode_delivery_target(value: object, path: str = "$.delivery.target") -> DeliveryTarget:
-    """严格解码交付目标（4 键全必填、禁额外键）。"""
+    """严格解码交付目标（4 必填键 + 2 可选身份键、禁其他键）。
+
+    身份键为后加可选键：历史记录缺省时解码为 ``None``（只读查回不失败），但交付
+    使用方必须 fail-closed 拒绝「无身份的覆盖确认」（见 ``_assert_target_matches``）。
+    """
 
     if not isinstance(value, dict):
         _fail("invalid_type", path)
-    _require_keys(value, _DELIVERY_TARGET_KEYS, path)
+    _require_keys_with_optional(value, _DELIVERY_TARGET_KEYS, _DELIVERY_TARGET_IDENTITY_KEYS, path)
     existing_raw = value["expected_existing"]
     confirmed_raw = value["overwrite_confirmed"]
     if not isinstance(existing_raw, bool) or not isinstance(confirmed_raw, bool):
         _fail("invalid_type", path)
     digest_raw = value["expected_existing_digest"]
+    volume_raw = value.get("expected_volume_serial")
+    file_id_raw = value.get("expected_file_id")
     if existing_raw:
         digest: str | None = _require_digest(digest_raw, f"{path}.expected_existing_digest")
+        volume_serial = (
+            None
+            if volume_raw is None
+            else _require_identity_int(volume_raw, f"{path}.expected_volume_serial", allow_zero=True)
+        )
+        file_id = (
+            None
+            if file_id_raw is None
+            else _require_identity_int(file_id_raw, f"{path}.expected_file_id", allow_zero=False)
+        )
+        if (volume_serial is None) != (file_id is None):
+            # 身份必须成对出现；半份身份不可当作可核依据。
+            _fail("invalid_value", f"{path}.expected_file_id")
     else:
         if digest_raw is not None:
             _fail("invalid_value", f"{path}.expected_existing_digest")
+        if volume_raw is not None or file_id_raw is not None:
+            _fail("invalid_value", f"{path}.expected_file_id")
         digest = None
+        volume_serial = None
+        file_id = None
     return DeliveryTarget(
         target_path=validate_delivery_target_path(value["target_path"], f"{path}.target_path"),
         expected_existing=existing_raw,
         expected_existing_digest=digest,
         overwrite_confirmed=confirmed_raw,
+        expected_volume_serial=volume_serial,
+        expected_file_id=file_id,
     )
 
 
@@ -9611,7 +9660,12 @@ _DELIVERY_TRANSITIONS: Final[dict[str, frozenset[str]]] = {
 @dataclass(frozen=True, slots=True)
 class DeliveryManifest:
     """文件交付完整合同（§9.9 ``delivery_manifest``）：目标、格式、成果版本/摘要、
-    暂存输出摘要与当前来源状态；``phase`` 只表示交付阶段，不表示成果质量。"""
+    暂存输出摘要与当前来源状态；``phase`` 只表示交付阶段，不表示成果质量。
+
+    ``staged_volume_serial`` / ``staged_file_id`` 是暂存文件的句柄身份（``staged``
+    起必填）：中断后按原 manifest 复核「目标是否就是本交付的暂存文件」，不从当前
+    表单重推；缺证只能保持 ``unknown``（I79）。
+    """
 
     delivery_id: str
     command: CommandRef
@@ -9628,6 +9682,8 @@ class DeliveryManifest:
     staged_path: str | None
     verified_at: str
     error_code: str | None
+    staged_volume_serial: int | None = None
+    staged_file_id: int | None = None
 
 
 _DELIVERY_MANIFEST_KEYS: Final = frozenset(
@@ -9650,6 +9706,10 @@ _DELIVERY_MANIFEST_KEYS: Final = frozenset(
         "error_code",
     }
 )
+#: 暂存文件句柄身份（后加可选键；旧记录解码为 ``None``，新写入自 ``staged`` 起必填）。
+_DELIVERY_MANIFEST_STAGED_IDENTITY_KEYS: Final = frozenset({"staged_volume_serial", "staged_file_id"})
+#: 必须带暂存身份的阶段（``unknown`` 可能发生在暂存前，故只要求成对、不强制存在）。
+_STAGED_IDENTITY_PHASES: Final = frozenset({"staged", "validated", "publish_claimed"})
 
 
 def validate_delivery_transition(previous: str, following: str) -> None:
@@ -9669,9 +9729,17 @@ def _validate_manifest_phase_fields(
     output_bytes: int | None,
     staged_path: str | None,
     error_code: str | None,
+    staged_identity: tuple[int | None, int | None] = (None, None),
+    *,
+    require_staged_identity: bool = True,
 ) -> None:
     if (output_digest is None) != (output_bytes is None):
         _fail("missing_field", "$.delivery_manifest.output_bytes")
+    staged_volume_serial, staged_file_id = staged_identity
+    if (staged_volume_serial is None) != (staged_file_id is None):
+        # 身份必须成对：半份身份不能当可核依据。
+        _fail("invalid_value", "$.delivery_manifest.staged_file_id")
+    has_staged_identity = staged_volume_serial is not None
     if phase == "manifest_saved":
         if output_digest is not None or staged_path is not None:
             _fail("invalid_delivery_phase", "$.delivery_manifest.phase")
@@ -9680,6 +9748,8 @@ def _validate_manifest_phase_fields(
             _fail("missing_field", "$.delivery_manifest.output_digest")
         if staged_path is None:
             _fail("missing_field", "$.delivery_manifest.staged_path")
+        if require_staged_identity and not has_staged_identity:
+            _fail("missing_field", "$.delivery_manifest.staged_file_id")
     elif phase in {"published_confirmed", "cancelled_before_publish"}:
         if staged_path is not None:
             _fail("invalid_delivery_phase", "$.delivery_manifest.staged_path")
@@ -9687,6 +9757,8 @@ def _validate_manifest_phase_fields(
         _fail("missing_field", "$.delivery_manifest.output_digest")
     if phase == "unknown" and error_code is None:
         _fail("missing_field", "$.delivery_manifest.error_code")
+    if phase not in _STAGED_IDENTITY_PHASES and phase != "unknown" and has_staged_identity:
+        _fail("invalid_delivery_phase", "$.delivery_manifest.staged_file_id")
 
 
 def encode_delivery_manifest(manifest: DeliveryManifest) -> dict[str, Any]:
@@ -9724,7 +9796,21 @@ def encode_delivery_manifest(manifest: DeliveryManifest) -> dict[str, Any]:
     error_raw = manifest.error_code
     if error_raw is not None and not isinstance(error_raw, str):
         _fail("invalid_type", "$.delivery_manifest.error_code")
-    _validate_manifest_phase_fields(phase, output_digest, output_bytes, staged_path, error_raw)
+    staged_volume_serial = (
+        None
+        if manifest.staged_volume_serial is None
+        else _require_identity_int(
+            manifest.staged_volume_serial, "$.delivery_manifest.staged_volume_serial", allow_zero=True
+        )
+    )
+    staged_file_id = (
+        None
+        if manifest.staged_file_id is None
+        else _require_identity_int(manifest.staged_file_id, "$.delivery_manifest.staged_file_id", allow_zero=False)
+    )
+    _validate_manifest_phase_fields(
+        phase, output_digest, output_bytes, staged_path, error_raw, (staged_volume_serial, staged_file_id)
+    )
     return {
         "schema_version": DELIVERY_MANIFEST_VERSION,
         "delivery_id": command_wire["delivery_id"],
@@ -9742,15 +9828,21 @@ def encode_delivery_manifest(manifest: DeliveryManifest) -> dict[str, Any]:
         "staged_path": staged_path,
         "verified_at": _require_utc_timestamp(manifest.verified_at, "$.delivery_manifest.verified_at"),
         "error_code": error_raw,
+        "staged_volume_serial": staged_volume_serial,
+        "staged_file_id": staged_file_id,
     }
 
 
 def decode_delivery_manifest(value: object, path: str = "$.delivery_manifest") -> DeliveryManifest:
-    """严格解码交付 manifest（16 键、版本 1、阶段字段自洽）。"""
+    """严格解码交付 manifest（16 必填键 + 2 可选暂存身份键、版本 1、阶段字段自洽）。
+
+    暂存身份键为后加可选键：旧记录缺省时解码为 ``None``（只读查回不失效），但写入
+    侧 :func:`encode_delivery_manifest` 自 ``staged`` 起强制要求成对身份。
+    """
 
     if not isinstance(value, dict):
         _fail("invalid_type", path)
-    _require_keys(value, _DELIVERY_MANIFEST_KEYS, path)
+    _require_keys_with_optional(value, _DELIVERY_MANIFEST_KEYS, _DELIVERY_MANIFEST_STAGED_IDENTITY_KEYS, path)
     version = value["schema_version"]
     if isinstance(version, bool) or not isinstance(version, int):
         _fail("invalid_type", f"{path}.schema_version")
@@ -9785,7 +9877,28 @@ def decode_delivery_manifest(value: object, path: str = "$.delivery_manifest") -
     error_raw = value["error_code"]
     if error_raw is not None and not isinstance(error_raw, str):
         _fail("invalid_type", f"{path}.error_code")
-    _validate_manifest_phase_fields(phase, output_digest, output_bytes_raw, staged_path, error_raw)
+    staged_volume_raw = value.get("staged_volume_serial")
+    staged_file_id_raw = value.get("staged_file_id")
+    staged_volume_serial = (
+        None
+        if staged_volume_raw is None
+        else _require_identity_int(staged_volume_raw, f"{path}.staged_volume_serial", allow_zero=True)
+    )
+    staged_file_id = (
+        None
+        if staged_file_id_raw is None
+        else _require_identity_int(staged_file_id_raw, f"{path}.staged_file_id", allow_zero=False)
+    )
+    _validate_manifest_phase_fields(
+        phase,
+        output_digest,
+        output_bytes_raw,
+        staged_path,
+        error_raw,
+        (staged_volume_serial, staged_file_id),
+        # 读侧重兼容：旧记录无暂存身份时仍可查回；「无身份不得用于续查」由使用方判定。
+        require_staged_identity=False,
+    )
     return DeliveryManifest(
         delivery_id=decoded_command.delivery_id,
         command=decoded_command.command,
@@ -9802,6 +9915,8 @@ def decode_delivery_manifest(value: object, path: str = "$.delivery_manifest") -
         staged_path=staged_path,
         verified_at=_require_utc_timestamp(value["verified_at"], f"{path}.verified_at"),
         error_code=error_raw,
+        staged_volume_serial=staged_volume_serial,
+        staged_file_id=staged_file_id,
     )
 
 

@@ -30,6 +30,7 @@ from services.agent_service.delivery import (
     DeliveryFileError,
     DeliveryUnknownError,
     FileSnapshot,
+    StagedFile,
     WindowsManagedFileStore,
     _file_identity,
     _GuardedFile,
@@ -49,12 +50,30 @@ def store_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def _target(root: Path, *, exists: bool = False, digest: str | None = None) -> DeliveryTarget:
+def _target(
+    root: Path,
+    *,
+    exists: bool = False,
+    digest: str | None = None,
+    identity: tuple[int, int] | None = None,
+) -> DeliveryTarget:
+    """构造目标；``exists=True`` 时绑定当前文件身份（覆盖确认必须带原文件身份）。"""
+
+    target_path = root / "out.txt"
+    volume_serial: int | None = None
+    file_id: int | None = None
+    if exists:
+        if identity is None:
+            stat_result = os.stat(target_path)
+            identity = (int(stat_result.st_dev), _file_identity(stat_result))
+        volume_serial, file_id = identity
     return DeliveryTarget(
-        target_path=str(root / "out.txt"),
+        target_path=str(target_path),
         expected_existing=exists,
         expected_existing_digest=digest,
         overwrite_confirmed=True,
+        expected_volume_serial=volume_serial,
+        expected_file_id=file_id,
     )
 
 
@@ -145,6 +164,38 @@ class TestStage:
             )
         assert exc.value.code == "delivery_target_changed"
 
+    def test_stage_rejects_confirmation_without_file_identity(self, store_env: Path):
+        """仅带摘要的覆盖确认（旧记录）不得沿用：缺原文件身份即 fail-closed。"""
+
+        (store_env / "out.txt").write_bytes(_CONTENT)
+        legacy = DeliveryTarget(
+            target_path=str(store_env / "out.txt"),
+            expected_existing=True,
+            expected_existing_digest=_DIGEST,
+            overwrite_confirmed=True,
+        )
+        store = WindowsManagedFileStore()
+        with pytest.raises(DeliveryFileError) as exc:
+            store.stage(target=legacy, content=_CONTENT, expected_digest=_DIGEST)
+        assert exc.value.code == "delivery_confirmation_identity_missing"
+        assert not list(store_env.glob("*.staged"))
+
+    def test_stage_refuses_same_content_different_file_after_confirmation(self, store_env: Path):
+        """确认与暂存之间同内容换文件（文件 ID 变了）：原确认失效，必须重新确认。"""
+
+        target_file = store_env / "out.txt"
+        target_file.write_bytes(_CONTENT)
+        confirmed = _target(store_env, exists=True, digest=_DIGEST)
+        replacement = store_env / "same-content.tmp"
+        replacement.write_bytes(_CONTENT)
+        os.replace(replacement, target_file)
+        store = WindowsManagedFileStore()
+        with pytest.raises(DeliveryFileError) as exc:
+            store.stage(target=confirmed, content=_CONTENT, expected_digest=_DIGEST)
+        assert exc.value.code == "delivery_target_changed"
+        assert target_file.read_bytes() == _CONTENT
+        assert not list(store_env.glob("*.staged"))
+
     def test_stage_accepts_existing_target_with_matching_digest(self, store_env: Path):
         (store_env / "out.txt").write_bytes(_CONTENT)
         store = WindowsManagedFileStore()
@@ -155,7 +206,7 @@ class TestStage:
 
 
 class TestPublish:
-    def _stage(self, store: WindowsManagedFileStore, root: Path) -> object:
+    def _stage(self, store: WindowsManagedFileStore, root: Path) -> StagedFile:
         return store.stage(target=_target(root), content=_CONTENT, expected_digest=_DIGEST)
 
     def test_publish_replaces_target_and_confirms_identity(self, store_env: Path):
@@ -182,6 +233,20 @@ class TestPublish:
         with pytest.raises(DeliveryFileError) as exc:
             store.publish(target=_target(store_env), staged=staged)
         assert exc.value.code == "delivery_stage_changed"
+
+    def test_publish_replaced_staged_file_fails(self, store_env: Path):
+        """暂存文件被换成同内容的新文件（新文件 ID）：不得按路径当成本交付的暂存。"""
+
+        store = WindowsManagedFileStore()
+        staged = self._stage(store, store_env)
+        replacement = store_env / "foreign-stage.tmp"
+        replacement.write_bytes(_CONTENT)
+        os.replace(replacement, staged.path)
+        with pytest.raises(DeliveryFileError) as exc:
+            store.publish(target=_target(store_env), staged=staged)
+        assert exc.value.code == "delivery_stage_changed"
+        assert staged.path.read_bytes() == _CONTENT
+        assert not (store_env / "out.txt").exists()
 
     def test_publish_target_appeared_fails(self, store_env: Path):
         store = WindowsManagedFileStore()
