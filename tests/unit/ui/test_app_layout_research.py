@@ -32,6 +32,7 @@ from ui.viewmodels.research_observer_view_model import (
     PendingDecision,
     ResearchObserverState,
     SessionArtifactView,
+    SessionDraftView,
     SessionMessageView,
 )
 
@@ -774,3 +775,273 @@ class TestDecisionSubmissionPipeline:
         assert refusal == agent_decision_arbiter.REFUSAL_OWNER_CONFLICT
         assert page.run_task.call_args_list == []
         arbiter.end_submit("other_surface")
+
+
+class TestObservationPanelHonestBranches:
+    """面板如实标注分支：未知角色 / 叶子执行节点 / 正文不可用 / 会话草稿卡。"""
+
+    def _state(self, **overrides: Any) -> ResearchObserverState:
+        base: dict[str, Any] = {"available": True, "session_id": "s-1", "session_title": "研究 A"}
+        base.update(overrides)
+        return ResearchObserverState(**base)
+
+    def _artifact(self, **overrides: Any) -> SessionArtifactView:
+        base: dict[str, Any] = {
+            "artifact_id": "a-1",
+            "artifact_version": 1,
+            "artifact_kind": "report",
+            "execution_id": "e-1",
+            "round_id": "r-1",
+            "summary": None,
+            "body_text": None,
+            "body_available": False,
+            "published_at": None,
+        }
+        base.update(overrides)
+        return SessionArtifactView(**base)
+
+    def _draft(self, **overrides: Any) -> SessionDraftView:
+        base: dict[str, Any] = {
+            "session_id": "s-1",
+            "draft_revision": 3,
+            "text": "草稿正文",
+            "mode": "discuss",
+            "purpose": "concept",
+            "research_date": "2026-11-13",
+            "cutoff": "2026-11-14",
+            "sources": ("business_snapshot:screener_candidate:600519.SH@abc123",),
+            "skills": ("skill-a@1",),
+            "mcp_services": ("market@2",),
+            "customized_fields": ("mode",),
+            "model_selection": "ms",
+            "send_target": "st",
+            "object_context": "oc",
+            "role_prompt_selection": "rp",
+            "is_empty": False,
+            "cleaned": False,
+            "archived": False,
+            "transferred": False,
+            "read_at": "2026-11-17T04:00:00.000000Z",
+        }
+        base.update(overrides)
+        return SessionDraftView(**base)
+
+    def _tooltips(self, panel: ft.Container) -> list[Any]:
+        return [control.tooltip for control in _iter_controls(panel) if isinstance(control, ft.IconButton)]
+
+    def _assert_text_absent(self, panel: ft.Container, value: str) -> None:
+        values = [control.value for control in _iter_controls(panel) if isinstance(control, ft.Text)]
+        assert value not in values, f"不应渲染文本 {value}"
+
+    def test_unknown_role_message_is_labelled_not_invented(self, monkeypatch) -> None:
+        message = SessionMessageView(
+            message_id="m-1",
+            role=None,
+            body_text="会话级说明",
+            body_available=True,
+            execution_id=None,
+            occurred_at="2026-11-17T01:30:00.000000Z",
+        )
+        panel = _render_panel(self._state(messages=(message,)), monkeypatch=monkeypatch)
+        _assert_text_present(panel, "agent_research_role_unknown")
+        _assert_text_present(panel, "会话级说明")
+
+    def test_leaf_execution_uses_subdirectory_marker_without_toggle(self, monkeypatch) -> None:
+        leaf = ExecutionNodeView(
+            execution_id="e-2",
+            parent_execution_id="e-1",
+            display_state="complete",
+            goal_coverage="full",
+            model_attempt_count=1,
+            tool_call_count=0,
+            active_ms=10,
+            depth=1,
+            has_children=False,
+        )
+        panel = _render_panel(self._state(execution_nodes=(leaf,)), monkeypatch=monkeypatch)
+
+        icons = [control.icon for control in _iter_controls(panel) if isinstance(control, ft.Icon)]
+        assert ft.Icons.SUBDIRECTORY_ARROW_RIGHT in icons, "叶子节点应使用子目录标记而非展开按钮"
+        tooltips = self._tooltips(panel)
+        assert "agent_research_collapse" not in tooltips
+        assert "agent_research_expand" not in tooltips
+        _assert_text_present(panel, "agent_research_execution_progress_fmt")
+
+    def test_unavailable_body_without_reason_states_body_unloaded(self, monkeypatch) -> None:
+        state = self._state(
+            artifacts=(self._artifact(),),
+            artifact_bodies=(
+                LoadedArtifactBody(
+                    key="a-1:1",
+                    body_text=None,
+                    body_available=False,
+                    unavailable_reason=None,
+                    truncated=False,
+                ),
+            ),
+        )
+        panel = _render_panel(state, monkeypatch=monkeypatch)
+        _assert_text_present(panel, "agent_research_artifact_body_unloaded")
+
+    def test_unknown_unavailable_reason_is_shown_as_raw_code(self, monkeypatch) -> None:
+        state = self._state(
+            artifacts=(self._artifact(),),
+            artifact_bodies=(
+                LoadedArtifactBody(
+                    key="a-1:1",
+                    body_text=None,
+                    body_available=False,
+                    unavailable_reason="body_timeout",
+                    truncated=False,
+                ),
+            ),
+        )
+        panel = _render_panel(state, monkeypatch=monkeypatch)
+        _assert_text_present(panel, "agent_research_artifact_unavailable_fmt")
+
+    def test_loaded_body_truncated_marker_without_text_row(self, monkeypatch) -> None:
+        state = self._state(
+            artifacts=(self._artifact(),),
+            artifact_bodies=(
+                LoadedArtifactBody(
+                    key="a-1:1",
+                    body_text=None,
+                    body_available=True,
+                    unavailable_reason=None,
+                    truncated=True,
+                ),
+            ),
+        )
+        panel = _render_panel(state, monkeypatch=monkeypatch)
+
+        _assert_text_present(panel, "agent_research_artifact_truncated")
+        # 已载入（即使正文为空串/None）不再给「读取正文」入口
+        assert "agent_research_artifact_load" not in self._tooltips(panel)
+
+    def test_artifact_body_pending_shows_progress_not_load_entry(self, monkeypatch) -> None:
+        state = self._state(artifacts=(self._artifact(),), artifact_body_pending_keys=("a-1:1",))
+        panel = _render_panel(state, monkeypatch=monkeypatch)
+
+        assert any(isinstance(control, ft.ProgressRing) for control in _iter_controls(panel))
+        assert "agent_research_artifact_load" not in self._tooltips(panel)
+
+    def test_session_draft_pending_card_shows_progress_and_revision(self, monkeypatch) -> None:
+        panel = _render_panel(
+            self._state(session_draft_revision=3, draft_pending=True),
+            monkeypatch=monkeypatch,
+        )
+
+        _assert_text_present(panel, "agent_research_draft_revision_fmt")
+        _assert_text_present(panel, "agent_research_draft_loading")
+        assert any(isinstance(control, ft.ProgressRing) for control in _iter_controls(panel))
+        assert "agent_research_draft_load" not in self._tooltips(panel)
+
+    def test_session_draft_load_button_forwards_callback(self, monkeypatch) -> None:
+        loaded: list[bool] = []
+        panel = _render_panel(
+            self._state(session_draft_revision=3),
+            monkeypatch=monkeypatch,
+            callbacks={"on_load_draft": lambda: loaded.append(True)},
+        )
+
+        button = _find_icon_button(panel, "agent_research_draft_load")
+        _invoke(button.on_click, MagicMock())
+        assert loaded == [True]
+        # 尚未读回载荷：不渲染草稿详情（不伪造空正文）
+        self._assert_text_absent(panel, "agent_research_draft_none")
+
+    def test_session_draft_error_code_is_shown(self, monkeypatch) -> None:
+        panel = _render_panel(
+            self._state(session_draft_revision=3, draft_error_code="REVISION_CONFLICT"),
+            monkeypatch=monkeypatch,
+        )
+        _assert_text_present(panel, "agent_research_draft_error_fmt")
+
+    def test_draft_detail_rows_render_body_selection_and_sources(self, monkeypatch) -> None:
+        draft = self._draft(archived=True, is_empty=True)
+        panel = _render_panel(
+            self._state(session_draft_revision=3, session_draft=draft),
+            monkeypatch=monkeypatch,
+        )
+
+        _assert_text_present(panel, "草稿正文")
+        _assert_text_present(panel, "agent_research_draft_archived")
+        _assert_text_present(panel, "agent_research_draft_empty")
+        _assert_text_present(panel, "agent_research_draft_meta_fmt")
+        _assert_text_present(panel, "agent_research_draft_sources_fmt")
+        _assert_text_present(panel, "agent_research_draft_skills_fmt")
+        _assert_text_present(panel, "agent_research_draft_mcp_fmt")
+        _assert_text_present(panel, "agent_research_draft_customized_fmt")
+        _assert_text_present(panel, "agent_research_draft_model_selection_fmt")
+        _assert_text_present(panel, "agent_research_draft_send_target_fmt")
+        _assert_text_present(panel, "agent_research_draft_object_context_fmt")
+        _assert_text_present(panel, "agent_research_draft_role_prompt_fmt")
+
+        # 非空稿不显示「空稿」提示（is_empty=False 分支）
+        non_empty = _render_panel(
+            self._state(session_draft_revision=3, session_draft=self._draft(text="正文")),
+            monkeypatch=monkeypatch,
+        )
+        self._assert_text_absent(non_empty, "agent_research_draft_empty")
+
+    def test_blank_draft_body_and_absent_selection_are_not_rendered(self, monkeypatch) -> None:
+        draft = self._draft(
+            text="",
+            is_empty=True,
+            sources=(),
+            skills=(),
+            mcp_services=(),
+            customized_fields=(),
+            model_selection=None,
+            send_target=None,
+            object_context=None,
+            role_prompt_selection=None,
+        )
+        panel = _render_panel(
+            self._state(session_draft_revision=3, session_draft=draft),
+            monkeypatch=monkeypatch,
+        )
+
+        _assert_text_present(panel, "agent_research_draft_body_empty")
+        for absent in (
+            "agent_research_draft_sources_fmt",
+            "agent_research_draft_skills_fmt",
+            "agent_research_draft_mcp_fmt",
+            "agent_research_draft_customized_fmt",
+            "agent_research_draft_model_selection_fmt",
+            "agent_research_draft_send_target_fmt",
+            "agent_research_draft_object_context_fmt",
+            "agent_research_draft_role_prompt_fmt",
+        ):
+            self._assert_text_absent(panel, absent)
+
+    def test_cleaned_transferred_and_missing_draft_are_distinguished(self, monkeypatch) -> None:
+        cleaned = _render_panel(
+            self._state(session_draft_revision=3, session_draft=self._draft(text=None, cleaned=True)),
+            monkeypatch=monkeypatch,
+        )
+        _assert_text_present(cleaned, "agent_research_draft_cleaned")
+
+        transferred = _render_panel(
+            self._state(session_draft_revision=3, session_draft=self._draft(text=None, transferred=True)),
+            monkeypatch=monkeypatch,
+        )
+        _assert_text_present(transferred, "agent_research_draft_transferred")
+
+        missing = _render_panel(
+            self._state(session_draft_revision=3, session_draft=self._draft(text=None)),
+            monkeypatch=monkeypatch,
+        )
+        _assert_text_present(missing, "agent_research_draft_none")
+
+    def test_more_items_marker_rendered_for_messages_and_artifacts(self, monkeypatch) -> None:
+        panel = _render_panel(
+            self._state(messages_has_more=True, artifacts_has_more=True),
+            monkeypatch=monkeypatch,
+        )
+        markers = [
+            control.value
+            for control in _iter_controls(panel)
+            if isinstance(control, ft.Text) and control.value == "agent_research_more_items"
+        ]
+        assert len(markers) == 2, "消息与成果各有一条「更多」提示"
