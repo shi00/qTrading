@@ -82,6 +82,34 @@ def _markdown_fence(text: str) -> str:
     return "`" * max(3, longest + 1)
 
 
+#: MD 标题中字段路径的可直接落盘字符：可打印且不是反引号/反斜杠（后者参与转义）。
+#: 其余字符（换行、控制符、反引号）一律编码为 ``\uXXXX`` / ``\UXXXXXXXX``，避免
+#: 破坏标题行或使回读切错位置（I86：字段键与值同样属于不可信数据）。
+_MD_PATH_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})|\\U([0-9a-fA-F]{8})")
+
+
+def _markdown_path_literal(path: str) -> str:
+    """把字段路径编码为可安全放进 MD 标题单个代码跨度的字面量（普通路径不变）。"""
+
+    if all(character.isprintable() and character not in "`\\" for character in path):
+        return path
+    parts: list[str] = []
+    for character in path:
+        if character.isprintable() and character not in "`\\":
+            parts.append(character)
+        elif ord(character) <= 0xFFFF:
+            parts.append(f"\\u{ord(character):04x}")
+        else:
+            parts.append(f"\\U{ord(character):08x}")
+    return "".join(parts)
+
+
+def _markdown_path_value(literal: str) -> str:
+    """回读还原：解码标题中的 ``\\uXXXX`` / ``\\UXXXXXXXX``（与编码严格互逆）。"""
+
+    return _MD_PATH_ESCAPE.sub(lambda match: chr(int(match.group(1) or match.group(2), 16)), literal)
+
+
 def _render_markdown(fields: Sequence[DeliveryField]) -> bytes:
     lines = ["# 成果交付", ""]
     current_record = ""
@@ -90,9 +118,10 @@ def _render_markdown(fields: Sequence[DeliveryField]) -> bytes:
             current_record = field.record
             lines.extend([f"## {_SECTION_TITLES[current_record]}", ""])
         fence = _markdown_fence(field.value_text)
+        path_literal = _markdown_path_literal(field.path)
         lines.extend(
             [
-                f"### `{field.path}` ({field.value_type}) {field.chunk_index}/{field.chunk_count}",
+                f"### `{path_literal}` ({field.value_type}) {field.chunk_index}/{field.chunk_count}",
                 "",
                 f"{fence}text",
                 field.value_text,
@@ -226,7 +255,7 @@ def _read_markdown(content: bytes) -> tuple[DeliveryField, ...]:
         try:
             header = line[len("### ") :]
             path, remainder = header.split("` (", 1)
-            path = path[1:]
+            path = _markdown_path_value(path[1:])
             value_type, remainder = remainder.split(") ", 1)
             chunk_index, chunk_count = remainder.split("/", 1)
         except ValueError as error:

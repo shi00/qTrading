@@ -216,6 +216,25 @@ class TestRenderRoundTrip:
         readback = read_delivery_fields(rendered.content, "md")
         assert readback == fields
 
+    def test_markdown_hostile_field_keys_are_escaped_and_roundtrip(self) -> None:
+        """I86：字段键同属不可信数据——反引号/换行/"` (" 不得破坏标题或回读。"""
+
+        payload = {"a`b": 1, "line\nbreak": 2, "paren` (x": 3, "back\\slash": 4}
+        fields = build_delivery_fields(_read(result_payload=json_doc(payload)))
+        rendered = render_delivery(fields, "md")
+
+        lines = rendered.content.decode("utf-8").split("\n")
+        headings = [line for line in lines if line.startswith("### `")]
+        assert len(headings) == len(fields)
+        assert read_delivery_fields(rendered.content, "md") == fields
+
+    def test_table_formats_keep_hostile_keys_verbatim(self) -> None:
+        """CSV/XLSX 为纯文本单元格，恶意字段键同样原值往返。"""
+
+        fields = build_delivery_fields(_read(result_payload=json_doc({"a`b": 1, "line\nbreak": 2})))
+        for format_name in ("csv", "xlsx"):
+            assert read_delivery_fields(render_delivery(fields, format_name).content, format_name) == fields
+
     def test_csv_has_utf8_bom_and_roundtrip(self) -> None:
         fields = self._fields()
         rendered = render_delivery(fields, "csv")
