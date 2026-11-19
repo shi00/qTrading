@@ -1,8 +1,10 @@
 """回测结果 → 业务来源严格读适配（E-01 D5，§9.13）。
 
-四分支区分（不把失败伪装成已读/已核验）：
-- 成功且有行 → ``read_state=ready``、``verification=program_verified``；
+分支区分（不把失败伪装成已读/已核验）：
+- 成功且有行（时间可证绝对时刻）→ ``read_state=ready``、``verification=program_verified``；
 - 成功且无行 → ``unavailable`` + ``result_not_found``；
+- 行内时间无时区（来源时区约定不可验证）→ ``unavailable`` + ``available_at_zone_unknown``，
+  不按 UTC 猜测、不补午夜（R21/R24）；
 - 数据库失败 → ``PERSISTENCE_UNAVAILABLE``（不构造来源）；
 - disposed → ``EngineDisposedError`` 原样传播；取消 → ``CancelledError`` 必须 raise（R2）。
 """
@@ -84,7 +86,14 @@ async def read_backtest_snapshot(
     digest = sha256_hex(
         json.dumps(safe_row, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     )
-    available_at = _wire_timestamp(_first_timestamp(row))
+    raw_timestamp = _first_timestamp(row)
+    available_at = _wire_timestamp(raw_timestamp)
+    if raw_timestamp is not None and available_at is None:
+        # 行内时间未带时区（``backtest_results.executed_at`` 为 timestamp without time
+        # zone，由会话时区的 ``now()`` 写入），绝对时刻不可证：不得按 UTC 猜测放行。
+        return BusinessSnapshotRead(
+            source=None, read_state=ReadState.UNAVAILABLE, missing_reason="available_at_zone_unknown"
+        )
     cutoff_dt = _parse_timestamp(cutoff, identity)
     if cutoff_dt is not None:
         if available_at is None:
@@ -131,7 +140,8 @@ async def read_backtest_snapshot(
     )
 
 
-def _first_timestamp(row: Mapping[str, Any]) -> datetime | date | None:
+def _first_timestamp(row: Mapping[str, Any]) -> datetime | None:
+    """取行内可得时点；纯 ``date`` 不含时刻（不补午夜），按未知处理。"""
     for key in _TIMESTAMP_KEYS:
         value = row.get(key)
         # NaT/NaN 不与自身相等：必须按「时点未知」处理，不能进入 astimezone 抛裸异常。
@@ -148,13 +158,16 @@ def _period_of(row: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _wire_timestamp(value: datetime | date | None) -> str | None:
-    if value is None:
+def _wire_timestamp(value: datetime | None) -> str | None:
+    """aware datetime → UTC 微秒文本；naive → ``None``（时区未定，返回未知而非猜 UTC）。
+
+    ``datetime`` 无时区时其绝对时刻取决于一个本地未声明的来源时区（数据库会话时区），
+    补成 UTC 会让「可得时点」系统性偏移；故只接受自带偏移的时间（R21/R24）。
+    """
+
+    if value is None or value.utcoffset() is None:
         return None
-    if isinstance(value, datetime):
-        moment = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-        return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-    return f"{value.isoformat()}T00:00:00.000000Z"
+    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _parse_timestamp(value: str | None, identity: str) -> datetime | None:

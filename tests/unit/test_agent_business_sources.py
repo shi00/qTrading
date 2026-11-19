@@ -1,7 +1,7 @@
 """E-01-5 回测严格读四分支：成功 / 不存在 / DB 失败 / disposed / 取消。"""
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
@@ -164,3 +164,54 @@ class TestBacktestSnapshotRead:
                 FakeReader(row=_row()), user_scope="u1", result_id="run-1", cutoff="2026-02-01T00:00:00"
             )
         assert exc.value.code is AgentErrorCode.INPUT_INVALID
+
+    @pytest.mark.asyncio
+    async def test_naive_executed_at_is_zone_unknown_not_utc(self) -> None:
+        """I64：无时区时间不得猜成 UTC；时区不可证时 fail-closed 并给独立原因。"""
+        row = _row()
+        row["executed_at"] = datetime(2026, 1, 2, 3, 4, 5)
+        without_cutoff = await read_backtest_snapshot(FakeReader(row=row), user_scope="u1", result_id="run-1")
+        assert without_cutoff.source is None
+        assert without_cutoff.read_state is ReadState.UNAVAILABLE
+        assert without_cutoff.missing_reason == "available_at_zone_unknown"
+        with_cutoff = await read_backtest_snapshot(
+            FakeReader(row=row),
+            user_scope="u1",
+            result_id="run-1",
+            cutoff="2026-02-01T00:00:00.000000Z",
+        )
+        # 不得误报为「晚于截止」：那是另一种可审计原因。
+        assert with_cutoff.missing_reason == "available_at_zone_unknown"
+
+    @pytest.mark.asyncio
+    async def test_pandas_naive_timestamp_is_zone_unknown(self) -> None:
+        """生产 DAO 经 pandas 返回 naive Timestamp；同样不得补成 UTC。"""
+        row = _row()
+        row["executed_at"] = pd.Timestamp("2026-01-02 03:04:05")
+        result = await read_backtest_snapshot(FakeReader(row=row), user_scope="u1", result_id="run-1")
+        assert result.source is None
+        assert result.missing_reason == "available_at_zone_unknown"
+
+    @pytest.mark.asyncio
+    async def test_date_only_value_is_not_padded_to_midnight(self) -> None:
+        """纯日期不含时刻：不补 T00:00:00Z，按未知处理（设计正本「未知不补午夜」）。"""
+        row = _row()
+        row["executed_at"] = date(2026, 1, 2)
+        result = await read_backtest_snapshot(
+            FakeReader(row=row),
+            user_scope="u1",
+            result_id="run-1",
+            cutoff="2026-02-01T00:00:00.000000Z",
+        )
+        assert result.source is None
+        assert result.missing_reason == "available_at_unknown"
+
+    @pytest.mark.asyncio
+    async def test_aware_non_utc_timestamp_is_converted_to_utc(self) -> None:
+        """自带偏移的时间按其时区换算为 UTC（不按本机时区近似）。"""
+        row = _row()
+        row["executed_at"] = datetime(2026, 1, 2, 11, 4, 5, tzinfo=timezone(timedelta(hours=8)))
+        result = await read_backtest_snapshot(FakeReader(row=row), user_scope="u1", result_id="run-1")
+        assert result.source is not None
+        assert result.source.source.available_at == "2026-01-02T03:04:05.000000Z"
+        assert result.read_state is ReadState.READY

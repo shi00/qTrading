@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -149,7 +149,7 @@ async def test_prepare_backtest_uses_strict_snapshot_read():
         "strategy_name": "momentum",
         "start_date": "2026-01-01",
         "end_date": "2026-03-01",
-        "executed_at": datetime(2026, 3, 2, 8, 0, 0),
+        "executed_at": datetime(2026, 3, 2, 8, 0, 0, tzinfo=UTC),
         "metrics": {"total_return": 0.1},
         "initial_capital": 100000,
         "final_capital": 110000,
@@ -348,7 +348,7 @@ async def test_view_model_prepares_backtest_draft_from_strict_reader():
         "strategy_name": "momentum",
         "start_date": "2026-01-01",
         "end_date": "2026-03-01",
-        "executed_at": datetime(2026, 3, 2, 8, 0, 0),
+        "executed_at": datetime(2026, 3, 2, 8, 0, 0, tzinfo=UTC),
         "metrics": {"total_return": 0.1},
         "initial_capital": 100000,
         "final_capital": 110000,
