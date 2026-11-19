@@ -272,33 +272,52 @@ def build_planning_capability(
 
 def build_summarizing_compaction(
     *,
-    model: Model | str | None,
+    model: Model | str | None = None,
     max_tokens: int,
     keep_messages: int,
 ) -> SummarizingCompaction[Any]:
     """装配摘要压缩，摘要出口与主轮同一绑定模型（summary 一账）。
 
-    - ``model=None`` 按正本 §10.3 形态继承本次请求的模型；运行装配必须保证该
-      模型就是已绑定 GatewayModel（摘要请求因此与主轮共用同一 executor/
-      Recorder 账本），不得在 Agent 构造处放非绑定模型；
-    - ``retries=0``：空摘要/模仿工具调用等失败不回退重试，直接显式失败；
+    - ``model`` 只接受 ``None``：摘要必须继承被压缩那次运行自己的 ``ctx.model``
+      （已绑定 GatewayModel），从而共用同一 executor/Recorder 账本、模型调用号
+      与治理。传入模型实例会绑定到构造时那一次运行的身份——同一能力被主会话与
+      子任务共用时，摘要会顶着主会话的账户与序号写子任务历史（跨角色混账）；
+      传入模型 id 字符串则由 harness 自行构造未治理模型（脱离账本/权限/窗口
+      治理）。两种形态都在此显式拒绝，不由上层装配兜底；
+    - ``retries=0``：空摘要/模仿工具调用等失败不回退重试，直接显式失败（异常
+      向被压缩的运行传播，依赖摘要的继续被阻断，不会带着旧历史静默续跑）；
+    - ``receipts=True``：摘要写入后在历史里留确定性回执（被摘要消息数/估算
+      token/摘要模型族/持久句柄），随历史一起（由运行装配持久化时）保留，供恢复
+      后辨认「此前记忆是二手的」；摘要部件自身还带 harness 写入的 ``created_at``
+      元数据；
     - ``tool_return_max_chars=None``：工具返回原文进入摘要，不静默截断；
     - ``preserve_first_user_message``/``incremental`` 显式冻结（早纠正保留、
       摘要增量化而非摘要的摘要）。
+
+    残余（依赖上层装配，未在此伪造）：① 来源键级谱系——历史部件当前不携带
+    ``source_id``/``version`` 身份，摘要无法登记逐源来源，也无法在摘要层剔除
+    被禁用来源；需上层在工具返回/用户消息上补源身份后，经
+    ``summarization_capabilities`` 注入过滤器；② 持久化与恢复闭环——摘要写入
+    ``ctx.messages`` 后能否跨重启恢复，取决于运行装配是否持久化完整历史并原样
+    回灌；本装配不另建摘要存储。
     """
 
-    if model is not None and not isinstance(model, str | Model):
-        raise ValueError("model must be a bound Model instance, a model id string, or None (inherit)")
+    if model is not None:
+        raise ValueError(
+            "model must be None: the summary must inherit the run's bound GatewayModel "
+            "(an explicit model instance pins another run's identity; a model id builds an ungoverned model)"
+        )
     if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1:
         raise ValueError("max_tokens must be a positive int")
     if isinstance(keep_messages, bool) or not isinstance(keep_messages, int) or keep_messages < 0:
         raise ValueError("keep_messages must be an int >= 0")
     return SummarizingCompaction(
-        model=model,
+        model=None,
         max_tokens=max_tokens,
         keep_messages=keep_messages,
         retries=0,
         tool_return_max_chars=None,
+        receipts=True,
         preserve_first_user_message=True,
         incremental=True,
     )

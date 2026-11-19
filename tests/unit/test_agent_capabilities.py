@@ -3,7 +3,8 @@
 验证的是本仓库装配冻结的语义，不重复测试 harness 内部实现：
 
 - Planning 经 deps 取 store，缺 deps 字段即拒绝（不造隐式全局 store）；
-- 摘要压缩必须绑定同一模型实例、参数冻结（retries=0、工具返回不截断）；
+- 摘要压缩必须继承运行自己的绑定模型（显式模型/模型 id 一律拒绝）、参数冻结
+  （retries=0、工具返回不截断、回执开启）；
 - ResearchBoundary 三规则：模式裁剪工具、禁用来源阻断、窗口未知/超限阻断；
   ``Mode.EXECUTE`` 不裁剪；放行时不改写请求上下文。
 """
@@ -16,6 +17,7 @@ from typing import Any, cast
 import pytest
 from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters
+from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import ToolDefinition
 
 from core.agent_types import AgentErrorCode, AgentServiceError, Mode
@@ -99,36 +101,40 @@ class TestPlanningAssembly:
 
 
 class TestSummarizingCompactionAssembly:
-    def test_bound_model_and_frozen_parameters(self) -> None:
-        compaction = build_summarizing_compaction(model="gateway:bound-model", max_tokens=8000, keep_messages=6)
-        assert compaction.model == "gateway:bound-model"
+    def test_inherits_run_bound_model_and_frozen_parameters(self) -> None:
+        compaction = build_summarizing_compaction(max_tokens=8000, keep_messages=6)
+        # 摘要必须继承被压缩运行自己的已绑定模型（None → ctx.model），不得钉死另一实例。
+        assert compaction.model is None
         assert compaction.max_tokens == 8000
         assert compaction.keep_messages == 6
         assert compaction.retries == 0
         assert compaction.tool_return_max_chars is None
+        assert compaction.receipts is True
         assert compaction.preserve_first_user_message is True
         assert compaction.incremental is True
 
     def test_none_inherits_request_model(self) -> None:
-        # 正本 §10.3 形态：model=None 继承本次请求模型（必须已是绑定 GatewayModel）
+        # 正本 §10.3 形态：model=None 继承本次请求模型（即该运行的绑定 GatewayModel）
         compaction = build_summarizing_compaction(model=None, max_tokens=8000, keep_messages=6)
         assert compaction.model is None
         assert compaction.retries == 0
 
-    def test_non_model_value_rejected(self) -> None:
+    @pytest.mark.parametrize("model", ["gateway:bound-model", object(), TestModel()])
+    def test_explicit_model_rejected(self, model: Any) -> None:
+        # 模型 id 会造未治理模型；模型实例会钉死构造时那一次运行的身份（跨角色混账）。
         with pytest.raises(ValueError) as error:
-            build_summarizing_compaction(model=cast(Any, object()), max_tokens=8000, keep_messages=6)
-        assert "bound Model" in str(error.value)
+            build_summarizing_compaction(model=model, max_tokens=8000, keep_messages=6)
+        assert "inherit the run's bound" in str(error.value)
 
     @pytest.mark.parametrize("max_tokens", [0, -1, True])
     def test_invalid_max_tokens_rejected(self, max_tokens: Any) -> None:
         with pytest.raises(ValueError) as error:
-            build_summarizing_compaction(model="gateway:bound-model", max_tokens=max_tokens, keep_messages=6)
+            build_summarizing_compaction(max_tokens=max_tokens, keep_messages=6)
         assert "max_tokens" in str(error.value)
 
     def test_invalid_keep_messages_rejected(self) -> None:
         with pytest.raises(ValueError) as error:
-            build_summarizing_compaction(model="gateway:bound-model", max_tokens=8000, keep_messages=-1)
+            build_summarizing_compaction(max_tokens=8000, keep_messages=-1)
         assert "keep_messages" in str(error.value)
 
 
