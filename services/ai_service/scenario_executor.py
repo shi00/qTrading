@@ -122,6 +122,7 @@ from core.model_management_types import (
     NormalizedLLMUsage,
     ResolvedConnection,
     ScenarioExecutionResult,
+    LOCAL_ADAPTER_KINDS,
     TextContentPart,
     adapter_kind_requires_egress,
     ensure_registered_adapter,
@@ -2026,10 +2027,22 @@ def _chat_capability_check(
     证据记录的 ``connection_revision`` 与派发连接一致（缺失版本视为未知 →
     过期）。unknown / unsupported / 旧证据 → 返回拒绝原因（派发前淘汰、零
     预留副作用），与模型故障重试语义严格区分。
+
+    I50：设备内本地 kind（``gguf_*``）一律不构成已准入的聊天能力——本地 worker
+    只在子进程内 stream 后聚合最终文本，没有绑定 ``request_id`` / 运行代次的
+    chunk / tool / final IPC 与聊天消费者，取消后的晚到消息也无处流式串入。
+    因此此处按 kind 直接拒绝（而不是依赖适配器恰好缺 ``invoke_chat`` 兜底），
+    避免配置声明 ``stream``/``tools`` 支持、或未来补一个聚合式 ``invoke_chat``
+    时把「无真实流式/工具往返」伪装成已准入。
     """
     required = _required_chat_capabilities(request)
 
     def _check(connection: ResolvedConnection, eligibility: _ConnectionEligibility) -> str | None:
+        if connection.adapter_kind in LOCAL_ADAPTER_KINDS:
+            return (
+                f"chat requires real streaming/tool IPC; {connection.adapter_kind} is not admitted "
+                "(aggregated text only, no chunk/tool/final frames)"
+            )
         for capability in required:
             evidence = eligibility.capabilities.get(capability)
             if evidence is None:

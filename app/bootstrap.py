@@ -112,7 +112,13 @@ class _LiteLLMChatAdapter:
 
 
 class _GGUFAdapter:
-    """``gguf_chat`` 适配器（D7）：薄委托 LocalModelManager 单连接入口。"""
+    """``gguf_chat`` 适配器（D7）：薄委托 LocalModelManager 单连接入口。
+
+    I50：仅承接旧单 prompt 入口（``invoke``）。本地 worker 无绑定 request_id /
+    运行代次的 chunk / tool / final IPC（子进程内部 stream 后聚合最终 ok），故
+    刻意不实现 ``invoke_chat``；agent 聊天回合对 ``gguf_*`` 一律在
+    ScenarioExecutor 能力门控处显式拒绝，不虚报流式/工具准入。
+    """
 
     async def invoke(
         self,

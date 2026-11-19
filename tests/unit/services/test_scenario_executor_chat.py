@@ -913,6 +913,23 @@ class TestChatCapabilityAdmission:
     Profile——unknown / unsupported / 旧证据一律派发前淘汰（零预留副作用），
     不按模型故障重试；旧直推入口政策不变。"""
 
+    @staticmethod
+    def _local_conn() -> ResolvedConnection:
+        """设备内本地聊天连接（gguf_chat，免 grant）。"""
+        return ResolvedConnection(
+            connection_id="conn-local",
+            connection_revision=1,
+            adapter_kind="gguf_chat",
+            provider="local",
+            model="C:/models/chat.gguf",
+            api_base=None,
+            adapter_options={"n_ctx": 4096},
+            context_window=None,
+            concurrency_limit=1,
+            credential_ref=None,
+            credential_version=None,
+        )
+
     async def _request_with_capabilities(
         self, capabilities: dict[str, dict[str, Any]], request: ChatTurnRequest | None = None
     ):
@@ -1014,6 +1031,54 @@ class TestChatCapabilityAdmission:
         )
         assert outcome.status == "succeeded"
         assert len(adapter.invoke_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_local_gguf_supported_claim_still_rejected(self):
+        """I50：本地 gguf_chat 即使声明 stream/tools=supported（且注册了具备
+        invoke_chat 的适配器）也拒绝准入——本地 worker 无绑定 request_id/运行代次
+        的 chunk/tool/final IPC，声明支持属虚假准入。零预留、零授权、零调用。"""
+        adapter = _ScriptedChatAdapter([((), None, _chat_ok_response())])
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, adapters={"gguf_chat": adapter})
+
+        outcome = await executor.execute_chat_turn(
+            _chat_request(),
+            _snapshot(
+                (_candidate(0, "conn-local"),),
+                (self._local_conn(),),
+                capabilities={
+                    "stream": {"support": "supported", "source": "user_declaration", "connection_revision": 1},
+                    "tools": {"support": "supported", "source": "user_declaration", "connection_revision": 1},
+                },
+            ),
+            binding=_binding(),
+        )
+
+        assert outcome.status == "failed"
+        assert "not admitted" in (outcome.error_code or "")
+        assert "no chunk/tool/final frames" in (outcome.error_code or "")
+        assert adapter.invoke_calls == []
+        recorder.try_reserve.assert_not_awaited()
+        recorder.mark_dispatched.assert_not_awaited()
+        recorder.begin_attempt.assert_not_awaited()
+        executor._config_service.authorize_attempt.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_local_gguf_rejected_by_kind_before_evidence(self):
+        """I50：本地 kind 的拒绝先于能力证据核验（无证据也给出明确「未准入」
+        原因，不落回泛化「no evidence」）。"""
+        adapter = _ScriptedChatAdapter([((), None, _chat_ok_response())])
+        executor = _executor(adapter, _recorder_mock(), adapters={"gguf_chat": adapter})
+
+        outcome = await executor.execute_chat_turn(
+            _chat_request(),
+            _snapshot((_candidate(0, "conn-local"),), (self._local_conn(),), capabilities={}),
+            binding=_binding(),
+        )
+
+        assert outcome.status == "failed"
+        assert "not admitted" in (outcome.error_code or "")
+        assert adapter.invoke_calls == []
 
 
 def _data_consent(**overrides: Any) -> dict[str, Any]:
