@@ -16,8 +16,11 @@
   XML 区分缓存不存在/存在但空/错误/类型不可核；单元格类型按 XML ``t``/``<f>``
   判定（文本以 ``=`` 开头仍是文本），数值/日期保留原 lexeme/serial 与 epoch；
 - PDF / PNG / JPEG 解析依赖（pypdf / Pillow）已按 Q5/Q3 裁决纳入正式依赖；
-  结构不可读仍明确 ``invalid_structure``，不伪造解码结果；图像在容器校验通过后
-  按声明尺寸核像素与解码字节预算，再 ``load()`` 真像素解码，解码失败即拒绝；
+  结构不可读仍明确 ``invalid_structure``，不伪造解码结果；PDF 逐页提取文本，无文本层
+  的扫描页与单页提取失败均按页记入未读缺口（``page_text_unavailable`` /
+  ``page_text_unreadable``），需口令的加密文档明确 ``pdf_encrypted``，零页明确
+  ``pdf_no_pages``，不以空文本报 READY；图像在容器校验通过后按声明尺寸核像素与
+  解码字节预算，再 ``load()`` 真像素解码，解码失败即拒绝；
 - 图像字符数不适用（``chars`` 为 ``None``），0 字符不代表图像已核；模型兼容与
   上下文窗口由派发层判定，本层不据此推断已兼容。
 """
@@ -45,6 +48,7 @@ from xml.etree import ElementTree
 
 from PIL import Image
 from pypdf import PdfReader
+from pypdf.errors import FileNotDecryptedError
 
 from core.agent_types import (
     AgentValidationError,
@@ -1790,7 +1794,13 @@ def _parse_pdf(data: bytes, selection: Selection, budget: AttachmentBudget) -> P
     _check_no_overlap(selection, PagesRange)
     try:
         reader = PdfReader(io.BytesIO(data), strict=True)
-        total_pages = len(reader.pages)
+        try:
+            total_pages = len(reader.pages)
+        except FileNotDecryptedError as exc:
+            # 空口令加密由 pypdf 自动解密，仍不可读说明需要口令：明确报加密，不冒充结构损坏。
+            raise AttachmentParseError(
+                "pdf_encrypted", "PDF is password-protected; page text cannot be extracted"
+            ) from exc
         if selection.kind == "all":
             budget.enforce_pages(total_pages)
             pages = list(range(total_pages))
@@ -1805,12 +1815,31 @@ def _parse_pdf(data: bytes, selection: Selection, budget: AttachmentBudget) -> P
                 pages.extend(range(atom.start - 1, atom.end))
                 read_ranges.append(to_wire_dict(atom))
             budget.enforce_pages(len(pages))
+        if not pages:
+            # 零页 PDF 无页面可读：这是覆盖缺口，不得以空正文报 READY/full。
+            return ParsedAttachment(
+                read_state=ReadState.PARTIAL,
+                coverage="limited",
+                body_text="",
+                limitations=[_limitation("pdf_no_pages", "PDF 无任何页面，未读到文本")],
+                stats=_stats(source_bytes=len(data), pages=0, chars=0),
+            )
         texts: list[str] = []
         limitations: list[dict[str, str]] = []
         readable_pages: list[int] = []
         unreadable_pages: list[int] = []
         for page_index in pages:
-            text = reader.pages[page_index].extract_text() or ""
+            try:
+                text = reader.pages[page_index].extract_text() or ""
+            except MemoryError:
+                raise
+            except Exception:  # 单页结构/字体表损坏：只记该页未读，不判整份无效
+                limitations.append(
+                    _limitation("page_text_unreadable", f"第 {page_index + 1} 页文本提取失败（页面结构不可读）")
+                )
+                unreadable_pages.append(page_index)
+                texts.append("")
+                continue
             if not text.strip():
                 limitations.append(_limitation("page_text_unavailable", f"第 {page_index + 1} 页无可提取文本"))
                 unreadable_pages.append(page_index)
@@ -1821,9 +1850,14 @@ def _parse_pdf(data: bytes, selection: Selection, budget: AttachmentBudget) -> P
         budget.enforce_codepoints(len(body))
         unread_ranges: list[dict[str, Any]] = []
         if limitations:
-            # I25：all 不是「无论读到什么都算全选」——只列真实可读页，未读页单列。
-            read_ranges = _page_range_atoms(readable_pages)
-            unread_ranges = _page_range_atoms(unreadable_pages)
+            # I25/I73：all 的 read/unread 数组按 §3.3.1 只允许为空或单个 all 分型，
+            # 写入页区间会被父侧判 worker_protocol_invalid；缺口改由 limitations 与
+            # PARTIAL/limited coverage 表达，只有 limited 选择才逐页列出可读/未读区间。
+            if selection.kind == "limited":
+                read_ranges = _page_range_atoms(readable_pages)
+                unread_ranges = _page_range_atoms(unreadable_pages)
+            else:
+                read_ranges = []
         return ParsedAttachment(
             read_state=ReadState.PARTIAL if limitations else ReadState.READY,
             coverage="limited" if limitations else "full",

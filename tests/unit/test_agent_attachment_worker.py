@@ -22,7 +22,7 @@ from xml.etree import ElementTree
 
 import pytest
 from PIL import Image
-from pypdf import PdfWriter
+from pypdf import PageObject, PdfWriter
 
 import services.agent_service.attachment_worker as attachment_worker
 
@@ -32,6 +32,7 @@ from core.agent_types import (
     AttachmentKind,
     CodepointsRange,
     JsonPointerRange,
+    PagesRange,
     ParagraphsRange,
     ReadState,
     RowsRange,
@@ -1822,6 +1823,86 @@ class TestImageExtraction:
         assert [item["code"] for item in parsed.limitations] == ["image_text_not_extracted"]
 
 
+def _pdf_bytes(pages: int, *, password: str | None = None) -> bytes:
+    """生成指定页数的空白 PDF（password 非空时加密），用于 PDF 覆盖缺口用例。"""
+
+    writer = PdfWriter()
+    for _ in range(pages):
+        writer.add_blank_page(width=200, height=200)
+    if password is not None:
+        writer.encrypt(password)
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
+
+
+class TestPdfExtraction:
+    def test_encrypted_pdf_is_explicit_error(self) -> None:
+        # 需口令的加密 PDF 不是「结构损坏」：明确 pdf_encrypted，不伪装成不可读结构。
+        with pytest.raises(AttachmentParseError) as exc:
+            _parse(AttachmentKind.PDF, _pdf_bytes(1, password="secret"))
+        assert exc.value.code == "pdf_encrypted"
+
+    def test_empty_password_encryption_is_still_readable(self) -> None:
+        # 空口令加密由 pypdf 自动解密：可读页面照常逐页处理，不得误报 pdf_encrypted。
+        parsed = _parse(AttachmentKind.PDF, _pdf_bytes(1, password=""))
+        assert parsed.read_state is ReadState.PARTIAL
+        assert [item["code"] for item in parsed.limitations] == ["page_text_unavailable"]
+        _assert_selected_range_contract(Selection(kind="all"), parsed)
+
+    def test_zero_page_pdf_reports_gap_not_ready(self) -> None:
+        parsed = _parse(AttachmentKind.PDF, _pdf_bytes(0))
+        assert parsed.read_state is ReadState.PARTIAL
+        assert parsed.coverage == "limited"
+        assert parsed.body_text == ""
+        assert [item["code"] for item in parsed.limitations] == ["pdf_no_pages"]
+        assert parsed.stats["pages"] == 0
+        assert parsed.read_ranges == []
+        assert parsed.unread_ranges == []
+        _assert_selected_range_contract(Selection(kind="all"), parsed)
+
+    def test_single_page_failure_is_recorded_as_unread(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = {"count": 0}
+
+        def _fake_extract_text(self: PageObject, *args: Any, **kwargs: Any) -> str:
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise ValueError("page content stream is broken")
+            return "hello"
+
+        monkeypatch.setattr(PageObject, "extract_text", _fake_extract_text)
+        selection = Selection(kind="limited", ranges=(PagesRange(kind="pages", start=1, end=3),))
+        parsed = _parse(AttachmentKind.PDF, _pdf_bytes(3), selection)
+        # 单页失败只记该页未读，其余页照常给出文本，不把整份 PDF 判为无效。
+        assert parsed.read_state is ReadState.PARTIAL
+        assert parsed.body_text == "hello\n\nhello"
+        assert [item["code"] for item in parsed.limitations] == ["page_text_unreadable"]
+        assert parsed.read_ranges == [
+            {"kind": "pages", "start": 1, "end": 1},
+            {"kind": "pages", "start": 3, "end": 3},
+        ]
+        assert parsed.unread_ranges == [{"kind": "pages", "start": 2, "end": 2}]
+        _assert_selected_range_contract(selection, parsed)
+
+    def test_mixed_pages_all_selection_is_contract_valid(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = {"count": 0}
+
+        def _fake_extract_text(self: PageObject, *args: Any, **kwargs: Any) -> str:
+            calls["count"] += 1
+            return "" if calls["count"] == 2 else "text"
+
+        monkeypatch.setattr(PageObject, "extract_text", _fake_extract_text)
+        parsed = _parse(AttachmentKind.PDF, _pdf_bytes(3))
+        # 全选混合页：缺口如实记录，但 all 的 read/unread 只能为空（§3.3.1）。
+        assert parsed.read_state is ReadState.PARTIAL
+        assert parsed.coverage == "limited"
+        assert parsed.body_text == "text\n\ntext"
+        assert [item["code"] for item in parsed.limitations] == ["page_text_unavailable"]
+        assert parsed.read_ranges == []
+        assert parsed.unread_ranges == []
+        _assert_selected_range_contract(Selection(kind="all"), parsed)
+
+
 class TestKindSniffing:
     def test_magic_mismatch_rejected(self) -> None:
         with pytest.raises(AttachmentWorkerError) as exc:
@@ -2281,15 +2362,17 @@ class TestWorkerLifecycle:
         buffer = io.BytesIO()
         writer.write(buffer)
         parsed = _parse(AttachmentKind.PDF, buffer.getvalue())
-        # I25：all 不得把无文本页伪装成已读——read 仅可读页，unread 单列。
+        # I25/I73：all 不得把无文本页伪装成已读，但 all 的 read/unread 只允许为空或
+        # 单个 all 分型（§3.3.1）；缺口经 limitations + PARTIAL/limited 表达。
         assert parsed.read_state is ReadState.PARTIAL
         assert parsed.coverage == "limited"
         assert parsed.read_ranges == []
-        assert parsed.unread_ranges == [{"kind": "pages", "start": 1, "end": 2}]
+        assert parsed.unread_ranges == []
         assert [item["code"] for item in parsed.limitations] == [
             "page_text_unavailable",
             "page_text_unavailable",
         ]
+        _assert_selected_range_contract(Selection(kind="all"), parsed)
 
     def test_image_malformed_structure_is_explicit(self) -> None:
         with pytest.raises(AttachmentParseError) as exc:
