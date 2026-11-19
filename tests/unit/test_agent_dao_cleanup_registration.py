@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -54,6 +55,9 @@ class _RegistrationConn:
         self.statements.append(sql)
         if sql.startswith("INSERT INTO agent_cleanup_job"):
             raise IntegrityError(sql, {}, Exception("duplicate key"))
+        if "FROM agent_session" in sql:
+            # R2-I21：登记前先锁事件目标会话并取事件水位。
+            return _Result(first=SimpleNamespace(event_seq=0))
         if "agent_cleanup_job.content_manifest" in sql:
             return _Result(first=None)
         if "FROM agent_cleanup_job" in sql:
@@ -75,6 +79,14 @@ class _RegistrationConn:
 
     def _writes(self) -> list[str]:
         return [sql for sql in self.statements if sql.startswith(("UPDATE ", "DELETE "))]
+
+    def begin_nested(self) -> Any:
+        """savepoint 替身：不吞异常（与真实语义一致，作业行冲突继续上抛）。"""
+
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=self)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        return cm
 
 
 def _dao(conn: _RegistrationConn) -> AgentDao:

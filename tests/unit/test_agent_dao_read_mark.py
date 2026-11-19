@@ -49,6 +49,11 @@ class _ReadMarkConn:
         self.marker_row = marker_row
         self.writes: list[dict[str, Any]] = []
 
+    def marker_writes(self) -> list[dict[str, Any]]:
+        """marker 行写事实（R2-I21 之后同事务还会写事件行/会话水位，不含 read_targets）。"""
+
+        return [write for write in self.writes if "read_targets" in write]
+
     async def execute(self, statement: Any, params: Any = None) -> Any:
         sql = str(statement)
         result = MagicMock()
@@ -182,7 +187,7 @@ class TestOwnershipAndWatermark:
         assert receipt.last_seq == 0
         assert receipt.read_target_count == 3
         assert receipt.replayed is False
-        assert conn.writes[-1]["read_targets"] == {
+        assert conn.marker_writes()[-1]["read_targets"] == {
             "message_ids": ["m-1", "m-2"],
             "artifact_refs": ["a-1@2"],
         }
@@ -232,7 +237,7 @@ class TestObservationScopeBinding:
             _command(observed_through_seq=42, observation_scope_digest=_DIGEST)
         )
         assert receipt.last_seq == 42
-        assert conn.writes[-1]["read_targets"]["observation_scope_digest"] == _DIGEST
+        assert conn.marker_writes()[-1]["read_targets"]["observation_scope_digest"] == _DIGEST
 
     async def test_scope_digest_mismatch_rejected(self) -> None:
         conn = _ReadMarkConn(
