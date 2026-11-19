@@ -130,11 +130,6 @@ def _delegate_decision() -> TurnDecision:
 
 
 def test_mode_policy_binds_modes_to_loop_capabilities() -> None:
-    answer = mode_policy(Mode.ANSWER)
-    assert answer.actions == frozenset({LoopAction.ANSWER})
-    assert answer.tool_names == frozenset()
-    assert answer.allow_delegation is False
-
     discuss = mode_policy(Mode.DISCUSS, read_tool_names=frozenset({"read_source"}))
     assert discuss.actions == frozenset({LoopAction.ANSWER, LoopAction.TOOL_CALL})
     assert discuss.tool_names == frozenset({"read_source"})
@@ -153,13 +148,15 @@ def test_mode_policy_binds_modes_to_loop_capabilities() -> None:
     assert execute.allow_delegation is True
 
 
-def test_answer_mode_directly_answers_without_tools_or_delegation() -> None:
+def test_execute_mode_can_answer_directly_without_tools_or_delegation() -> None:
+    """直答是动作而非模式：执行模式下简单目标可直接作答，零工具零委派。"""
+
     store = _Store()
     tools = _RecordingTools()
     delegate = _RecordingDelegate()
     turn = _ScriptedTurn([TurnDecision(action=LoopAction.ANSWER, text="直接回答")])
 
-    outcome = asyncio.run(_loop(mode=Mode.ANSWER, turn=turn, store=store, tools=tools, delegate=delegate).run())
+    outcome = asyncio.run(_loop(mode=Mode.EXECUTE, turn=turn, store=store, tools=tools, delegate=delegate).run())
 
     assert outcome.state is LoopRunState.ANSWERED
     assert outcome.result.result_kind == "explanation"

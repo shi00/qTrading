@@ -116,17 +116,15 @@ class EffectState(Enum):
 
 
 class Mode(Enum):
-    """研究模式：仅用户选择或明确要求决定（F21）。
+    """研究模式：仅用户选择或明确要求决定（F21，三模式）。
 
-    ``ANSWER`` 为直答模式：不调用研究工具、不委派、不启动研究操作，直接给出
-    回答（R2-I08）；``DISCUSS`` 只理解获准资料，``PLAN`` 只交付方法，
-    ``EXECUTE`` 才启动研究操作。
+    ``DISCUSS`` 只理解获准资料，``PLAN`` 只交付方法，``EXECUTE`` 才启动研究操作。
+    直答是循环内的动作（``LoopAction.ANSWER``）而非模式，任何模式都可直接作答。
     """
 
     DISCUSS = "discuss"
     PLAN = "plan"
     EXECUTE = "execute"
-    ANSWER = "answer"
 
 
 class Purpose(Enum):

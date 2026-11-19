@@ -2,13 +2,14 @@
 
 职责边界：
 
-- **唯一循环**：讨论、计划、执行、直答四条路径共用 :class:`ExecutionLoop.run`
+- **唯一循环**：讨论、计划、执行三种模式共用 :class:`ExecutionLoop.run`
   这一个循环；模式只改变可见动作与工具白名单，不复制第二套执行逻辑。
+  **直答不是模式**，而是循环内的动作（``LoopAction.ANSWER``）：任何模式都可
+  直接作答，其是否可用由该模式的可见动作集合决定。
 - **模式绑定**（F21 / DD-F03）：
 
-  - ``ANSWER``（直答）：零工具、零委派、零研究操作，直接回答；
-  - ``DISCUSS``（讨论）：只允许调用调用方登记的获准读资料工具，零研究检索/
-    MCP 研究调用、零叶子派发，结论为直答；
+  - ``DISCUSS``（讨论）：可直接作答 + 调用调用方登记的获准读资料工具，零研究检索/
+    MCP 研究调用、零叶子派发，零委派；
   - ``PLAN``（仅计划）：只允许计划工具，交付计划即结束，**不自动转执行**；
   - ``EXECUTE``（执行）：才允许研究工具与一层委派，最终成果可靠保存。
 
@@ -170,17 +171,12 @@ def mode_policy(
 ) -> ModePolicy:
     """模式 → 动作/工具/委派策略（唯一映射，循环据此在派发前拒绝越界动作）。
 
-    - ``ANSWER``：仅 ``ANSWER``；零工具、零委派；
     - ``DISCUSS``：``ANSWER`` + 获准读资料工具；零研究工具、零委派；
     - ``PLAN``：``PLAN`` + 计划工具；零研究工具、零委派，计划后不自动执行；
     - ``EXECUTE``：``ANSWER/RESULT/TOOL_CALL/DELEGATE``；工具按调用方登记的
       全量白名单，允许一层委派。
     """
 
-    if mode is Mode.ANSWER:
-        return ModePolicy(
-            mode=mode, actions=frozenset({LoopAction.ANSWER}), tool_names=frozenset(), allow_delegation=False
-        )
     if mode is Mode.DISCUSS:
         return ModePolicy(
             mode=mode,

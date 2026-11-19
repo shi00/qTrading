@@ -299,7 +299,8 @@ class TestStateEnums:
         assert {item.value for item in EffectState} == {"not_dispatched", "dispatched", "confirmed", "unknown"}
 
     def test_mode_values(self) -> None:
-        assert {item.value for item in Mode} == {"discuss", "plan", "execute", "answer"}
+        # F21 三模式；直答是循环动作（LoopAction.ANSWER），不是模式。
+        assert {item.value for item in Mode} == {"discuss", "plan", "execute"}
 
     def test_purpose_values(self) -> None:
         assert {item.value for item in Purpose} == {
