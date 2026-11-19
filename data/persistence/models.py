@@ -1557,6 +1557,12 @@ class AgentMessage(Base):
     role_version = Column(Text)
     body_text = Column(Text)
     body_ref = Column(Text)
+    #: 三表示分列（I76）：``body_text`` 为原值；``model_text`` 为模型可见投影；
+    #: ``search_text`` 为公开导出/索引投影。模型与导出读取必须各用其投影，不得把
+    #: 原值直接当投影；``body_untrusted`` 记录来源（True=外部不可信已中和，
+    #: False=用户自述，NULL=旧行未记录，不臆断为可信）。
+    model_text = Column(Text)
+    body_untrusted = Column(Boolean)
     payload = Column(JSONB(none_as_null=True))
     input_revision = Column(BigInteger)
     occurred_at = Column(DateTime(timezone=True), nullable=False)

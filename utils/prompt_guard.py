@@ -1,12 +1,16 @@
 import re
 import logging
 import unicodedata
+from dataclasses import dataclass
 
 from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
 MAX_PROMPT_LENGTH = 8000
+
+#: 模型可见投影的默认长度上限（外部资料单段）；公开导出不按此上限截断。
+EXTERNAL_TEXT_MAX_LEN = 2000
 
 # 零宽/不可见字符清单唯一正本（UTILS-B-05）：validate_prompt 的归一化与
 # neutralize_external_text 的中和层共用同一清单。此前两处各自维护（校验层曾缺
@@ -17,6 +21,10 @@ MAX_PROMPT_LENGTH = 8000
 # INVISIBLE PLUS）为数学排版专用不可见 Format 字符，NFKC 不剥除（Cf 类别保留），
 # 夹带注入短语（如 "ig\u2061nore"）可同时绕过校验层与中和层，故纳入同一清单。
 _ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\ufeff\u00ad\u2060-\u2064\u180e]")
+
+#: ASCII 控制字符（保留 \t \n \r）：外部文本入投影前剥除，避免不可见控制序列
+#: 破坏结构化标记或日志/导出。
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 _INJECTION_PATTERNS = [
     re.compile(
@@ -170,3 +178,59 @@ def neutralize_external_text(text: str, max_len: int = 2000) -> str:
     if len(text) > max_len:
         text = text[:max_len]
     return text
+
+
+@dataclass(frozen=True, slots=True)
+class UntrustedTextRepresentations:
+    """外部/用户文本三表示（I76）：原值、模型可见投影、公开导出投影分列记录。
+
+    - ``raw``：落库原值，仅供精确回读/摘要，**不得**直接作为模型输入或公开导出；
+    - ``model_visible``：进入模型上下文的投影（外部文本经中和，用户自述保持原值）；
+    - ``public_export``：公开历史/索引/审计/导出的投影（中和 + R9 凭证脱敏）。
+    """
+
+    raw: str
+    model_visible: str
+    public_export: str
+
+
+def _neutralize_and_sanitize(text: str) -> str:
+    """中和（控制字符/零宽/尖括号/PII）后按 R9 做文本级凭证脱敏，不截断。"""
+
+    cleaned = _CONTROL_CHARS_RE.sub("", text)
+    neutralized = neutralize_external_text(cleaned, max_len=max(len(cleaned), 1))
+    return DataSanitizer.sanitize_error(neutralized)
+
+
+def project_public_text(text: str) -> str:
+    """公开导出投影：中和 + ``DataSanitizer`` 脱敏（R9），保留完整已保存内容。"""
+
+    return _neutralize_and_sanitize(text if isinstance(text, str) else str(text))
+
+
+def convert_untrusted_text(text: str, *, max_len: int = EXTERNAL_TEXT_MAX_LEN) -> UntrustedTextRepresentations:
+    """外部不可信文本 → 三表示的唯一转换点（§2.1；SEC-001 + R9）。
+
+    外部资料、网页、工具/MCP 返回、日志等一律按不可信处理：先剥除控制字符与
+    零宽字符、中和尖括号（XML/Markdown 包裹不构成安全边界）、脱敏 PII 与凭证，
+    模型可见投影再截断到 ``max_len``；公开导出投影不截断（索引覆盖完整正文）。
+    """
+
+    raw = text if isinstance(text, str) else str(text)
+    public_export = _neutralize_and_sanitize(raw)
+    return UntrustedTextRepresentations(
+        raw=raw,
+        model_visible=public_export[:max_len],
+        public_export=public_export,
+    )
+
+
+def convert_user_text(text: str) -> UntrustedTextRepresentations:
+    """用户自述文本 → 三表示（用户即指令来源，模型可见投影保持原值）。
+
+    用户消息是可信指令，不做尖括号/prompt 中和（否则会改写用户意图），但公开
+    导出与索引面仍须经同一脱敏点（R9：用户可能粘贴凭据/个人信息）。
+    """
+
+    raw = text if isinstance(text, str) else str(text)
+    return UntrustedTextRepresentations(raw=raw, model_visible=raw, public_export=project_public_text(raw))

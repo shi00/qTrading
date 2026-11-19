@@ -3486,6 +3486,9 @@ class RecordEventRequest:
 
     - ``message_id``：公开消息或事件稳定身份（调用方 stable_id 派生，PK）；
     - ``body_text``/``body_ref`` 互斥（§9.6）；``search_text`` 仅可读公开文本；
+    - ``body_untrusted``：外部来源标记（网页/工具/MCP/附件等不可信文本）。DAO 在
+      单一转换点（``utils.prompt_guard``）据此派生原值/模型可见/公开导出三表示，
+      不信任调用方给出的投影（I76）；
     - ``committed_at`` 由 DAO 事务取库时钟，不在请求内（保存时刻=提交事实）。
     """
 
@@ -3509,6 +3512,8 @@ class RecordEventRequest:
     body_text: str | None = None
     body_ref: str | None = None
     search_text: str | None = None
+    #: 外部来源标记：True 时 ``body_text`` 按不可信外部文本中和后再投影（I76）。
+    body_untrusted: bool = False
     native_fact_ref: str | None = None
     tool_call_id: str | None = None
 

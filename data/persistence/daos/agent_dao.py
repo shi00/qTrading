@@ -277,9 +277,29 @@ from core.agent_types import (
     validate_session_read_query,
 )
 from data.persistence.daos.base_dao import BaseDao
+from utils.prompt_guard import (
+    UntrustedTextRepresentations,
+    convert_untrusted_text,
+    convert_user_text,
+    project_public_text,
+)
 
 #: observe 监听通道（§9.13「独立 LISTEN ≤1」；pg_notify payload ≤8000B）。
 _AGENT_EVENT_CHANNEL: Final = "agent_events"
+
+
+def _text_representations(body_text: str | None, *, untrusted: bool) -> UntrustedTextRepresentations | None:
+    """agent_message 三表示派生的唯一入口（I76）：原值 / 模型可见 / 公开导出。
+
+    外部不可信文本（``untrusted=True``）经 ``convert_untrusted_text`` 中和后再投影；
+    用户自述经 ``convert_user_text``（模型可见=原值，公开导出仍按 R9 脱敏）。
+    正文为空时不产出投影，调用方不得自行拼装脱敏/中和逻辑。
+    """
+
+    if body_text is None:
+        return None
+    return convert_untrusted_text(body_text) if untrusted else convert_user_text(body_text)
+
 
 #: 资源全局仲裁单例行 slot_id（§5.4 锁序第 1 条「全局资源 guard」；C-04 裁决：
 #: user_scope='' 哨兵行，claim 事务内 ON CONFLICT DO NOTHING 幂等预置）。
@@ -794,6 +814,9 @@ class AgentDao(BaseDao):
 
         self._check_engine()
         identity = derive_accept_identity(request)
+        # 三表示单一转换点（I76）：受理正文的用户自述投影与公开导出一并派生，
+        # 下游写入不得各自处理脱敏/中和。
+        user_representations = convert_user_text(request.text)
         command_input_digest = frozen_command_input_digest(
             "accept",
             request.text,
@@ -1073,7 +1096,11 @@ class AgentDao(BaseDao):
                     subject_revision=1,
                     role="user",
                     body_text=request.text,
-                    search_text=request.text,
+                    # 三表示单一转换点（I76）：用户自述原值入 body_text，模型可见
+                    # 投影与公开导出投影由同一转换点派生（不直写调用方正文字符串）。
+                    model_text=user_representations.model_visible,
+                    body_untrusted=False,
+                    search_text=user_representations.public_export,
                     payload={
                         "schema_version": 1,
                         "message_id": identity.message_id,
@@ -3819,6 +3846,8 @@ class AgentDao(BaseDao):
         _require_text_field(request.manifest_payload, "manifest_payload", identity)
         _require_text_field(request.source_display_name, "source_display_name", identity)
         source_digest = sha256_hex(request.text)
+        # 三表示单一转换点（I76）：修订正文的用户自述投影与公开导出一并派生。
+        revision_representations = convert_user_text(request.text)
         command_input_digest = frozen_command_input_digest(
             "revise",
             request.text,
@@ -4031,7 +4060,10 @@ class AgentDao(BaseDao):
                     subject_revision=1,
                     role="user",
                     body_text=request.text,
-                    search_text=request.text,
+                    # 三表示单一转换点（I76）：修订正文同样经用户自述投影派生。
+                    model_text=revision_representations.model_visible,
+                    body_untrusted=False,
+                    search_text=revision_representations.public_export,
                     payload={
                         "schema_version": 1,
                         "message_id": message_id,
@@ -4958,6 +4990,16 @@ class AgentDao(BaseDao):
                 "body_text and body_ref are mutually exclusive",
                 identity_str,
             )
+        if not isinstance(request.body_untrusted, bool):
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "body_untrusted must be bool", identity_str)
+        # 三表示单一转换点（I76）：原值落 body_text，模型可见/公开导出分别落
+        # model_text / search_text；不信任调用方自行处理的投影。
+        representations = _text_representations(request.body_text, untrusted=request.body_untrusted)
+        model_text = representations.model_visible if representations is not None else None
+        # 公开导出投影仍由调用方按公开性声明（None 即不公开，不自动以正文兜底），
+        # 但声明值必须经同一转换点脱敏/中和后落列。
+        public_search_text = project_public_text(request.search_text) if request.search_text is not None else None
+        body_untrusted = request.body_untrusted if request.body_text is not None else None
         try:
             decode_json_doc(request.payload_canonical_json)
         except AgentValidationError as exc:
@@ -5066,6 +5108,8 @@ class AgentDao(BaseDao):
                             role_version=request.role_version,
                             body_text=request.body_text,
                             body_ref=request.body_ref,
+                            model_text=model_text,
+                            body_untrusted=body_untrusted,
                             payload=json.loads(request.payload_canonical_json)
                             if request.payload_canonical_json != ""
                             else None,
@@ -5074,7 +5118,7 @@ class AgentDao(BaseDao):
                             committed_at=committed,
                             native_fact_ref=request.native_fact_ref,
                             tool_call_id=request.tool_call_id,
-                            search_text=request.search_text,
+                            search_text=public_search_text,
                         )
                     )
             except IntegrityError as exc:
@@ -5111,6 +5155,8 @@ class AgentDao(BaseDao):
                             AgentMessage.role_version,
                             AgentMessage.body_text,
                             AgentMessage.body_ref,
+                            AgentMessage.model_text,
+                            AgentMessage.body_untrusted,
                             AgentMessage.search_text,
                             AgentMessage.native_fact_ref,
                             AgentMessage.tool_call_id,
@@ -5145,7 +5191,9 @@ class AgentDao(BaseDao):
                     and existing.role_version == request.role_version
                     and existing.body_text == request.body_text
                     and existing.body_ref == request.body_ref
-                    and existing.search_text == request.search_text
+                    and existing.model_text == model_text
+                    and existing.body_untrusted == body_untrusted
+                    and existing.search_text == public_search_text
                     and existing.native_fact_ref == request.native_fact_ref
                     and existing.tool_call_id == request.tool_call_id
                     and json_doc(existing.payload) == json_doc(json.loads(request.payload_canonical_json))
