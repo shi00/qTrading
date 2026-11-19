@@ -97,6 +97,7 @@ from typing import Any, Final, Literal, cast
 from core.agent_types import (
     DataAttemptAuthorization,
     DataAttemptOutcome,
+    SourceKind,
     validate_data_attempt_authorization,
 )
 from core.errors import AIContentRefusedError
@@ -114,6 +115,7 @@ from core.model_management_types import (
     ChatTurnTransportState,
     ExecutionSnapshot,
     FunctionToolSpec,
+    ImageContentPart,
     InferenceAdapter,
     InferenceRequest,
     ModelTurnProtocolError,
@@ -210,7 +212,8 @@ def _default_local_only_mode_reader() -> bool:
 #: 资料核权上下文键（M07，``execute_chat_turn`` 的 binding 可选键 ``data_consent``）：
 #: 受理冻结操作/资料上下文，逐实际 attempt 以真实 ``attempt_id`` 重建核权请求。
 #: 全部键必填——缺键即入口 fail-closed（不静默降级为「无资料约束」）。
-_DATA_CONSENT_BINDING_KEYS: Final[tuple[str, ...]] = (
+#: I43：叶装配侧（``resolve_leaf_data_consent``）按同一元组产出冻结上下文。
+DATA_CONSENT_BINDING_KEYS: Final[tuple[str, ...]] = (
     "user_scope",
     "operation_id",
     "consent_id",
@@ -241,7 +244,7 @@ def _parse_data_consent_binding(raw: object, invocation_id: str) -> DataAttemptA
 
     if not isinstance(raw, Mapping):
         raise ValueError("binding 'data_consent' must be a mapping with the frozen operation context")
-    missing = [key for key in _DATA_CONSENT_BINDING_KEYS if key not in raw]
+    missing = [key for key in DATA_CONSENT_BINDING_KEYS if key not in raw]
     if missing:
         raise ValueError(f"binding 'data_consent' missing keys: {', '.join(missing)}")
     selections = raw["source_selections"]
@@ -266,6 +269,83 @@ def _parse_data_consent_binding(raw: object, invocation_id: str) -> DataAttemptA
     )
     validate_data_attempt_authorization(template)
     return template
+
+
+#: I43：operation 行作用域键（叶装配侧给出 execution/round/node，operation_id 仍
+#: 逐次取本次模型调用身份 ``model_call_id``——一模型调用一 operation）。
+_DATA_OPERATION_SCOPE_KEYS: Final[tuple[str, ...]] = ("execution_id", "round_id", "node_id")
+
+#: I43 稳定原因码：无资料许可即拒绝 / 闭包不可核 / 闭包超集。
+_DATA_CONSENT_REQUIRED: Final[str] = "data_consent_required"
+_SOURCE_CLOSURE_UNVERIFIABLE: Final[str] = "source_closure_unverifiable"
+_SOURCE_CLOSURE_MISMATCH: Final[str] = "source_closure_mismatch"
+
+
+@dataclass(frozen=True, slots=True)
+class _DataOperationScope:
+    """模型调用 operation 的归属作用域（I43，来自叶装配侧 binding）。"""
+
+    execution_id: str
+    round_id: str
+    node_id: str
+
+
+def _parse_data_operation_scope(raw: object) -> _DataOperationScope | None:
+    """binding ``data_operation_scope`` → operation 归属（缺省 = 旧链路，不启用）。"""
+
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise ValueError("binding 'data_operation_scope' must be a mapping")
+    missing = [key for key in _DATA_OPERATION_SCOPE_KEYS if key not in raw]
+    if missing:
+        raise ValueError(f"binding 'data_operation_scope' missing keys: {', '.join(missing)}")
+    values: dict[str, str] = {}
+    for key in _DATA_OPERATION_SCOPE_KEYS:
+        value = raw[key]
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"binding 'data_operation_scope' requires non-empty text at '{key}'")
+        values[key] = value
+    return _DataOperationScope(**values)
+
+
+#: 消息 metadata 中可识别的资料引用三元组键（与 ``DataConsentSourceItem`` 源身份
+#: 同名；当前桥层只有该结构可无歧义解析为许可集合成员）。
+_SOURCE_REF_METADATA_KEYS: Final[frozenset[str]] = frozenset({"source_kind", "source_id", "source_version"})
+
+
+def _chat_payload_source_refs(request: ChatTurnRequest) -> frozenset[tuple[str, str, str]] | None:
+    """本次 chat 出站 payload 引用的资料集合（I43 闭包校验输入）。
+
+    可识别引用：``ChatMessage.metadata`` 恰含 ``source_kind`` / ``source_id`` /
+    ``source_version`` 三元组（wire 拼写与 ``SourceKind`` 一致）。以下情形按
+    **不可核**（返回 ``None``，调用方 fail-closed）：
+    - 消息携带图片 part（``binary_ref`` 无许可集合对应身份，无法证明 ⊆ 许可集）；
+    - metadata 出现三元组之外的键或三元组不完整（未识别的引用声明类型）；
+    - ``source_kind`` 不在冻结 ``SourceKind`` 值域内。
+
+    未覆盖载体（不参与解析，报告中登记）：正文文本、工具调用参数、instructions、
+    工具 schema——桥层当前不携带可无歧义映射到源身份的引用结构，不在此自造协议。
+    """
+
+    refs: set[tuple[str, str, str]] = set()
+    for message in request.messages:
+        if message.metadata:
+            keys = set(message.metadata)
+            if keys != _SOURCE_REF_METADATA_KEYS:
+                return None
+            kind = message.metadata["source_kind"]
+            if kind not in SourceKind._value2member_map_:
+                return None
+            source_id = message.metadata["source_id"]
+            source_version = message.metadata["source_version"]
+            if not source_id or not source_version:
+                return None
+            refs.add((kind, source_id, source_version))
+        for part in message.content_parts:
+            if isinstance(part, ImageContentPart):
+                return None
+    return frozenset(refs)
 
 
 @dataclass(slots=True)
@@ -476,6 +556,16 @@ class ScenarioExecutor:
         # M07：受理冻结资料/操作上下文（可选键）。声明即逐实际 attempt 新鲜核权；
         # 未声明不改变既有链路（旧直推入口与未接线调用方政策不变）。
         raw_data_consent = binding.get("data_consent")
+        operation_scope = _parse_data_operation_scope(binding.get("data_operation_scope"))
+        require_data_consent = binding.get("require_data_consent", False)
+        if not isinstance(require_data_consent, bool):
+            raise ValueError("binding 'require_data_consent' must be a bool when present")
+        if operation_scope is not None:
+            # I43：operation 身份逐调用取本次 model_call_id（一模型调用一 operation），
+            # 不沿用叶装配期的占位身份；归属作用域由 binding 冻结。
+            if not isinstance(raw_data_consent, Mapping):
+                raise ValueError("binding 'data_operation_scope' requires frozen 'data_consent' context")
+            raw_data_consent = {**raw_data_consent, "operation_id": identity.invocation_id}
         data_authorization = (
             _parse_data_consent_binding(raw_data_consent, identity.invocation_id)
             if raw_data_consent is not None
@@ -520,6 +610,11 @@ class ScenarioExecutor:
             adapter_check=_chat_adapter_check,
             capability_check=_chat_capability_check(request),
             data_authorization=data_authorization,
+            # I43：agent research 叶链无 ``data_consent`` 决定即零外发拒绝（不放行
+            # 「无资料发送」）；闭包校验在执行器内对本次 payload 引用集合复核。
+            require_data_consent=require_data_consent,
+            data_operation_scope=operation_scope,
+            source_closure=(_chat_payload_source_refs(request) if data_authorization is not None else None),
             # M08：Agent 聊天回合严格路径——必需登记（reserve / mark_dispatched /
             # begin_attempt）逐项 fail-closed，不回退进程内派发身份。
             strict_required_registration=True,
@@ -1051,6 +1146,24 @@ class ScenarioExecutor:
                 last_reason = "deadline exhausted"
                 raise _DeadlineExhaustedError()
 
+            # I43：无许可即拒绝——agent research 叶链未取得 ``data_consent`` 决定时
+            # 零外发（不登记 attempt、不进预留、不外发），并中断候选遍历（换候选
+            # 无济：许可缺失是 operation 级事实）。
+            if policy.require_data_consent and policy.data_authorization is None:
+                last_reason = _DATA_CONSENT_REQUIRED
+                logger.warning(
+                    "[ScenarioExecutor] data consent required but absent, zero outbound (task=%s)",
+                    identity.task_id,
+                )
+                return _CandidateOutcome(
+                    status="failed",
+                    decision_hint="rejected",
+                    reason=_DATA_CONSENT_REQUIRED,
+                    outputs=(),
+                    usages=(),
+                    halt_candidates=True,
+                )
+
             attempt_id = uuid.uuid4().hex
             last_attempt_id = attempt_id
             reservation_token = uuid.uuid4().hex
@@ -1102,6 +1215,28 @@ class ScenarioExecutor:
                         usages=(),
                         halt_candidates=True,
                     )
+                # I43：先备后核——operation 身份取本次 ``model_call_id``，行必须存在
+                # 才能落许可 claim（DAO 缺 operation 行即 INPUT_INVALID）。准备失败
+                # 同样零出站且不切换候选（operation 级事实）。
+                if policy.data_operation_scope is not None:
+                    prepare_denial = await self._ensure_data_operation(
+                        policy.data_operation_scope, policy.data_authorization, identity
+                    )
+                    if prepare_denial is not None:
+                        last_reason = prepare_denial
+                        logger.warning(
+                            "[ScenarioExecutor] data operation prepare failed, zero outbound (task=%s, reason=%s)",
+                            identity.task_id,
+                            prepare_denial,
+                        )
+                        return _CandidateOutcome(
+                            status="failed",
+                            decision_hint="rejected",
+                            reason=prepare_denial,
+                            outputs=(),
+                            usages=(),
+                            halt_candidates=True,
+                        )
                 denial = await self._authorize_data_attempt(policy.data_authorization, attempt_id)
                 if denial is not None:
                     last_reason = denial
@@ -1114,6 +1249,40 @@ class ScenarioExecutor:
                         status="failed",
                         decision_hint="rejected",
                         reason=denial,
+                        outputs=(),
+                        usages=(),
+                        halt_candidates=True,
+                    )
+                # I43：闭包校验——本次出站 payload 引用的资料必须 ⊆ 已授权
+                # ``source_selections``；引用结构不可识别即不可核（fail-closed）。
+                if policy.source_closure is None:
+                    last_reason = _SOURCE_CLOSURE_UNVERIFIABLE
+                    logger.warning(
+                        "[ScenarioExecutor] payload source closure unverifiable, zero outbound (task=%s)",
+                        identity.task_id,
+                    )
+                    return _CandidateOutcome(
+                        status="failed",
+                        decision_hint="rejected",
+                        reason=_SOURCE_CLOSURE_UNVERIFIABLE,
+                        outputs=(),
+                        usages=(),
+                        halt_candidates=True,
+                    )
+                permitted = {
+                    (item.source_kind.value, item.source_id, item.source_version)
+                    for item in policy.data_authorization.source_selections
+                }
+                if not policy.source_closure <= permitted:
+                    last_reason = _SOURCE_CLOSURE_MISMATCH
+                    logger.warning(
+                        "[ScenarioExecutor] payload references sources outside consent scope, zero outbound (task=%s)",
+                        identity.task_id,
+                    )
+                    return _CandidateOutcome(
+                        status="failed",
+                        decision_hint="rejected",
+                        reason=_SOURCE_CLOSURE_MISMATCH,
                         outputs=(),
                         usages=(),
                         halt_candidates=True,
@@ -1485,6 +1654,37 @@ class ScenarioExecutor:
             return _CandidateOutcome(
                 status="failed", reason=last_reason, outputs=(), usages=(), attempt_id=last_attempt_id
             )
+
+    async def _ensure_data_operation(
+        self,
+        scope: _DataOperationScope,
+        template: DataAttemptAuthorization,
+        identity: _TurnIdentity,
+    ) -> str | None:
+        """确保本次模型调用的 operation 行存在（I43）：``None``=就绪，否则脱敏原因码。
+
+        operation 身份统一取本次 ``model_call_id``（``identity.invocation_id``，
+        一模型调用一 operation），归属 execution/round/node 随 binding 冻结；
+        owner/run 代次由 DAO 读 DB 权威值。能力缺失 / 持久化失败一律 fail-closed
+        （零出站，原因仅含稳定码与异常类型，R9/R21）。
+        """
+
+        ensure = getattr(self._config_service, "ensure_model_operation", None)
+        if ensure is None:
+            return "data operation unavailable: owner capability missing"
+        try:
+            await ensure(
+                user_scope=template.user_scope,
+                operation_id=identity.invocation_id,
+                execution_id=scope.execution_id,
+                round_id=scope.round_id,
+                node_id=scope.node_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            return f"data operation prepare failed: {type(e).__name__}"
+        return None
 
     async def _authorize_data_attempt(self, template: DataAttemptAuthorization, attempt_id: str) -> str | None:
         """资料核权门（M07）：返回 ``None``=放行，否则脱敏原因码（零出站）。
@@ -2072,6 +2272,13 @@ class _AttemptPolicy:
     capability_check: Callable[[ResolvedConnection, _ConnectionEligibility], str | None] | None = None
     data_authorization: DataAttemptAuthorization | None = None
     strict_required_registration: bool = False
+    #: I43：无许可即拒绝（agent research 叶链 fail-closed，零外发）。
+    require_data_consent: bool = False
+    #: I43：operation 归属作用域（设置时每次模型调用先 ``ensure_model_operation``，
+    #: operation_id 取本次 ``model_call_id``）。
+    data_operation_scope: _DataOperationScope | None = None
+    #: I43：本次出站 payload 引用的资料集合（``None`` = 不可核 → fail-closed）。
+    source_closure: frozenset[tuple[str, str, str]] | None = None
 
 
 @dataclass(slots=True)

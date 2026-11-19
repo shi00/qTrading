@@ -451,6 +451,24 @@ class _FrozenSourceFacts:
     body_text: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class LeafDispatchFacts:
+    """叶派发身份事实（I43）：execution/round 归属 + owner/run 代次（DB 权威值）。"""
+
+    user_scope: str
+    owner_epoch: int
+    run_epoch: int
+
+
+@dataclass(frozen=True, slots=True)
+class DataConsentAuthority:
+    """某 execution/round/node 的权威资料许可决定（I43，只读投影）。"""
+
+    consent_id: str
+    revision: int
+    binding: DataConsentBinding
+
+
 # E-06 九类原生目标位于**运行库**（dbos / agent_ds，独立逻辑库），不属业务库；
 # 计数/Datasource 删除见 ``data.persistence.agent_runtime_store``，系统表删除走
 # DBOS 公开 API（``services.agent_service.cleanup_native``）。本 DAO 只承载应用域
@@ -4594,6 +4612,197 @@ class AgentDao(BaseDao):
                 )
             )
             return DataConsentClaimFact(claim=claim, replayed=False)
+
+    # ------------------------------------------------------------------
+    # I43：叶派发事实 / 权威资料许可 / 模型调用 operation 准备
+    # ------------------------------------------------------------------
+
+    async def read_leaf_dispatch_facts(self, execution_id: str, round_id: str) -> LeafDispatchFacts:
+        """叶派发身份事实（I43）：user_scope / owner_epoch / run_epoch 权威值。
+
+        只读、不推断：execution 或 round 缺失、或轮不属该执行 → ``INPUT_INVALID``
+        （调用方违反「先备后派发」契约，零写）。
+        """
+
+        self._check_engine()
+        identity_str = f"{execution_id}/{round_id}"
+        _require_text_field(execution_id, "execution_id", identity_str)
+        _require_text_field(round_id, "round_id", identity_str)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(
+                        AgentExecution.user_scope,
+                        AgentExecution.owner_epoch,
+                        AgentRound.run_epoch,
+                    )
+                    .select_from(AgentExecution)
+                    .join(
+                        AgentRound,
+                        sa.and_(
+                            AgentRound.user_scope == AgentExecution.user_scope,
+                            AgentRound.round_id == round_id,
+                            AgentRound.execution_id == AgentExecution.execution_id,
+                        ),
+                    )
+                    .where(AgentExecution.execution_id == execution_id)
+                )
+            ).first()
+        if row is None:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                "execution/round not found or round does not belong to execution",
+                identity_str,
+            )
+        return LeafDispatchFacts(
+            user_scope=row.user_scope,
+            owner_epoch=int(row.owner_epoch),
+            run_epoch=int(row.run_epoch),
+        )
+
+    async def read_authoritative_data_consent(
+        self, *, execution_id: str, round_id: str, node_id: str
+    ) -> DataConsentAuthority | None:
+        """按 execution/round/node 定位权威资料许可决定（I43，只读）。
+
+        规则：同 execution+round+node 取最新 revision；多条同 revision 且载荷内容
+        不同 → ``OPERATION_UNKNOWN``（不猜，R21 fail-closed）；无决定行 → ``None``
+        （由调用方按「无许可即拒绝」处置）。载荷不可靠重读同样 fail-closed。
+        """
+
+        self._check_engine()
+        identity_str = f"{execution_id}/{round_id}/{node_id}"
+        _require_text_field(execution_id, "execution_id", identity_str)
+        _require_text_field(round_id, "round_id", identity_str)
+        _require_text_field(node_id, "node_id", identity_str)
+        facts = await self.read_leaf_dispatch_facts(execution_id, round_id)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    sa.select(
+                        AgentDecision.decision_id,
+                        AgentDecision.revision,
+                        AgentDecision.data_consent_payload,
+                    )
+                    .where(
+                        AgentDecision.user_scope == facts.user_scope,
+                        AgentDecision.execution_id == execution_id,
+                        AgentDecision.round_id == round_id,
+                        AgentDecision.node_id == node_id,
+                        AgentDecision.decision_kind == "data_consent",
+                    )
+                    .order_by(AgentDecision.revision.desc(), AgentDecision.updated_at.desc())
+                )
+            ).all()
+        if not rows:
+            return None
+        top_revision = int(rows[0].revision)
+        top = [row for row in rows if int(row.revision) == top_revision]
+        if len(top) > 1:
+            payloads = {json_doc(row.data_consent_payload) for row in top if row.data_consent_payload is not None}
+            if len(payloads) != 1 or any(row.data_consent_payload is None for row in top):
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN,
+                    "data consent authority ambiguous at same revision",
+                    identity_str,
+                )
+        chosen = top[0]
+        if chosen.data_consent_payload is None:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                "data consent payload cannot be reliably decoded",
+                identity_str,
+            )
+        binding = decode_data_consent_binding(chosen.data_consent_payload, "$")
+        return DataConsentAuthority(
+            consent_id=chosen.decision_id,
+            revision=int(chosen.revision),
+            binding=binding,
+        )
+
+    async def ensure_model_operation(
+        self,
+        *,
+        user_scope: str,
+        operation_id: str,
+        execution_id: str,
+        round_id: str,
+        node_id: str,
+    ) -> bool:
+        """幂等确保模型调用 operation 行存在（I43：一模型调用一 operation）。
+
+        返回值：``True`` = 本次新建；``False`` = 等价行已存在（零新事实）。
+        代次取 DB 权威值（execution.owner_epoch / round.run_epoch），不信任调用方；
+        最小可派发态 = phase ``prepared`` / effect ``not_dispatched`` / io
+        ``not_started``（§9.9 三独立维度，不冒充已派发或已有结果）。同 operation_id
+        已存在但归属不同 execution/round/node 或不同 user_scope → ``INPUT_CONFLICT``
+        （不覆盖原事实）。
+        """
+
+        self._check_engine()
+        identity_str = f"{user_scope}/{operation_id}"
+        _require_text_field(user_scope, "user_scope", identity_str)
+        _require_text_field(operation_id, "operation_id", identity_str)
+        _require_text_field(execution_id, "execution_id", identity_str)
+        _require_text_field(round_id, "round_id", identity_str)
+        _require_text_field(node_id, "node_id", identity_str)
+        facts = await self.read_leaf_dispatch_facts(execution_id, round_id)
+        if facts.user_scope != user_scope:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                "user_scope does not own execution",
+                identity_str,
+            )
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa_pg.insert(AgentOperation)
+                .values(
+                    user_scope=user_scope,
+                    operation_id=operation_id,
+                    execution_id=execution_id,
+                    round_id=round_id,
+                    step_id=node_id,
+                    owner_epoch=facts.owner_epoch,
+                    run_epoch=facts.run_epoch,
+                    phase="prepared",
+                    effect_state="not_dispatched",
+                    io_state="not_started",
+                )
+                .on_conflict_do_nothing()
+            )
+            if result.rowcount == 1:
+                return True
+            existing = (
+                await conn.execute(
+                    sa.select(
+                        AgentOperation.execution_id,
+                        AgentOperation.round_id,
+                        AgentOperation.step_id,
+                    ).where(
+                        AgentOperation.user_scope == user_scope,
+                        AgentOperation.operation_id == operation_id,
+                    )
+                )
+            ).first()
+        if existing is None:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_CONFLICT,
+                "operation_id owned by another user scope",
+                identity_str,
+            )
+        if existing.execution_id != execution_id or existing.round_id != round_id or existing.step_id != node_id:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_CONFLICT,
+                "operation_id already bound to another execution/round/node",
+                identity_str,
+            )
+        return False
 
     # ------------------------------------------------------------------
     # C-03-1：可靠事件写入与读取（§4.4 包络 + §9.6 统一事件存储）

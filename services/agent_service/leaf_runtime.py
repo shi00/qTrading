@@ -19,15 +19,16 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from core.model_management_types import ExecutionSnapshot
 from pydantic_ai.profiles import ModelProfile
 
-from services.agent_service.model import ChatTurnExecutor, GatewayModel
+from services.agent_service.model import ChatTurnExecutor, GatewayModel, derive_model_call_id
 from services.agent_service.workflows import (
     LeafExecutionContext,
     LeafRunner,
@@ -65,6 +66,9 @@ ModelBindingResolver = Callable[[LeafExecutionContext], Awaitable[LeafModelBindi
 #: 叶 Agent 主体：给定模型桥与叶上下文产出叶终态事实（成果落库属执行分片）。
 LeafAgentRunner = Callable[[GatewayModel, LeafExecutionContext], Awaitable[NodeOutcome]]
 
+#: 叶资料许可提供者（I43）：返回该叶的 15 键冻结资料上下文；``None`` = 无决定。
+DataConsentProvider = Callable[[LeafExecutionContext], Awaitable[Mapping[str, Any] | None]]
+
 
 @dataclass(frozen=True, slots=True)
 class LeafRuntimeWiring:
@@ -72,12 +76,105 @@ class LeafRuntimeWiring:
 
     model_binding: ModelBindingResolver
     agent_runner: LeafAgentRunner
+    #: I43：资料许可逐 attempt 核权的决策来源（缺省不接线 = 无许可即拒绝）。
+    data_consent_provider: DataConsentProvider | None = None
 
 
-async def resolve_agent_model_binding(context: LeafExecutionContext) -> LeafModelBinding:
+async def resolve_leaf_data_consent(
+    context: LeafExecutionContext, *, dao: Any | None = None
+) -> Mapping[str, Any] | None:
+    """生产默认资料许可提供者（I43）：按 execution/round/node 读权威决定。
+
+    无决定行 → ``None``（装配侧写入 ``require_data_consent``，执行器零外发拒绝）；
+    决定行不可读 / 作用域不一致 / 摘要不自洽 → 抛错（装配期 fail-closed，零外发）。
+    返回值恰为执行器 ``data_consent`` 契约的 15 键（不含 ``attempt_id``）；
+    ``operation_id`` 为叶首回合派生身份占位——真实 operation 身份在执行器逐次
+    取 ``model_call_id`` 覆盖（一模型调用一 operation）。
+    """
+
+    agent_dao = dao
+    if agent_dao is None:
+        # lazy-import：CacheManager 依赖全量 DAO 注册链，仅资料许可路径需要。
+        from data.cache.cache_manager import CacheManager
+
+        agent_dao = getattr(CacheManager(), "agent_dao", None)
+    if agent_dao is None:
+        raise RuntimeError("agent dao unavailable (zero model dispatch)")
+
+    from core.agent_types import data_consent_source_scope_digest
+    from services.ai_service.scenario_executor import DATA_CONSENT_BINDING_KEYS
+
+    facts = await agent_dao.read_leaf_dispatch_facts(context.execution_id, context.round_id)
+    authority = await agent_dao.read_authoritative_data_consent(
+        execution_id=context.execution_id,
+        round_id=context.round_id,
+        node_id=context.node.node_id,
+    )
+    if authority is None:
+        return None
+    binding = authority.binding
+    if (
+        binding.user_scope != facts.user_scope
+        or binding.execution_id != context.execution_id
+        or binding.round_id != context.round_id
+    ):
+        raise ValueError("data consent binding scope does not match leaf execution")
+    if data_consent_source_scope_digest(binding.source_selections) != binding.source_scope_digest:
+        raise ValueError("data consent source scope digest does not match source selections")
+    payload: dict[str, Any] = {
+        "user_scope": binding.user_scope,
+        "operation_id": derive_model_call_id(leaf_call_identity(context), 0),
+        "consent_id": authority.consent_id,
+        "expected_consent_revision": binding.consent_revision,
+        "connection_id": binding.connection_authorization_ref.connection_id,
+        "connection_revision": binding.connection_revision,
+        "security_revision": binding.security_revision,
+        "credential_version": binding.credential_version,
+        "purpose": binding.purpose,
+        "target_fingerprint": binding.target_fingerprint,
+        "scope_version": binding.scope_version,
+        "source_selections": binding.source_selections,
+        "source_scope_digest": binding.source_scope_digest,
+        "owner_epoch": facts.owner_epoch,
+        "run_epoch": facts.run_epoch,
+    }
+    missing = [key for key in DATA_CONSENT_BINDING_KEYS if key not in payload]
+    if missing:
+        raise ValueError(f"data consent context missing keys: {', '.join(missing)}")
+    return payload
+
+
+def _validated_data_consent_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """校验装配侧资料上下文（I43）：15 键闭合 + 源项类型 + 摘要新鲜重算。"""
+
+    from core.agent_types import DataConsentSourceItem, data_consent_source_scope_digest
+    from services.ai_service.scenario_executor import DATA_CONSENT_BINDING_KEYS
+
+    expected = set(DATA_CONSENT_BINDING_KEYS)
+    keys = set(raw)
+    if keys != expected:
+        missing = sorted(expected - keys)
+        extra = sorted(keys - expected)
+        raise ValueError(f"data consent keys mismatch (missing={missing}, extra={extra})")
+    selections = raw["source_selections"]
+    if not isinstance(selections, tuple) or any(not isinstance(item, DataConsentSourceItem) for item in selections):
+        raise ValueError("data consent 'source_selections' must be a tuple of DataConsentSourceItem")
+    if data_consent_source_scope_digest(selections) != raw["source_scope_digest"]:
+        raise ValueError("data consent 'source_scope_digest' does not match source selections")
+    return dict(raw)
+
+
+async def resolve_agent_model_binding(
+    context: LeafExecutionContext,
+    *,
+    data_consent_provider: DataConsentProvider | None = None,
+) -> LeafModelBinding:
     """生产默认模型绑定：按 ``agent_research`` 场景路由取执行器与冻结快照。
 
     路由未启用/无候选/调度服务未组装 → 明确失败（不静默换模型、零外发）。
+    I43：资料许可决定随 binding 冻结——有决定则写 ``data_consent``（15 键）与
+    operation 归属作用域；无决定（含未接线 provider）写 ``require_data_consent``
+    且**不写** ``data_consent``（执行器零外发拒绝，不放行「无资料发送」）。
     """
 
     from services.ai_service.scenario_dispatch import resolve_executor
@@ -85,10 +182,24 @@ async def resolve_agent_model_binding(context: LeafExecutionContext) -> LeafMode
     dispatch = await resolve_executor(AGENT_RESEARCH_SCENARIO_ID)
     if dispatch is None:
         raise RuntimeError(f"{AGENT_RESEARCH_SCENARIO_ID} route unavailable (zero model dispatch)")
+    raw_consent = await data_consent_provider(context) if data_consent_provider is not None else None
+    binding: dict[str, Any] = {
+        "scenario_id": AGENT_RESEARCH_SCENARIO_ID,
+        "task_id": context.node.node_id,
+    }
+    if raw_consent is None:
+        binding["require_data_consent"] = True
+    else:
+        binding["data_consent"] = _validated_data_consent_payload(raw_consent)
+        binding["data_operation_scope"] = {
+            "execution_id": context.execution_id,
+            "round_id": context.round_id,
+            "node_id": context.node.node_id,
+        }
     return LeafModelBinding(
         executor=dispatch.executor,
         snapshot=dispatch.snapshot,
-        binding={"scenario_id": AGENT_RESEARCH_SCENARIO_ID, "task_id": context.node.node_id},
+        binding=binding,
     )
 
 
@@ -104,10 +215,27 @@ async def unavailable_leaf_agent(model: GatewayModel, context: LeafExecutionCont
     return NodeOutcome(node_id=context.node.node_id, state="failed", error_code=LEAF_AGENT_UNAVAILABLE)
 
 
-def default_leaf_runtime() -> LeafRuntimeWiring:
-    """生产默认装配：真实场景路由解析 + 如实失败的叶 Agent 主体。"""
+def default_leaf_runtime(dao: Any | None = None) -> LeafRuntimeWiring:
+    """生产默认装配：真实场景路由解析 + 资料许可提供者 + 如实失败的叶 Agent 主体。
 
-    return LeafRuntimeWiring(model_binding=resolve_agent_model_binding, agent_runner=unavailable_leaf_agent)
+    ``dao`` 缺省时提供者在解析时惰性取 ``CacheManager().agent_dao``；无法取得时
+    掷错（叶失败、零外发），不降级为「无许可约束」。
+    """
+
+    provider: DataConsentProvider = (
+        resolve_leaf_data_consent
+        if dao is None
+        else cast(DataConsentProvider, functools.partial(resolve_leaf_data_consent, dao=dao))
+    )
+
+    async def _model_binding(context: LeafExecutionContext) -> LeafModelBinding:
+        return await resolve_agent_model_binding(context, data_consent_provider=provider)
+
+    return LeafRuntimeWiring(
+        model_binding=_model_binding,
+        agent_runner=unavailable_leaf_agent,
+        data_consent_provider=provider,
+    )
 
 
 def leaf_call_identity(context: LeafExecutionContext) -> str:

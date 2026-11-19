@@ -25,6 +25,7 @@
 
 import asyncio
 import inspect
+import logging
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
@@ -45,6 +46,7 @@ from core.model_management_types import (
     ChatTurnResponse,
     ExecutionSnapshot,
     FunctionToolSpec,
+    ImageContentPart,
     NormalizedLLMUsage,
     ModelTurnProtocolError,
     PersistenceOutcome,
@@ -1283,6 +1285,170 @@ class TestChatDataConsentGate:
             )
         assert "consent_id" in str(excinfo.value)
         recorder.ensure_invocation.assert_not_awaited()
+        assert adapter.invoke_calls == []
+
+
+def _operation_scope(**overrides: Any) -> dict[str, Any]:
+    values: dict[str, Any] = {"execution_id": "exec-1", "round_id": "round-1", "node_id": "n1"}
+    values.update(overrides)
+    return values
+
+
+def _chat_request_with(messages: tuple[ChatMessage, ...], model_call_id: str = "mc-1") -> ChatTurnRequest:
+    return ChatTurnRequest(
+        model_call_id=model_call_id,
+        messages=messages,
+        instructions=("系统提示",),
+        tools=(),
+        output_schema=None,
+        frozen_params={},
+        max_output_tokens=256,
+        deadline=asyncio.get_running_loop().time() + _REQUEST_DEADLINE_BUDGET_S,
+    )
+
+
+class TestAgentConsentRequiredAndClosure:
+    """I43：无许可即拒绝 + 逐 attempt 结论 + payload 资料闭包校验。"""
+
+    @pytest.mark.asyncio
+    async def test_require_without_consent_denies_zero_outbound_and_halts(self, caplog: pytest.LogCaptureFixture):
+        adapter = _ScriptedChatAdapter([])
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder)
+
+        with caplog.at_level(logging.WARNING):
+            outcome = await executor.execute_chat_turn(
+                _chat_request(),
+                _snapshot(
+                    (_candidate(0, "conn-remote"), _candidate(1, "conn-remote")),
+                    (_remote_conn(),),
+                ),
+                binding=_binding(require_data_consent=True),
+            )
+
+        assert outcome.status == "failed"
+        assert "data_consent_required" in (outcome.error_code or "")
+        assert adapter.invoke_calls == []
+        recorder.try_reserve.assert_not_awaited()
+        recorder.mark_dispatched.assert_not_awaited()
+        # halt：两个候选只评估一次（换候选无济于 operation 级许可缺失）
+        assert sum("data consent required but absent" in record.message for record in caplog.records) == 1
+
+    @pytest.mark.asyncio
+    async def test_each_attempt_reauthorizes_with_model_call_operation_id(self):
+        adapter = _ScriptedChatAdapter(
+            [
+                ((), TimeoutError("upstream timed out"), None),
+                ((), None, _chat_ok_response()),
+            ]
+        )
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder)
+        ensure = AsyncMock()
+        executor._config_service.ensure_model_operation = ensure
+        authorize = AsyncMock(
+            side_effect=[_data_receipt(DataAttemptOutcome.ALLOW), _data_receipt(DataAttemptOutcome.ALLOW)]
+        )
+        executor._config_service.authorize_data_attempt = authorize
+
+        outcome = await executor.execute_chat_turn(
+            _chat_request(),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            binding=_binding(data_consent=_data_consent(), data_operation_scope=_operation_scope()),
+        )
+
+        assert outcome.status == "succeeded"
+        assert len(adapter.invoke_calls) == 2
+        assert authorize.await_count == 2  # 重试 2 次 → 授权 2 次
+        assert ensure.await_count == 2  # 每次模型调用先备 operation
+        assert {call.kwargs["operation_id"] for call in ensure.await_args_list} == {"mc-1"}
+        assert {call.args[0].operation_id for call in authorize.await_args_list} == {"mc-1"}
+
+    @pytest.mark.asyncio
+    async def test_revoked_between_attempts_zero_outbound(self):
+        adapter = _ScriptedChatAdapter(
+            [
+                ((), TimeoutError("upstream timed out"), None),
+                ((), None, _chat_ok_response()),
+            ]
+        )
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder)
+        executor._config_service.ensure_model_operation = AsyncMock()
+        authorize = AsyncMock(
+            side_effect=[
+                _data_receipt(DataAttemptOutcome.ALLOW),
+                _data_receipt(DataAttemptOutcome.DENY, "state_not_approved"),
+            ]
+        )
+        executor._config_service.authorize_data_attempt = authorize
+
+        outcome = await executor.execute_chat_turn(
+            _chat_request(),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            binding=_binding(data_consent=_data_consent(), data_operation_scope=_operation_scope()),
+        )
+
+        assert outcome.status == "failed"
+        assert "data authorization deny: state_not_approved" in (outcome.error_code or "")
+        assert len(adapter.invoke_calls) == 1
+        assert authorize.await_count == 2
+        assert recorder.try_reserve.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_payload_reference_outside_consent_scope_denied(self):
+        adapter = _ScriptedChatAdapter([])
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder)
+        executor._config_service.authorize_data_attempt = AsyncMock(
+            return_value=_data_receipt(DataAttemptOutcome.ALLOW)
+        )
+        request = _chat_request_with(
+            (
+                ChatMessage(
+                    role="user",
+                    content_parts=(TextContentPart(text="研究问题"),),
+                    metadata={"source_kind": "user_message", "source_id": "资料-A", "source_version": "v1"},
+                ),
+            )
+        )
+
+        outcome = await executor.execute_chat_turn(
+            request,
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            binding=_binding(data_consent=_data_consent()),  # 许可集合为空
+        )
+
+        assert outcome.status == "failed"
+        assert "source_closure_mismatch" in (outcome.error_code or "")
+        assert adapter.invoke_calls == []
+        recorder.try_reserve.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unverifiable_payload_closure_denied(self):
+        adapter = _ScriptedChatAdapter([])
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder)
+        executor._config_service.authorize_data_attempt = AsyncMock(
+            return_value=_data_receipt(DataAttemptOutcome.ALLOW)
+        )
+        request = _chat_request_with(
+            (
+                ChatMessage(
+                    role="user",
+                    content_parts=(ImageContentPart(mime="image/png", binary_ref="bin-1"),),
+                ),
+            )
+        )
+
+        outcome = await executor.execute_chat_turn(
+            request,
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            binding=_binding(data_consent=_data_consent()),
+        )
+
+        assert outcome.status == "failed"
+        assert "source_closure_unverifiable" in (outcome.error_code or "")
         assert adapter.invoke_calls == []
 
 

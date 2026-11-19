@@ -1387,3 +1387,27 @@ class ModelConfigurationService:
             binding=binding,
             revision=binding.consent_revision,
         )
+
+    async def ensure_model_operation(
+        self,
+        *,
+        user_scope: str,
+        operation_id: str,
+        execution_id: str,
+        round_id: str,
+        node_id: str,
+    ) -> None:
+        """确保本次模型调用的 operation 行存在（I43「先备后派发」）。
+
+        幂等（DAO ``ON CONFLICT DO NOTHING``）：同一 ``operation_id``（= 模型调用
+        身份）重放不新建事实；代次由 DAO 取 DB 权威值。DAO 缺失 → fail-closed
+        ``PERSISTENCE_UNAVAILABLE``（不回退进程内派发身份）。
+        """
+
+        await self._resolve_agent_dao().ensure_model_operation(
+            user_scope=user_scope,
+            operation_id=operation_id,
+            execution_id=execution_id,
+            round_id=round_id,
+            node_id=node_id,
+        )

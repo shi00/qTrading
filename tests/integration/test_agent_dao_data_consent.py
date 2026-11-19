@@ -875,6 +875,107 @@ class TestClaimDataConsent:
         assert _code_of(exc) == AgentErrorCode.POLICY_DENIED
 
 
+class TestEnsureModelOperation:
+    """I43：模型调用 operation 先备（幂等 + 冲突零新事实 + 撤销先胜）。"""
+
+    async def test_ensure_is_idempotent_and_uses_db_epochs(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        _, execution_id, round_id = await _seed_research_chain(dao)
+        first = await dao.ensure_model_operation(
+            user_scope=USER_SCOPE,
+            operation_id="op-model-1",
+            execution_id=execution_id,
+            round_id=round_id,
+            node_id="root",
+        )
+        second = await dao.ensure_model_operation(
+            user_scope=USER_SCOPE,
+            operation_id="op-model-1",
+            execution_id=execution_id,
+            round_id=round_id,
+            node_id="root",
+        )
+        assert first is True
+        assert second is False
+        async with dao.engine.begin() as conn:
+            rows = (
+                await conn.execute(
+                    sa.select(AgentOperation).where(
+                        AgentOperation.user_scope == USER_SCOPE,
+                        AgentOperation.operation_id == "op-model-1",
+                    )
+                )
+            ).all()
+        assert len(rows) == 1
+        op = rows[0]
+        assert op.execution_id == execution_id
+        assert op.round_id == round_id
+        assert op.step_id == "root"
+        assert op.owner_epoch == 1
+        assert op.run_epoch == 1
+        assert op.phase == "prepared"
+        assert op.effect_state == "not_dispatched"
+        assert op.io_state == "not_started"
+        assert op.revision == 1
+
+    async def test_conflicting_scope_raises_and_writes_nothing(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        _, execution_id, round_id = await _seed_research_chain(dao)
+        await dao.ensure_model_operation(
+            user_scope=USER_SCOPE,
+            operation_id="op-model-1",
+            execution_id=execution_id,
+            round_id=round_id,
+            node_id="root",
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.ensure_model_operation(
+                user_scope=USER_SCOPE,
+                operation_id="op-model-1",
+                execution_id=execution_id,
+                round_id=round_id,
+                node_id="node-other",
+            )
+        assert _code_of(exc) == AgentErrorCode.INPUT_CONFLICT
+        async with dao.engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(AgentOperation.step_id, AgentOperation.revision).where(
+                        AgentOperation.user_scope == USER_SCOPE,
+                        AgentOperation.operation_id == "op-model-1",
+                    )
+                )
+            ).first()
+        assert row is not None
+        assert row.step_id == "root"
+        assert row.revision == 1
+
+    async def test_revoke_first_wins_over_ensured_operation(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        session_id, execution_id, round_id = await _seed_research_chain(dao)
+        await dao.save_data_consent_decision(
+            _save_command(
+                _binding(execution_id=execution_id, round_id=round_id),
+                session_id=session_id,
+                execution_id=execution_id,
+                round_id=round_id,
+                expected_revision=0,
+            )
+        )
+        await dao.ensure_model_operation(
+            user_scope=USER_SCOPE,
+            operation_id="op-1",
+            execution_id=execution_id,
+            round_id=round_id,
+            node_id="root",
+        )
+        await dao.revoke_data_consent_decision(_revoke_command(1))
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.claim_data_consent(_authorization(), _claim())
+        assert _code_of(exc) == AgentErrorCode.POLICY_DENIED
+        assert "state_not_approved" in str(exc.value)
+
+
 class TestAcceptIntentConcurrency:
     """检视 M-1 回归锚：跨 session 并发受理同一 intent 的唯一索引竞态必须
     归 INPUT_CONFLICT（§9.13 数据库失败明确分类；INV-01 一意图一受理身份），
