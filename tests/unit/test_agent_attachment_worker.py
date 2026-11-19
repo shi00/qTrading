@@ -330,6 +330,24 @@ class TestJsonExtraction:
         )
         assert code == "invalid_selection"
 
+    def test_object_key_with_leading_zero_resolves(self) -> None:
+        # "01" 是合法对象键，不是数组索引（I67）。
+        parsed = _parse(
+            AttachmentKind.JSON,
+            b'{"01": 1}',
+            Selection(kind="limited", ranges=(JsonPointerRange(kind="json_pointer", pointer="/01"),)),
+        )
+        assert json.loads(parsed.blocks[0])["value"]["lexeme"] == "1"
+
+    def test_array_index_with_leading_zero_is_rejected(self) -> None:
+        code = _limit_of(
+            b'{"a": [1, 2]}',
+            Selection(kind="limited", ranges=(JsonPointerRange(kind="json_pointer", pointer="/a/01"),)),
+            AttachmentBudget(),
+            AttachmentKind.JSON,
+        )
+        assert code == "invalid_selection"
+
     def test_invalid_json_rejected(self) -> None:
         with pytest.raises(AttachmentParseError) as exc:
             _parse(AttachmentKind.JSON, b"{not json")

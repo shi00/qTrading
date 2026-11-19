@@ -535,7 +535,11 @@ class CodepointsRange:
 
 @dataclass(frozen=True, slots=True)
 class JsonPointerRange:
-    """RFC6901 JSON Pointer：必须以 / 开头，只允许 ~0/~1 转义，禁前导零与 -。"""
+    """RFC6901 JSON Pointer：必须以 / 开头，只允许 ~0/~1 转义，禁 -。
+
+    「数组索引无前导零」是容器相关语义：decode 阶段无容器类型，数字 token 一律
+    按合法对象键处理（对象键可以为 "01"），索引格式在按真实文档解析时校验。
+    """
 
     kind: str = "json_pointer"
     pointer: str = "/"
@@ -1086,14 +1090,16 @@ def _require_str_list(value: object, path: str, *, allow_empty: bool = False) ->
 
 
 def _validate_json_pointer(pointer: object, path: str) -> str:
-    """RFC6901 校验：以 / 开头、仅 ~0/~1 转义、数组索引无前导零、禁 -（§3.3.1）。"""
+    """RFC6901 语法校验：以 / 开头、仅 ~0/~1 转义、禁 -（§3.3.1）。
+
+    decode 阶段不掌握容器类型，数字 token 不能按数组索引规则拒绝（对象键允许
+    "01"）；数组索引的无前导零要求由按真实文档解析的一方校验。
+    """
 
     if not isinstance(pointer, str) or not pointer.startswith("/"):
         _fail("invalid_pointer", path)
     for token in pointer.split("/")[1:]:
         if token == "-":
-            _fail("invalid_pointer", path)
-        if token.isdigit() and len(token) > 1 and token[0] == "0":
             _fail("invalid_pointer", path)
         index = 0
         while index < len(token):
@@ -1204,7 +1210,11 @@ def decode_range_atom(value: object, path: str, *, allow_all: bool = False) -> R
 
 
 def decode_selection(value: object, path: str) -> Selection:
-    """严格解码 Selection：all 或 limited（数组非空、单轴、禁 all 分型）（§3.3.1）。"""
+    """严格解码 Selection：all 或 limited（数组非空、单轴、禁 all 分型、拒重叠）（§3.3.1）。
+
+    同一选择内的区间是互斥集合：重复、交叠或 JSON 祖先/子树重叠一律拒绝，
+    「首尾相接」（闭区间端点相等）按重叠处理；不同工作表/不同字段键不构成重叠。
+    """
 
     if not isinstance(value, dict):
         _fail("invalid_type", path)
@@ -1222,6 +1232,10 @@ def decode_selection(value: object, path: str) -> Selection:
         atoms = tuple(decode_range_atom(item, f"{path}.ranges[{index}]") for index, item in enumerate(raw_ranges))
         if len({type(atom) for atom in atoms}) > 1:
             _fail("kind_mismatch", f"{path}.ranges")
+        for i in range(len(atoms)):
+            for j in range(i + 1, len(atoms)):
+                if _atoms_overlap(atoms[i], atoms[j]):
+                    _fail("overlap", f"{path}.ranges[{j}]")
         return Selection(kind="limited", ranges=atoms)  # pyright: ignore[reportArgumentType]  # allow_all=False 排除 AllAtom
     _fail("invalid_tag", f"{path}.kind")
 

@@ -156,6 +156,62 @@ class TestSelection:
             decode_selection(limited_wire(pages_wire(), {"kind": "json_pointer", "pointer": "/a"}), "$")
         expect_invalid(exc)
 
+    def test_duplicate_and_overlap_within_selection_rejected(self) -> None:
+        # 同一选择内重复段与交叠段必须拒绝（I67）。
+        for atoms in ((pages_wire(1, 3), pages_wire(1, 3)), (pages_wire(1, 4), pages_wire(3, 6))):
+            with pytest.raises(AgentValidationError) as exc:
+                decode_selection(limited_wire(*atoms), "$")
+            assert exc.value.code == "overlap"
+        # 首尾相接（闭区间端点相等）同属重叠。
+        with pytest.raises(AgentValidationError) as exc:
+            decode_selection(limited_wire(pages_wire(1, 2), pages_wire(2, 3)), "$")
+        assert exc.value.code == "overlap"
+        # 端点不相交的相邻段合法。
+        sel = decode_selection(limited_wire(pages_wire(1, 2), pages_wire(3, 4)), "$")
+        assert sel.ranges == (PagesRange(start=1, end=2), PagesRange(start=3, end=4))
+
+    def test_rows_overlap_is_sheet_scoped_in_selection(self) -> None:
+        across = limited_wire(
+            {"kind": "rows", "sheet": "S1", "start": 1, "end": 3},
+            {"kind": "rows", "sheet": "S2", "start": 1, "end": 1},
+        )
+        assert len(decode_selection(across, "$").ranges) == 2
+        same_sheet = limited_wire(
+            {"kind": "rows", "sheet": "S1", "start": 1, "end": 2},
+            {"kind": "rows", "sheet": "S1", "start": 2, "end": 3},
+        )
+        with pytest.raises(AgentValidationError) as exc:
+            decode_selection(same_sheet, "$")
+        assert exc.value.code == "overlap"
+
+    def test_json_pointer_and_sheets_overlap_in_selection(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            decode_selection(
+                limited_wire(
+                    {"kind": "json_pointer", "pointer": "/report"},
+                    {"kind": "json_pointer", "pointer": "/report/revenue"},
+                ),
+                "$",
+            )
+        assert exc.value.code == "overlap"
+        with pytest.raises(AgentValidationError) as exc:
+            decode_selection(
+                limited_wire({"kind": "sheets", "names": ["S1"]}, {"kind": "sheets", "names": ["S1", "S2"]}),
+                "$",
+            )
+        assert exc.value.code == "overlap"
+
+    def test_fields_overlap_in_selection(self) -> None:
+        base: dict[str, Any] = {"kind": "fields", "sheet": None, "row_start": 1, "row_end": 5}
+        with pytest.raises(AgentValidationError) as exc:
+            decode_selection(
+                limited_wire({**base, "keys": ["a"]}, {**base, "row_start": 4, "row_end": 9, "keys": ["a"]}),
+                "$",
+            )
+        assert exc.value.code == "overlap"
+        # 同表同行但字段键不相交不构成重叠。
+        assert len(decode_selection(limited_wire({**base, "keys": ["a"]}, {**base, "keys": ["b"]}), "$").ranges) == 2
+
 
 class TestRangeAtom:
     def test_numeric_kinds_endpoint_validation(self) -> None:
@@ -223,10 +279,11 @@ class TestRangeAtom:
         expect_invalid(exc)
 
     def test_json_pointer_rules(self) -> None:
-        for pointer in ("/", "/a/b", "/a~1b", "/list/~0x", "/0", "/rows/12"):
+        # 数字 token 在 decode 阶段按对象键处理："01" 合法，只有 "-" 与转义错误被拒。
+        for pointer in ("/", "/a/b", "/a~1b", "/list/~0x", "/0", "/rows/12", "/rows/01", "/01"):
             atom = decode_range_atom({"kind": "json_pointer", "pointer": pointer}, "$")
             assert isinstance(atom, JsonPointerRange)
-        for pointer in ("", "a/b", "/a~", "/a~2", "/rows/01", "/rows/-", "0", "/~"):
+        for pointer in ("", "a/b", "/a~", "/a~2", "/rows/-", "0", "/~"):
             with pytest.raises(AgentValidationError) as exc:
                 decode_range_atom({"kind": "json_pointer", "pointer": pointer}, "$")
             expect_invalid(exc)

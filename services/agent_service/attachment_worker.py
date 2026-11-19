@@ -339,7 +339,8 @@ def _resolve_pointer(document: Any, pointer: str) -> Any:
                 raise AttachmentParseError("invalid_selection", "json_pointer does not exist in source")
             current = current[token]
         elif isinstance(current, list):
-            if not token.isdigit():
+            # RFC6901 数组索引：仅 "0" 或非零开头数字；"01" 只能是对象键。
+            if not token.isdigit() or (len(token) > 1 and token[0] == "0"):
                 raise AttachmentParseError("invalid_selection", "json_pointer array index is invalid")
             index = int(token)
             if index >= len(current):
