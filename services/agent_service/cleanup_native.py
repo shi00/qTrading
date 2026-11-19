@@ -1,7 +1,8 @@
 """九类原生目标真实执行器（E-06-2c / 详细设计 §10.7）。
 
 删除顺序冻结为：公开系统删除（DBOS ``Client.delete_workflows``）→ Datasource
-常量表参数化 DML → 九域逐域查回。全部为同步引擎调用，经受管线程提交（R16）。
+常量表参数化 DML 与九域查零（**同一事务**，非零即回滚）。全部为同步引擎调用，
+经受管线程提交（R16）。
 
 明确不做：LIKE/前缀/递归扩集合/全表删除；系统表私有 DML（绕过 DBOS 公开 API）；
 重试时把「查不到」当作已清除之外的新证据（预检的缺失由调用方按原 fence 处置）。
@@ -29,7 +30,7 @@ class NativeStorePort(Protocol):
 
     def missing_primary_ids(self, ids: list[str]) -> tuple[str, ...]: ...
 
-    def delete_datasource_rows(self, ids: list[str]) -> int: ...
+    def delete_datasource_rows_and_count(self, ids: list[str]) -> dict[str, int]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,7 +152,11 @@ class NativeCleanupExecutor:
         return NativePreflight(normalized, counts, missing)
 
     async def delete(self, ids: Sequence[str]) -> NativeCleanupResult:
-        """按准确集合删除并查回；空集合是唯一允许的「无需删除」情形。"""
+        """按准确集合删除并在同一事务内查回；空集合是唯一允许的「无需删除」情形。
+
+        非零计数表示删除已回滚（原行保持），由编排按既有非零分支转 ``retry_pending``，
+        原 job/原 fence 不变即可重试。
+        """
 
         normalized = self._normalize(ids)
         if not normalized:
@@ -165,8 +170,8 @@ class NativeCleanupExecutor:
     def _delete_sync(self, ids: list[str]) -> dict[str, int]:
         # 显式不递归子工作流：集合只由用户确认的准确 ID 构成（§10.7）。
         self._client.delete_workflows(ids, delete_children=False)
-        self._store.delete_datasource_rows(ids)
-        return self._store.counts(ids)
+        # 删除与查零同一事务：非零即回滚，绝不先提交删除再由另连接核零。
+        return self._store.delete_datasource_rows_and_count(ids)
 
     @staticmethod
     def _normalize(ids: Sequence[str]) -> tuple[str, ...]:

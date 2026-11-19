@@ -399,7 +399,7 @@ class TestCleanupExecutionFailures:
         record = _record()
         counts = _zeros()
         counts["dbos.workflow_status"] = 1
-        service, _, dao, _ = _service(record, executor=_Executor(counts=counts))
+        service, store, dao, _ = _service(record, executor=_Executor(counts=counts))
 
         receipt = await service.confirm_and_execute(_command(record))
 
@@ -408,6 +408,9 @@ class TestCleanupExecutionFailures:
         assert dao.tombstones == []
         assert dao.phases[0]["phase"] is CleanupPhase.RETRY_PENDING
         assert dao.phases[0]["error_category"] == "native_rows_remaining"
+        # 非零即回滚：原 job 的 fence 与冻结集合保持不变，可在原 fence 下重试。
+        assert store.record.fence_committed is True
+        assert store.record.exact_ids == _IDS
 
     @pytest.mark.asyncio
     async def test_tombstone_failure_keeps_set_and_records_sqlstate(self) -> None:

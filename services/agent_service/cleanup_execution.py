@@ -1,9 +1,9 @@
 """清理执行编排（E-06-3b / 详细设计 §10.7）。
 
 流程冻结：确认（原预览/修订 + 准入 + fence）→ 首次预检（查不到不是已清）→
-落删除尝试阶段 → 公开系统删除 + Datasource DML + 九域查回 → 落 tombstone
-待办阶段 → 应用域 NOT NULL tombstone → 九域全 0 才 ``verified``；任一步失败
-保留原集合转 ``retry_pending``。
+落删除尝试阶段 → 公开系统删除 + Datasource DML 与九域查零（同一事务，非零回滚）
+→ 落 tombstone 待办阶段 → 应用域 NOT NULL tombstone → 九域全 0 才 ``verified``；
+任一步失败保留原集合转 ``retry_pending``。
 
 尝试阶段在副作用前落库（M14）：删除完成到 ``tombstone/verified`` 之间取消、
 硬崩或服务异常时，下一次重试据此识别「已尝试删除」并沿原 job 收尾，不把

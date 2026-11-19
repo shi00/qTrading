@@ -3,7 +3,9 @@
 覆盖：
 - 运行库存储的九类计数 SQL 与 :data:`CLEANUP_NATIVE_TARGETS` 一一对应、全部
   ``ANY(:ids)`` 展参、无 LIKE/前缀；Datasource 删除只命中常量表；
-- 执行器顺序（公开系统删除 → Datasource DML → 逐域查回）、显式不递归子工作流、
+- Datasource 删除与九域查零在同一事务内完成，非零即回滚（不留「先提交删除、
+  再另连接核零」的部分成功窗口，I82）；
+- 执行器顺序（公开系统删除 → Datasource DML 与同事务查零）、显式不递归子工作流、
   空集合零副作用、超 200/空 ID 在触达客户端与存储前拒绝；
 - 应用域 tombstone 的入参边界（空 user_scope、非法资产键、超 200）；
 - 删除尝试阶段只写 ``error_category`` 且要求 fence 已提交、未 verified（M14）。
@@ -14,6 +16,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -30,12 +33,15 @@ from core.agent_types import (
     CleanupPhase,
     sha256_hex,
 )
+from data.persistence import engine_provider
 from data.persistence.agent_runtime_store import (
     CLEANUP_COUNT_SQL,
     CLEANUP_DATASOURCE_DELETE_SQL,
     CLEANUP_PRIMARY_PRESENCE_SQL,
+    AgentRuntimeNativeStore,
 )
 from data.persistence.daos.agent_dao import AgentDao
+from data.persistence.daos.base_dao import EngineDisposedError
 from services.agent_service.cleanup_native import NativeCleanupExecutor, NativeVerification
 
 
@@ -53,10 +59,10 @@ class _FakeStore:
         self.events.append("preflight")
         return ()
 
-    def delete_datasource_rows(self, ids: list[str]) -> int:
+    def delete_datasource_rows_and_count(self, ids: list[str]) -> dict[str, int]:
         self.events.append("datasource")
         self.delete_calls.append(list(ids))
-        return 1
+        return dict(self._counts)
 
 
 class _FakeVerification:
@@ -122,14 +128,138 @@ class TestNativeStatementCoverage:
         assert CLEANUP_PRIMARY_PRESENCE_SQL.count("ANY(:ids)") == 2
 
 
+class _DeleteResult:
+    def __init__(self, rowcount: int) -> None:
+        self.rowcount = rowcount
+
+
+class _ScalarResult:
+    def __init__(self, value: int) -> None:
+        self._value = value
+
+    def scalar_one(self) -> int:
+        return self._value
+
+
+class _AtomicConn:
+    """假连接：同一事务内先 DELETE 再逐域 COUNT，记录语句顺序。"""
+
+    def __init__(self, *, deleted: int, counts: dict[str, int] | None = None) -> None:
+        self.deleted = deleted
+        self.overrides = counts or {}
+        self.statements: list[str] = []
+
+    def execute(self, statement: Any, params: Any = None) -> Any:
+        sql = str(statement)
+        self.statements.append(sql)
+        if sql.startswith("DELETE"):
+            return _DeleteResult(self.deleted)
+        table = re.search(r"FROM\s+([\w.]+)", sql)
+        assert table is not None, sql
+        return _ScalarResult(self.overrides.get(table.group(1), 0))
+
+
+class _AtomicTransaction:
+    def __init__(self, engine: _AtomicEngine) -> None:
+        self._engine = engine
+
+    def __enter__(self) -> _AtomicConn:
+        return self._engine.conn
+
+    def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: object) -> bool:
+        if exc_type is None:
+            self._engine.commits += 1
+        else:
+            self._engine.rollbacks += 1
+        return False
+
+
+class _AtomicEngine:
+    """假引擎：只提供 ``begin()``（无 ``connect``），证明核零不跨事务/跨连接。"""
+
+    def __init__(self, conn: _AtomicConn) -> None:
+        self.conn = conn
+        self.begins = 0
+        self.commits = 0
+        self.rollbacks = 0
+
+    def begin(self) -> _AtomicTransaction:
+        self.begins += 1
+        return _AtomicTransaction(self)
+
+
+class TestDatasourceDeleteAtomicity:
+    """I82：Datasource 删除与删后查零同一事务；非零即回滚，不留跨事务窗口。"""
+
+    @staticmethod
+    def _zeros() -> dict[str, int]:
+        return {table: 0 for table, _key in CLEANUP_NATIVE_TARGETS}
+
+    @staticmethod
+    def _store(engine: _AtomicEngine) -> AgentRuntimeNativeStore:
+        return AgentRuntimeNativeStore(engine)  # type: ignore[arg-type]  # 测试替身引擎
+
+    def test_zero_counts_commit_in_single_transaction(self) -> None:
+        conn = _AtomicConn(deleted=2)
+        engine = _AtomicEngine(conn)
+
+        counts = self._store(engine).delete_datasource_rows_and_count(["wf-1"])
+
+        assert engine.begins == 1
+        assert engine.commits == 1
+        assert engine.rollbacks == 0
+        assert set(counts) == {table for table, _key in CLEANUP_NATIVE_TARGETS}
+        assert set(counts.values()) == {0}
+        assert len(conn.statements) == 1 + len(CLEANUP_NATIVE_TARGETS)
+        assert conn.statements[0].startswith("DELETE FROM agent_ds.datasource_outputs")
+
+    def test_non_zero_rolls_back_and_reports_restored_rows(self) -> None:
+        in_txn = self._zeros()
+        in_txn["dbos.streams"] = 1
+        engine = _AtomicEngine(_AtomicConn(deleted=2, counts=in_txn))
+
+        counts = self._store(engine).delete_datasource_rows_and_count(["wf-1"])
+
+        # 抛异常即回滚：删除不提交，原行保持（原 job/fence 可重试）。
+        assert engine.rollbacks == 1
+        assert engine.commits == 0
+        assert counts["dbos.streams"] == 1
+        # 回滚恢复被删行：Datasource 域如实并入 2 行，不得报 0（R21）。
+        assert counts["agent_ds.datasource_outputs"] == 2
+
+    def test_datasource_rows_surviving_delete_roll_back_and_count_sum(self) -> None:
+        in_txn = self._zeros()
+        in_txn["agent_ds.datasource_outputs"] = 1
+        engine = _AtomicEngine(_AtomicConn(deleted=3, counts=in_txn))
+
+        counts = self._store(engine).delete_datasource_rows_and_count(["wf-1"])
+
+        assert engine.rollbacks == 1
+        assert counts["agent_ds.datasource_outputs"] == 4
+
+    def test_disposed_engine_rejected_before_transaction(self) -> None:
+        engine = _AtomicEngine(_AtomicConn(deleted=0))
+        engine_provider.set_engine(engine)
+        engine_provider.mark_disposed(True)
+        try:
+            with pytest.raises(EngineDisposedError) as exc:
+                self._store(engine).delete_datasource_rows_and_count(["wf-1"])
+        finally:
+            engine_provider.reset_engine_provider()
+
+        assert "Engine disposed, delete rejected." in str(exc.value)
+        assert engine.begins == 0
+        assert engine.commits == 0
+
+
 class TestNativeCleanupExecutor:
     @pytest.mark.asyncio
-    async def test_delete_runs_public_system_delete_before_datasource_dml(self) -> None:
+    async def test_delete_runs_public_system_delete_before_atomic_datasource_step(self) -> None:
         store = _FakeStore(counts={"dbos.workflow_status": 0})
         client = _FakeClient()
         result = await _executor(store, client).delete(["wf-2", "wf-1"])
 
-        assert client.events + store.events == ["client", "datasource", "counts"]
+        assert client.events + store.events == ["client", "datasource"]
         assert client.calls == [(["wf-1", "wf-2"], False)]
         assert store.delete_calls == [["wf-1", "wf-2"]]
         assert result.exact_ids == ("wf-1", "wf-2")

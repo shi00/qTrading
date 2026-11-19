@@ -6,6 +6,8 @@
 
 职责边界：
 - 只提供九类原生目标的逐域只读计数、主键域存在性预检、Datasource 常量表参数化删除；
+- Datasource 删除与「删后九域查零」在**同一事务**内完成，非零即回滚（不留
+  「已提交删除、另连接核零」的部分成功窗口）；
 - 系统表（``dbos.*``）删除**不在此直写**：按 §10.7 走 DBOS 公开 API
   ``Client.delete_workflows``（见 ``services.agent_service.cleanup_native``），
   不调用私有 purge、不用 LIKE/前缀/递归/全表删除；
@@ -41,6 +43,9 @@ CLEANUP_COUNT_SQL: Final[dict[str, str]] = {
 #: Datasource 常量表参数化删除（§10.7：固定参数化 DML，不调用私有 purge）。
 CLEANUP_DATASOURCE_DELETE_SQL: Final = "DELETE FROM agent_ds.datasource_outputs WHERE workflow_id = ANY(:ids)"
 
+#: Datasource 域在九类计数中的匹配键（回滚后恢复行数须如实并入，R21）。
+_DATASOURCE_TARGET: Final = "agent_ds.datasource_outputs"
+
 #: 主键域存在性预检（§10.7「查不到不是已清」）：ID 至少应出现在系统状态或 Datasource 输出之一。
 CLEANUP_PRIMARY_PRESENCE_SQL: Final = """
 SELECT workflow_uuid FROM dbos.workflow_status WHERE workflow_uuid = ANY(:ids)
@@ -57,6 +62,17 @@ def _bind_ids(statement: str) -> sa.TextClause:
     """
 
     return sa.text(statement).bindparams(sa.bindparam("ids", type_=sa.ARRAY(sa.Text)))
+
+
+class _RowsRemainingAfterDelete(Exception):
+    """事务内删除后仍可见行（内部信号）：抛出即回滚删除，交调用方按原 job 重试。
+
+    ``counts`` 为回滚后真实行数的诚实表示（Datasource 域已并入被回滚的删除行数）。
+    """
+
+    def __init__(self, counts: dict[str, int]) -> None:
+        super().__init__("native rows remain after datasource delete")
+        self.counts = counts
 
 
 class AgentRuntimeNativeStore:
@@ -91,10 +107,29 @@ class AgentRuntimeNativeStore:
             }
         return tuple(sorted(set(ids) - found))
 
-    def delete_datasource_rows(self, ids: list[str]) -> int:
-        """按准确集合删除 ``agent_ds.datasource_outputs``；返回删除行数。"""
+    def delete_datasource_rows_and_count(self, ids: list[str]) -> dict[str, int]:
+        """同一事务内删除 ``agent_ds.datasource_outputs`` 并九域查零。
+
+        删除与查零共享一个事务：任一行在提交前仍可见（删除未命中/并发写入）即
+        **整体回滚**，原行保持可重试（原 job 与原 fence 不动）；绝不出现
+        「先提交删除、再由另连接核零」的部分成功窗口。返回值是九域计数：
+        提交时即提交后真实值，回滚时 Datasource 域已并入被回滚的删除行数（R21）。
+        并发写入由准入保证（I81：同集合 writer 必须已退出）后再进入本事务。
+        """
 
         self._check_engine("delete")
-        with self._engine.begin() as conn:
-            result = conn.execute(_bind_ids(CLEANUP_DATASOURCE_DELETE_SQL), {"ids": ids})
-            return int(result.rowcount or 0)
+        try:
+            with self._engine.begin() as conn:
+                result = conn.execute(_bind_ids(CLEANUP_DATASOURCE_DELETE_SQL), {"ids": ids})
+                deleted = int(result.rowcount or 0)
+                counts = {
+                    table: int(conn.execute(_bind_ids(CLEANUP_COUNT_SQL[table]), {"ids": ids}).scalar_one())
+                    for table, _key in CLEANUP_NATIVE_TARGETS
+                }
+                if any(counts.values()):
+                    if deleted > 0:
+                        counts[_DATASOURCE_TARGET] += deleted
+                    raise _RowsRemainingAfterDelete(counts)
+                return counts
+        except _RowsRemainingAfterDelete as exc:
+            return exc.counts
