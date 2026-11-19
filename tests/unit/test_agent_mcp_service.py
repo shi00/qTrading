@@ -620,6 +620,113 @@ class TestCloseConfirmation:
         assert first.close_calls == 1  # 无未确认资源，重连不再重复关闭旧句柄
 
 
+class TestUnknownOutcomeHoldsOwnership:
+    """I53：后效未知的在途归属保留到 owner 真实退出被确认，不提前释放/不放开重连。"""
+
+    @pytest.mark.asyncio
+    async def test_unknown_operation_blocks_reconnect_until_close_confirmed(self) -> None:
+        factory = _CountingFactory(close_failures=2)
+        manager, store = _factory_manager(factory)
+        await store.save(_config())
+        await manager.connect(_identity())
+        first = factory.sessions[0]
+        manager.register_in_flight(_identity(), "op-1")
+        manager.mark_in_flight_unknown(_identity(), "op-1")
+
+        with pytest.raises(RuntimeError) as close_exc:
+            await manager.disconnect(_identity())
+        assert "client close failed" in str(close_exc.value)
+        # 关闭未确认：句柄与未知归属都保留，不立即释放占用（I53）。
+        assert first.closed is False
+        assert manager.in_flight_operations(_identity()) == ("op-1",)
+
+        with pytest.raises(AgentServiceError) as exc:
+            await manager.connect(_identity())
+        assert exc.value.code is AgentErrorCode.OPERATION_UNKNOWN
+        assert manager.in_flight_operations(_identity()) == ("op-1",)
+        assert len(factory.opened) == 1
+
+    @pytest.mark.asyncio
+    async def test_unknown_ownership_released_after_confirmed_exit(self) -> None:
+        factory = _CountingFactory(close_failures=1)
+        manager, store = _factory_manager(factory)
+        await store.save(_config())
+        await manager.connect(_identity())
+        first = factory.sessions[0]
+        manager.register_in_flight(_identity(), "op-1")
+        manager.mark_in_flight_unknown(_identity(), "op-1")
+
+        with pytest.raises(RuntimeError) as close_exc:
+            await manager.disconnect(_identity())
+        assert "client close failed" in str(close_exc.value)
+        assert manager.in_flight_operations(_identity()) == ("op-1",)
+
+        await manager.connect(_identity())  # 重连前先确认关闭
+
+        assert first.closed is True
+        assert manager.in_flight_operations(_identity()) == ()
+        assert len(factory.opened) == 2
+
+    @pytest.mark.asyncio
+    async def test_lost_session_holds_unknown_ownership_until_exit_confirmed(self) -> None:
+        factory = _CountingFactory(close_failures=1)
+        manager, store = _factory_manager(factory)
+        await store.save(_config())
+        await manager.connect(_identity())
+        first = factory.sessions[0]
+        manager.register_in_flight(_identity(), "op-1")
+        manager.mark_in_flight_unknown(_identity(), "op-1")
+
+        with pytest.raises(RuntimeError) as lost_exc:
+            await manager.mark_session_lost(_identity())
+        assert "client close failed" in str(lost_exc.value)
+        assert manager.in_flight_operations(_identity()) == ("op-1",)
+
+        await manager.connect(_identity())
+
+        assert first.closed is True
+        assert manager.in_flight_operations(_identity()) == ()
+        assert len(factory.opened) == 2
+
+    @pytest.mark.asyncio
+    async def test_still_executing_operation_still_refuses_disconnect(self) -> None:
+        """未判未知（仍可能执行）的在途 operation 依旧拒停，只有未知者允许走关闭确认。"""
+
+        session = _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),))
+        manager, _store, _factory, _probe = _manager(session=session)
+        await manager.save_config(_config())
+        await manager.connect(_identity())
+        manager.register_in_flight(_identity(), "op-1")
+
+        with pytest.raises(AgentServiceError) as exc:
+            await manager.disconnect(_identity())
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert session.closed is False
+
+    @pytest.mark.asyncio
+    async def test_stale_unknown_mark_does_not_shadow_new_generation_operation(self) -> None:
+        """归属已随 owner 退出释放后再标记未知必须无效，否则会遮蔽新一代同 id 在途调用。"""
+
+        factory = _CountingFactory()
+        manager, store = _factory_manager(factory)
+        await store.save(_config())
+        await manager.connect(_identity())
+
+        manager.register_in_flight(_identity(), "op-1")
+        await manager.mark_session_lost(_identity())  # 真实退出已确认，归属随之释放
+        assert manager.in_flight_operations(_identity()) == ()
+
+        manager.mark_in_flight_unknown(_identity(), "op-1")  # 迟到的未知标记：不得留下悬空项
+        await manager.connect(_identity())
+        second = factory.sessions[1]
+        manager.register_in_flight(_identity(), "op-1")  # 新一代连接上仍有真实在途调用
+
+        with pytest.raises(AgentServiceError) as exc:
+            await manager.disconnect(_identity())
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert second.closed is False
+
+
 class TestConnectTotalDeadline:
     """I13：启动/初始化/鉴权/发现共用同一总期限，发现只拿剩余额度。"""
 

@@ -1,7 +1,8 @@
 """E-02 显式工具调用门单元测试（静态可验证部分）。
 
 覆盖 DoD：缺参/空工具集 0 调用、撤销先胜 0 效果、派发后超时/断线记 unknown
-且不自动重试、取消继续传播并释放在途归属、结果留存超限明示失败。
+且不自动重试、取消继续传播并释放在途归属、后效未知的归属保留到会话退出确认、
+结果留存超限明示失败。
 完整 jsonschema 校验经端口注入（真实适配器仍 needs-spike/待依赖批准）。
 """
 
@@ -407,6 +408,22 @@ class TestDispatchEffects:
         assert outcome.state is ToolCallState.UNKNOWN
         assert outcome.result is None
         assert [call[0] for call in session.calls] == ["read_file"]
+        # 后效未知：归属保留到所属会话真实退出被确认，不得立即释放（I53）。
+        assert manager.in_flight_operations(_IDENTITY) == ("op-1",)
+
+    @pytest.mark.asyncio
+    async def test_unknown_ownership_is_released_only_after_confirmed_exit(self) -> None:
+        """后效未知不得提前释放占用：确认会话真实退出后才解除归属（I53）。"""
+
+        session = _Session(raises=ConnectionError("dropped"))
+        dispatcher, session, _grants, manager = await _dispatcher(session=session)
+        outcome = await dispatcher.call(_request())
+        assert outcome.state is ToolCallState.UNKNOWN
+        assert manager.in_flight_operations(_IDENTITY) == ("op-1",)
+
+        await manager.disconnect(_IDENTITY)
+
+        assert session.closed is True
         assert manager.in_flight_operations(_IDENTITY) == ()
 
     @pytest.mark.asyncio

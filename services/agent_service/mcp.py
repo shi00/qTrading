@@ -1,7 +1,8 @@
 """共享 MCP 连接管理（E-02 / 详细设计 §10.4、HANDOFF §9）。
 
 本模块只承载**静态可验证**的准入合同：保存不启连、连接测试只发现（0 研究工具
-调用）、预算与只读审核证据不足拒启、显式断开且在途时拒停、断线不自动重连。
+调用）、预算与只读审核证据不足拒启、显式断开且在途时拒停（后效未知的 operation
+保留归属到 owner 真实退出被确认）、断线不自动重连。
 研究启连时由连接 owner 完成一次发现并**冻结工具目录 + 连接代次**，工具调用门据此
 服务端核验目录/审核范围/schema，不采信请求自报（I04）。审核证据不是一次性结论：
 每次工具调用前重新加载配置、重新观测实现指纹并重判只读准入，未准入即零新调用（I06）。
@@ -345,10 +346,15 @@ class SharedMCPConnectionManager:
         self._configs: dict[str, MCPServerConfig] = {}
         self._guards: dict[str, MCPBudgetGuard] = {}
         self._in_flight: dict[str, set[str]] = {}
+        #: 后效未知（``ToolCallState.UNKNOWN``）的在途 operation：归属保留到所属会话
+        #: 真实退出被确认后才释放，期间不释放占用、不允许重连重发（I53）。
+        self._unresolved: dict[str, set[str]] = {}
         #: 同一身份/版本的启连只 open 一次；其余调用者等待并共享该结果。
         self._connecting: dict[str, asyncio.Task[None]] = {}
         #: 关闭未确认的会话句柄（closing/unknown）：实际退出后才移除，不得先丢后关（I17）。
         self._closing: dict[str, list[MCPClientSessionPort]] = {}
+        #: 从 ``_sessions`` 摘下的连接 owner 句柄：其关闭被确认时才释放在途归属（I53）。
+        self._closing_owner: dict[str, MCPClientSessionPort] = {}
         #: 同一身份的关闭 single-flight：并发断开/重连不会对同一句柄重复关闭。
         self._closing_tasks: dict[str, asyncio.Task[None]] = {}
         #: 连接 owner 在启连时冻结的发现目录与连接代次（单调递增，不复用）。
@@ -487,15 +493,20 @@ class SharedMCPConnectionManager:
         self._generations[label] = self._generation_seq
 
     async def disconnect(self, identity: MCPServiceIdentity) -> None:
-        """显式断开：有在途调用默认拒停；句柄只在确认退出后移除（失败/取消保留待重试）。"""
+        """显式断开：仍可能执行中的在途调用默认拒停；后效未知者保留到退出确认（I17/I53）。
+
+        已判后效未知（UNKNOWN）的 operation 不阻塞断开（关闭是确认其真实退出的唯一
+        途径），但其归属**不在此处释放**：只有 owner 句柄关闭成功后才一并清除，故
+        关闭失败/取消期间仍按原 operation 核对，也不会为用户释放重连重发机会。
+        """
 
         label = _identity_text(identity)
-        if self._in_flight.get(label):
+        if self._executing_operations(label):
             raise AgentServiceError(AgentErrorCode.POLICY_DENIED, "connection still has in-flight operations", label)
-        self._in_flight.pop(label, None)
         session = self._sessions.pop(label, None)
         self._forget_connection_state(label)
         if session is not None:
+            self._closing_owner[label] = session
             self._track_closing(label, session)
         await self._request_close(label)
 
@@ -553,12 +564,16 @@ class SharedMCPConnectionManager:
         return config.audit.tool_scope
 
     async def mark_session_lost(self, identity: MCPServiceIdentity) -> None:
-        """断线明示：保留真实句柄并尝试关闭，不自动重连/重启；关闭未确认则保留待上报。"""
+        """断线明示：保留真实句柄并尝试关闭，不自动重连/重启；关闭未确认则保留待上报。
+
+        在途/后效未知的归属同样保留到 owner 句柄真实退出被确认（I53）。
+        """
 
         label = _identity_text(identity)
         session = self._sessions.pop(label, None)
         self._forget_connection_state(label)
         if session is not None:
+            self._closing_owner[label] = session
             self._track_closing(label, session)
         await self._request_close(label)
 
@@ -575,8 +590,27 @@ class SharedMCPConnectionManager:
         if operations is None:
             return
         operations.discard(operation_id)
+        unresolved = self._unresolved.get(label)
+        if unresolved is not None:
+            unresolved.discard(operation_id)
+            if not unresolved:
+                self._unresolved.pop(label, None)
         if not operations:
             self._in_flight.pop(label, None)
+
+    def mark_in_flight_unknown(self, identity: MCPServiceIdentity, operation_id: str) -> None:
+        """记录后效未知：归属保留到所属会话真实退出被确认后再释放（I53）。
+
+        未知退出（超时/断线/协议或服务端错误/结果不可编码）不构成「效果确定未发生」，
+        故不得立即释放归属，也不得让断开/重连把仍在执行的原 operation 视为已结束。
+        """
+
+        label = _identity_text(identity)
+        if operation_id not in self._in_flight.get(label, set()):
+            # 归属已随 owner 退出确认被释放：此时再登记会留下永不清除的悬空项，
+            # 并可能在新一代连接上遮蔽同 id 的在途 operation（I53）。
+            return
+        self._unresolved.setdefault(label, set()).add(operation_id)
 
     def in_flight_operations(self, identity: MCPServiceIdentity) -> tuple[str, ...]:
         return tuple(sorted(self._in_flight.get(_identity_text(identity), set())))
@@ -590,6 +624,11 @@ class SharedMCPConnectionManager:
         self._guards.pop(label, None)
         self._catalogs.pop(label, None)
         self._generations.pop(label, None)
+
+    def _executing_operations(self, label: str) -> set[str]:
+        """仍可能正在执行的 operation（排除已判后效未知者）。"""
+
+        return self._in_flight.get(label, set()) - self._unresolved.get(label, set())
 
     def _track_closing(self, label: str, session: MCPClientSessionPort) -> None:
         """登记关闭未确认句柄（closing/unknown）：保留准确引用直到实际退出。"""
@@ -618,7 +657,7 @@ class SharedMCPConnectionManager:
         await asyncio.shield(pending)
 
     async def _close_tracked(self, label: str) -> None:
-        """逐个关闭已登记句柄，仅实际退出成功后移除；失败/取消保留其余句柄。"""
+        """逐个关闭已登记句柄，仅实际退出成功后移除；失败/取消保留其余句柄（I17/I53）。"""
 
         while True:
             handles = self._closing.get(label)
@@ -627,6 +666,12 @@ class SharedMCPConnectionManager:
                 return
             session = handles[0]
             await session.aclose()
+            if self._closing_owner.get(label) is session:
+                # owner 真实退出已确认：该连接上的在途/未知 operation 不可能再产生后效，
+                # 在此之前归属一律保留（关闭失败/取消时不得提前释放，I53）。
+                self._closing_owner.pop(label, None)
+                self._in_flight.pop(label, None)
+                self._unresolved.pop(label, None)
             remaining = self._closing.get(label)
             if remaining is not None:
                 remaining[:] = [handle for handle in remaining if handle is not session]

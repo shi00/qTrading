@@ -643,24 +643,32 @@ class FastMCPSession:
             return
         try:
             await self._client.__aexit__(None, None, None)
-        finally:
-            # 关闭一经尝试即不再接受新发送；stderr 清理只做一次，失败重试不覆盖已冻结尾部。
-            self._on_close()
-            if not self._stderr_drain_closed:
-                self._stderr_drain_closed = True
-                drain = self._stderr_drain
-                if drain is not None:
-                    drain.close()
-                    try:
-                        self._diagnostics.stderr_tail = drain.tail()
-                    finally:
-                        # 属性已持有有界脱敏副本；清空内存缓冲，不留运行期留存。
-                        drain.clear()
-            if self._stdio_env is not None:
-                # 退出尝试后即删专属临时目录（幂等）：失败重试也不留残留。
-                self._stdio_env.cleanup()
+        except BaseException:
+            # 退出未确认：只收尾「关闭尝试」（拒绝新发送/冻结诊断/删临时目录），不标记已关闭，
+            # 句柄保留以便重试真实退出；不得把未知退出伪装成已退出（I17/I53）。
+            self._finish_close_attempt()
+            raise
         # 只有实际退出成功才标记已关闭：失败/取消后的再次 aclose 仍会真正重试退出（I17）。
         self._closed = True
+        self._finish_close_attempt()
+
+    def _finish_close_attempt(self) -> None:
+        """关闭尝试的幂等收尾：拒绝新发送、冻结并清空 stderr 尾部、删除专属临时目录。"""
+
+        self._on_close()
+        if not self._stderr_drain_closed:
+            self._stderr_drain_closed = True
+            drain = self._stderr_drain
+            if drain is not None:
+                drain.close()
+                try:
+                    self._diagnostics.stderr_tail = drain.tail()
+                finally:
+                    # 属性已持有有界脱敏副本；清空内存缓冲，不留运行期留存。
+                    drain.clear()
+        if self._stdio_env is not None:
+            # 退出尝试后即删专属临时目录（幂等）：失败重试也不留残留。
+            self._stdio_env.cleanup()
 
 
 def _result_payload(result: Any) -> dict[str, Any]:

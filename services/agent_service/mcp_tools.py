@@ -21,7 +21,8 @@
 
 派发后超时/断线/协议解码失败/服务端错误响应均无确证，记 ``UNKNOWN`` 且不自动重试；
 只有端口在出站前显式拒绝（``MCPCallNotDispatched``）才判 ``FAILED``（效果确定未发生）。
-取消继续传播并释放归属。
+取消继续传播并释放归属；``UNKNOWN`` 的在途归属则保留到所属会话真实退出被确认后才
+释放（不立即释放占用、不放开重连重发，I53）。
 真实 jsonschema 适配器与每 send 目的地门仍 needs-spike，不在本轮宣称已验证。
 """
 
@@ -254,7 +255,14 @@ class MCPToolDispatcher:
         self._manager.register_in_flight(request.identity, request.operation_id)
         try:
             outcome = await self._invoke(session, request, arguments, guard, deadline_s)
-        finally:
+        except BaseException:
+            # 取消/异常继续传播（R2）：调用方已放弃本次等待，归属随取消一起释放。
+            self._manager.release_in_flight(request.identity, request.operation_id)
+            raise
+        if outcome.state is ToolCallState.UNKNOWN:
+            # 后效未知：不得立即释放归属，也不得让断开/重连把原 operation 视为已结束。
+            self._manager.mark_in_flight_unknown(request.identity, request.operation_id)
+        else:
             self._manager.release_in_flight(request.identity, request.operation_id)
         return ToolCallOutcome(
             state=outcome.state,
