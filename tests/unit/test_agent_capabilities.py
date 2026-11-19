@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters
 from pydantic_ai.tools import ToolDefinition
 
@@ -153,6 +154,33 @@ class TestResearchBoundaryDecision:
         policy = _policy(context_window_tokens=1000, estimated_input_tokens=1001)
         assert evaluate_research_boundary(policy) == "context_window_exceeded"
 
+    def test_strictest_candidate_window_wins(self) -> None:
+        # I47：窗口取所有候选可用限制中最严者，小窗口备用模型拖低上限。
+        blocked = _policy(
+            context_window_tokens=128_000,
+            candidate_context_windows=(1_000,),
+            estimated_input_tokens=1_500,
+        )
+        assert evaluate_research_boundary(blocked) == "context_window_exceeded"
+        within = _policy(
+            context_window_tokens=128_000,
+            candidate_context_windows=(2_000,),
+            estimated_input_tokens=1_500,
+        )
+        assert evaluate_research_boundary(within) is None
+
+    def test_unknown_current_window_not_rescued_by_candidates(self) -> None:
+        # I47：本候选窗口未知即拒绝，不能用其它候选窗口替代（当前请求就发往本候选）。
+        policy = _policy(context_window_tokens=None, candidate_context_windows=(128_000,))
+        assert evaluate_research_boundary(policy, measured_input_tokens=500) == "window_unknown"
+
+    def test_measured_estimate_substitutes_missing_external(self) -> None:
+        # I47：外部估计缺失时由自测兜底；两者皆缺失才拒绝。
+        policy = _policy(estimated_input_tokens=None)
+        assert evaluate_research_boundary(policy) == "window_unknown"
+        assert evaluate_research_boundary(policy, measured_input_tokens=500) is None
+        assert evaluate_research_boundary(policy, measured_input_tokens=1001) == "context_window_exceeded"
+
 
 class TestResearchBoundaryCapability:
     @pytest.mark.asyncio
@@ -239,6 +267,79 @@ class TestResearchBoundaryCapability:
         assert request_context.messages == []
         assert result.messages == []
         assert result.model_request_parameters.function_tools == []
+
+    @pytest.mark.asyncio
+    async def test_oversized_tool_schema_rejected_before_dispatch(self, monkeypatch) -> None:
+        # I47：正文极短但工具 schema 极大，外部低估值不能放宽闸门。
+        monkeypatch.setattr(
+            "services.ai_service.token_budget._estimate_tokens",
+            lambda text, model=None: len(text or ""),
+        )
+        big_schema = {"type": "object", "properties": {f"field_{i}": {"type": "string"} for i in range(200)}}
+        request_context = ModelRequestContext(
+            model=cast(Model, object()),
+            messages=[],
+            model_settings=None,
+            model_request_parameters=ModelRequestParameters(
+                function_tools=[ToolDefinition(name="search", description="d", parameters_json_schema=big_schema)]
+            ),
+        )
+        boundary = ResearchBoundary(
+            policy_provider=lambda ctx: _resolved(_policy(context_window_tokens=500, estimated_input_tokens=1))
+        )
+
+        with pytest.raises(AgentServiceError) as error:
+            await boundary.before_model_request(cast(Any, None), request_context)
+        assert error.value.code is AgentErrorCode.POLICY_DENIED
+        assert "context window exceeded" in error.value.sanitized_message
+
+    @pytest.mark.asyncio
+    async def test_narrowed_tools_measured_after_trim(self, monkeypatch) -> None:
+        # I47：按最终待发请求计量——被模式裁剪掉的工具 schema 不得计入，避免误拒。
+        monkeypatch.setattr(
+            "services.ai_service.token_budget._estimate_tokens",
+            lambda text, model=None: len(text or ""),
+        )
+        big_schema = {"type": "object", "properties": {f"field_{i}": {"type": "string"} for i in range(200)}}
+        request_context = ModelRequestContext(
+            model=cast(Model, object()),
+            messages=[],
+            model_settings=None,
+            model_request_parameters=ModelRequestParameters(
+                function_tools=[
+                    ToolDefinition(name="mcp_search", description="d", parameters_json_schema=big_schema),
+                    ToolDefinition(name="read_plan", description="d", parameters_json_schema={"type": "object"}),
+                ]
+            ),
+        )
+        boundary = ResearchBoundary(
+            policy_provider=lambda ctx: _resolved(
+                _policy(mode=Mode.DISCUSS, allowed_tool_names=frozenset({"read_plan"}))
+            )
+        )
+
+        result = await boundary.before_model_request(cast(Any, None), request_context)
+        assert [tool.name for tool in result.model_request_parameters.function_tools] == ["read_plan"]
+
+    @pytest.mark.asyncio
+    async def test_binary_input_unestimable_blocks(self) -> None:
+        # I47 / R21：二进制（图片）无法以文本计量 → 显式不可估，派发前拒绝。
+        request_context = ModelRequestContext(
+            model=cast(Model, object()),
+            messages=[
+                ModelRequest(
+                    parts=[UserPromptPart(content=[BinaryContent(data=b"\x89PNG\r\n", media_type="image/png")])]
+                )
+            ],
+            model_settings=None,
+            model_request_parameters=ModelRequestParameters(),
+        )
+        boundary = ResearchBoundary(policy_provider=lambda ctx: _resolved(_policy()))
+
+        with pytest.raises(AgentServiceError) as error:
+            await boundary.before_model_request(cast(Any, None), request_context)
+        assert error.value.code is AgentErrorCode.POLICY_DENIED
+        assert "unestimable" in error.value.sanitized_message
 
 
 async def _resolved(policy: ResearchBoundaryPolicy) -> ResearchBoundaryPolicy:

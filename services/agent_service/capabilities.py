@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, cast
@@ -317,8 +318,11 @@ class ResearchBoundaryPolicy:
     - ``allowed_tool_names``：当前模式允许暴露的工具名（讨论/计划模式收窄）；
     - ``active_source_keys``：本轮已登记来源 (source_id, version)；
     - ``disabled_source_keys``：当前已禁用的来源键；
-    - ``context_window_tokens`` / ``estimated_input_tokens``：实际窗口与估计
-      输入；任一为 ``None`` 表示无法核定——边界拒绝放行，不用测试字节数代替。
+    - ``context_window_tokens`` / ``candidate_context_windows``：本候选实际窗口
+      与路由内其余候选的可用窗口；判定取所有可用窗口中最严者（I47）。本候选
+      窗口未知（``None``）即无法核定，拒绝放行——不能用其它候选窗口替代；
+    - ``estimated_input_tokens``：外部估计输入；``None`` 表示外部无法核定——
+      由能力按最终请求全输入自测兜底，不用测试字节数代替。
     """
 
     mode: Mode
@@ -327,6 +331,7 @@ class ResearchBoundaryPolicy:
     disabled_source_keys: frozenset[SourceKey]
     context_window_tokens: int | None
     estimated_input_tokens: int | None
+    candidate_context_windows: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.mode, Mode):
@@ -337,6 +342,9 @@ class ResearchBoundaryPolicy:
                 continue
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive int or None")
+        for value in self.candidate_context_windows:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError("candidate_context_windows entries must be positive ints")
         for key_set_name in ("active_source_keys", "disabled_source_keys"):
             for key in getattr(self, key_set_name):
                 if not isinstance(key, tuple) or len(key) != 2:
@@ -344,15 +352,94 @@ class ResearchBoundaryPolicy:
                 if not all(isinstance(part, str) and part for part in key):
                     raise ValueError(f"{key_set_name} entries must carry non-empty text")
 
+    def strictest_context_window_tokens(self) -> int | None:
+        """所有候选可用窗口中最严者；本候选窗口未知 → ``None``（拒绝放行）。"""
 
-def evaluate_research_boundary(policy: ResearchBoundaryPolicy) -> str | None:
-    """返回阻断原因；``None`` 表示未触发阻断（不代表授权已通过）。"""
+        if self.context_window_tokens is None:
+            return None
+        return min((self.context_window_tokens, *self.candidate_context_windows))
+
+
+def _contains_binary_content(messages: Sequence[Any]) -> bool:
+    """待发消息是否含二进制内容（图片/文件）：文本估算无法计量，须显式不可估。"""
+
+    from pydantic_ai.messages import BinaryContent
+
+    for message in messages:
+        for part in getattr(message, "parts", ()):
+            content = getattr(part, "content", None)
+            if isinstance(content, BinaryContent):
+                return True
+            if isinstance(content, Sequence) and not isinstance(content, (str, bytes, bytearray)):
+                if any(isinstance(item, BinaryContent) for item in content):
+                    return True
+    return False
+
+
+def _estimate_request_input_tokens(request_context: ModelRequestContext) -> int | None:
+    """按最终待发请求估算输入 token 下限（I47 窗口门，与费用预估同源）。
+
+    覆盖 ``messages`` 全部分型（SDK 确定性序列化）+ ``function_tools`` /
+    ``output_tools`` 的 name/description/schema + ``instruction_parts`` +
+    ``output_object`` schema。含二进制内容或序列化失败 → ``None``（不可估，
+    拒绝放行，不以正文估算冒充完整输入，R21）。
+    """
+
+    from pydantic_ai.messages import ModelMessagesTypeAdapter
+
+    from services.ai_service.token_budget import _estimate_tokens
+
+    messages = request_context.messages
+    if _contains_binary_content(messages):
+        return None
+    parameters = request_context.model_request_parameters
+    try:
+        messages_text = ModelMessagesTypeAdapter.dump_json(messages).decode("utf-8")
+        tools_text = json.dumps(
+            [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters_json_schema,
+                }
+                for tool in (*parameters.function_tools, *parameters.output_tools)
+            ],
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        output_schema_text = (
+            json.dumps(parameters.output_object.json_schema, ensure_ascii=False, sort_keys=True, default=str)
+            if parameters.output_object is not None
+            else ""
+        )
+    except (TypeError, ValueError):
+        return None
+    instructions_text = "\n".join(part.content for part in (parameters.instruction_parts or []))
+    model = getattr(request_context.model, "model_name", None)
+    return sum(
+        _estimate_tokens(text, model) for text in (messages_text, tools_text, output_schema_text, instructions_text)
+    )
+
+
+def evaluate_research_boundary(
+    policy: ResearchBoundaryPolicy, *, measured_input_tokens: int | None = None
+) -> str | None:
+    """返回阻断原因；``None`` 表示未触发阻断（不代表授权已通过）。
+
+    ``measured_input_tokens`` 为按最终请求全输入自测的下限；与外部估计取较大者，
+    外部低估不能放宽闸门（I47）。窗口取所有候选可用窗口中最严者。
+    """
 
     if policy.active_source_keys & policy.disabled_source_keys:
         return "source_disabled"
-    if policy.context_window_tokens is None or policy.estimated_input_tokens is None:
+    estimates = [
+        estimate for estimate in (policy.estimated_input_tokens, measured_input_tokens) if estimate is not None
+    ]
+    window = policy.strictest_context_window_tokens()
+    if window is None or not estimates:
         return "window_unknown"
-    if policy.estimated_input_tokens > policy.context_window_tokens:
+    if max(estimates) > window:
         return "context_window_exceeded"
     return None
 
@@ -373,7 +460,25 @@ class ResearchBoundary(AbstractCapability[Any]):
         self, ctx: RunContext[Any], request_context: ModelRequestContext
     ) -> ModelRequestContext:
         policy = await self.policy_provider(ctx)
-        reason = evaluate_research_boundary(policy)
+        # 先按模式裁剪工具，再对「最终待发请求」自测全输入（I47）：先测会被裁剪掉
+        # 的工具 schema 会高估，导致本可放行的请求被误拒。
+        candidate_context = request_context
+        if policy.mode is not Mode.EXECUTE:
+            parameters = request_context.model_request_parameters
+            allowed = [tool for tool in parameters.function_tools if tool.name in policy.allowed_tool_names]
+            if len(allowed) != len(parameters.function_tools):
+                candidate_context = replace(
+                    request_context,
+                    model_request_parameters=replace(parameters, function_tools=allowed),
+                )
+        measured = _estimate_request_input_tokens(candidate_context)
+        if measured is None:
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                "request input size unestimable (binary or unencodable input); refusing to guess before dispatch",
+                "research_boundary",
+            )
+        reason = evaluate_research_boundary(policy, measured_input_tokens=measured)
         if reason == "source_disabled":
             raise AgentServiceError(
                 AgentErrorCode.POLICY_DENIED,
@@ -387,19 +492,11 @@ class ResearchBoundary(AbstractCapability[Any]):
                 "research_boundary",
             )
         if reason == "context_window_exceeded":
+            estimates = [estimate for estimate in (policy.estimated_input_tokens, measured) if estimate is not None]
             raise AgentServiceError(
                 AgentErrorCode.POLICY_DENIED,
-                f"context window exceeded: estimated={policy.estimated_input_tokens} "
-                f"window={policy.context_window_tokens}",
+                f"context window exceeded: estimated={max(estimates)} "
+                f"window={policy.strictest_context_window_tokens()}",
                 "research_boundary",
             )
-        if policy.mode is Mode.EXECUTE:
-            return request_context
-        parameters = request_context.model_request_parameters
-        allowed = [tool for tool in parameters.function_tools if tool.name in policy.allowed_tool_names]
-        if len(allowed) == len(parameters.function_tools):
-            return request_context
-        return replace(
-            request_context,
-            model_request_parameters=replace(parameters, function_tools=allowed),
-        )
+        return candidate_context
