@@ -718,7 +718,7 @@ review08（AKShare 开源组件复用专项，2026-09-23）发现：Tushare 积�
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-AgentSource-Residual-Risks** | 父进程范围复核缺「伪造越界/重叠 `selected_range` 被拒」负向用例；worker 自身 deadline 与父进程 `communicate` 超时同值；超时 limitation 硬编码「30 秒」；header 恰 64KiB 的 off-by-one；`_json_safe` 摘要碰撞 | ① 附件 worker 接入 F 系列真实链路前；② 或出现部分结果丢失/超时文案与配置不一致的报告时；③ 或扩到新解析格式需复用 `_json_safe` 摘要时 |
+| **P3-AgentSource-Residual-Risks** | `_json_safe` 摘要碰撞（NaN→null/Decimal→字符串后求摘要，理论上与 None 同摘要） | 扩到新解析格式需复用 `_json_safe` 摘要时先补类型标签；或出现摘要碰撞事故时 |
 
 **产生背景与现状**
 
