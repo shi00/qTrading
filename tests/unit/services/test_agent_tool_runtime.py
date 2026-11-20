@@ -203,6 +203,9 @@ class TestToolRuntimeExecute:
         assert request.operation_id == dao.decisions[0].operation_id
         assert request.connection_generation == 3
         assert dao.decisions[0].audit_scope_digest == audit_scope_digest(("search",))
+        payload = json.loads(dao.decisions[0].question_payload)
+        assert payload["service_id"] == _IDENTITY.service_id
+        assert payload["config_version"] == _IDENTITY.config_version
         assert dao.results[-1].outcome_state == "completed"
         assert dao.results[-1].result_payload is not None
 

@@ -11,9 +11,9 @@
 - **结果如实落库**：``completed`` / ``failed`` / ``unknown`` 三态分别映射
   ``phase``/``effect_state``，未知不伪装成失败或成功（R21 / I15）。
 
-当前组合根**不构造** :class:`SharedMCPConnectionManager`（真实 FastMCP 传输仍
-needs-spike），故 ``build_tool_runtime`` 只由显式注入的 manager 调用；未注入时
-叶 Agent 保持零工具、零外发，不伪造已接线。人工答复 UI 闭环同样不在本轮。
+生产组合根经 :func:`build_tool_runtime_factory` 接线：只认用户显式启连的单一服务，
+未启连 / 无授权 / 目录漂移一律返回 ``None``（叶 Agent 零工具、零外发），
+**不会隐式建连**。人工答复 UI 闭环同样不在本轮。
 """
 
 from __future__ import annotations
@@ -44,6 +44,7 @@ from core.agent_types import (
 from data.persistence.daos.base_dao import EngineDisposedError
 from services.agent_service.mcp import MCPToolDescriptor, SharedMCPConnectionManager
 from services.agent_service.mcp_jsonschema import JsonSchemaToolValidator
+from services.agent_service.mcp_lifecycle import MCPServiceLifecycle
 from services.agent_service.mcp_tools import (
     MCPToolDispatcher,
     ToolCallOutcome,
@@ -63,6 +64,7 @@ __all__ = [
     "ToolRuntime",
     "ToolRuntimeFactory",
     "build_tool_runtime",
+    "build_tool_runtime_factory",
 ]
 
 _JSON_SEPARATORS: Final[tuple[str, str]] = (",", ":")
@@ -157,7 +159,7 @@ class ToolRuntime:
                     parameter_digest=arguments_digest,
                     schema_digest=sha256_hex(descriptor.schema_json),
                     audit_scope_digest=audit_scope_digest(self.audit_scope),
-                    question_payload=_question_payload(tool_name, arguments_digest),
+                    question_payload=_question_payload(self.identity, tool_name, arguments_digest),
                 )
             )
         except asyncio.CancelledError:
@@ -244,14 +246,20 @@ def _canonical_text(payload: Any) -> str:
         ) from exc
 
 
-def _question_payload(tool_name: str, arguments_digest: str) -> str:
-    """决定问题载荷（人可读 + 摘要）；不含参数原文，避免把调用细节写入问题文本。"""
+def _question_payload(identity: MCPServiceIdentity, tool_name: str, arguments_digest: str) -> str:
+    """决定问题载荷（人可读 + 摘要）；不含参数原文，避免把调用细节写入问题文本。
+
+    ``service_id`` / ``config_version`` 是持久化的「研究引用了该 MCP 配置版」证据：
+    断开/更新共享配置前由 DAO 据此核对仍未终结的使用者（I59）。
+    """
 
     return _canonical_text(
         {
             "question": f"是否允许本次调用工具 {tool_name}？",
             "tool_name": tool_name,
             "parameter_digest": arguments_digest,
+            "service_id": identity.service_id,
+            "config_version": identity.config_version,
         }
     )
 
@@ -305,6 +313,34 @@ def _specs_from_catalog(catalog: tuple[MCPToolDescriptor, ...], *, allowed: froz
             continue
         specs.append(spec)
     return tuple(specs)
+
+
+def build_tool_runtime_factory(*, dao: ToolDecisionDao, lifecycle: MCPServiceLifecycle) -> ToolRuntimeFactory:
+    """构造逐叶工具工厂：只认显式启连的单一服务，否则零工具（**绝不自动启连**）。
+
+    - 无已连接服务 / 多个已连接（无法确定归属）/ 无启连授权 / 目录摘要漂移
+      → 返回 ``None``（叶运行零工具）；
+    - 其余走 :func:`build_tool_runtime`：冻结目录 ∩ 授权集合 → 完整 schema 校验。
+    """
+
+    def _factory(scope: ToolRunScope) -> ToolRuntime | None:
+        identity = lifecycle.active_identity()
+        if identity is None or not lifecycle.is_connected(identity):
+            return None
+        sets = lifecycle.tool_sets(identity)
+        if sets is None:
+            return None
+        return build_tool_runtime(
+            dao=dao,
+            manager=lifecycle.manager,
+            identity=identity,
+            scope=scope,
+            role_tools=sets.role_tools,
+            request_tools=sets.request_tools,
+            permission_tools=sets.permission_tools,
+        )
+
+    return _factory
 
 
 def build_tool_runtime(

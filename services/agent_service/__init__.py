@@ -75,6 +75,7 @@ from services.agent_service.mcp_fastmcp import (
     MCPSessionDiagnostics,
 )
 from services.agent_service.mcp_jsonschema import JsonSchemaToolValidator
+from services.agent_service.mcp_lifecycle import MCPConnectReceipt, MCPServiceLifecycle
 from services.agent_service.recovery import (
     ManualRecoveryReceipt,
     StartupIsolationReceipt,
@@ -106,6 +107,7 @@ from services.agent_service.tool_runtime import (
     ToolRuntime,
     ToolRuntimeFactory,
     build_tool_runtime,
+    build_tool_runtime_factory,
 )
 from services.agent_service.tools import ToolSpec, build_deferred_tools
 
@@ -153,7 +155,9 @@ __all__ = [
     "LoopObservation",
     "LoopRunOutcome",
     "LoopRunState",
+    "MCPConnectReceipt",
     "MCPSendGate",
+    "MCPServiceLifecycle",
     "MCPSessionDiagnostics",
     "ManualRecoveryReceipt",
     "ModePolicy",
@@ -187,6 +191,7 @@ __all__ = [
     "build_planning_capability",
     "build_summarizing_compaction",
     "build_tool_runtime",
+    "build_tool_runtime_factory",
     "detect_attachment_kind",
     "freeze_comparison_group",
     "install_leaf_runtime",

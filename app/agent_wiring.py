@@ -25,9 +25,9 @@
 
 - 叶 runner 在组装期登记（``install_leaf_runtime``，含 GatewayModel 工厂：调用
   身份只由叶持久执行身份派生）；
-- MCP 共享连接管理器与工具 runtime 尚未在组合根构造（真实 FastMCP 传输仍
-  needs-spike），故叶运行保持 ``tool_runtime_factory=None``：零工具、零外发，
-  不伪造「工具已接线」；
+- MCP 生命周期在组合根构造（``app.agent_mcp.build_mcp_lifecycle``）：真实
+  FastMCP 传输 + ``app_state`` 配置/授权 + stdio 实现指纹；构造期零连接，
+  未显式启连时工具工厂返回 ``None``（零工具、零外发）；
 - 宿主就绪后构造 ``ResearchDispatcher``（受理回执 → 持久父研究 workflow），
   计划来源与投递/读回端口由组合根注入；
 - 派发门闩与关闭链共用同一 ``_ProcessDispatchGate``：关闭派发后新提交零派发。
@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from importlib.metadata import version
 from typing import Any, Final, cast
 
+from app.agent_mcp import build_mcp_lifecycle
 from core.agent_types import AgentValidationError
 from services.agent_service import (
     AgentRuntime,
@@ -69,8 +70,10 @@ from services.agent_service.dispatch import (
     RootWorkflowSubmitter,
 )
 from services.agent_service.leaf_runtime import default_leaf_runtime
+from services.agent_service.mcp_lifecycle import MCPServiceLifecycle
 from services.agent_service.runtime import CloseCommandIdentity, CloseFactOutcome, OwnerLoopBridge
 from services.agent_service.skills import ManagedSkillStore, SkillCatalogService
+from services.agent_service.tool_runtime import build_tool_runtime_factory
 from services.agent_service.units import UnitConversion
 from services.agent_service.workflows import submit_research_workflow
 from utils.config.db import (
@@ -145,6 +148,8 @@ class AgentWiring:
     dispatcher: ResearchDispatcher | None = None
     cleanup: AgentCleanupWiring | None = None
     cleanup_failure: str | None = None
+    #: MCP 生命周期门面（构造期零连接；关闭前置逐个断开已连服务）。
+    mcp_lifecycle: MCPServiceLifecycle | None = None
     unclosed_handle: AgentRuntimeHandle | None = None
     instance_guard: Any | None = None
     _close_command: CloseCommandIdentity | None = None
@@ -188,6 +193,8 @@ class AgentWiring:
         据 :meth:`close_ready` 阻断后续释放。
         """
 
+        if self.mcp_lifecycle is not None:
+            await self._disconnect_mcp_sessions()
         if self.service is None:
             return None
         if self._close_command is None:
@@ -226,6 +233,28 @@ class AgentWiring:
         if self.close_ready():
             await self.service.aclose()
         return receipt
+
+    async def _disconnect_mcp_sessions(self) -> None:
+        """关闭前置：断开本进程显式建立的 MCP 连接。
+
+        在途/冻结使用者由共享连接管理器拒停；断开失败如实记录并继续，
+        不把「未确认断开」伪装成已断开（R21），也不阻断其余关闭步骤。
+        """
+
+        lifecycle = self.mcp_lifecycle
+        if lifecycle is None:
+            return
+        for identity in lifecycle.connected_identities():
+            try:
+                await lifecycle.disconnect(identity)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(
+                    "[AgentWiring] mcp disconnect failed: %s (%s)",
+                    type(e).__name__,
+                    identity.stable_key(),
+                )
 
     async def _close_unclosed_handle(self) -> None:
         """重试关闭未收口宿主（``AgentRuntimeHandle.close`` 按资源粒度幂等）。"""
@@ -489,6 +518,7 @@ async def wire_agent_runtime(
     blocking_runner: Callable[[Callable[[], Any]], Awaitable[Any]] | None = None,
     launch_allowed: bool | None = None,
     leaf_runtime: LeafRuntimeWiring | None = None,
+    mcp_lifecycle: MCPServiceLifecycle | None = None,
     plan_provider: PlanSpecProvider | None = None,
     workflow_submitter: RootWorkflowSubmitter | None = None,
     workflow_result_reader: RootWorkflowResultReader | None = None,
@@ -528,16 +558,42 @@ async def wire_agent_runtime(
         logger.warning("[AgentWiring] agent runtime url unresolved: %s (zero dispatch)", type(e).__name__)
         return AgentWiring(service=service, bridge=bridge, failure="runtime_url_unresolved")
 
+    lifecycle = mcp_lifecycle
+    if lifecycle is None:
+        try:
+            lifecycle = build_mcp_lifecycle(engine=engine, dao=dao)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # 构造失败只降级为「无 MCP 工具」，不阻断既有启动；不伪造已接线。
+            logger.warning(
+                "[AgentWiring] mcp lifecycle unavailable: %s (tools stay disabled)",
+                type(e).__name__,
+            )
+            lifecycle = None
+    if leaf_runtime is None:
+        tool_factory = None if lifecycle is None else build_tool_runtime_factory(dao=dao, lifecycle=lifecycle)
+        leaf_runtime = default_leaf_runtime(dao, tool_runtime_factory=tool_factory)
     try:
-        install_leaf_runtime(leaf_runtime if leaf_runtime is not None else default_leaf_runtime(dao))
+        install_leaf_runtime(leaf_runtime)
     except Exception as e:  # 叶运行链未装好即零派发（launch/派发都不进行）
         logger.warning("[AgentWiring] leaf runtime install failed: %s (zero dispatch)", type(e).__name__)
-        return AgentWiring(service=service, bridge=bridge, failure=f"leaf_runtime_install_failed:{type(e).__name__}")
+        return AgentWiring(
+            service=service,
+            bridge=bridge,
+            failure=f"leaf_runtime_install_failed:{type(e).__name__}",
+            mcp_lifecycle=lifecycle,
+        )
 
     allow_launch = agent_runtime_launch_allowed() if launch_allowed is None else launch_allowed
     migration_url, share_migration_credentials = _migration_credentials(get_agent_migration_db_url())
     if migration_url is None and not share_migration_credentials:
-        return AgentWiring(service=service, bridge=bridge, failure="migration_credentials_missing")
+        return AgentWiring(
+            service=service,
+            bridge=bridge,
+            failure="migration_credentials_missing",
+            mcp_lifecycle=lifecycle,
+        )
     settings = AgentRuntimeSettings(
         system_database_url=runtime_url,
         migration_database_url=migration_url,
@@ -559,7 +615,12 @@ async def wire_agent_runtime(
         raise
     except Exception as e:
         logger.warning("[AgentWiring] agent runtime startup failed: %s (zero dispatch)", type(e).__name__)
-        return AgentWiring(service=service, bridge=bridge, failure=f"startup_failed:{type(e).__name__}")
+        return AgentWiring(
+            service=service,
+            bridge=bridge,
+            failure=f"startup_failed:{type(e).__name__}",
+            mcp_lifecycle=lifecycle,
+        )
 
     if outcome.handle is None:
         failure = outcome.failure
@@ -575,6 +636,7 @@ async def wire_agent_runtime(
             bridge=bridge,
             isolation=outcome.isolation,
             failure=failure,
+            mcp_lifecycle=lifecycle,
             unclosed_handle=outcome.unclosed_handle,
             instance_guard=outcome.instance_guard,
         )
@@ -639,5 +701,6 @@ async def wire_agent_runtime(
         dispatcher=dispatcher,
         cleanup=cleanup,
         cleanup_failure=cleanup_failure,
+        mcp_lifecycle=lifecycle,
         instance_guard=outcome.instance_guard,
     )

@@ -119,6 +119,7 @@ from core.agent_types import (
     HistoryHit,
     HistoryPage,
     HistoryQuery,
+    MCPServiceIdentity,
     MarkAnswerDeliveredRequest,
     MessagePage,
     MessagePageItem,
@@ -315,6 +316,20 @@ _RESOURCE_GUARD_SLOT_ID: Final = "global_guard"
 #: 与每会话 1 总 / 每总 3 叶同时生效，任一超限即拒。
 _RESOURCE_GLOBAL_TOTAL_LIMIT: Final = 2
 _RESOURCE_GLOBAL_LEAF_LIMIT: Final = 4
+
+#: 仍可能使用某 MCP 配置版的非终结执行状态（排队/暂停/可恢复/在途）。
+#: 与 ``AgentExecution.display_state`` 的 CheckConstraint 取值一致；终结态
+#: （ended/failed/complete/partial/withdrawn/closed_unknown/planned）不构成冻结使用者。
+_MCP_FROZEN_EXECUTION_STATES: Final[tuple[str, ...]] = (
+    "queued",
+    "running",
+    "waiting_dependency",
+    "waiting_user",
+    "pausing",
+    "paused",
+    "ending",
+    "unknown",
+)
 
 #: 全局开放票据计数：跨 user_scope（guard 行 slot_kind='global_guard' 天然不计入），
 #: 开放谓词与树计数一致（released_at IS NULL OR release_verified=false，
@@ -3647,6 +3662,42 @@ class AgentDao(BaseDao):
             allowed_current_states=(ToolGrantState.GRANTED, ToolGrantState.CLAIMED),
             target_state=ToolGrantState.REVOKED,
         )
+
+    async def list_mcp_frozen_users(self, identity: MCPServiceIdentity) -> tuple[str, ...]:
+        """列出仍引用该 MCP 配置版且未终结的研究（I59 冻结使用者核对）。
+
+        引用来源是持久化的工具决定载荷（``question_payload`` 中的 ``service_id`` /
+        ``config_version``），不是管理器内存计数：重启后排队/暂停/可恢复的研究
+        仍持有该配置版，只有持久化查询能证明「无使用者」。
+
+        语义边界（R21，不得夸大）：本查询只覆盖**已产生工具决定**的研究；
+        计划期即冻结工具但尚未调用工具的研究当前没有持久化引用字段，属于已知缺口。
+        查询失败向上抛（fail-closed），不返回空结果冒充「无使用者」。
+        """
+
+        self._check_engine("mcp frozen users")
+        identity.stable_key()
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            rows = await conn.execute(
+                sa.select(AgentDecision.execution_id)
+                .join(
+                    AgentExecution,
+                    sa.and_(
+                        AgentExecution.user_scope == AgentDecision.user_scope,
+                        AgentExecution.execution_id == AgentDecision.execution_id,
+                    ),
+                )
+                .where(
+                    AgentDecision.decision_kind == "tool_permission",
+                    AgentDecision.question_payload["service_id"].astext == identity.service_id,
+                    AgentDecision.question_payload["config_version"].astext == str(identity.config_version),
+                    AgentExecution.display_state.in_(_MCP_FROZEN_EXECUTION_STATES),
+                )
+                .distinct()
+            )
+            return tuple(sorted(row[0] for row in rows))
 
     async def read_operation_grant_scope(self, *, operation_id: str) -> OperationGrantScope | None:
         """按 operation 身份只读解析许可范围（I44 生产适配器）。
