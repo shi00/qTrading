@@ -744,7 +744,9 @@ E-02 里程碑独立检视（B1-B3 已修：结果不可编码 → unknown、单
 
 **I03 已收敛**：① stdio 改为自管进程的 `BudgetedStdioTransport`，`receive_bytes` / `structure_depth` 在 SDK 解析前按原始字节计量并登记真实插入点（准入不再拒绝），超限 fail-closed 拆除连接且不挂起；② 子进程由本进程自管，`exit_status` 在关闭后可观测为实际退出码（未观测到仍为 `None`，不填 0）；③ 目录/解码/schema/单条四族已在 `FastMCPSession.list_tools` / `call_tool` 以增量计数接入。
 
-**仍未收敛**：① `retention_bytes` 无调用点且无释放；② HTTP/SSE 仅完成传输构造，未做真实往返实证；③ 会话内自建 `MCPBudgetGuard` 与连接管理器的 guard 分族计量（decoded/catalog vs single_result/retention），尚未合并为单一账本；④ stdio 超限不保证以 `MCPBudgetExceeded` 原类型抵达调用方（SDK 默认 `message_handler` 消费读流 `Exception` 值），调用方看到 `CONNECTION_CLOSED`，原因在诊断 `inbound_limit:<family>`。
+**仍未收敛**：① `retention_bytes` 无调用点且无释放；② HTTP/SSE 仅完成传输构造，未做真实往返实证；③ stdio 超限不保证以 `MCPBudgetExceeded` 原类型抵达调用方（SDK 默认 `message_handler` 消费读流 `Exception` 值），调用方看到 `CONNECTION_CLOSED`，原因在诊断 `inbound_limit:<family>`。
+
+**已收敛（每连接单一账本）**：连接管理器在启连时创建唯一 `MCPBudgetGuard` 并经 `MCPClientFactoryPort.open(config, guard=...)` 注入会话，`receive_bytes` / `structure_depth`（传输层入站）与目录/schema/解码/单条/留存（会话解析后）各族均累计在该实例上；会话不再自建第二个 guard 分族计量（连接测试的临时会话由工厂为该次连接自建，仍是单一实例）。
 
 **期望的最终解法**
 

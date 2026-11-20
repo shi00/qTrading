@@ -158,7 +158,7 @@ class _FakeFactory:
     opened: int = 0
     opened_configs: list[MCPServerConfig] = field(default_factory=list)
 
-    async def open(self, config: MCPServerConfig) -> _FakeSession:
+    async def open(self, config: MCPServerConfig, *, guard: Any = None) -> _FakeSession:
         self.opened += 1
         self.opened_configs.append(config)
         return self.session
@@ -350,7 +350,7 @@ class TestConnectionTest:
             def __init__(self) -> None:
                 self.calls = 0
 
-            async def open(self, config: MCPServerConfig) -> _FakeSession:
+            async def open(self, config: MCPServerConfig, *, guard: Any = None) -> _FakeSession:
                 self.calls += 1
                 return shared if self.calls == 1 else scratch
 
@@ -561,7 +561,7 @@ class _CountingFactory:
         self.opened: list[MCPServerConfig] = []
         self.sessions: list[_FakeSession] = []
 
-    async def open(self, config: MCPServerConfig) -> _FakeSession:
+    async def open(self, config: MCPServerConfig, *, guard: Any = None) -> _FakeSession:
         self.opened.append(config)
         await asyncio.sleep(self.delay)
         if self.fail_times:
@@ -593,7 +593,7 @@ class _GatedFactory:
     def gate(self, key: str) -> asyncio.Event:
         return self.gates.setdefault(key, asyncio.Event())
 
-    async def open(self, config: MCPServerConfig) -> _FakeSession:
+    async def open(self, config: MCPServerConfig, *, guard: Any = None) -> _FakeSession:
         self.opened.append(config)
         await self.gate(config.identity.stable_key()).wait()
         session = _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),))
@@ -1066,7 +1066,7 @@ class _TimedFactory:
         self._session = session
         self.opened: list[MCPServerConfig] = []
 
-    async def open(self, config: MCPServerConfig) -> _TimedSession:
+    async def open(self, config: MCPServerConfig, *, guard: Any = None) -> _TimedSession:
         self.opened.append(config)
         self._clock.advance(self._open_s)  # 启动/初始化/鉴权耗时
         return self._session
@@ -1081,7 +1081,7 @@ class _GatedTimedFactory:
         self.sessions: list[_TimedSession] = []
         self.gate = asyncio.Event()
 
-    async def open(self, config: MCPServerConfig) -> _TimedSession:
+    async def open(self, config: MCPServerConfig, *, guard: Any = None) -> _TimedSession:
         self.opened.append(config)
         await self.gate.wait()
         session = _TimedSession(self._clock, 1.0)

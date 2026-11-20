@@ -97,7 +97,7 @@ class _Factory:
         self.session = _Session()
         self.opened = 0
 
-    async def open(self, config: MCPServerConfig) -> _Session:
+    async def open(self, config: MCPServerConfig, *, guard: Any = None) -> _Session:
         self.opened += 1
         return self.session
 

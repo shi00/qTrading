@@ -11,7 +11,9 @@
 6. 解析前入站限额（I03）：超限大帧/深 JSON 使连接 fail-closed 拆除，调用立即失败
    而非挂起，原因记入诊断（``inbound_limit:<family>``），且不以 ``CancelledError``
    形式呈现；
-7. 退出码：自管子进程关闭后 ``exit_status`` 可观测为整数。
+7. 退出码：自管子进程关闭后 ``exit_status`` 可观测为整数；
+8. 单一账本：注入的 ``MCPBudgetGuard`` 同时承载入站（``receive_bytes``）与解析后
+   （目录/解码）各族，不再由会话另建第二个 guard 分族计量。
 
 残留（不得据本文件宣称）：限额族（目录/解码/schema/单条/留存）在解析后计量，
 其拒绝点晚于接收；stdio 超限的异常类型不保证原样抵达调用方。
@@ -35,7 +37,7 @@ from core.agent_types import (
     MCPTransportKind,
 )
 from services.agent_service.mcp import MCPServerConfig, MCPTransportConfig
-from services.agent_service.mcp_budget import MCPDeadline
+from services.agent_service.mcp_budget import MCPBudgetGuard, MCPDeadline
 from services.agent_service.mcp_fastmcp import FastMCPClientFactory
 
 pytestmark = [pytest.mark.integration, pytest.mark.no_db, pytest.mark.asyncio]
@@ -134,6 +136,23 @@ class TestRealStdioTransport:
             result = await session.call_tool("echo", {"text": "hi"}, deadline_s=30)
             assert result == {"echo": "hi", "len": 2}
             assert session.gate.sends == 2
+        finally:
+            await session.aclose()
+
+    async def test_injected_guard_accumulates_all_families(self, server_script: Path) -> None:
+        """单一账本：入站（receive_bytes）与解析后（目录/解码）计量累计在注入的同一实例上。"""
+
+        config = _config(server_script)
+        guard = MCPBudgetGuard(config.budget, identity=config.identity.stable_key())
+        factory = FastMCPClientFactory()
+        session = await factory.open(config, guard=guard)
+        try:
+            tools = await session.list_tools(deadline_s=30)
+            assert guard.used("catalog_items") == len(tools)
+            assert guard.used("catalog_bytes") > 0
+            await session.call_tool("echo", {"text": "hi"}, deadline_s=30)
+            assert guard.used("receive_bytes") > 0
+            assert guard.used("decoded_bytes") > 0
         finally:
             await session.aclose()
 

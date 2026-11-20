@@ -744,11 +744,14 @@ class FastMCPClientFactory:
     ) -> None:
         self._deadline_factory = deadline_factory or (lambda seconds: MCPDeadline(seconds=seconds))
 
-    async def open(self, config: MCPServerConfig) -> FastMCPSession:
+    async def open(self, config: MCPServerConfig, *, guard: MCPBudgetGuard | None = None) -> FastMCPSession:
         """建立真实连接（仅显式启连/测试调用）；失败映射为 ``CONFIG_UNAVAILABLE``。
 
         启连点**复用** ``validate_mcp_server_config``：配置可能由存储加载后被篡改，
         未通过即零启连（不建临时目录、不建线程、不解析秘密、不创建子进程/网络连接）。
+
+        ``guard`` 由共享连接管理器注入：入站限额与解析后各计量族共用**同一**账本；
+        未注入（连接测试的临时会话）时为本连接自建，仍只有一个实例。
         """
 
         label = config.identity.stable_key()
@@ -769,7 +772,8 @@ class FastMCPClientFactory:
                 ) from exc
         drain = _SanitizedStderrDrain() if is_stdio else None
         stdio_env: _ManagedStdioEnvironment | None = None
-        guard = MCPBudgetGuard(config.budget, identity=label)
+        if guard is None:
+            guard = MCPBudgetGuard(config.budget, identity=label)
         try:
             if is_stdio:
                 stdio_env = _ManagedStdioEnvironment.create(config.transport.env)

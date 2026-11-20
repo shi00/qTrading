@@ -162,7 +162,8 @@ class _Factory:
     def __init__(self, session: _Session) -> None:
         self.session = session
 
-    async def open(self, config: MCPServerConfig) -> _Session:
+    async def open(self, config: MCPServerConfig, *, guard: MCPBudgetGuard | None = None) -> _Session:
+        self.guard = guard
         return self.session
 
 
@@ -561,10 +562,28 @@ class TestDispatchEffects:
 
     @pytest.mark.asyncio
     async def test_budget_guard_is_shared_per_connection(self) -> None:
-        dispatcher, _session, _grants, manager = await _dispatcher(budget=_budget(retention_bytes=10_000))
+        """每连接单一账本：管理器注入的 guard 就是会话计量各族所用的同一实例。"""
+
+        session = _Session()
+        factory = _Factory(session)
+        manager = SharedMCPConnectionManager(
+            store=_Store(_config(_budget(retention_bytes=10_000))),
+            factory=factory,
+            probe=_Probe(),
+            usage=_NoFrozenUsers(),
+        )
+        await manager.connect(_IDENTITY)
         guard = manager.budget_guard(_IDENTITY)
         assert isinstance(guard, MCPBudgetGuard)
+        assert factory.guard is guard
         assert guard.used("retention_bytes") == 0
+
+        # 同一账本：单条结果族与留存族累计到同一实例，而非各记一份。
+        dispatcher = MCPToolDispatcher(manager=manager, validator=_Validator(), grants=_Grants())
+        outcome = await dispatcher.call(_request())
+        assert outcome.state is ToolCallState.COMPLETED
+        assert guard.used("single_result_bytes") > 0
+        assert guard.used("retention_bytes") > 0
 
 
 class TestFrozenArguments:

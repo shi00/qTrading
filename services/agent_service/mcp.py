@@ -328,9 +328,14 @@ class MCPClientSessionPort(Protocol):
 
 
 class MCPClientFactoryPort(Protocol):
-    """会话工厂端口：仅在用户显式启连/显式测试时被调用。"""
+    """会话工厂端口：仅在用户显式启连/显式测试时被调用。
 
-    async def open(self, config: MCPServerConfig) -> MCPClientSessionPort: ...
+    ``guard`` 由调用方注入时，会话的入站（``receive_bytes`` / ``structure_depth``）与
+    出站后计量（目录/schema/解码/单条/留存）必须累计在**同一**账本上；未注入（如
+    连接测试的临时会话）时由工厂为该次连接自建，仍是单一实例。
+    """
+
+    async def open(self, config: MCPServerConfig, *, guard: MCPBudgetGuard | None = None) -> MCPClientSessionPort: ...
 
 
 class MCPImplementationProbe(Protocol):
@@ -566,7 +571,9 @@ class SharedMCPConnectionManager:
             )
         guard = MCPBudgetGuard(config.budget, identity=label)
         deadline = self._start_connect_deadline(config)
-        session = await self._factory.open(config)
+        # 每连接单一账本：入站限额（receive_bytes/structure_depth）与解析后各族
+        # （目录/schema/解码/单条/留存）累计在同一 guard 上，由管理器注入会话。
+        session = await self._factory.open(config, guard=guard)
         try:
             tools = await session.list_tools(deadline_s=self._remaining_deadline_s(deadline, "discovery", label))
         except BaseException:

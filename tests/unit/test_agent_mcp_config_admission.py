@@ -141,7 +141,7 @@ class _Factory:
         self.opened: list[MCPServerConfig] = []
         self.session = _Session()
 
-    async def open(self, config: MCPServerConfig) -> _Session:
+    async def open(self, config: MCPServerConfig, *, guard: Any = None) -> _Session:
         self.opened.append(config)
         return self.session
 
