@@ -32,6 +32,7 @@ async def test_settings_all_tabs(e2e_page):
         "settings_tab_data",
         "settings_tab_database",
         "settings_tab_ai",
+        "settings_tab_mcp",
         "settings_tab_tasks",
         "settings_tab_notify",
         "settings_tab_system",

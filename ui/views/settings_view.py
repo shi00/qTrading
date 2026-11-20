@@ -18,6 +18,7 @@
 
 import logging
 from collections.abc import Callable
+from typing import Any
 
 import flet as ft
 
@@ -30,6 +31,7 @@ from ui.views.settings_tabs.ai_brain_tab import AIBrainTab
 from ui.views.settings_tabs.automation_tab import AutomationTab, NotificationsTab
 from ui.views.settings_tabs.data_source_tab import DataSourceTab
 from ui.views.settings_tabs.database_tab import DatabaseTab
+from ui.views.settings_tabs.mcp_services_tab import MCPServicesTab
 from ui.views.settings_tabs.system_tab import SystemTab
 from utils.sanitizers import DataSanitizer
 
@@ -41,6 +43,7 @@ _TAB_CONFIG = [
     ("settings_tab_data", ft.Icons.STORAGE),
     ("settings_tab_database", ft.Icons.DNS),
     ("settings_tab_ai", ft.Icons.SMART_TOY),
+    ("settings_tab_mcp", ft.Icons.HUB),
     ("settings_tab_tasks", ft.Icons.SCHEDULE),
     ("settings_tab_notify", ft.Icons.NOTIFICATIONS),
     ("settings_tab_system", ft.Icons.TUNE),
@@ -68,6 +71,7 @@ def _build_tabs(
     show_snack: Callable,
     current_tab: int = 0,
     visited_tabs: set[int] | None = None,
+    mcp_lifecycle: Any | None = None,
 ) -> list[ft.Control]:
     """构造已访问 Tab (``visible`` prop 控制显隐), 未访问 Tab 为空 Container。
 
@@ -81,6 +85,8 @@ def _build_tabs(
         current_tab: 当前激活 Tab 索引 (控制 ``visible`` prop)。
         visited_tabs: 已访问 Tab 索引集合。None 时默认 ``{current_tab}`` (惰性构造,
             向后兼容)。已访问 Tab 被构造并放入 Stack, 未访问 Tab 为空 Container。
+        mcp_lifecycle: 组合根接线的 MCP 生命周期门面（结构性与
+            ``MCPServiceLifecycle`` 一致；UI 不 import app 层）。
     """
     if visited_tabs is None:
         visited_tabs = {current_tab}
@@ -89,6 +95,7 @@ def _build_tabs(
         lambda: DataSourceTab(show_snack),
         lambda: DatabaseTab(show_snack),
         lambda: AIBrainTab(show_snack),
+        lambda: MCPServicesTab(mcp_lifecycle),
         lambda: AutomationTab(show_snack),
         lambda: NotificationsTab(show_snack),
         lambda: SystemTab(show_snack),
@@ -145,6 +152,7 @@ def _show_snack_impl(
 def SettingsView(
     active: bool = True,
     target_subtab: tuple[str, int] | None = None,
+    mcp_lifecycle: Any | None = None,
 ) -> ft.Container:
     """Settings view — declarative shell container.
 
@@ -165,6 +173,7 @@ def SettingsView(
     Args:
         active: 当前 tab 是否激活 (控制副作用执行)。
         target_subtab: 深链子页请求 ``(subtab_key, seq)`` 或 None。
+        mcp_lifecycle: MCP 服务生命周期门面；None 时「MCP 服务」页只显示不可用原因。
     """
     current_tab, set_current_tab = ft.use_state(0)
     visited_tabs, set_visited_tabs = ft.use_state({0})
@@ -201,7 +210,12 @@ def SettingsView(
 
     # --- Build tabs ---
     # Issue #438: 已访问 Tab 构造并放入 Stack, 未访问 Tab 为空 Container (惰性构造)
-    tabs = _build_tabs(_show_snack, current_tab=current_tab, visited_tabs=visited_tabs)
+    tabs = _build_tabs(
+        _show_snack,
+        current_tab=current_tab,
+        visited_tabs=visited_tabs,
+        mcp_lifecycle=mcp_lifecycle,
+    )
     assert len(_TAB_CONFIG) == len(tabs), f"_TAB_CONFIG ({len(_TAB_CONFIG)}) and tabs ({len(tabs)}) length mismatch!"
 
     # --- Tab click handler ---

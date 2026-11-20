@@ -180,6 +180,7 @@ def _build_pages_stack(
     screener_stock_request: tuple[str, int] | None = None,
     backtest_prefill_request: int | None = None,
     on_start_research: Any = None,
+    mcp_lifecycle: Any = None,
 ) -> ft.Stack:
     """构造所有页面控件的 ``ft.Stack`` (``visible`` prop 控制显示/隐藏)。
 
@@ -291,6 +292,7 @@ def _build_pages_stack(
                 lambda: SettingsView(
                     active=current_tab == NavTabs.SETTINGS,
                     target_subtab=settings_subtab_request,
+                    mcp_lifecycle=mcp_lifecycle,
                 ),
                 current_tab == NavTabs.SETTINGS,
             ),
@@ -859,6 +861,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             screener_stock_request,
             backtest_prefill_request,
             _start_research,
+            getattr(agent_wiring, "mcp_lifecycle", None),
         ),
         expand=True,
         padding=AppStyles.SPACING_XL,

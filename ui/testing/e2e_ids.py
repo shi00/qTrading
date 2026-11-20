@@ -173,7 +173,7 @@ class _SettingsIds:
     def tab(role: str) -> Eid:
         """生成 Tab 按钮 anchor（ft.Button，AnchorKind=INTERACTIVE）。
 
-        role 是 tab 角色名（ASCII，如 data/database/ai/tasks/notify/system），
+        role 是 tab 角色名（ASCII，如 data/database/ai/mcp/tasks/notify/system），
         从 _TAB_CONFIG 的 i18n_key 去掉 ``settings_tab_`` 前缀派生。
 
         Precondition: role 必须为 ASCII 且不含空格/破折号（附录 A 命名规范）。
