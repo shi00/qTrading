@@ -2162,7 +2162,7 @@ class TestJsonSupportParity:
 
 
 def _request(
-    data: bytes, name: str = "a.txt", kind: AttachmentKind = AttachmentKind.TXT
+    data: bytes, name: str = "a.txt", kind: AttachmentKind = AttachmentKind.TXT, selection: Selection | None = None
 ) -> AttachmentExtractionRequest:
     return AttachmentExtractionRequest(
         user_scope="scope-1",
@@ -2173,7 +2173,7 @@ def _request(
         source_digest=hashlib.sha256(data).hexdigest(),
         kind=kind,
         data=data,
-        selection=Selection(kind="all"),
+        selection=selection or Selection(kind="all"),
     )
 
 
@@ -2366,6 +2366,68 @@ class TestWorkerLifecycle:
         with pytest.raises(AttachmentWorkerError) as exc:
             await worker.extract(_request(b"hello"))
         assert exc.value.code == "worker_protocol_invalid"
+
+    @pytest.mark.asyncio
+    async def test_header_carries_injected_worker_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """I36：下发 worker 的 timeout_s 必须等于父侧监督的有效时限。
+
+        此前下发的是 budget 值而父侧按可注入 ``timeout_s`` 监督，两者不等时父进程会
+        先杀仍在自身时限内的 worker。
+        """
+
+        valid = json.dumps(
+            _worker_entry(monkeypatch, b"hello", kind=AttachmentKind.TXT, selection=Selection(kind="all"))
+        ).encode("utf-8")
+        script = (
+            "import json,sys\n"
+            "header = json.loads(sys.stdin.buffer.readline())\n"
+            "matched = abs(float(header['timeout_s']) - 0.7) < 1e-9\n"
+            f"if matched:\n    sys.stdout.buffer.write({valid!r})\n"
+            "else:\n    sys.exit(3)\n"
+        )
+        worker = SubprocessAttachmentWorker(command=(sys.executable, "-c", script), timeout_s=0.7)
+
+        result = await worker.extract(_request(b"hello"))
+
+        assert result.body_text == "hello"
+        assert worker.active_pids() == ()
+
+    @pytest.mark.asyncio
+    async def test_read_range_outside_selection_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """I36 负向：worker 伪造越界 read_range，父进程按 §3.3.1 拒绝。"""
+
+        selection = Selection(kind="limited", ranges=(CodepointsRange(kind="codepoints", start=1, end=2),))
+        data = b"abcdef"
+        response = _worker_entry(monkeypatch, data, kind=AttachmentKind.TXT, selection=selection)
+        response["result"]["read_ranges"] = [to_wire_dict(CodepointsRange(kind="codepoints", start=1, end=3))]
+        script = f"import sys\nsys.stdout.buffer.write({json.dumps(response).encode('utf-8')!r})\n"
+        worker = SubprocessAttachmentWorker(command=(sys.executable, "-c", script), timeout_s=5.0)
+
+        with pytest.raises(AttachmentWorkerError) as exc:
+            await worker.extract(_request(data, selection=selection))
+
+        assert exc.value.code == "worker_protocol_invalid"
+        assert "not_in_selection" in exc.value.message
+        assert worker.active_pids() == ()
+
+    @pytest.mark.asyncio
+    async def test_overlapping_read_and_unread_ranges_are_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """I36 负向：read 与 unread 重叠（同一行既已读又未读）即协议失败。"""
+
+        selection = Selection(kind="limited", ranges=(CodepointsRange(kind="codepoints", start=1, end=4),))
+        data = b"abcdef"
+        response = _worker_entry(monkeypatch, data, kind=AttachmentKind.TXT, selection=selection)
+        response["result"]["read_ranges"] = [to_wire_dict(CodepointsRange(kind="codepoints", start=2, end=3))]
+        response["result"]["unread_ranges"] = [to_wire_dict(CodepointsRange(kind="codepoints", start=3, end=4))]
+        script = f"import sys\nsys.stdout.buffer.write({json.dumps(response).encode('utf-8')!r})\n"
+        worker = SubprocessAttachmentWorker(command=(sys.executable, "-c", script), timeout_s=5.0)
+
+        with pytest.raises(AttachmentWorkerError) as exc:
+            await worker.extract(_request(data, selection=selection))
+
+        assert exc.value.code == "worker_protocol_invalid"
+        assert "overlap" in exc.value.message
+        assert worker.active_pids() == ()
 
     @pytest.mark.asyncio
     async def test_cancel_terminates_worker_and_reraises(self) -> None:

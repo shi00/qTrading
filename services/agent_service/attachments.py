@@ -355,7 +355,10 @@ class SubprocessAttachmentWorker:
                 "max_codepoints": self._budget.max_codepoints,
                 "extract_timeout_s": self._budget.extract_timeout_s,
             },
-            "timeout_s": self._budget.extract_timeout_s,
+            # worker 自身 deadline 必须与父侧监督使用同一有效时限：若下发 budget 值而
+            # 父侧按可注入 ``worker_timeout_s`` 监督，两者不等时父进程会先杀仍在自身
+            # 时限内的 worker（I36 竞态）。
+            "timeout_s": worker_timeout_s,
             "payload_bytes": len(request.data),
         }
         header_bytes = json.dumps(header, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
