@@ -936,6 +936,10 @@ def _message_replay_row(event_id: str) -> Any:
         role_version=None,
         body_text="hi",
         body_ref=None,
+        # I76 三表示分列：用户自述行模型可见=原值，来源标记 False；重放等价
+        # 比较含这两列，行事实缺列会退化为崩溃而非重放/冲突判定。
+        model_text="hi",
+        body_untrusted=False,
         search_text=None,
         native_fact_ref=None,
         tool_call_id=None,
