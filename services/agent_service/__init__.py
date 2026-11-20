@@ -100,6 +100,14 @@ from services.agent_service.service import (
 from services.agent_service.skills import SkillAvailabilityReceipt
 from services.agent_service.sources import BusinessSourceService
 from services.agent_service.tool_grants import DaoToolGrantPort
+from services.agent_service.tool_loop import ToolLoopPorts, ToolLoopResult, run_agent_tool_loop
+from services.agent_service.tool_runtime import (
+    ToolRunScope,
+    ToolRuntime,
+    ToolRuntimeFactory,
+    build_tool_runtime,
+)
+from services.agent_service.tools import ToolSpec, build_deferred_tools
 
 __all__ = [
     "DISPATCH_CLOSED",
@@ -162,15 +170,23 @@ __all__ = [
     "SubmissionOutcome",
     "SubprocessAttachmentWorker",
     "ToolCall",
+    "ToolLoopPorts",
+    "ToolLoopResult",
+    "ToolRunScope",
+    "ToolRuntime",
+    "ToolRuntimeFactory",
+    "ToolSpec",
     "TurnContext",
     "TurnDecision",
     "WaitResult",
     "assemble_agent_runtime",
+    "build_deferred_tools",
     "build_gateway_model",
     "build_leaf_runner",
     "build_plan_store",
     "build_planning_capability",
     "build_summarizing_compaction",
+    "build_tool_runtime",
     "detect_attachment_kind",
     "freeze_comparison_group",
     "install_leaf_runtime",
@@ -179,6 +195,7 @@ __all__ = [
     "mode_policy",
     "read_backtest_snapshot",
     "resume_selected_workflows",
+    "run_agent_tool_loop",
     "run_startup_isolation",
     "start_agent_runtime",
 ]

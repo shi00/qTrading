@@ -60,6 +60,7 @@ __all__ = [
     "ToolCallState",
     "ToolDispatchVerdict",
     "ToolGrantPort",
+    "audit_scope_digest",
     "canonical_arguments_digest",
 ]
 
@@ -100,7 +101,7 @@ def canonical_arguments_digest(arguments: Mapping[str, Any]) -> str:
     return sha256_hex(_canonical_json(dict(arguments)))
 
 
-def _scope_digest(scope: tuple[str, ...]) -> str:
+def audit_scope_digest(scope: tuple[str, ...]) -> str:
     """审核工具范围摘要：排序后的规范 JSON（与目录摘要同源思路，名称集合语义）。"""
 
     return sha256_hex(_canonical_json(sorted(scope)))
@@ -239,7 +240,7 @@ class MCPToolDispatcher:
             operation_id=request.operation_id,
             schema_digest=sha256_hex(descriptor.schema_json),
             arguments_digest=arguments_digest,
-            audit_scope_digest=_scope_digest(scope),
+            audit_scope_digest=audit_scope_digest(scope),
         )
         if verdict is ToolDispatchVerdict.REVOKED:
             raise AgentServiceError(AgentErrorCode.SOURCE_DISABLED, "tool permission was revoked", label)

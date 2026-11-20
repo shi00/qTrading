@@ -25,6 +25,9 @@
 
 - 叶 runner 在组装期登记（``install_leaf_runtime``，含 GatewayModel 工厂：调用
   身份只由叶持久执行身份派生）；
+- MCP 共享连接管理器与工具 runtime 尚未在组合根构造（真实 FastMCP 传输仍
+  needs-spike），故叶运行保持 ``tool_runtime_factory=None``：零工具、零外发，
+  不伪造「工具已接线」；
 - 宿主就绪后构造 ``ResearchDispatcher``（受理回执 → 持久父研究 workflow），
   计划来源与投递/读回端口由组合根注入；
 - 派发门闩与关闭链共用同一 ``_ProcessDispatchGate``：关闭派发后新提交零派发。

@@ -2597,6 +2597,48 @@ class ToolGrantFact:
 
 
 @dataclass(frozen=True)
+class SaveToolDecisionRequest:
+    """工具许可决定保存输入（SQ-03「保存准确 decision」；不建第二授权库）。
+
+    ``decision_id`` / ``operation_id`` 由调用方以稳定身份派生，保证重放幂等；
+    ``grant_id`` 由 DAO 依同一稳定身份派生。``question_payload`` 必须是 JSON 对象
+    文本，DAO 会把 ``parameter_digest`` / ``schema_digest`` / ``audit_scope_digest``
+    并入该对象后落库（当前无独立摘要列，缺口见台账）。
+    """
+
+    user_scope: str
+    session_id: str
+    execution_id: str
+    round_id: str
+    node_id: str
+    decision_id: str
+    operation_id: str
+    tool_call_id: str
+    tool_name: str
+    parameter_digest: str
+    schema_digest: str
+    audit_scope_digest: str
+    question_payload: CanonicalJson
+    expires_at: str | None = None
+
+
+@dataclass(frozen=True)
+class SaveToolResultRequest:
+    """工具调用结果保存输入（§SQ-03「保存 tool result 和来源引用」）。
+
+    ``outcome_state`` 只接受 ``completed`` / ``failed`` / ``unknown``；DAO 据此
+    映射 ``phase`` / ``effect_state`` / ``io_state``，不接受调用方自报三态组合。
+    """
+
+    user_scope: str
+    operation_id: str
+    outcome_state: str
+    result_payload: CanonicalJson | None = None
+    result_ref: str | None = None
+    error_code: str | None = None
+
+
+@dataclass(frozen=True)
 class OperationGrantScope:
     """工具派发认领所需的只读授权范围（I44 生产适配器输入）。
 

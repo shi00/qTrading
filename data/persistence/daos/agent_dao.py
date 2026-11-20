@@ -158,6 +158,8 @@ from core.agent_types import (
     SOURCE_COVERAGES,
     SOURCE_REGISTRATION_CONSUMER_KINDS,
     SaveAnswerRequest,
+    SaveToolDecisionRequest,
+    SaveToolResultRequest,
     Selection,
     SelectedRange,
     SessionChangeCommand,
@@ -3731,6 +3733,226 @@ class AgentDao(BaseDao):
                 tool_call_id=decision_row.tool_call_id,
                 parameter_digest=decision_row.parameter_digest,
             )
+
+    async def save_tool_decision(self, request: SaveToolDecisionRequest) -> ToolGrantFact:
+        """保存工具许可决定与待派发 operation（SQ-03「保存准确 decision」）。
+
+        单事务写 ``agent_decision``（``decision_kind="tool_permission"``、
+        ``grant_state=granted``、``grant_revision=1``）与 ``agent_operation``
+        （``phase=prepared`` / effect ``not_dispatched`` / io ``not_started``），
+        使后续 ``claim_tool_dispatch`` 有可核来源。同 ``decision_id`` 重放只读原
+        事实、零新行；归属/工具/操作不符即拒绝，不覆盖原事实（R21）。
+        """
+
+        self._check_engine("tool decision")
+        identity = f"{request.user_scope}/{request.decision_id}"
+        _require_text_field(request.user_scope, "user_scope", identity)
+        _require_text_field(request.session_id, "session_id", identity)
+        _require_text_field(request.execution_id, "execution_id", identity)
+        _require_text_field(request.round_id, "round_id", identity)
+        _require_text_field(request.node_id, "node_id", identity)
+        _require_text_field(request.decision_id, "decision_id", identity)
+        _require_text_field(request.operation_id, "operation_id", identity)
+        _require_text_field(request.tool_call_id, "tool_call_id", identity)
+        _require_text_field(request.tool_name, "tool_name", identity)
+        for digest, field in (
+            (request.parameter_digest, "parameter_digest"),
+            (request.schema_digest, "schema_digest"),
+            (request.audit_scope_digest, "audit_scope_digest"),
+        ):
+            if not is_digest(digest):
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"invalid {field}", identity)
+        try:
+            payload = json.loads(request.question_payload)
+        except (TypeError, ValueError) as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "question payload is not json", identity) from exc
+        if not isinstance(payload, dict):
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "question payload must be an object", identity)
+        payload = {
+            **payload,
+            "tool_name": request.tool_name,
+            "parameter_digest": request.parameter_digest,
+            "schema_digest": request.schema_digest,
+            "audit_scope_digest": request.audit_scope_digest,
+        }
+        facts = await self.read_leaf_dispatch_facts(request.execution_id, request.round_id)
+        if facts.user_scope != request.user_scope:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "user_scope does not own execution", identity)
+        grant_id = stable_id(
+            "tool_grant",
+            [request.user_scope, request.execution_id, request.round_id, request.tool_call_id],
+        )
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            existing = (
+                await conn.execute(
+                    sa.select(
+                        AgentDecision.execution_id,
+                        AgentDecision.round_id,
+                        AgentDecision.tool_call_id,
+                        AgentDecision.grant_id,
+                        AgentDecision.grant_revision,
+                        AgentDecision.grant_state,
+                    ).where(
+                        AgentDecision.user_scope == request.user_scope,
+                        AgentDecision.decision_id == request.decision_id,
+                    )
+                )
+            ).first()
+            if existing is not None:
+                if (
+                    existing.execution_id != request.execution_id
+                    or existing.round_id != request.round_id
+                    or existing.tool_call_id != request.tool_call_id
+                ):
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_CONFLICT,
+                        "tool decision already bound to another execution/round/tool call",
+                        identity,
+                    )
+                if existing.grant_id is None or existing.grant_revision is None or existing.grant_state is None:
+                    raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "decision carries no tool grant", identity)
+                operation_exists = (
+                    await conn.execute(
+                        sa.select(AgentOperation.operation_id).where(
+                            AgentOperation.user_scope == request.user_scope,
+                            AgentOperation.operation_id == request.operation_id,
+                        )
+                    )
+                ).first()
+                if operation_exists is None:
+                    raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "tool operation missing", identity)
+                return ToolGrantFact(
+                    decision_id=request.decision_id,
+                    grant_id=existing.grant_id,
+                    grant_revision=existing.grant_revision,
+                    grant_state=ToolGrantState(existing.grant_state),
+                )
+            presentation_batch_seq = (
+                await conn.execute(
+                    sa.select(sa.func.coalesce(sa.func.max(AgentDecision.presentation_batch_seq), 0)).where(
+                        AgentDecision.user_scope == request.user_scope,
+                        AgentDecision.execution_id == request.execution_id,
+                    )
+                )
+            ).scalar_one() + 1
+            occurred = datetime.now(UTC)
+            try:
+                await conn.execute(
+                    sa.insert(AgentDecision).values(
+                        user_scope=request.user_scope,
+                        decision_id=request.decision_id,
+                        session_id=request.session_id,
+                        execution_id=request.execution_id,
+                        round_id=request.round_id,
+                        node_id=request.node_id,
+                        decision_kind="tool_permission",
+                        tool_call_id=request.tool_call_id,
+                        question_payload=payload,
+                        parameter_digest=request.parameter_digest,
+                        tool_ref=request.tool_name,
+                        expires_at=_wire_to_dt(request.expires_at),
+                        grant_id=grant_id,
+                        grant_revision=1,
+                        grant_state=ToolGrantState.GRANTED.value,
+                        presentation_batch_seq=presentation_batch_seq,
+                        updated_at=occurred,
+                    )
+                )
+                await conn.execute(
+                    sa.insert(AgentOperation).values(
+                        user_scope=request.user_scope,
+                        operation_id=request.operation_id,
+                        session_id=request.session_id,
+                        execution_id=request.execution_id,
+                        round_id=request.round_id,
+                        step_id=request.node_id,
+                        call_kind="tool_call",
+                        tool_call_id=request.tool_call_id,
+                        grant_id=grant_id,
+                        grant_revision=1,
+                        parameter_digest=request.parameter_digest,
+                        owner_epoch=facts.owner_epoch,
+                        run_epoch=facts.run_epoch,
+                        phase="prepared",
+                        effect_state="not_dispatched",
+                        io_state="not_started",
+                        updated_at=occurred,
+                    )
+                )
+            except IntegrityError as exc:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_CONFLICT,
+                    "tool decision created concurrently",
+                    identity,
+                ) from exc
+            return ToolGrantFact(
+                decision_id=request.decision_id,
+                grant_id=grant_id,
+                grant_revision=1,
+                grant_state=ToolGrantState.GRANTED,
+            )
+
+    async def save_tool_result(self, request: SaveToolResultRequest) -> None:
+        """保存工具调用结果（SQ-03）：按结果态映射 phase/effect/io，不伪装确定失败。
+
+        ``completed`` → phase ``result_saved`` / effect ``confirmed``；``failed`` →
+        phase ``failed_confirmed`` / effect ``not_dispatched``（仅确定未发生时使用）；
+        ``unknown`` → phase ``unknown`` / effect ``unknown``（后效未知，保留归属）。
+        operation 不存在或归属不符即拒绝，不凭空建行。
+        """
+
+        self._check_engine("tool result")
+        identity = f"{request.user_scope}/{request.operation_id}"
+        _require_text_field(request.user_scope, "user_scope", identity)
+        _require_text_field(request.operation_id, "operation_id", identity)
+        transitions = {
+            "completed": ("result_saved", "confirmed", "completed"),
+            "failed": ("failed_confirmed", "not_dispatched", "failed"),
+            "unknown": ("unknown", "unknown", "unknown"),
+        }
+        transition = transitions.get(request.outcome_state)
+        if transition is None:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "invalid tool outcome state", identity)
+        payload: Any = None
+        if request.result_payload is not None:
+            try:
+                payload = json.loads(request.result_payload)
+            except (TypeError, ValueError) as exc:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID, "tool result payload is not json", identity
+                ) from exc
+            if not isinstance(payload, dict):
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "tool result payload must be an object", identity)
+        phase, effect_state, io_state = transition
+        occurred = datetime.now(UTC)
+        values: dict[str, Any] = {
+            "phase": phase,
+            "effect_state": effect_state,
+            "io_state": io_state,
+            "result_payload": payload,
+            "result_ref": request.result_ref,
+            "error_code": request.error_code,
+            "updated_at": occurred,
+            "revision": AgentOperation.revision + 1,
+        }
+        if phase != "unknown":
+            values["exited_at"] = occurred
+            values["verified_at"] = occurred
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa.update(AgentOperation)
+                .where(
+                    AgentOperation.user_scope == request.user_scope,
+                    AgentOperation.operation_id == request.operation_id,
+                )
+                .values(**values)
+            )
+            if result.rowcount != 1:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "tool operation does not exist", identity)
 
     async def _cas_grant_state(
         self,

@@ -16,7 +16,8 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
-from pydantic_ai.messages import ModelResponse
+from pydantic_ai import DeferredToolRequests
+from pydantic_ai.messages import ModelResponse, ToolCallPart
 
 from core.agent_types import AgentErrorCode, AgentServiceError, PlanNodeSpec, ResearchResult
 from core.model_management_types import ExecutionSnapshot
@@ -29,10 +30,13 @@ from services.agent_service.leaf_agent import (
     LEAF_MODEL_REF_UNAVAILABLE,
     LEAF_POLICY_DENIED,
     LEAF_RESULT_SAVE_FAILED,
+    LEAF_TOOL_SETUP_FAILED,
     build_leaf_agent_runner,
     run_leaf_agent,
 )
 from services.agent_service.leaf_runtime import LeafModelBinding
+from services.agent_service.mcp_tools import ToolCallOutcome as _ToolCallOutcome
+from services.agent_service.mcp_tools import ToolCallState as _ToolCallState
 from services.agent_service.model import GatewayModel
 from services.agent_service.workflows import LeafExecutionContext
 
@@ -125,6 +129,7 @@ class _RunResult:
 class _FakeAgent:
     instances: list[_FakeAgent] = []
     output: str = "研究结论"
+    outputs: list[Any] | None = None
     messages: list[Any] = [ModelResponse([], model_name="provider-model-1")]
     error: Exception | None = None
 
@@ -134,19 +139,30 @@ class _FakeAgent:
         self.run_calls = 0
         type(self).instances.append(self)
 
-    async def run(self, prompt: str, *, deps: Any) -> _RunResult:
+    async def run(
+        self,
+        prompt: str | None = None,
+        *,
+        deps: Any,
+        message_history: list[Any] | None = None,
+        deferred_tool_results: Any = None,
+    ) -> _RunResult:
         self.run_calls += 1
         self.prompt = prompt
         self.deps = deps
+        self.message_history = message_history
+        self.deferred_tool_results = deferred_tool_results
         if type(self).error is not None:
             raise type(self).error
-        return _RunResult(output=type(self).output, messages=list(type(self).messages))
+        output = type(self).outputs.pop(0) if type(self).outputs else type(self).output
+        return _RunResult(output=output, messages=list(type(self).messages))
 
 
 @pytest.fixture(autouse=True)
 def _fake_agent(monkeypatch: pytest.MonkeyPatch) -> type[_FakeAgent]:
     _FakeAgent.instances = []
     _FakeAgent.output = "研究结论"
+    _FakeAgent.outputs = None
     _FakeAgent.messages = [ModelResponse([], model_name="provider-model-1")]
     _FakeAgent.error = None
     monkeypatch.setattr(leaf_agent, "Agent", _FakeAgent)
@@ -291,3 +307,69 @@ class TestBuildLeafAgentRunner:
 
         assert outcome.state == "failed"
         assert outcome.error_code == LEAF_ATTRIBUTION_UNAVAILABLE
+
+
+class _ToolRuntimeStub:
+    def __init__(self, outcome: Any) -> None:
+        self.tools: tuple[Any, ...] = ()
+        self.outcome = outcome
+        self.calls: list[dict[str, Any]] = []
+
+    async def execute(self, *, tool_name: str, arguments: dict[str, Any], tool_call_id: str) -> Any:
+        self.calls.append({"tool_name": tool_name, "arguments": arguments, "tool_call_id": tool_call_id})
+        return self.outcome
+
+
+class TestLeafToolLoop:
+    async def test_runtime_injection_runs_tool_loop_and_records_unknown(self, _fake_agent: type[_FakeAgent]) -> None:
+        runtime = _ToolRuntimeStub(_ToolCallOutcome(_ToolCallState.UNKNOWN, None, "op-1"))
+        _fake_agent.outputs = [
+            DeferredToolRequests(calls=[ToolCallPart(tool_name="search", args={"query": "x"}, tool_call_id="call-1")]),
+            "研究结论",
+        ]
+        dao = _Dao()
+
+        outcome = await run_leaf_agent(
+            _model(),
+            _context(),
+            _binding(),
+            dao=dao,
+            tool_runtime_factory=lambda scope: runtime,  # type: ignore[arg-type,return-value]
+        )
+
+        assert outcome.state == "complete"
+        assert runtime.calls == [{"tool_name": "search", "arguments": {"query": "x"}, "tool_call_id": "call-1"}]
+        assert dao.drafts[0].unknown_operation_refs == ("op-1",)
+        assert _fake_agent.instances[0].kwargs["tools"] == ()
+
+    async def test_runtime_setup_failure_is_zero_outbound(self, _fake_agent: type[_FakeAgent]) -> None:
+        def _boom(scope: Any) -> Any:
+            raise RuntimeError("mcp manager unavailable")
+
+        outcome = await run_leaf_agent(
+            _model(),
+            _context(),
+            _binding(),
+            dao=_Dao(),
+            tool_runtime_factory=_boom,
+        )
+
+        assert outcome.state == "failed"
+        assert outcome.error_code == LEAF_TOOL_SETUP_FAILED
+        assert _fake_agent.instances == []
+
+    async def test_tool_budget_failure_maps_to_stable_code(self, _fake_agent: type[_FakeAgent]) -> None:
+        _fake_agent.error = AgentServiceError(AgentErrorCode.BUDGET_BLOCKED, "tool_round_limit", "tool_loop")
+        dao = _Dao()
+
+        outcome = await run_leaf_agent(
+            _model(),
+            _context(),
+            _binding(),
+            dao=dao,
+            tool_runtime_factory=lambda scope: _ToolRuntimeStub(_ToolCallOutcome(_ToolCallState.COMPLETED, {}, "op-1")),
+        )
+
+        assert outcome.state == "failed"
+        assert outcome.error_code == "tool_budget_exceeded"
+        assert dao.drafts == []

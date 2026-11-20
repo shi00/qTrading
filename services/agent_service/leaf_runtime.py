@@ -30,6 +30,7 @@ from core.model_management_types import ExecutionSnapshot
 from pydantic_ai.profiles import ModelProfile
 
 from services.agent_service.model import ChatTurnExecutor, GatewayModel, derive_model_call_id
+from services.agent_service.tool_runtime import ToolRuntimeFactory
 from services.agent_service.workflows import (
     LeafExecutionContext,
     LeafRunner,
@@ -79,6 +80,8 @@ class LeafRuntimeWiring:
     agent_runner: LeafAgentRunner
     #: I43：资料许可逐 attempt 核权的决策来源（缺省不接线 = 无许可即拒绝）。
     data_consent_provider: DataConsentProvider | None = None
+    #: 工具 runtime 工厂（缺省 ``None`` = 零工具；MCP 管理器未装配前不伪造已接线）。
+    tool_runtime_factory: ToolRuntimeFactory | None = None
 
 
 async def resolve_leaf_data_consent(
@@ -221,7 +224,11 @@ async def unavailable_leaf_agent(
     return NodeOutcome(node_id=context.node.node_id, state="failed", error_code=LEAF_AGENT_UNAVAILABLE)
 
 
-def default_leaf_runtime(dao: Any | None = None) -> LeafRuntimeWiring:
+def default_leaf_runtime(
+    dao: Any | None = None,
+    *,
+    tool_runtime_factory: ToolRuntimeFactory | None = None,
+) -> LeafRuntimeWiring:
     """生产默认装配：真实场景路由解析 + 资料许可提供者 + 真实叶 Agent 主体。
 
     ``dao`` 缺省时提供者与叶主体在运行时惰性取 ``CacheManager().agent_dao``；无法
@@ -242,8 +249,9 @@ def default_leaf_runtime(dao: Any | None = None) -> LeafRuntimeWiring:
 
     return LeafRuntimeWiring(
         model_binding=_model_binding,
-        agent_runner=build_leaf_agent_runner(dao),
+        agent_runner=build_leaf_agent_runner(dao, tool_runtime_factory=tool_runtime_factory),
         data_consent_provider=provider,
+        tool_runtime_factory=tool_runtime_factory,
     )
 
 

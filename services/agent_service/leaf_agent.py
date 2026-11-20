@@ -23,7 +23,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Final, Protocol, cast
 
-from pydantic_ai import Agent, UnexpectedModelBehavior
+from pydantic_ai import Agent, DeferredToolRequests, UnexpectedModelBehavior
 from pydantic_ai.messages import ModelResponse
 
 from core.agent_types import (
@@ -41,6 +41,8 @@ from services.agent_service.leaf_runtime import (
     LeafModelBinding,
 )
 from services.agent_service.model import GatewayModel
+from services.agent_service.tool_loop import ToolLoopPorts, run_agent_tool_loop
+from services.agent_service.tool_runtime import ToolRunScope, ToolRuntimeFactory
 from services.agent_service.workflows import NodeOutcome
 
 logger = logging.getLogger(__name__)
@@ -55,6 +57,9 @@ __all__ = [
     "LEAF_POLICY_DENIED",
     "LEAF_RESULT_KIND",
     "LEAF_RESULT_SAVE_FAILED",
+    "LEAF_TOOL_BUDGET_EXCEEDED",
+    "LEAF_TOOL_RESULT_NOT_SAVED",
+    "LEAF_TOOL_SETUP_FAILED",
     "DaoLeafAttributionReader",
     "DaoLeafResultStore",
     "LeafAgentDeps",
@@ -77,6 +82,9 @@ LEAF_EMPTY_RESULT: Final[str] = "leaf_empty_result"
 LEAF_MODEL_FAILED: Final[str] = "leaf_model_failed"
 LEAF_POLICY_DENIED: Final[str] = "leaf_policy_denied"
 LEAF_RESULT_SAVE_FAILED: Final[str] = "leaf_result_save_failed"
+LEAF_TOOL_SETUP_FAILED: Final[str] = "leaf_tool_setup_failed"
+LEAF_TOOL_BUDGET_EXCEEDED: Final[str] = "tool_budget_exceeded"
+LEAF_TOOL_RESULT_NOT_SAVED: Final[str] = "tool_result_not_saved"
 
 # NOTE(lazy): 叶 instructions 使用内置最小模板. ceiling: 未接角色/Prompt 资产服务，所有角色共用同一指令.
 # upgrade: 角色 Prompt 资产接线（R02/E 系列）时改为按 role_key + 版本读取.
@@ -191,8 +199,13 @@ async def run_leaf_agent(
     *,
     dao: Any,
     result_kind: str = LEAF_RESULT_KIND,
+    tool_runtime_factory: ToolRuntimeFactory | None = None,
 ) -> NodeOutcome:
-    """执行一次叶 Agent 回合并保存成果；失败如实返回 ``failed``（R21）。"""
+    """执行一次叶 Agent 回合并保存成果；失败如实返回 ``failed``（R21）。
+
+    ``tool_runtime_factory=None`` 保持无工具单轮（第 2 项已验证行为）；显式注入时
+    在归属事实可知后构造 runtime，并走 Deferred 工具循环。
+    """
 
     digest = context.input_digest
     if digest is None or not is_digest(digest):
@@ -223,15 +236,37 @@ async def run_leaf_agent(
         snapshot=binding.snapshot,
         scenario_id=AGENT_RESEARCH_SCENARIO_ID,
     )
-    agent: Agent[LeafAgentDeps, str] = Agent(
+    scope = ToolRunScope(
+        user_scope=facts.user_scope,
+        session_id=facts.session_id,
+        execution_id=context.execution_id,
+        round_id=context.round_id,
+        node_id=context.node.node_id,
+    )
+    tool_runtime = None
+    if tool_runtime_factory is not None:
+        try:
+            tool_runtime = tool_runtime_factory(scope)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(
+                "[LeafAgent] tool runtime setup failed: %s (execution=%s node=%s)",
+                type(e).__name__,
+                context.execution_id,
+                context.node.node_id,
+            )
+            return _failed(context, LEAF_TOOL_SETUP_FAILED)
+    tools = tool_runtime.tools if tool_runtime is not None else ()
+    agent: Agent[LeafAgentDeps, Any] = Agent(
         model,
         name=LEAF_AGENT_NAME,
         deps_type=LeafAgentDeps,
-        output_type=str,
+        output_type=[str, DeferredToolRequests],
         defer_model_check=True,
         retries=0,
         instructions=_leaf_instructions(context),
-        tools=(),
+        tools=tools,
         capabilities=(boundary,),
     )
     deps = LeafAgentDeps(
@@ -241,12 +276,28 @@ async def run_leaf_agent(
         round_id=context.round_id,
         node_id=context.node.node_id,
     )
+    unknown_operation_refs: tuple[str, ...] = ()
     try:
-        result = await agent.run(_leaf_prompt(context), deps=deps)
+        if tool_runtime is None:
+            result = await agent.run(_leaf_prompt(context), deps=deps)
+        else:
+            loop_result = await run_agent_tool_loop(
+                agent,
+                _leaf_prompt(context),
+                deps=deps,
+                ports=ToolLoopPorts(executor=tool_runtime),
+            )
+            result = loop_result.run_result
+            unknown_operation_refs = loop_result.unknown_operation_refs
     except asyncio.CancelledError:
         raise
     except AgentServiceError as e:
-        code = LEAF_POLICY_DENIED if e.code is AgentErrorCode.POLICY_DENIED else f"leaf_{e.code.value}"
+        if e.code is AgentErrorCode.BUDGET_BLOCKED:
+            code = LEAF_TOOL_BUDGET_EXCEEDED
+        elif e.code is AgentErrorCode.OPERATION_UNKNOWN and e.sanitized_message == "tool_result_not_saved":
+            code = LEAF_TOOL_RESULT_NOT_SAVED
+        else:
+            code = LEAF_POLICY_DENIED if e.code is AgentErrorCode.POLICY_DENIED else f"leaf_{e.code.value}"
         logger.warning(
             "[LeafAgent] leaf model turn denied/failed: %s (execution=%s node=%s)",
             e.code.value,
@@ -306,7 +357,7 @@ async def run_leaf_agent(
         execution_state="complete",
         goal_coverage="unknown",
         convergence_confirmed=False,
-        unknown_operation_refs=(),
+        unknown_operation_refs=unknown_operation_refs,
         ledger_refs=(),
         plan_version=None,
         parent_artifact_refs=(),
@@ -340,7 +391,11 @@ async def run_leaf_agent(
     )
 
 
-def build_leaf_agent_runner(dao: Any | None = None) -> LeafAgentRunner:
+def build_leaf_agent_runner(
+    dao: Any | None = None,
+    *,
+    tool_runtime_factory: ToolRuntimeFactory | None = None,
+) -> LeafAgentRunner:
     """生产叶主体工厂：显式 DAO 优先，缺省惰性取共享 ``CacheManager``。"""
 
     async def _runner(
@@ -367,6 +422,12 @@ def build_leaf_agent_runner(dao: Any | None = None) -> LeafAgentRunner:
                 context.node.node_id,
             )
             return _failed(context, LEAF_ATTRIBUTION_UNAVAILABLE)
-        return await run_leaf_agent(model, context, binding, dao=resolved)
+        return await run_leaf_agent(
+            model,
+            context,
+            binding,
+            dao=resolved,
+            tool_runtime_factory=tool_runtime_factory,
+        )
 
     return _runner
