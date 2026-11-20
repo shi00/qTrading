@@ -70,10 +70,14 @@ class _FakeClient:
     async def resume_workflows_async(self, workflow_ids: list[str]) -> None:
         return None
 
+    def delete_workflows(self, workflow_ids: list[str], *, delete_children: bool = False) -> None:
+        self.deleted = list(workflow_ids)
+
 
 class _FakeHandle:
     def __init__(self, *, client: _FakeClient) -> None:
         self.client = client
+        self.runtime_engine: Any = SimpleNamespace()
         self.close_calls = 0
         self._closed = False
         self._launched = False
@@ -335,6 +339,21 @@ async def test_close_fact_sink_never_lies_after_launch() -> None:
     command = CloseCommandIdentity(user_scope="local-desktop", close_command_id="c1")
     assert (await _PendingCloseFactSink(launched=False).save_end_or_unknown(command)).saved is True
     assert (await _PendingCloseFactSink(launched=True).save_end_or_unknown(command)).saved is False
+
+
+async def test_cleanup_ports_wired_only_when_host_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(wiring_mod, "launch_agent_runtime", lambda handle: None)
+    wiring, _handle, _guard = await _wire(launch_allowed=False)
+    assert wiring.ready is True
+    assert wiring.cleanup is not None
+    assert wiring.cleanup_failure is None
+
+
+async def test_cleanup_not_wired_when_host_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(wiring_mod, "launch_agent_runtime", lambda handle: None)
+    wiring, _handle, _guard = await _wire(client=_FakeClient(raise_on_list=True))
+    assert wiring.ready is False
+    assert wiring.cleanup is None
 
 
 def test_process_dispatch_gate_is_closed_while_unlaunched() -> None:

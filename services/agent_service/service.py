@@ -36,6 +36,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
@@ -82,6 +83,7 @@ from core.agent_types import (
     SkillVersionRef,
     SourceRead,
     SourceReadQuery,
+    SourceRegistrationRequest,
     SourceStopCommand,
     SourceStopReceipt,
     SubmissionReceipt,
@@ -94,6 +96,7 @@ from core.agent_types import (
     validate_read_mark_command,
     validate_session_change_command,
     decode_json_doc,
+    decode_source_version_ref,
 )
 from data.persistence.daos.agent_dao import AgentDao
 from data.persistence.daos.ai_usage_dao import AIUsageDao
@@ -948,11 +951,60 @@ class AgentService:
                 identity,
             )
         receipt = await self._dao.accept_request(request)
+        # I63：受理落定后、派发之前按用户确认的截止界做 PIT 准入（失败即零派发）。
+        await self._admit_business_sources(request, receipt)
         dispatcher = self._dispatcher
         if dispatcher is None:
             return receipt, None
         outcome = await dispatcher.dispatch(receipt, user_scope=request.user_scope, mode=request.mode)
         return receipt, outcome
+
+    async def _admit_business_sources(self, request: AcceptRequest, receipt: SubmissionReceipt) -> None:
+        """受理期业务来源 PIT 准入（I63）：按冻结 manifest 的 ``cutoff`` 重判。
+
+        只登记 manifest 中显式选择的来源集合；准入失败（时点未知/晚于截止/来源
+        缺失）原样抛出，调用方据此中断派发（零派发，R21/R24）。未携带来源的
+        请求不触达数据库。
+        """
+
+        label = f"{request.user_scope}/{request.session_id}"
+        try:
+            manifest = json.loads(request.manifest_payload)
+        except (TypeError, ValueError) as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "frozen manifest is not valid JSON", label) from exc
+        if not isinstance(manifest, dict):
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "frozen manifest must be an object", label)
+        raw_refs = manifest.get("source_refs")
+        if raw_refs in (None, []):
+            return
+        if not isinstance(raw_refs, list):
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "frozen manifest source_refs must be a list", label)
+        try:
+            refs = tuple(
+                decode_source_version_ref(item, f"$.manifest.source_refs[{index}]")
+                for index, item in enumerate(raw_refs)
+            )
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID, f"invalid frozen source ref: {exc.code}", label
+            ) from exc
+        cutoff = manifest.get("cutoff")
+        if cutoff is not None and not isinstance(cutoff, str):
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "frozen manifest cutoff must be text", label)
+        items = await self._dao.read_business_source_items(user_scope=request.user_scope, refs=refs)
+        if not items:
+            return
+        await BusinessSourceService(self._dao).register(
+            SourceRegistrationRequest(
+                user_scope=request.user_scope,
+                consumer_kind="execution",
+                consumer_id=receipt.execution_id,
+                consumer_version="1",
+                purpose=request.purpose,
+                decision_cutoff=cutoff,
+                selected=items,
+            )
+        )
 
     async def submit_and_dispatch(self, request: AcceptRequest, *, command: CommandRef) -> SubmissionOutcome:
         """受理 + 派发（组合根注入派发器时的生产入口）：可靠保存后才投递。

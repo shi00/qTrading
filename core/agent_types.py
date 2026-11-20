@@ -2597,6 +2597,26 @@ class ToolGrantFact:
 
 
 @dataclass(frozen=True)
+class OperationGrantScope:
+    """工具派发认领所需的只读授权范围（I44 生产适配器输入）。
+
+    由 operation 身份反查其绑定的 grant 与决定行事实；任一环节缺失以 ``None``
+    字段表达（调用方必须按「无法证明授权」拒绝，不得猜测或补默认值，R21）。
+    """
+
+    user_scope: str
+    operation_id: str
+    execution_id: str | None
+    round_id: str | None
+    grant_id: str | None
+    decision_id: str | None
+    grant_revision: int | None
+    grant_state: ToolGrantState | None
+    tool_call_id: str | None
+    parameter_digest: str | None
+
+
+@dataclass(frozen=True)
 class ReviseQueuedRequest:
     """队列修订输入（§9.13 revise_queued / SQ-07 排队期修订）。
 
@@ -7789,6 +7809,22 @@ class CleanupPrecondition:
     preview_valid: bool
     new_reference_conflict: bool
     unknown_deliveries: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupNativeFacts:
+    """原生目标逐 ID 权威事实（I81 生产核验提供器输入）。
+
+    ``resolvable_ids`` 为在本用户域内可定位到执行/轮次事实的 ID；不在其内的 ID
+    表示事实不可得，调用方必须拒绝清理（不得以「查不到」冒充「可清理」，R21）。
+    """
+
+    resolvable_ids: tuple[str, ...]
+    foreign_ids: tuple[str, ...]
+    non_terminal_ids: tuple[str, ...]
+    externally_referenced_ids: tuple[str, ...]
+    writers_running_ids: tuple[str, ...]
+    unknown_delivery_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)

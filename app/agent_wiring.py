@@ -56,6 +56,10 @@ from services.agent_service import (
     launch_agent_runtime,
     start_agent_runtime,
 )
+from services.agent_service.cleanup import CleanupService, DaoCleanupJobStore
+from services.agent_service.cleanup_execution import CleanupExecutionService
+from services.agent_service.cleanup_native import NativeCleanupExecutor
+from services.agent_service.cleanup_ports import DaoCleanupAdmissionFacts, DaoNativeVerification, DbosDeletionClient
 from services.agent_service.dispatch import (
     PlanSpecProvider,
     RootWorkflowResultReader,
@@ -107,6 +111,19 @@ def agent_runtime_launch_allowed() -> bool:
 
 
 @dataclass
+class AgentCleanupWiring:
+    """清理链路的生产装配（I81）：作业存储 + 准入事实 + 原生执行器 + 编排。
+
+    构造成功只表示端口已接线；是否允许清理仍由权威事实逐次判定（无事实即拒绝）。
+    """
+
+    store: DaoCleanupJobStore
+    jobs: CleanupService
+    executor: NativeCleanupExecutor
+    execution: CleanupExecutionService
+
+
+@dataclass
 class AgentWiring:
     """本会话的 Agent 接线（facade + 共享桥 + 宿主 + 关闭前置）。
 
@@ -122,6 +139,8 @@ class AgentWiring:
     handle: AgentRuntimeHandle | None = None
     runtime: AgentRuntime | None = None
     dispatcher: ResearchDispatcher | None = None
+    cleanup: AgentCleanupWiring | None = None
+    cleanup_failure: str | None = None
     unclosed_handle: AgentRuntimeHandle | None = None
     instance_guard: Any | None = None
     _close_command: CloseCommandIdentity | None = None
@@ -410,6 +429,39 @@ def _migration_credentials(migration_url: str | None) -> tuple[str | None, bool]
     return None, True
 
 
+def _build_cleanup_wiring(*, handle: AgentRuntimeHandle, dao: Any) -> tuple[AgentCleanupWiring | None, str | None]:
+    """装配清理链路（I81）；失败如实返回原因，不伪造「清理可用」。
+
+    只装配端口：准入/核验仍逐次读权威事实，任何不可得即拒绝。删除调用由
+    ``NativeCleanupExecutor`` 提交受管线程（R16）。
+    """
+
+    try:
+        from data.persistence.agent_runtime_store import AgentRuntimeNativeStore
+
+        store = DaoCleanupJobStore(dao)
+        facts = DaoCleanupAdmissionFacts(dao)
+        verification = DaoNativeVerification(dao)
+        native_store = AgentRuntimeNativeStore(handle.runtime_engine)
+        executor = NativeCleanupExecutor(
+            store=native_store,
+            client=DbosDeletionClient(handle.client),
+            verification=verification,
+        )
+        jobs = CleanupService(store, facts)
+        execution = CleanupExecutionService(jobs=jobs, store=store, dao=dao, executor=executor)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning(
+            "[AgentWiring] cleanup wiring unavailable: %s (cleanup disabled, not claimed ready)",
+            type(e).__name__,
+        )
+        return None, f"cleanup_wiring_failed:{type(e).__name__}"
+    logger.info("[AgentWiring] cleanup ports wired (admission facts + native verification)")
+    return AgentCleanupWiring(store=store, jobs=jobs, executor=executor, execution=execution), None
+
+
 def _build_skill_catalog(dao: Any, root: str | None) -> SkillCatalogService | None:
     """构造本地受管 Skill 目录服务；根目录不可用时降级为未接线（不阻断运行链）。"""
 
@@ -572,6 +624,7 @@ async def wire_agent_runtime(
         launched,
         outcome.isolation.ready if outcome.isolation is not None else None,
     )
+    cleanup, cleanup_failure = _build_cleanup_wiring(handle=handle, dao=dao)
     return AgentWiring(
         service=AgentService(dao, usage_dao, dispatcher=dispatcher, skills=skills),
         bridge=bridge,
@@ -580,5 +633,7 @@ async def wire_agent_runtime(
         handle=handle,
         runtime=runtime,
         dispatcher=dispatcher,
+        cleanup=cleanup,
+        cleanup_failure=cleanup_failure,
         instance_guard=outcome.instance_guard,
     )

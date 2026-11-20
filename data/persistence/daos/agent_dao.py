@@ -55,7 +55,9 @@ from core.agent_types import (
     BindActualInputReceipt,
     BindActualInputRequest,
     BusinessSourceRegistrationReceipt,
+    BusinessSourceItem,
     BusinessSourceRegistrationRequest,
+    CleanupNativeFacts,
     CanonicalJson,
     CommandReceipt,
     CommandRef,
@@ -187,6 +189,7 @@ from core.agent_types import (
     SubmissionReceipt,
     ToolGrantFact,
     ToolGrantState,
+    OperationGrantScope,
     UsageAdmissionFact,
     UsageAdmissionRequest,
     UsageBudgetLimits,
@@ -3636,6 +3639,92 @@ class AgentDao(BaseDao):
             allowed_current_states=(ToolGrantState.GRANTED, ToolGrantState.CLAIMED),
             target_state=ToolGrantState.REVOKED,
         )
+
+    async def read_operation_grant_scope(self, *, operation_id: str) -> OperationGrantScope | None:
+        """按 operation 身份只读解析许可范围（I44 生产适配器）。
+
+        operation → 其绑定的 ``grant_id`` → 决定行事实。任一环节缺失以 ``None``
+        字段返回（调用方必须拒绝派发，不得猜测授权）；operation 不存在返回
+        ``None``。只读、无锁、无副作用。
+        """
+
+        self._check_engine("tool grant scope")
+        _require_text_field(operation_id, "operation_id", "tool_grant")
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            operation_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentOperation.user_scope,
+                        AgentOperation.execution_id,
+                        AgentOperation.round_id,
+                        AgentOperation.grant_id,
+                        AgentOperation.tool_call_id,
+                        AgentOperation.parameter_digest,
+                    ).where(AgentOperation.operation_id == operation_id)
+                )
+            ).first()
+            if operation_row is None:
+                return None
+            if operation_row.grant_id is None:
+                return OperationGrantScope(
+                    user_scope=operation_row.user_scope,
+                    operation_id=operation_id,
+                    execution_id=operation_row.execution_id,
+                    round_id=operation_row.round_id,
+                    grant_id=None,
+                    decision_id=None,
+                    grant_revision=None,
+                    grant_state=None,
+                    tool_call_id=operation_row.tool_call_id,
+                    parameter_digest=operation_row.parameter_digest,
+                )
+            decision_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentDecision.decision_id,
+                        AgentDecision.grant_revision,
+                        AgentDecision.grant_state,
+                        AgentDecision.tool_call_id,
+                        AgentDecision.parameter_digest,
+                    )
+                    .where(
+                        AgentDecision.user_scope == operation_row.user_scope,
+                        AgentDecision.grant_id == operation_row.grant_id,
+                    )
+                    .limit(1)
+                )
+            ).first()
+            if decision_row is None:
+                return OperationGrantScope(
+                    user_scope=operation_row.user_scope,
+                    operation_id=operation_id,
+                    execution_id=operation_row.execution_id,
+                    round_id=operation_row.round_id,
+                    grant_id=operation_row.grant_id,
+                    decision_id=None,
+                    grant_revision=None,
+                    grant_state=None,
+                    tool_call_id=operation_row.tool_call_id,
+                    parameter_digest=operation_row.parameter_digest,
+                )
+            try:
+                grant_state = ToolGrantState(decision_row.grant_state)
+            except ValueError:
+                grant_state = None
+            return OperationGrantScope(
+                user_scope=operation_row.user_scope,
+                operation_id=operation_id,
+                execution_id=operation_row.execution_id,
+                round_id=operation_row.round_id,
+                grant_id=operation_row.grant_id,
+                decision_id=decision_row.decision_id,
+                grant_revision=decision_row.grant_revision,
+                grant_state=grant_state,
+                tool_call_id=decision_row.tool_call_id,
+                parameter_digest=decision_row.parameter_digest,
+            )
 
     async def _cas_grant_state(
         self,
@@ -9990,6 +10079,226 @@ class AgentDao(BaseDao):
             registered=tuple(registered),
             link_ids=tuple(link_ids),
             replayed=replayed,
+        )
+
+    async def read_business_source_items(
+        self, *, user_scope: str, refs: Sequence[SourceVersionRef]
+    ) -> tuple[BusinessSourceItem, ...]:
+        """按已冻结的来源版本引用读回业务来源项（I63 受理期 PIT 准入输入）。
+
+        只读、无副作用；缺失版本或摘要不符一律抛错（不跳过、不填默认，R21），
+        由调用方阻断受理后的派发。非 ``source_ref`` 类来源（如用户消息来源）不
+        在本入口承载（其受理谱系边由 ``accept_request`` 同事务写入）。
+        """
+
+        self._check_engine("business source read")
+        _require_text_field(user_scope, "user_scope", "business_source")
+        if not refs:
+            return ()
+        items: list[BusinessSourceItem] = []
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            for ref in refs:
+                identity = f"{user_scope}/{ref.source_id}@{ref.source_version}"
+                _require_text_field(ref.source_id, "source_id", identity)
+                _require_text_field(ref.source_version, "source_version", identity)
+                _require_text_field(ref.source_digest, "source_digest", identity)
+                row = (
+                    await conn.execute(
+                        sa.select(AgentAssetVersion).where(
+                            AgentAssetVersion.user_scope == user_scope,
+                            AgentAssetVersion.asset_id == ref.source_id,
+                            AgentAssetVersion.asset_version == ref.source_version,
+                        )
+                    )
+                ).first()
+                if row is None:
+                    raise AgentServiceError(
+                        AgentErrorCode.PERSISTENCE_UNAVAILABLE, "source version is missing", identity
+                    )
+                if row.digest != ref.source_digest:
+                    raise AgentServiceError(
+                        AgentErrorCode.OPERATION_UNKNOWN, "source version digest mismatch", identity
+                    )
+                metadata = row.metadata_payload
+                if not isinstance(metadata, dict) or not isinstance(metadata.get("source_ref"), dict):
+                    raise AgentServiceError(
+                        AgentErrorCode.OPERATION_UNKNOWN,
+                        "source version is not a registered source_ref asset",
+                        identity,
+                    )
+                source_ref, verification, _metadata = self._decode_source_asset_row(
+                    row, user_scope=user_scope, identity=identity
+                )
+                items.append(BusinessSourceItem(source=source_ref, verification=verification))
+        return tuple(items)
+
+    async def read_boundary_source_keys(
+        self, *, user_scope: str, execution_id: str
+    ) -> tuple[frozenset[tuple[str, str]], frozenset[tuple[str, str]]]:
+        """读取研究边界的活跃/禁用来源键（I65 生产策略提供器输入）。
+
+        ``active`` = 该执行输入版已登记的来源版本（``consumer_kind='execution'``
+        谱系边）；``disabled`` = 其中当前投影已禁用的键。只读，不推断未登记来源。
+        """
+
+        self._check_engine("research boundary sources")
+        _require_text_field(user_scope, "user_scope", "research_boundary")
+        _require_text_field(execution_id, "execution_id", "research_boundary")
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    sa.select(AgentSourceLink.source_id, AgentSourceLink.source_version).where(
+                        AgentSourceLink.user_scope == user_scope,
+                        AgentSourceLink.consumer_kind == "execution",
+                        AgentSourceLink.consumer_id == execution_id,
+                    )
+                )
+            ).fetchall()
+            active = frozenset((str(row.source_id), str(row.source_version)) for row in rows)
+            if not active:
+                return active, frozenset()
+            disabled: set[tuple[str, str]] = set()
+            for source_id, source_version in active:
+                state = (
+                    await conn.execute(
+                        sa.select(AgentAssetVersion.read_state).where(
+                            AgentAssetVersion.user_scope == user_scope,
+                            AgentAssetVersion.asset_id == source_id,
+                            AgentAssetVersion.asset_version == source_version,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if state == "disabled":
+                    disabled.add((source_id, source_version))
+        return active, frozenset(disabled)
+
+    async def read_cleanup_native_facts(self, *, user_scope: str, ids: Sequence[str]) -> CleanupNativeFacts:
+        """读取清理准入/核验所需的逐 ID 权威事实（I81）。
+
+        ID 为 DBOS workflow id；本方法只读应用域事实（轮次/操作/执行状态/命令
+        交付/派生引用），不触达 DBOS 系统表。无法在本用户域定位的 ID 不出现在
+        ``resolvable_ids`` 中——调用方必须按「事实不可得」拒绝，而非视作已清理。
+        """
+
+        self._check_engine("cleanup facts")
+        _require_text_field(user_scope, "user_scope", "cleanup_facts")
+        requested = tuple(dict.fromkeys(str(item) for item in ids if item))
+        if not requested:
+            return CleanupNativeFacts((), (), (), (), (), ())
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            operation_rows = (
+                await conn.execute(
+                    sa.select(
+                        AgentOperation.workflow_id,
+                        AgentOperation.user_scope,
+                        AgentOperation.execution_id,
+                        AgentOperation.phase,
+                    ).where(AgentOperation.workflow_id.in_(requested))
+                )
+            ).fetchall()
+            round_rows = (
+                await conn.execute(
+                    sa.select(AgentRound.workflow_id, AgentRound.user_scope, AgentRound.execution_id).where(
+                        AgentRound.workflow_id.in_(requested)
+                    )
+                )
+            ).fetchall()
+
+        scopes: dict[str, set[str]] = {}
+        execution_by_id: dict[str, str | None] = {}
+        for row in (*operation_rows, *round_rows):
+            workflow_id = str(row.workflow_id)
+            scopes.setdefault(workflow_id, set()).add(str(row.user_scope))
+            if str(row.user_scope) == user_scope and row.execution_id:
+                execution_by_id.setdefault(workflow_id, str(row.execution_id))
+            else:
+                execution_by_id.setdefault(workflow_id, None)
+        resolvable = tuple(sorted(item for item, execution_id in execution_by_id.items() if execution_id))
+        foreign = tuple(sorted(item for item in requested if scopes.get(item) and user_scope not in scopes[item]))
+        execution_ids = sorted({execution_id for execution_id in execution_by_id.values() if execution_id})
+        if not execution_ids:
+            return CleanupNativeFacts(resolvable, foreign, (), (), (), ())
+
+        async with engine.connect() as conn:
+            state_rows = (
+                await conn.execute(
+                    sa.select(AgentExecution.execution_id, AgentExecution.display_state).where(
+                        AgentExecution.user_scope == user_scope,
+                        AgentExecution.execution_id.in_(execution_ids),
+                    )
+                )
+            ).fetchall()
+            command_rows = (
+                await conn.execute(
+                    sa.select(
+                        AgentCommand.execution_id,
+                        AgentCommand.delivery_state,
+                        AgentCommand.consumption_state,
+                        AgentCommand.commit_state,
+                    ).where(
+                        AgentCommand.user_scope == user_scope,
+                        AgentCommand.execution_id.in_(execution_ids),
+                    )
+                )
+            ).fetchall()
+            derived_rows = (
+                await conn.execute(
+                    sa.select(AgentSourceLink.consumer_id).where(
+                        AgentSourceLink.user_scope == user_scope,
+                        AgentSourceLink.consumer_kind == "asset",
+                        AgentSourceLink.consumer_id.in_(execution_ids),
+                    )
+                )
+            ).fetchall()
+
+        states = {str(row.execution_id): str(row.display_state) for row in state_rows}
+        non_terminal_executions = {
+            execution_id
+            for execution_id in execution_ids
+            if states.get(execution_id) is None or states[execution_id] not in NON_RECOVERABLE_DISPLAY_STATES
+        }
+        ambiguous_executions = {
+            str(row.execution_id)
+            for row in command_rows
+            if str(row.execution_id) in execution_ids
+            and (
+                str(row.delivery_state) == "delivery_unknown"
+                or str(row.consumption_state) == "consumption_unknown"
+                or str(row.commit_state) == "commit_unknown"
+            )
+        }
+        derived_executions = {str(row.consumer_id) for row in derived_rows}
+        running_executions = {
+            str(row.execution_id)
+            for row in operation_rows
+            if row.execution_id is not None and str(row.phase) in {"prepared", "dispatch_claimed", "dispatched"}
+        }
+
+        ids_by_execution: dict[str, list[str]] = {}
+        for workflow_id, execution_id in execution_by_id.items():
+            if execution_id:
+                ids_by_execution.setdefault(execution_id, []).append(workflow_id)
+
+        def _ids_of(target: set[str]) -> tuple[str, ...]:
+            return tuple(
+                sorted(
+                    {workflow_id for execution_id in target for workflow_id in ids_by_execution.get(execution_id, ())}
+                )
+            )
+
+        return CleanupNativeFacts(
+            resolvable_ids=resolvable,
+            foreign_ids=foreign,
+            non_terminal_ids=_ids_of(non_terminal_executions),
+            externally_referenced_ids=_ids_of(derived_executions),
+            writers_running_ids=_ids_of(running_executions),
+            unknown_delivery_ids=_ids_of(ambiguous_executions),
         )
 
     async def tombstone_cleanup_text(

@@ -99,6 +99,7 @@ from services.agent_service.service import (
 )
 from services.agent_service.skills import SkillAvailabilityReceipt
 from services.agent_service.sources import BusinessSourceService
+from services.agent_service.tool_grants import DaoToolGrantPort
 
 __all__ = [
     "DISPATCH_CLOSED",
@@ -124,6 +125,7 @@ __all__ = [
     "ComparisonSharedInput",
     "ComparisonSubmissionReceipt",
     "ComparisonSubmissionRequest",
+    "DaoToolGrantPort",
     "DelegationRequest",
     "DelegationResult",
     "DelegationScope",
