@@ -563,6 +563,14 @@ class TestManifestDecodeValidation:
         payload["schema_version"] = 2
         assert self._decode_code(payload) == "unsupported_version"
 
+    def test_non_integer_schema_version_rejected(self) -> None:
+        """I69：浮点 1.0、字符串 "1" 与布尔 True 都不是合法整数版本。"""
+
+        for version in (1.0, "1", True):
+            payload = self._payload()
+            payload["schema_version"] = version
+            assert self._decode_code(payload) == "unsupported_version"
+
     def test_lanes_must_be_non_empty_list(self) -> None:
         payload = self._payload()
         payload["lanes"] = []

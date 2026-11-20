@@ -63,6 +63,7 @@ from core.agent_types import (
     RowsRange,
     Selection,
     SheetsRange,
+    XLSX_CELL_META_VERSION,
     decode_selection,
     encode_exact_number,
     json_doc,
@@ -1194,7 +1195,7 @@ def _cache_meta(
     number_format: str | None,
 ) -> dict[str, Any]:
     meta: dict[str, Any] = {
-        "schema_version": "1",
+        "schema_version": XLSX_CELL_META_VERSION,
         "sheet": sheet,
         "cell": cell_ref,
         "formula_text": formula_text,

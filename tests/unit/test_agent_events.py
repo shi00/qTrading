@@ -162,6 +162,12 @@ class TestResearchEventCodec:
         stripped = {k: v for k, v in wire.items() if k != "subject_id"}
         _reject(lambda: decode_research_event(stripped, "$"), code="missing_field")
         _reject(lambda: decode_research_event({**wire, "schema_version": 2}, "$"), code="invalid_schema_version")
+        # I69：版本必须是严格整数，True（==1）/1.0/"1" 一律拒绝。
+        for version in (True, 1.0, "1", "2", None):
+            _reject(
+                lambda v=version: decode_research_event({**wire, "schema_version": v}, "$"),
+                code="invalid_schema_version",
+            )
         _reject(lambda: decode_research_event({**wire, "event_kind": "text_delta"}, "$"), code="invalid_event_kind")
         _reject(lambda: decode_research_event({**wire, "session_seq": 0}, "$"), code="invalid_revision")
         _reject(lambda: decode_research_event({**wire, "session_seq": True}, "$"), code="invalid_revision")
@@ -239,6 +245,15 @@ class TestValidateResearchEvent:
 
     def test_valid_session_event(self) -> None:
         validate_research_event(_session_event())
+
+    def test_schema_version_must_be_strict_int(self) -> None:
+        """I69：validator 与解码器同判据，True/1.0/"1" 都不是合法版本。"""
+
+        for version in (True, 1.0, "1", 2):
+            _reject(
+                lambda v=version: validate_research_event(_event(schema_version=v)),
+                code="invalid_schema_version",
+            )
 
     def test_execution_event_requires_round_node_seq(self) -> None:
         _reject(lambda: validate_research_event(_event(round_id=None)), code="identity_mismatch")

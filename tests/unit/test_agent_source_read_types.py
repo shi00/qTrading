@@ -257,12 +257,22 @@ class TestXlsxCellMetaCodec:
 
     def test_extra_key_and_schema_version_rejected(self) -> None:
         wire = to_wire_dict(XlsxCellMeta(sheet="Sheet1", cell="A1"))
+        assert wire["schema_version"] == 1
         with pytest.raises(AgentValidationError) as exc_extra:
             decode_xlsx_cell_meta({**wire, "total": 1})
         expect_code(exc_extra, "unknown_field")
         with pytest.raises(AgentValidationError) as exc_version:
-            decode_xlsx_cell_meta({**wire, "schema_version": "2"})
+            decode_xlsx_cell_meta({**wire, "schema_version": 2})
         expect_code(exc_version, "invalid_version")
+
+    @pytest.mark.parametrize("version", [True, 1.0, "1", 2.0])
+    def test_schema_version_must_be_strict_int(self, version: object) -> None:
+        """I69：XLSX 元数据版本为严格整数，True/浮点/字符串即使数值等于 1 也拒绝。"""
+
+        wire = to_wire_dict(XlsxCellMeta(sheet="Sheet1", cell="A1"))
+        with pytest.raises(AgentValidationError) as exc:
+            decode_xlsx_cell_meta({**wire, "schema_version": version})
+        expect_code(exc, "invalid_version")
 
     def test_cache_flags_must_be_bool_or_null(self) -> None:
         wire = to_wire_dict(XlsxCellMeta(sheet="Sheet1", cell="A1", cache_present=None))

@@ -164,6 +164,26 @@ class TestDraftPayloadCodec:
             decode_draft_payload(wire)
         _expect_error(excinfo, "invalid_schema_version", "$.payload.schema_version")
 
+    @pytest.mark.parametrize("version", [True, 1.0, 2.0, "2", "1", None])
+    def test_non_integer_schema_version_rejected(self, version: object) -> None:
+        """I69：编码与解码两侧都必须拒绝 bool/浮点/字符串版本。
+
+        「编码→持久化（规范 JSON 文本）→解码」逐类型负例：浮点 2.0 数值上等于 2，
+        仅用 ``!=`` 比较会被当作合法版本，故须显式要求 ``type is int``。
+        """
+
+        wire = encode_draft_payload(_payload())
+        with pytest.raises(AgentValidationError) as excinfo:
+            decode_draft_payload({**wire, "schema_version": version})
+        _expect_error(excinfo, "invalid_schema_version", "$.payload.schema_version")
+
+        # 编码侧同样拒绝：payload 对象被塞入非整数版本时不得写出 wire。
+        poisoned = _payload()
+        object.__setattr__(poisoned, "schema_version", version)
+        with pytest.raises(AgentValidationError) as excinfo:
+            encode_draft_payload(poisoned)
+        _expect_error(excinfo, "invalid_schema_version", "$.payload.schema_version")
+
     def test_invalid_mode_tag_rejected(self) -> None:
         wire = encode_draft_payload(_payload())
         wire["mode"] = "chat"

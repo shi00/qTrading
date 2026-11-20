@@ -135,6 +135,16 @@ class TestDecodeRoleSkillAssignment:
             decode_role_skill_assignment(wire)
         assert exc.value.code == "invalid_schema_version"
 
+    def test_non_integer_schema_version_rejected(self) -> None:
+        """I69：浮点 1.0 与字符串 "1" 数值看似相同，但不是合法整数版本。"""
+
+        for version in (1.0, "1", 1.5):
+            wire = self._wire()
+            wire["schema_version"] = version
+            with pytest.raises(AgentValidationError) as exc:
+                decode_role_skill_assignment(wire)
+            assert exc.value.code == "invalid_schema_version"
+
     def test_non_list_sets_rejected(self) -> None:
         wire = self._wire()
         wire["enabled"] = {"skill_id": "a", "version": 1}

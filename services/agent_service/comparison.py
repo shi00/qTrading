@@ -513,7 +513,8 @@ def decode_comparison_manifest(payload: object) -> FrozenComparisonGroup:
         _fail("invalid_type", path)
     _require_exact_keys(payload, _MANIFEST_KEYS, path)
     version = payload["schema_version"]
-    if isinstance(version, bool) or version != COMPARISON_MANIFEST_VERSION:
+    # 版本严格整数：True/1.0/"1" 都不是合法版本（I69）。
+    if isinstance(version, bool) or not isinstance(version, int) or version != COMPARISON_MANIFEST_VERSION:
         _fail("unsupported_version", f"{path}.schema_version")
     group_ref = require_identity(payload["group_ref"], f"{path}.group_ref")
     raw_lanes = payload["lanes"]

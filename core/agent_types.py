@@ -3335,8 +3335,7 @@ def validate_research_event(event: ResearchEvent) -> None:
     _require_str(event.payload_kind, "$.payload_kind")
     if not isinstance(event.event_kind, EventKind):
         _fail("invalid_type", "$.event_kind")
-    if isinstance(event.schema_version, bool) or event.schema_version != 1:
-        _fail("invalid_schema_version", "$.schema_version")
+    _require_schema_version(event.schema_version, 1, "$.schema_version")
     if isinstance(event.session_seq, bool) or not isinstance(event.session_seq, int) or event.session_seq < 1:
         _fail("invalid_revision", "$.session_seq")
     if (
@@ -3406,9 +3405,7 @@ def decode_research_event(value: object, path: str) -> ResearchEvent:
     if not isinstance(value, dict):
         _fail("invalid_type", path)
     _require_keys(value, _RESEARCH_EVENT_KEYS, path)
-    schema_version = value["schema_version"]
-    if isinstance(schema_version, bool) or schema_version != 1:
-        _fail("invalid_schema_version", f"{path}.schema_version")
+    _require_schema_version(value["schema_version"], 1, f"{path}.schema_version")
     try:
         event_kind = EventKind(value["event_kind"])
     except ValueError:
@@ -6222,6 +6219,10 @@ class AttachmentKind(Enum):
     JPEG = "jpeg"
 
 
+#: XLSX 单元格元数据结构版本（严格整数，与其余容器同一合同，I69）。
+XLSX_CELL_META_VERSION: Final = 1
+
+
 @dataclass(frozen=True, slots=True)
 class XlsxCellMeta:
     """XLSX 单元格元数据（§10.4，schema_version=1，全部键必填）。
@@ -6244,7 +6245,7 @@ class XlsxCellMeta:
     date_epoch: str | None = None
     number_format: str | None = None
     xml_value_lexeme: str | None = None
-    schema_version: str = "1"
+    schema_version: int = XLSX_CELL_META_VERSION
 
 
 _XLSX_CELL_META_KEYS: Final[frozenset[str]] = frozenset(
@@ -6309,7 +6310,9 @@ def decode_xlsx_cell_meta(value: object, path: str = "$.xlsx_cell_meta") -> Xlsx
     if not isinstance(value, dict):
         _fail("invalid_type", path)
     _require_keys(value, _XLSX_CELL_META_KEYS, path)
-    if _require_str(value["schema_version"], f"{path}.schema_version") != "1":
+    version = value["schema_version"]
+    # 版本严格整数：True/1.0/"1" 都不是合法版本（I69）。
+    if isinstance(version, bool) or not isinstance(version, int) or version != XLSX_CELL_META_VERSION:
         _fail("invalid_version", f"{path}.schema_version")
     cache_present = _opt_bool(value["cache_present"], f"{path}.cache_present")
     cache_applicable = _opt_bool(value["cache_applicable"], f"{path}.cache_applicable")
@@ -6338,7 +6341,7 @@ def decode_xlsx_cell_meta(value: object, path: str = "$.xlsx_cell_meta") -> Xlsx
         date_epoch=_opt_str(value["date_epoch"], f"{path}.date_epoch"),
         number_format=_opt_str(value["number_format"], f"{path}.number_format"),
         xml_value_lexeme=_opt_str(value["xml_value_lexeme"], f"{path}.xml_value_lexeme"),
-        schema_version="1",
+        schema_version=XLSX_CELL_META_VERSION,
     )
 
 
@@ -7708,8 +7711,7 @@ def decode_role_skill_assignment(value: object, path: str = "$.role_skill_assign
     if not isinstance(value, dict):
         _fail("invalid_type", path)
     _require_keys(value, _ROLE_SKILL_ASSIGNMENT_KEYS, path)
-    if value["schema_version"] != ROLE_SKILL_ASSIGNMENT_VERSION or isinstance(value["schema_version"], bool):
-        _fail("invalid_schema_version", f"{path}.schema_version")
+    _require_schema_version(value["schema_version"], ROLE_SKILL_ASSIGNMENT_VERSION, f"{path}.schema_version")
     enabled_value = value["enabled"]
     defaults_value = value["defaults"]
     if not isinstance(enabled_value, list) or not isinstance(defaults_value, list):
@@ -8222,8 +8224,7 @@ def draft_cutoff_requires_clarification(payload: DraftPayload) -> bool:
 def encode_draft_payload(payload: DraftPayload) -> dict[str, Any]:
     """DraftPayload → 规范 wire 对象（v2 15 键全量，集合规范化排序去重）。"""
 
-    if isinstance(payload.schema_version, bool) or payload.schema_version != DRAFT_PAYLOAD_SCHEMA_VERSION:
-        _fail("invalid_schema_version", "$.payload.schema_version")
+    _require_schema_version(payload.schema_version, DRAFT_PAYLOAD_SCHEMA_VERSION, "$.payload.schema_version")
     if not isinstance(payload.text, str):
         _fail("invalid_type", "$.payload.text")
     if not isinstance(payload.mode, Mode):
@@ -8290,9 +8291,11 @@ def decode_draft_payload(value: object, path: str = "$.payload") -> DraftPayload
     if "schema_version" not in value:
         _fail("missing_field", f"{path}.schema_version")
     schema_version = value["schema_version"]
-    if isinstance(schema_version, bool) or schema_version not in (
-        DRAFT_PAYLOAD_V1_SCHEMA_VERSION,
-        DRAFT_PAYLOAD_SCHEMA_VERSION,
+    # 旧 v1 稿只读兼容，但与 v2 同为严格整数（bool/float/字符串一律拒绝，I69）。
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version not in (DRAFT_PAYLOAD_V1_SCHEMA_VERSION, DRAFT_PAYLOAD_SCHEMA_VERSION)
     ):
         _fail("invalid_schema_version", f"{path}.schema_version")
     if schema_version == DRAFT_PAYLOAD_V1_SCHEMA_VERSION:
@@ -8944,6 +8947,19 @@ class DraftRead:
 def _require_positive_revision(value: object, path: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         _fail("invalid_revision", path)
+    return value
+
+
+def _require_schema_version(value: object, expected: int, path: str) -> int:
+    """结构版本字段必须是严格整数（I69）。
+
+    Python 中 ``True == 1``、``1.0 == 1``，仅用 ``!= expected`` 比较会把布尔与浮点
+    当作合法版本；字符串即便字面相同也不属整数合同。故显式排除 bool 并要求
+    ``type`` 为 int，通过后返回该整数。
+    """
+
+    if isinstance(value, bool) or not isinstance(value, int) or value != expected:
+        _fail("invalid_schema_version", path)
     return value
 
 

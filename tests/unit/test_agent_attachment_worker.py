@@ -630,6 +630,9 @@ class TestXlsxExtraction:
         assert cells["A1"]["value"]["lexeme"] == "00123"
         assert cells["A1"]["xlsx_cell_meta"]["cache_present"] is False
         assert cells["A1"]["xlsx_cell_meta"]["cache_missing_reason"] == "not_applicable"
+        # I69：版本字段必须是严格整数，不得以字符串 "1" 写入。
+        assert cells["A1"]["xlsx_cell_meta"]["schema_version"] == 1
+        assert isinstance(cells["A1"]["xlsx_cell_meta"]["schema_version"], int)
 
         cached = cells["B2"]
         assert cached["formula_text"] == "=A1"
@@ -2351,6 +2354,18 @@ class TestWorkerLifecycle:
             await worker.extract(_request(b"hello"))
         assert exc.value.code == "worker_failed"
         assert worker.active_pids() == ()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("version", [1.0, "1", True])
+    async def test_worker_result_schema_version_must_be_strict_int(self, version: object) -> None:
+        """I69：worker 响应版本为严格整数，浮点/字符串/布尔不得被当作合法协议版本。"""
+
+        response = json.dumps({"ok": True, "schema_version": version, "result": {}}).encode("utf-8")
+        script = f"import sys\nsys.stdout.buffer.write({response!r})\n"
+        worker = SubprocessAttachmentWorker(command=(sys.executable, "-c", script), timeout_s=5.0)
+        with pytest.raises(AttachmentWorkerError) as exc:
+            await worker.extract(_request(b"hello"))
+        assert exc.value.code == "worker_protocol_invalid"
 
     @pytest.mark.asyncio
     async def test_cancel_terminates_worker_and_reraises(self) -> None:

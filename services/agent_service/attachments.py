@@ -543,7 +543,11 @@ class SubprocessAttachmentWorker:
             raise AttachmentWorkerError(
                 "worker_protocol_invalid", "attachment worker result is not valid JSON"
             ) from exc
-        if not isinstance(response, dict) or response.get("schema_version") != 1:
+        if not isinstance(response, dict):
+            raise AttachmentWorkerError("worker_protocol_invalid", "attachment worker result schema is invalid")
+        # 版本严格整数：True/1.0/"1" 都不是合法协议版本（I69）。
+        response_version = response.get("schema_version")
+        if isinstance(response_version, bool) or not isinstance(response_version, int) or response_version != 1:
             raise AttachmentWorkerError("worker_protocol_invalid", "attachment worker result schema is invalid")
         if response.get("ok") is not True:
             error = response.get("error")
