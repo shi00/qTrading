@@ -665,6 +665,20 @@ class TestResearchBoundaryDispatchGate:
         assert exc.value.code is AgentErrorCode.SOURCE_DISABLED
         assert len(session.calls) == 1
 
+    @pytest.mark.asyncio
+    async def test_duplicate_in_flight_operation_blocks_before_claim(self) -> None:
+        """同一 operation 已在途：重复调用在 claim 前被拒（零 claim/零外发）。"""
+
+        dispatcher, session, grants, manager = await _dispatcher()
+        manager.register_in_flight(_IDENTITY, "op-1")
+
+        with pytest.raises(AgentServiceError) as exc:
+            await dispatcher.call(_request(operation_id="op-1"))
+
+        assert exc.value.code is AgentErrorCode.INPUT_CONFLICT
+        assert grants.claims == []
+        assert session.calls == []
+
 
 class TestFrozenArguments:
     """I05：参数在校验前冻结为规范快照，claim 绑定 schema/参数/审核范围摘要。"""

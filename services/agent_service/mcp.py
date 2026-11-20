@@ -348,6 +348,22 @@ def _identity_text(identity: MCPServiceIdentity) -> str:
     return identity.stable_key()
 
 
+def _frozen_config_drifted(frozen: MCPServerConfig, loaded: MCPServerConfig) -> bool:
+    """启连后存储值是否偏离冻结态（审核身份/工具范围、传输、预算、期限）。
+
+    显示名等展示字段不参与判定；上述任一项变化都意味着按旧冻结态继续服务不再
+    等价于「按存储配置服务」，须拒绝并要求重新启连。
+    """
+
+    return (
+        frozen.audit != loaded.audit
+        or frozen.transport != loaded.transport
+        or frozen.budget != loaded.budget
+        or frozen.connect_deadline_s != loaded.connect_deadline_s
+        or frozen.tool_deadline_s != loaded.tool_deadline_s
+    )
+
+
 def catalog_digest(tools: tuple[MCPToolDescriptor, ...]) -> str:
     """目录摘要：按工具名排序后的 (name, schema) 规范 JSON 摘要。"""
 
@@ -683,8 +699,22 @@ class SharedMCPConnectionManager:
     # -- 在途归属 -----------------------------------------------------------
 
     def register_in_flight(self, identity: MCPServiceIdentity, operation_id: str) -> None:
+        """登记在途 operation；同一 operation 已在途即拒绝（不共享归属）。
+
+        并发重复使用同一 ``operation_id`` 会让先到者的结果与后到者的 unknown 归属
+        互相污染：任一方的后效未知都会把另一方的生命周期拖住。故登记是原子检查 +
+        写入（调用点无 ``await``），重复即 ``INPUT_CONFLICT``、零派发。
+        """
+
         label = _identity_text(identity)
         require_identity(operation_id, "$.mcp.operation_id")
+        operations = self._in_flight.get(label)
+        if operations is not None and operation_id in operations:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_CONFLICT,
+                "operation is already in flight on this connection",
+                f"{label}/{operation_id}",
+            )
         self._in_flight.setdefault(label, set()).add(operation_id)
 
     def release_in_flight(self, identity: MCPServiceIdentity, operation_id: str) -> None:
@@ -857,13 +887,28 @@ class SharedMCPConnectionManager:
         """工具调用/重复启连前重核审核证据与失效条件：**不缓存**结论。
 
         重新加载并准入配置（I18：不信任存储值）后重新观测实现指纹，与审核记录比对。
+        **已连接时另核对冻结态**：同一身份/版本的存储值若在启连后变化（审核记录、
+        工具范围、传输、预算、期限），冻结态不再等于存储值，直接判不通过，不按旧
+        冻结态继续服务。
         观测到指纹变化只说明「本机可观测项与审核记录不一致」，不足以断言运行中进程
         已被替换；因此未准入即拒绝，而非推断具体原因。remote 传输的远端目标状态
         本机不可观测，结论置 ``trust_limited``，调用方不得将其呈现为「已验证」。
         """
 
         config = await self._require_config(identity)
-        return await self._audit_evidence(config)
+        evidence = await self._audit_evidence(config)
+        if not evidence.admitted:
+            # 审核撤回/指纹变化等更具体的原因优先透出（诊断与测试均依赖稳定原因码）。
+            return evidence
+        label = _identity_text(identity)
+        frozen = self._configs.get(label)
+        if frozen is not None and _frozen_config_drifted(frozen, config):
+            return MCPAuditEvidenceRecheck(
+                admitted=False,
+                reason="config_changed_after_connect",
+                trust_limited=evidence.trust_limited,
+            )
+        return evidence
 
     async def _audit_evidence(self, config: MCPServerConfig) -> MCPAuditEvidenceRecheck:
         """按配置重新观测实现指纹并判定只读准入（调用方负责在 claim/发送前拒绝）。"""

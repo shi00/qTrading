@@ -2,8 +2,9 @@
 
 顺序：连接代次/冻结目录/schema/只读审核范围核验 → 研究边界事实新鲜重核（来源撤用
 即零派发、边界摘要不符即拒绝旧授权）→ 参数规范快照与摘要绑定 → 完整 schema 校验
-（端口）→ 服务/角色/请求/新鲜许可交集 → 授权 claim（撤销先胜，携带 schema/参数/
-审核范围/研究边界摘要）→ 登记在途 → 单一 deadline 调用 → 结果并入预算 → 配对返回。
+（端口）→ 服务/角色/请求/新鲜许可交集 → 会话/期限/账本就绪 → 在途登记（同一
+operation 并发重复即拒）→ 授权 claim（撤销先胜，携带 schema/参数/审核范围/研究边界
+摘要）→ 单一 deadline 调用 → 结果并入预算 → 配对返回。
 
 参数在**校验前**即被冻结为规范 JSON 快照（键序无关、经序列化深拷贝、与调用方
 对象彻底脱离），校验与发送只使用该快照：``ToolCallRequest.arguments_digest`` 记录
@@ -278,27 +279,34 @@ class MCPToolDispatcher:
                 AgentErrorCode.INPUT_INVALID, f"tool arguments are not closed: {exc.code}", label
             ) from exc
 
-        verdict = await self._grants.claim(
-            identity=request.identity,
-            tool_name=request.tool_name,
-            operation_id=request.operation_id,
-            schema_digest=sha256_hex(descriptor.schema_json),
-            arguments_digest=arguments_digest,
-            audit_scope_digest=audit_scope_digest(scope),
-            boundary_digest=request.boundary_digest,
-        )
-        if verdict is ToolDispatchVerdict.REVOKED:
-            raise AgentServiceError(AgentErrorCode.SOURCE_DISABLED, "tool permission was revoked", label)
-        if verdict is ToolDispatchVerdict.UNKNOWN:
-            raise AgentServiceError(AgentErrorCode.POLICY_DENIED, "tool permission closure is unknown", label)
-        if not self._still_frozen(arguments, arguments_digest):
-            # 校验端口不应改动快照；一旦改动即「校验 A、发送 B」，零外发。
-            raise AgentServiceError(AgentErrorCode.POLICY_DENIED, "tool arguments changed after validation", label)
-
+        # 会话/期限/账本先取：未启连即在 claim 之前拒绝，不消耗一次授权认领。
         session = self._manager.session(request.identity)
         deadline_s = self._manager.tool_deadline_s(request.identity)
         guard = self._manager.budget_guard(request.identity)
+        # 在途登记先于 claim：同一 operation_id 的并发重复在零外发前被拒，
+        # 不共享归属（否则后到者的 unknown 会污染先到者的 operation 生命周期）。
         self._manager.register_in_flight(request.identity, request.operation_id)
+        try:
+            verdict = await self._grants.claim(
+                identity=request.identity,
+                tool_name=request.tool_name,
+                operation_id=request.operation_id,
+                schema_digest=sha256_hex(descriptor.schema_json),
+                arguments_digest=arguments_digest,
+                audit_scope_digest=audit_scope_digest(scope),
+                boundary_digest=request.boundary_digest,
+            )
+            if verdict is ToolDispatchVerdict.REVOKED:
+                raise AgentServiceError(AgentErrorCode.SOURCE_DISABLED, "tool permission was revoked", label)
+            if verdict is ToolDispatchVerdict.UNKNOWN:
+                raise AgentServiceError(AgentErrorCode.POLICY_DENIED, "tool permission closure is unknown", label)
+            if not self._still_frozen(arguments, arguments_digest):
+                # 校验端口不应改动快照；一旦改动即「校验 A、发送 B」，零外发。
+                raise AgentServiceError(AgentErrorCode.POLICY_DENIED, "tool arguments changed after validation", label)
+        except BaseException:
+            # 零派发路径：认领未通过即释放在途归属，不留悬空占用（R2：取消继续传播）。
+            self._manager.release_in_flight(request.identity, request.operation_id)
+            raise
         try:
             outcome = await self._invoke(session, request, arguments, guard, deadline_s)
         except BaseException:

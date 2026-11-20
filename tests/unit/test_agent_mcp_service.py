@@ -15,7 +15,7 @@ import asyncio
 import os
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import pytest
@@ -483,6 +483,40 @@ class TestExistingSessionRechecksAudit:
         assert "audit_missing" in exc.value.sanitized_message
         assert factory.opened == 1
 
+    @pytest.mark.asyncio
+    async def test_recheck_refuses_tool_scope_changed_after_connect(self) -> None:
+        """启连后存储中的审核工具范围变化：冻结态不再等于存储值，拒绝继续服务。"""
+
+        manager, store, factory, _probe = _manager()
+        await store.save(_config())
+        await manager.connect(_identity())
+        await store.save(_config(audit=replace(_audit(), tool_scope=("read_file", "write_file"))))
+
+        evidence = await manager.recheck_audit_evidence(_identity())
+        assert evidence.admitted is False
+        assert evidence.reason == "config_changed_after_connect"
+
+        with pytest.raises(AgentServiceError) as exc:
+            await manager.connect(_identity())
+        assert exc.value.code is AgentErrorCode.CAPABILITY_UNVERIFIED
+        assert "config_changed_after_connect" in exc.value.sanitized_message
+        assert factory.opened == 1  # 冻结态偏离即拒，不新开连接
+
+
+class TestInFlightIsolation:
+    @pytest.mark.asyncio
+    async def test_duplicate_operation_registration_is_rejected(self) -> None:
+        """同一 operation_id 的并发重复不得共享归属（INPUT_CONFLICT，原登记保持唯一）。"""
+
+        manager, _store, _factory, _probe = _manager()
+        manager.register_in_flight(_identity(), "op-1")
+
+        with pytest.raises(AgentServiceError) as exc:
+            manager.register_in_flight(_identity(), "op-1")
+
+        assert exc.value.code is AgentErrorCode.INPUT_CONFLICT
+        assert manager.in_flight_operations(_identity()) == ("op-1",)
+
 
 class TestNoAutoReconnectAndDisconnect:
     @pytest.mark.asyncio
@@ -869,7 +903,10 @@ class TestFrozenUsageGuard:
 
             async def frozen_users(self, identity: MCPServiceIdentity) -> tuple[str, ...]:
                 assert self.manager is not None
-                self.manager.register_in_flight(identity, "op-raced")
+                # 只在尚未登记时模拟「查询期间新到调用」：同一 operation 重复登记本身
+                # 已被 INPUT_CONFLICT 拒绝（不共享归属），不构成本用例的并发场景。
+                if "op-raced" not in self.manager.in_flight_operations(identity):
+                    self.manager.register_in_flight(identity, "op-raced")
                 return ()
 
         session = _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),))
