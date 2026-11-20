@@ -23,6 +23,7 @@ from core.agent_types import (
 from services.agent_service.mcp import MCPToolDescriptor
 from services.agent_service.mcp_budget import MCPBudgetExceeded
 from services.agent_service.mcp_tools import (
+    ToolBoundaryAttestation,
     ToolCallOutcome,
     ToolCallRequest,
     ToolCallState,
@@ -112,7 +113,23 @@ class _Dispatcher:
         return self.outcome
 
 
-def _runtime(dispatcher: _Dispatcher, dao: _Dao) -> ToolRuntime:
+_BOUNDARY_DIGEST = "f" * 64
+
+
+class _Boundary:
+    """研究边界事实替身：固定摘要与阻断原因（``None`` = 允许派发）。"""
+
+    def __init__(self, *, digest: str = _BOUNDARY_DIGEST, blocked_reason: str | None = None) -> None:
+        self.digest = digest
+        self.blocked_reason = blocked_reason
+        self.calls = 0
+
+    async def attest(self) -> ToolBoundaryAttestation:
+        self.calls += 1
+        return ToolBoundaryAttestation(self.digest, self.blocked_reason)
+
+
+def _runtime(dispatcher: _Dispatcher, dao: _Dao, boundary: _Boundary | None = None) -> ToolRuntime:
     return ToolRuntime(
         tools=(),
         dispatcher=dispatcher,  # type: ignore[arg-type]  # 单测替身，非真实管理器
@@ -126,6 +143,7 @@ def _runtime(dispatcher: _Dispatcher, dao: _Dao) -> ToolRuntime:
         service_tools=("search",),
         audit_scope=("search",),
         dao=dao,  # type: ignore[arg-type]  # 单测替身，非真实 DAO
+        boundary=boundary or _Boundary(),
     )
 
 
@@ -146,6 +164,7 @@ class TestBuildToolRuntime:
             role_tools=("search", "quote"),
             request_tools=("search",),
             permission_tools=("search", "quote"),
+            boundary=_Boundary(),
         )
 
         assert [tool.name for tool in runtime.tools] == ["search"]
@@ -163,6 +182,7 @@ class TestBuildToolRuntime:
             role_tools=("search",),
             request_tools=(),
             permission_tools=("search",),
+            boundary=_Boundary(),
         )
 
         assert runtime.tools == ()
@@ -184,6 +204,7 @@ class TestBuildToolRuntime:
             role_tools=("search", "loose"),
             request_tools=("search", "loose"),
             permission_tools=("search", "loose"),
+            boundary=_Boundary(),
         )
 
         assert [tool.name for tool in runtime.tools] == ["search"]
@@ -206,8 +227,28 @@ class TestToolRuntimeExecute:
         payload = json.loads(dao.decisions[0].question_payload)
         assert payload["service_id"] == _IDENTITY.service_id
         assert payload["config_version"] == _IDENTITY.config_version
+        # I43：授权时的研究边界事实摘要进入请求与持久化决定载荷。
+        assert request.boundary_digest == _BOUNDARY_DIGEST
+        assert payload["boundary_digest"] == _BOUNDARY_DIGEST
         assert dao.results[-1].outcome_state == "completed"
         assert dao.results[-1].result_payload is not None
+
+    async def test_disabled_source_blocks_before_decision_with_zero_dispatch(self) -> None:
+        """I43：来源已禁用即零决定/零 claim/零派发（不把「读不到/已禁用」当作可用）。"""
+
+        dispatcher = _Dispatcher(ToolCallOutcome(ToolCallState.COMPLETED, {}, "op-1"))
+        dao = _Dao()
+        boundary = _Boundary(blocked_reason="source_disabled")
+        runtime = _runtime(dispatcher, dao, boundary)
+
+        outcome = await runtime.execute(tool_name="search", arguments={"query": "x"}, tool_call_id="call-1")
+
+        assert outcome.state is ToolCallState.FAILED
+        assert outcome.result == {"state": "denied", "reason": AgentErrorCode.SOURCE_DISABLED.value}
+        assert dao.decisions == []
+        assert dao.results == []
+        assert dispatcher.requests == []
+        assert boundary.calls == 1
 
     async def test_missing_permission_is_denied_with_zero_dispatch(self) -> None:
         dispatcher = _Dispatcher(ToolCallOutcome(ToolCallState.COMPLETED, {}, "op-1"))

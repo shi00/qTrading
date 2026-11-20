@@ -4,10 +4,10 @@
 绑定 + owner/run epoch 复核），不建第二权限库。
 
 **摘要比对边界（§7-Q1 决策 a）**：决定表目前只持久化 ``parameter_digest`` /
-``tool_call_id``，没有 ``schema_digest`` / ``audit_scope_digest`` 列。因此本适配器
-只比对参数摘要（不符即 ``REVOKED``）；``schema_digest`` / ``audit_scope_digest``
-仅供调用门自身比对与日志追溯，暂无持久化落点——该缺口已在台账登记，补齐需
-新增列 + 迁移 + 授权写入路径，不在本次装配范围。不得因此放宽参数比对。
+``tool_call_id``，没有 ``schema_digest`` / ``audit_scope_digest`` / ``boundary_digest``
+列。因此本适配器只比对参数摘要（不符即 ``REVOKED``）；其余摘要仅供调用门自身比对与
+日志追溯，暂无持久化落点——该缺口已在台账登记，补齐需新增列 + 迁移 + 授权写入路径，
+不在本次装配范围。不得因此放宽参数比对。
 """
 
 from __future__ import annotations
@@ -67,11 +67,13 @@ class DaoToolGrantPort(ToolGrantPort):
         schema_digest: str,
         arguments_digest: str,
         audit_scope_digest: str,
+        boundary_digest: str,
     ) -> ToolDispatchVerdict:
         """认领派发权；任何无法证明授权的情形一律 ``REVOKED``（零派发）。
 
-        ``schema_digest`` / ``audit_scope_digest`` 当前无持久化落点（见模块说明），
-        仍做非空校验以避免空摘要被当作有效授权。
+        ``schema_digest`` / ``audit_scope_digest`` / ``boundary_digest`` 当前无持久化
+        落点（见模块说明），仍做非空校验以避免空摘要被当作有效授权；研究边界事实的
+        新鲜比对由调用门在 claim 前完成（I43）。
         """
 
         if (
@@ -81,6 +83,7 @@ class DaoToolGrantPort(ToolGrantPort):
             or not schema_digest
             or not arguments_digest
             or not audit_scope_digest
+            or not boundary_digest
         ):
             return ToolDispatchVerdict.REVOKED
         try:

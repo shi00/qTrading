@@ -125,6 +125,11 @@ class _Dao:
     async def claim_tool_dispatch(self, request: Any) -> Any:
         raise AssertionError("not used")
 
+    async def read_boundary_source_keys(
+        self, *, user_scope: str, execution_id: str
+    ) -> tuple[frozenset[tuple[str, str]], frozenset[tuple[str, str]]]:
+        return frozenset(), frozenset()
+
 
 class _Memory:
     def __init__(self) -> None:
@@ -298,6 +303,13 @@ class _GrantDao:
 
     async def save_tool_result(self, request: Any) -> None:
         self.results.append(request)
+
+    async def read_boundary_source_keys(
+        self, *, user_scope: str, execution_id: str
+    ) -> tuple[frozenset[tuple[str, str]], frozenset[tuple[str, str]]]:
+        """本场景未登记来源：空集合即「无禁用来源」（与生产 DAO 的空结果语义一致）。"""
+
+        return frozenset(), frozenset()
 
     async def read_operation_grant_scope(self, *, operation_id: str) -> OperationGrantScope | None:
         decision = next((item for item in self.decisions if item.operation_id == operation_id), None)

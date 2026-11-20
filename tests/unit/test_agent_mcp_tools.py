@@ -40,6 +40,7 @@ from services.agent_service.mcp import (
 from services.agent_service.mcp_tools import (
     MCPBudgetExceeded,
     MCPToolDispatcher,
+    ToolBoundaryAttestation,
     ToolCallRequest,
     ToolCallState,
     ToolDispatchVerdict,
@@ -200,6 +201,7 @@ class _Grants:
         self.raises = raises
         #: (tool_name, operation_id, schema_digest, arguments_digest, audit_scope_digest)
         self.claims: list[tuple[str, str, str, str, str]] = []
+        self.boundary_digests: list[str] = []
 
     async def claim(
         self,
@@ -210,13 +212,31 @@ class _Grants:
         schema_digest: str,
         arguments_digest: str,
         audit_scope_digest: str,
+        boundary_digest: str,
     ) -> ToolDispatchVerdict:
         if self.raises is not None:
             raise self.raises
         self.claims.append((tool_name, operation_id, schema_digest, arguments_digest, audit_scope_digest))
+        self.boundary_digests.append(boundary_digest)
         if self.on_claim is not None:
             self.on_claim()
         return self.verdict
+
+
+_BOUNDARY_DIGEST = sha256_hex(b"boundary")
+
+
+class _Boundary:
+    """研究边界事实替身：固定摘要与阻断原因（``None`` = 允许派发）。"""
+
+    def __init__(self, *, digest: str = _BOUNDARY_DIGEST, blocked_reason: str | None = None) -> None:
+        self.digest = digest
+        self.blocked_reason = blocked_reason
+        self.calls = 0
+
+    async def attest(self) -> ToolBoundaryAttestation:
+        self.calls += 1
+        return ToolBoundaryAttestation(self.digest, self.blocked_reason)
 
 
 async def _dispatcher(
@@ -227,6 +247,7 @@ async def _dispatcher(
     deadline_s: int = 30,
     grants: _Grants | None = None,
     validator: _Validator | None = None,
+    boundary: _Boundary | None = None,
 ) -> tuple[MCPToolDispatcher, _Session, _Grants, SharedMCPConnectionManager]:
     config = _config(budget, deadline_s=deadline_s)
     session = session or _Session()
@@ -235,7 +256,12 @@ async def _dispatcher(
     )
     await manager.connect(_IDENTITY)
     grants = grants or _Grants(verdict)
-    dispatcher = MCPToolDispatcher(manager=manager, validator=validator or _Validator(), grants=grants)
+    dispatcher = MCPToolDispatcher(
+        manager=manager,
+        validator=validator or _Validator(),
+        grants=grants,
+        boundary=boundary or _Boundary(),
+    )
     return dispatcher, session, grants, manager
 
 
@@ -267,7 +293,7 @@ async def _dispatcher_with_store(
     manager = SharedMCPConnectionManager(store=store, factory=_Factory(session), probe=probe, usage=_NoFrozenUsers())
     await manager.connect(_IDENTITY)
     grants = _Grants()
-    dispatcher = MCPToolDispatcher(manager=manager, validator=_Validator(), grants=grants)
+    dispatcher = MCPToolDispatcher(manager=manager, validator=_Validator(), grants=grants, boundary=_Boundary())
     return dispatcher, session, grants, store, manager, probe
 
 
@@ -284,6 +310,7 @@ def _request(**overrides: object) -> ToolCallRequest:
         "permission_tools": ("read_file",),
         "operation_id": "op-1",
         "connection_generation": 1,
+        "boundary_digest": _BOUNDARY_DIGEST,
     }
     values.update(overrides)
     if "arguments_digest" not in overrides:
@@ -579,11 +606,64 @@ class TestDispatchEffects:
         assert guard.used("retention_bytes") == 0
 
         # 同一账本：单条结果族与留存族累计到同一实例，而非各记一份。
-        dispatcher = MCPToolDispatcher(manager=manager, validator=_Validator(), grants=_Grants())
+        dispatcher = MCPToolDispatcher(manager=manager, validator=_Validator(), grants=_Grants(), boundary=_Boundary())
         outcome = await dispatcher.call(_request())
         assert outcome.state is ToolCallState.COMPLETED
         assert guard.used("single_result_bytes") > 0
         assert guard.used("retention_bytes") > 0
+
+
+class TestResearchBoundaryDispatchGate:
+    """I43：研究边界（来源撤用）在派发前新鲜重核；禁用源零 claim/零派发。"""
+
+    @pytest.mark.asyncio
+    async def test_disabled_source_blocks_with_zero_claim_and_no_send(self) -> None:
+        dispatcher, session, grants, _manager = await _dispatcher(boundary=_Boundary(blocked_reason="source_disabled"))
+        with pytest.raises(AgentServiceError) as exc:
+            await dispatcher.call(_request())
+        assert exc.value.code is AgentErrorCode.SOURCE_DISABLED
+        assert grants.claims == []
+        assert session.calls == []
+
+    @pytest.mark.asyncio
+    async def test_boundary_digest_mismatch_refuses_stale_authorization(self) -> None:
+        dispatcher, session, grants, _manager = await _dispatcher(boundary=_Boundary(digest=sha256_hex(b"changed")))
+        with pytest.raises(AgentServiceError) as exc:
+            await dispatcher.call(_request())
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert "boundary" in exc.value.sanitized_message
+        assert grants.claims == []
+        assert session.calls == []
+
+    @pytest.mark.asyncio
+    async def test_matching_boundary_is_bound_into_claim(self) -> None:
+        dispatcher, _session, grants, _manager = await _dispatcher()
+        outcome = await dispatcher.call(_request())
+        assert outcome.state is ToolCallState.COMPLETED
+        assert grants.boundary_digests == [_BOUNDARY_DIGEST]
+
+    @pytest.mark.asyncio
+    async def test_claim_competition_loser_has_zero_dispatch(self) -> None:
+        """claim 竞争：先胜者派发一次，后到者被撤销且零外发（边界事实相同不改变判定）。"""
+
+        class _CompetingGrants(_Grants):
+            def __init__(self) -> None:
+                super().__init__(ToolDispatchVerdict.CLAIMED)
+                self.seen = 0
+
+            async def claim(self, **kwargs: Any) -> ToolDispatchVerdict:
+                await super().claim(**kwargs)
+                self.seen += 1
+                return ToolDispatchVerdict.CLAIMED if self.seen == 1 else ToolDispatchVerdict.REVOKED
+
+        dispatcher, session, _grants, _manager = await _dispatcher(grants=_CompetingGrants())
+
+        first = await dispatcher.call(_request(operation_id="op-1"))
+        assert first.state is ToolCallState.COMPLETED
+        with pytest.raises(AgentServiceError) as exc:
+            await dispatcher.call(_request(operation_id="op-1"))
+        assert exc.value.code is AgentErrorCode.SOURCE_DISABLED
+        assert len(session.calls) == 1
 
 
 class TestFrozenArguments:

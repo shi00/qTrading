@@ -100,6 +100,7 @@ from services.agent_service.service import (
 )
 from services.agent_service.skills import SkillAvailabilityReceipt
 from services.agent_service.sources import BusinessSourceService
+from services.agent_service.tool_boundary import DaoToolBoundaryPort
 from services.agent_service.tool_grants import DaoToolGrantPort
 from services.agent_service.tool_loop import ToolLoopPorts, ToolLoopResult, run_agent_tool_loop
 from services.agent_service.tool_runtime import (
@@ -135,6 +136,7 @@ __all__ = [
     "ComparisonSharedInput",
     "ComparisonSubmissionReceipt",
     "ComparisonSubmissionRequest",
+    "DaoToolBoundaryPort",
     "DaoToolGrantPort",
     "DelegationRequest",
     "DelegationResult",

@@ -8,6 +8,8 @@
   （目录/审核范围/schema 漂移、参数摘要冻结、单一 deadline、UNKNOWN 不重试）；
 - **决定先落库再 claim**：``save_tool_decision`` 写 ``agent_decision`` +
   ``agent_operation``，使派发认领有可核来源；无新鲜许可即零派发；
+- **研究边界新鲜核定**（I43）：保存决定前读取来源事实并冻结摘要，派发前由调用门
+  重新读取比对；已登记来源中存在禁用版本即零决定/零 claim/零派发；
 - **结果如实落库**：``completed`` / ``failed`` / ``unknown`` 三态分别映射
   ``phase``/``effect_state``，未知不伪装成失败或成功（R21 / I15）。
 
@@ -47,12 +49,14 @@ from services.agent_service.mcp_jsonschema import JsonSchemaToolValidator
 from services.agent_service.mcp_lifecycle import MCPServiceLifecycle
 from services.agent_service.mcp_tools import (
     MCPToolDispatcher,
+    ToolBoundaryPort,
     ToolCallOutcome,
     ToolCallRequest,
     ToolCallState,
     audit_scope_digest,
     canonical_arguments_digest,
 )
+from services.agent_service.tool_boundary import BoundarySourceReader, DaoToolBoundaryPort
 from services.agent_service.tool_grants import DaoToolGrantPort
 from services.agent_service.tools import ToolSpec, build_deferred_tools, validate_tool_schema
 
@@ -101,6 +105,10 @@ class ToolDecisionDao(Protocol):
     async def claim_tool_dispatch(self, request: GrantRevisionRequest) -> ToolGrantFact: ...
 
 
+class ToolRuntimeDao(ToolDecisionDao, BoundarySourceReader, Protocol):
+    """工具 runtime 工厂所需的完整 DAO 面：决定/结果/授权反查 + 研究边界来源事实。"""
+
+
 @dataclass(frozen=True, slots=True)
 class ToolRuntime:
     """已装配的工具集与执行端口（实现 ``ToolExecutorPort``）。"""
@@ -117,6 +125,7 @@ class ToolRuntime:
     service_tools: tuple[str, ...]
     audit_scope: tuple[str, ...]
     dao: ToolDecisionDao
+    boundary: ToolBoundaryPort
 
     async def execute(
         self,
@@ -144,6 +153,15 @@ class ToolRuntime:
                 {"state": "denied", "reason": AgentErrorCode.INPUT_INVALID.value},
                 operation_id,
             )
+        # I43：保存决定前冻结研究边界事实。来源已禁用即零决定/零 claim/零派发；
+        # 事实不可得（DAO 故障）原样传播，不以「读不到」当作「无禁用来源」。
+        attestation = await self.boundary.attest()
+        if attestation.blocked_reason is not None:
+            return ToolCallOutcome(
+                ToolCallState.FAILED,
+                {"state": "denied", "reason": AgentErrorCode.SOURCE_DISABLED.value},
+                operation_id,
+            )
         try:
             await self.dao.save_tool_decision(
                 SaveToolDecisionRequest(
@@ -159,7 +177,7 @@ class ToolRuntime:
                     parameter_digest=arguments_digest,
                     schema_digest=sha256_hex(descriptor.schema_json),
                     audit_scope_digest=audit_scope_digest(self.audit_scope),
-                    question_payload=_question_payload(self.identity, tool_name, arguments_digest),
+                    question_payload=_question_payload(self.identity, tool_name, arguments_digest, attestation.digest),
                 )
             )
         except asyncio.CancelledError:
@@ -186,6 +204,7 @@ class ToolRuntime:
             permission_tools=self.permission_tools,
             operation_id=operation_id,
             connection_generation=self.connection_generation,
+            boundary_digest=attestation.digest,
         )
         try:
             outcome = await self.dispatcher.call(request)
@@ -246,11 +265,12 @@ def _canonical_text(payload: Any) -> str:
         ) from exc
 
 
-def _question_payload(identity: MCPServiceIdentity, tool_name: str, arguments_digest: str) -> str:
+def _question_payload(identity: MCPServiceIdentity, tool_name: str, arguments_digest: str, boundary_digest: str) -> str:
     """决定问题载荷（人可读 + 摘要）；不含参数原文，避免把调用细节写入问题文本。
 
     ``service_id`` / ``config_version`` 是持久化的「研究引用了该 MCP 配置版」证据：
-    断开/更新共享配置前由 DAO 据此核对仍未终结的使用者（I59）。
+    断开/更新共享配置前由 DAO 据此核对仍未终结的使用者（I59）。``boundary_digest``
+    是授权时冻结的研究边界事实摘要（I43），派发前由调用门新鲜重核比对。
     """
 
     return _canonical_text(
@@ -258,6 +278,7 @@ def _question_payload(identity: MCPServiceIdentity, tool_name: str, arguments_di
             "question": f"是否允许本次调用工具 {tool_name}？",
             "tool_name": tool_name,
             "parameter_digest": arguments_digest,
+            "boundary_digest": boundary_digest,
             "service_id": identity.service_id,
             "config_version": identity.config_version,
         }
@@ -315,7 +336,7 @@ def _specs_from_catalog(catalog: tuple[MCPToolDescriptor, ...], *, allowed: froz
     return tuple(specs)
 
 
-def build_tool_runtime_factory(*, dao: ToolDecisionDao, lifecycle: MCPServiceLifecycle) -> ToolRuntimeFactory:
+def build_tool_runtime_factory(*, dao: ToolRuntimeDao, lifecycle: MCPServiceLifecycle) -> ToolRuntimeFactory:
     """构造逐叶工具工厂：只认显式启连的单一服务，否则零工具（**绝不自动启连**）。
 
     - 无已连接服务 / 多个已连接（无法确定归属）/ 无启连授权 / 目录摘要漂移
@@ -338,6 +359,7 @@ def build_tool_runtime_factory(*, dao: ToolDecisionDao, lifecycle: MCPServiceLif
             role_tools=sets.role_tools,
             request_tools=sets.request_tools,
             permission_tools=sets.permission_tools,
+            boundary=DaoToolBoundaryPort(dao=dao, user_scope=scope.user_scope, execution_id=scope.execution_id),
         )
 
     return _factory
@@ -352,6 +374,7 @@ def build_tool_runtime(
     role_tools: Iterable[str],
     request_tools: Iterable[str],
     permission_tools: Iterable[str],
+    boundary: ToolBoundaryPort,
 ) -> ToolRuntime:
     """冻结目录 + 允许集 → 校验/装工具；空允许集返回零工具（合法形态）。"""
 
@@ -370,6 +393,7 @@ def build_tool_runtime(
         manager=manager,
         validator=JsonSchemaToolValidator(),
         grants=DaoToolGrantPort(dao),
+        boundary=boundary,
     )
     runtime = ToolRuntime(
         tools=build_deferred_tools(specs),
@@ -384,5 +408,6 @@ def build_tool_runtime(
         service_tools=service_tools,
         audit_scope=manager.audit_tool_scope(identity),
         dao=dao,
+        boundary=boundary,
     )
     return runtime

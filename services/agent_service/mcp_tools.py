@@ -1,9 +1,9 @@
 """显式 MCP 工具调用门（E-02 / 详细设计 F15、HANDOFF §9）。
 
-顺序：连接代次/冻结目录/schema/只读审核范围核验 → 参数规范快照与摘要绑定 →
-完整 schema 校验（端口）→ 服务/角色/请求/新鲜许可交集 → 授权 claim（撤销先胜，
-携带 schema/参数/审核范围摘要）→ 登记在途 → 单一 deadline 调用 → 结果并入预算 →
-配对返回。
+顺序：连接代次/冻结目录/schema/只读审核范围核验 → 研究边界事实新鲜重核（来源撤用
+即零派发、边界摘要不符即拒绝旧授权）→ 参数规范快照与摘要绑定 → 完整 schema 校验
+（端口）→ 服务/角色/请求/新鲜许可交集 → 授权 claim（撤销先胜，携带 schema/参数/
+审核范围/研究边界摘要）→ 登记在途 → 单一 deadline 调用 → 结果并入预算 → 配对返回。
 
 参数在**校验前**即被冻结为规范 JSON 快照（键序无关、经序列化深拷贝、与调用方
 对象彻底脱离），校验与发送只使用该快照：``ToolCallRequest.arguments_digest`` 记录
@@ -55,6 +55,8 @@ __all__ = [
     "MCPBudgetExceeded",
     "MCPToolDispatcher",
     "ToolArgumentValidatorPort",
+    "ToolBoundaryAttestation",
+    "ToolBoundaryPort",
     "ToolCallOutcome",
     "ToolCallRequest",
     "ToolCallState",
@@ -118,6 +120,8 @@ class ToolGrantPort(Protocol):
 
     实现必须把 ``schema_digest`` / ``arguments_digest`` / ``audit_scope_digest``
     与已授权决定记录比对：任一不符即返回 ``REVOKED``，不得放行。
+    ``boundary_digest`` 为授权时冻结的研究边界事实摘要（来源可用性），同样必须
+    非空；源事实在授权后被改动时不得以旧许可放行。
     """
 
     async def claim(
@@ -129,7 +133,26 @@ class ToolGrantPort(Protocol):
         schema_digest: str,
         arguments_digest: str,
         audit_scope_digest: str,
+        boundary_digest: str,
     ) -> ToolDispatchVerdict: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ToolBoundaryAttestation:
+    """派发时点重新观测到的研究边界事实（来源可用性）。
+
+    ``digest`` 为活跃/已禁用来源键集合的规范摘要；``blocked_reason`` 非 ``None``
+    表示当前不允许新派发（``source_disabled``：已登记来源中存在已禁用版本）。
+    """
+
+    digest: str
+    blocked_reason: str | None = None
+
+
+class ToolBoundaryPort(Protocol):
+    """研究边界事实端口（生产实现按运行作用域新鲜读取来源状态）。"""
+
+    async def attest(self) -> ToolBoundaryAttestation: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +162,8 @@ class ToolCallRequest:
     ``arguments`` 可以是调用方持有的可变对象：调用门在校验前自行冻结规范快照，
     此后不再读取该对象，校验与发送只用快照。``arguments_digest`` 为授权时记录的
     参数规范摘要（:func:`canonical_arguments_digest` 派生），仅用于与门内重算值比对。
+    ``boundary_digest`` 为授权时冻结的研究边界事实摘要；门内在 claim 前重新观测来源
+    状态，与授权值不符即拒绝旧许可（零 claim/零派发）。
     """
 
     identity: MCPServiceIdentity
@@ -152,6 +177,8 @@ class ToolCallRequest:
     operation_id: str
     #: 请求构建时的连接代次；与当前连接冻结代次不符即拒绝（旧目录不可复用）。
     connection_generation: int
+    #: 请求构建时的研究边界事实摘要（来源可用性）；与派发时重新观测值不符即拒绝。
+    boundary_digest: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,10 +202,12 @@ class MCPToolDispatcher:
         manager: SharedMCPConnectionManager,
         validator: ToolArgumentValidatorPort,
         grants: ToolGrantPort,
+        boundary: ToolBoundaryPort,
     ) -> None:
         self._manager = manager
         self._validator = validator
         self._grants = grants
+        self._boundary = boundary
 
     async def call(self, request: ToolCallRequest) -> ToolCallOutcome:
         label = request.identity.stable_key()
@@ -189,6 +218,21 @@ class MCPToolDispatcher:
             raise AgentServiceError(
                 AgentErrorCode.CAPABILITY_UNVERIFIED,
                 f"read-only audit refused: {evidence.reason}",
+                label,
+            )
+        # I43：研究边界不是一次性结论。派发前按最新来源事实重核：已登记的来源中
+        # 存在禁用版本即零 claim/零派发；授权后边界事实变化（摘要不符）同样拒绝旧许可。
+        attestation = await self._boundary.attest()
+        if attestation.blocked_reason is not None:
+            raise AgentServiceError(
+                AgentErrorCode.SOURCE_DISABLED,
+                f"research boundary blocks new dispatch: {attestation.blocked_reason}",
+                label,
+            )
+        if attestation.digest != request.boundary_digest:
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                "research boundary changed since the tool decision was authorized",
                 label,
             )
         frozen = self._manager.frozen_catalog(request.identity)
@@ -241,6 +285,7 @@ class MCPToolDispatcher:
             schema_digest=sha256_hex(descriptor.schema_json),
             arguments_digest=arguments_digest,
             audit_scope_digest=audit_scope_digest(scope),
+            boundary_digest=request.boundary_digest,
         )
         if verdict is ToolDispatchVerdict.REVOKED:
             raise AgentServiceError(AgentErrorCode.SOURCE_DISABLED, "tool permission was revoked", label)

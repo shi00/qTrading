@@ -74,7 +74,7 @@
 | P3-AgentDelivery-Resume-NotImplemented | Agent 交付中断后的续接与残留清理未实现：中断后沿原 manifest 续接、认领前后目标身份/摘要查回与补存成功回执（HANDOFF §10.2 L581-583）、按成果维度查原 `unknown`、unknown/取消后残留清理 | P3 | ① 交付 UI（F-05）上线前须至少支持「按 `read_delivery` 查回 + 明确重导为新的 delivery」；② 或出现中断后用户重复导出/覆盖旧目标的事故时 |
 | P3-AgentSearch-IndexPlan | 历史搜索/指纹在真实数据量下的执行计划与延迟未经隔离 PG 实测，GIN 表达式索引（`to_tsvector('simple')`）与 `ILIKE` 查询的匹配方式未验证 | P3 | 验收阶段以获准隔离 PG 在 D10 规模（1000 主会话/10 万公开消息/单会话 1 万条）实测计划/延迟/峰值，P95 超 2 秒或未走索引即升级 |
 | P3-AgentSkill-VersionReadNoRehash | 已发布 Skill 版本的幂等匹配只比对 `.skill-manifest.json` 与入站 inspection，受管读取/服务侧不重算 digest（当前无正式 Harness loader 接入执行链） | P3 | ① 正式 Harness loader 接入执行链前；② 或出现已发布版本目录被就地篡改/链接替换的报告时 |
-| P3-AgentResearchBoundary-Unwired | `ResearchBoundary` 能力类已实现但生产组装从未实例化；MCP `ToolCallRequest`/claim 只绑 schema/参数/审核范围摘要，不绑 research boundary 与源 claim | P3 | ① Agent 组装接入 capability（讨论/执行模式、来源撤用、窗口）时；② 或出现禁用源仍被 MCP 派发的实例时 |
+| P3-AgentResearchBoundary-Unwired | `ResearchBoundary` 已接入叶 Agent（模型请求前）与 MCP 派发（授权冻结来源事实摘要、派发前新鲜重核、禁用源零派发）；剩余缺口为决定表无 schema/审核范围/边界摘要列，`DaoToolGrantPort` 仅能比对参数摘要，其余摘要不参与持久化 claim 比对 | P3 | ① 出现重启/跨进程后旧决定配合已变更边界仍被派发的实例时；② 或决定表新增摘要列迁移时 |
 | P3-AgentSkill-InvocationFlags-Unwired | `SKILL.md` 的 `disable-model-invocation`/`user-invocable` 已解析进 `SkillManifest`，但全仓无消费方；原文件保版可重读 | P3 | ① 正式 Harness loader/技能选择器接入时；② 或出现禁用的 Skill 被模型自动调用的实例时 |
 | P3-AgentAttachment-CsvHeader-AppConfirm | `csv_header_confirmed` 仅由 `AttachmentExtractionRequest` 透传，APP/UI 无「用户确认表头」入口，默认 `False` → 不扣首条（偏严格，不少算/不丢数据） | P3 | ① 附件确认 UI/服务编排落地时；② 或出现用户已确认表头却仍被少算/多扣的实例时 |
 | P3-AgentAttachment-Openpyxl-PrivateSteps | XLSX 解析复刻 `load_workbook` 私有步骤，延迟导入 `openpyxl.reader.excel.ExcelReader` 与 `openpyxl.styles.stylesheet.apply_stylesheet`；已有容器前置预算保护 | P3 | ① openpyxl 主/次版本升级前；② 或出现受支持 XLSX 解析结构错乱/异常时 |
@@ -828,19 +828,21 @@ PR #2281 检视 I39（risk）指出：导入侧已做字节/链接拒绝与版�
 
 正式 loader 落地时，在 `ReadOnlyWorkspace` 的同句柄读取中重算文件摘要与总量，并与 `.skill-manifest.json` 比对；不一致即拒绝加载并标记版本不可信。补充「发布后就地篡改」「链接替换」负向用例。
 
-#### P3-AgentResearchBoundary-Unwired：ResearchBoundary 未接入组装、MCP claim 未绑研究边界（I43）
+#### P3-AgentResearchBoundary-Unwired：MCP 决定/claim 的摘要持久化缺口（I43 剩余）
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-AgentResearchBoundary-Unwired** | `ResearchBoundary` 能力类（模式/来源撤用/窗口门控）已实现但生产组装从未实例化；MCP `ToolCallRequest` 与 `ToolGrantPort.claim` 只绑 schema/参数/审核范围摘要，不绑 research boundary 与源 claim | ① Agent 组装接入 capability 时；② 或出现禁用源/旧摘要仍被 MCP 派发的实例时 |
+| **P3-AgentResearchBoundary-Unwired** | `ResearchBoundary` 已接入叶 Agent（模型请求前）与 MCP 派发（授权冻结来源事实摘要、派发前新鲜重核、禁用源零派发）；剩余缺口为决定表无 schema/审核范围/边界摘要列，`DaoToolGrantPort` 仅能比对参数摘要，其余摘要不参与持久化 claim 比对 | ① 出现重启/跨进程后旧决定配合已变更边界仍被派发的实例时；② 或决定表新增摘要列迁移时 |
 
 **产生背景与现状**
 
-检视 I43（risk）指出 `mcp_tools.py` 的请求/claim 结构与 `ResearchBoundary`、资料 owner、源 claim 没有真实生产组合。复核确认：能力类存在但仅测试实例化（`capabilities.py:361`），MCP 请求/claim 的摘要三元组（schema/参数/审核范围）不包含研究边界身份。未见越权实证，属「未接线」而非已证缺陷。
+检视 I43（risk）原指出 `mcp_tools.py` 的请求/claim 结构与 `ResearchBoundary`、资料 owner、源 claim 没有真实生产组合。已收敛部分：① 能力类经 `build_leaf_boundary` 装入叶 Agent `capabilities`（模型请求前按最新来源/窗口判定）；② MCP 侧新增 `ToolBoundaryPort` 生产实现 `DaoToolBoundaryPort`（`AgentDao.read_boundary_source_keys`），`ToolRuntime` 在保存决定前冻结来源事实摘要并写入决定载荷，`MCPToolDispatcher` 在 claim 前新鲜重核，摘要不符即拒绝旧许可、已登记来源存在禁用版本即零决定/零 claim/零派发；③ `ToolGrantPort.claim` 增加 `boundary_digest` 并强制非空。
+
+未收敛部分：决定表只持久化 `parameter_digest`，`schema_digest` / `audit_scope_digest` / `boundary_digest` 无独立列，claim 无法回读持久化的授权时摘要做比对（当前由派发点新鲜重核兜底）。
 
 **期望的最终解法**
 
-Agent 组装接入 capability 时，把讨论/计划模式、来源撤用、上下文窗口的判定结果绑定进 MCP 请求/claim；补「禁用源 0 派发」「claim 竞争零受影响派发」的组合用例，且不重复 M07/M19 的越权计数。
+决定表新增三类摘要列并纳入迁移；`DaoToolGrantPort.claim` 回读并逐项比对，不符即 `REVOKED`。补齐后删除本条目。
 
 #### P3-AgentSkill-InvocationFlags-Unwired：Skill 调用旗标已解析但无消费方（I47）
 

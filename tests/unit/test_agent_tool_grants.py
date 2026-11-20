@@ -60,7 +60,9 @@ class _Dao:
         )
 
 
-async def _claim(dao: _Dao, *, arguments_digest: str = "a" * 64) -> ToolDispatchVerdict:
+async def _claim(
+    dao: _Dao, *, arguments_digest: str = "a" * 64, boundary_digest: str = "e" * 64
+) -> ToolDispatchVerdict:
     return await DaoToolGrantPort(dao).claim(
         identity=_IDENTITY,
         tool_name="search",
@@ -68,6 +70,7 @@ async def _claim(dao: _Dao, *, arguments_digest: str = "a" * 64) -> ToolDispatch
         schema_digest="b" * 64,
         arguments_digest=arguments_digest,
         audit_scope_digest="c" * 64,
+        boundary_digest=boundary_digest,
     )
 
 
@@ -88,6 +91,13 @@ class TestDaoToolGrantPort:
     async def test_missing_parameter_digest_revokes(self) -> None:
         dao = _Dao(_scope(parameter_digest=None))
         assert await _claim(dao) is ToolDispatchVerdict.REVOKED
+        assert dao.claim_requests == []
+
+    async def test_missing_boundary_digest_revokes_without_claim(self) -> None:
+        """I43：边界摘要同样是授权证据，空摘要不得当作有效授权。"""
+
+        dao = _Dao(_scope())
+        assert await _claim(dao, boundary_digest="") is ToolDispatchVerdict.REVOKED
         assert dao.claim_requests == []
 
     async def test_missing_operation_revokes(self) -> None:
