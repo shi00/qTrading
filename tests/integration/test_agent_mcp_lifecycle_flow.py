@@ -2,12 +2,14 @@
 
 本文件用**受控传输替身**验证装配语义（准入、授权冻结、目录漂移、断开后零工具），
 不重复验证真实 FastMCP 传输——后者已由 ``test_agent_mcp_fastmcp_transport.py`` 覆盖。
-注意：当前准入规则（I03）下 stdio 因缺少解析前插入点不可启连、remote 实现指纹本机
-不可核定，故「真实服务的共享连接」仍受 E-02 门禁约束，本文件不宣称已打通。
+I03 起 stdio 已有解析前限额插入点并可准入，``TestRealStdioToolChain`` 用真实子进程
+验证「发现 → 注册 → 调用 → 拒绝」整链；remote 实现指纹仍本机不可核定（trust_limited）。
 """
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -19,8 +21,12 @@ from core.agent_types import (
     MCPReadOnlyAudit,
     MCPServiceIdentity,
     MCPTransportKind,
+    OperationGrantScope,
+    ToolGrantFact,
+    ToolGrantState,
     sha256_hex,
 )
+from services.agent_service.mcp_tools import ToolCallState
 from services.agent_service.mcp import (
     MCPServerConfig,
     MCPToolDescriptor,
@@ -28,6 +34,7 @@ from services.agent_service.mcp import (
     SharedMCPConnectionManager,
 )
 from services.agent_service.mcp_config_store import AppStateMCPConfigStore
+from services.agent_service.mcp_fastmcp import FastMCPClientFactory
 from services.agent_service.mcp_grant import AppStateMCPGrantStore
 from services.agent_service.mcp_lifecycle import MCPServiceLifecycle
 from services.agent_service.tool_runtime import ToolRunScope, build_tool_runtime_factory
@@ -220,3 +227,165 @@ class TestLifecycleFlow:
 
         assert exc.value.code is AgentErrorCode.POLICY_DENIED
         assert lifecycle.manager.is_connected(_IDENTITY) is True
+
+
+#: 真实 stdio 服务：一个在审核范围内（echo），一个范围外（hidden）。
+_SERVER_SOURCE = """
+from fastmcp import FastMCP
+
+mcp = FastMCP("real-chain")
+
+
+@mcp.tool
+def echo(text: str) -> dict:
+    "Echo text back."
+    return {"echo": text, "len": len(text)}
+
+
+@mcp.tool
+def hidden() -> dict:
+    "A tool outside the reviewed read-only scope."
+    return {"hidden": True}
+
+
+if __name__ == "__main__":
+    mcp.run()
+"""
+
+
+def _stdio_config(script: Path) -> MCPServerConfig:
+    return MCPServerConfig(
+        identity=_IDENTITY,
+        display_name="真实 stdio 链",
+        transport=MCPTransportConfig(
+            kind=MCPTransportKind.STDIO,
+            command=sys.executable,
+            args=(str(script),),
+            cwd=str(script.parent),
+        ),
+        budget=MCPBudgetProfile(
+            receive_bytes=4_000_000,
+            decoded_bytes=4_000_000,
+            structure_depth=64,
+            catalog_items=64,
+            catalog_bytes=1_000_000,
+            schema_bytes=1_000_000,
+            single_result_bytes=1_000_000,
+            retention_bytes=4_000_000,
+        ),
+        audit=MCPReadOnlyAudit(
+            service=_IDENTITY,
+            tool_scope=("echo",),
+            implementation_fingerprint=_FINGERPRINT,
+            evidence_source="integration",
+            reviewed_at="2026-11-20T00:00:00.000000Z",
+            invalidation_conditions=("executable",),
+        ),
+    )
+
+
+class _GrantDao:
+    """最小 DAO：决定/结果留痕，授权范围由已保存决定反查（模拟生产单账本）。"""
+
+    def __init__(self) -> None:
+        self.decisions: list[Any] = []
+        self.results: list[Any] = []
+        self._revision = 1
+
+    async def save_tool_decision(self, request: Any) -> Any:
+        self.decisions.append(request)
+        return None
+
+    async def save_tool_result(self, request: Any) -> None:
+        self.results.append(request)
+
+    async def read_operation_grant_scope(self, *, operation_id: str) -> OperationGrantScope | None:
+        decision = next((item for item in self.decisions if item.operation_id == operation_id), None)
+        if decision is None:
+            return None
+        return OperationGrantScope(
+            user_scope=decision.user_scope,
+            operation_id=operation_id,
+            execution_id=decision.execution_id,
+            round_id=decision.round_id,
+            grant_id="grant-1",
+            decision_id=decision.decision_id,
+            grant_revision=self._revision,
+            grant_state=ToolGrantState.GRANTED,
+            tool_call_id=decision.tool_call_id,
+            parameter_digest=decision.parameter_digest,
+        )
+
+    async def claim_tool_dispatch(self, request: Any) -> Any:
+        return ToolGrantFact(
+            decision_id=request.decision_id,
+            grant_id="grant-1",
+            grant_revision=self._revision,
+            grant_state=ToolGrantState.CLAIMED,
+        )
+
+
+def _real_chain() -> tuple[MCPServiceLifecycle, _GrantDao]:
+    memory = _Memory()
+    manager = SharedMCPConnectionManager(
+        store=manager_store(memory),
+        factory=FastMCPClientFactory(),
+        probe=_Probe(),
+        usage=_Usage(),
+    )
+    lifecycle = MCPServiceLifecycle(
+        manager=manager,
+        configs=manager_store(memory),
+        grants=AppStateMCPGrantStore(read=memory.read, write=memory.write),
+    )
+    return lifecycle, _GrantDao()
+
+
+class TestRealStdioToolChain:
+    """发现 → 注册 → 真实调用 → 拒绝：整条工具链路（含未授权/非法参数/断开后）。"""
+
+    async def test_discover_register_invoke_and_refuse(self, tmp_path: Path) -> None:
+        script = tmp_path / "real_chain_server.py"
+        script.write_text(_SERVER_SOURCE, encoding="utf-8")
+        config = _stdio_config(script)
+        lifecycle, dao = _real_chain()
+        scope = ToolRunScope(
+            user_scope="user-1",
+            session_id="session-1",
+            execution_id="execution-1",
+            round_id="round-1",
+            node_id="n1",
+        )
+
+        await lifecycle.save_config(config)
+        connected = await lifecycle.connect(_IDENTITY, approved_tools=["echo"])
+        assert connected.tools == ("echo",)
+        discovered = {item.name for item in lifecycle.manager.frozen_catalog(_IDENTITY)}
+        assert discovered == {"echo", "hidden"}
+
+        tool_factory = build_tool_runtime_factory(dao=dao, lifecycle=lifecycle)
+        runtime = tool_factory(scope)
+        assert runtime is not None
+        # 审核范围外的 hidden 已发现但未注册。
+        assert [tool.name for tool in runtime.tools] == ["echo"]
+
+        outcome = await runtime.execute(tool_name="echo", arguments={"text": "hi"}, tool_call_id="call-1")
+        assert outcome.state is ToolCallState.COMPLETED
+        assert outcome.result == {"echo": "hi", "len": 2}
+        assert [item.tool_name for item in dao.decisions] == ["echo"]
+        assert dao.results[-1].outcome_state == "completed"
+
+        refused = await runtime.execute(tool_name="hidden", arguments={}, tool_call_id="call-2")
+        assert refused.state is ToolCallState.FAILED
+        assert refused.result == {"state": "denied", "reason": AgentErrorCode.POLICY_DENIED.value}
+        assert dao.results[-1].outcome_state == "failed"
+
+        invalid = await runtime.execute(tool_name="echo", arguments={}, tool_call_id="call-3")
+        assert invalid.state is ToolCallState.FAILED
+        assert invalid.result == {"state": "denied", "reason": AgentErrorCode.INPUT_INVALID.value}
+
+        await lifecycle.disconnect(_IDENTITY)
+        with pytest.raises(AgentServiceError) as exc:
+            await runtime.execute(tool_name="echo", arguments={"text": "hi"}, tool_call_id="call-4")
+        assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+        assert tool_factory(scope) is None
