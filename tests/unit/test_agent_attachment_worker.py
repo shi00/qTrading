@@ -1814,6 +1814,33 @@ class TestImageExtraction:
         assert exc.value.code == "image_decoded_bytes_exceeded"
         assert load_calls == []
 
+    def test_cmyk_jpeg_decoded_bytes_counted_by_mode_channels(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """CMYK（4 通道）真实 JPEG：解码预算按 ``getmodebands`` 通道数核算，不按 RGB=3 硬编码。"""
+
+        size = (32, 24)
+        pixels = size[0] * size[1]
+        data = _encode_image("JPEG", size, mode="CMYK")
+        assert Image.getmodebands("CMYK") == 4
+        load_calls: list[str] = []
+        original_load = Image.Image.load
+
+        def _spy_load(self: Image.Image, *args: Any, **kwargs: Any) -> None:
+            load_calls.append(self.mode)
+            original_load(self, *args, **kwargs)
+
+        monkeypatch.setattr(Image.Image, "load", _spy_load)
+        monkeypatch.setattr(attachment_worker, "MAX_IMAGE_DECODED_BYTES", pixels * 4 - 1)
+        with pytest.raises(AttachmentParseError) as exc:
+            _parse(AttachmentKind.JPEG, data)
+        assert exc.value.code == "image_decoded_bytes_exceeded"
+        assert load_calls == []
+
+        # 预算恰为 4 通道字节数时通过并真解码：若按 RGB=3 估算则不会拦下上一步。
+        monkeypatch.setattr(attachment_worker, "MAX_IMAGE_DECODED_BYTES", pixels * 4)
+        parsed = _parse(AttachmentKind.JPEG, data)
+        assert parsed.read_state is ReadState.READY
+        assert load_calls and set(load_calls) == {"CMYK"}
+
     def test_zero_char_stats_does_not_change_image_state(self) -> None:
         parsed = _parse(AttachmentKind.PNG, _encode_image("PNG", (10, 10)))
         # 图像无可提取字符：chars 如实记为不适用，0 字符不改写已核状态。

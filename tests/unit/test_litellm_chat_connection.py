@@ -21,6 +21,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
@@ -28,6 +30,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from PIL import Image
 
 from core.model_management_types import (
     AssistantToolCall,
@@ -189,6 +192,20 @@ def _events_from(on_event_calls: list[ChatStreamEvent]) -> Any:
         on_event_calls.append(event)
 
     return _on_event
+
+
+def _real_image_bytes(fmt: str, size: tuple[int, int] = (8, 6)) -> bytes:
+    """Pillow 真实编码的图片字节（不接受手写替身：能力门拒的是真实图片分型）。"""
+
+    buffer = io.BytesIO()
+    Image.new("RGB", size, (255, 0, 0)).save(buffer, format=fmt)
+    return buffer.getvalue()
+
+
+def _data_url_image(fmt: str, mime: str) -> str:
+    data = _real_image_bytes(fmt)
+    Image.open(io.BytesIO(data)).verify()  # 自证输入是真实可解码图片
+    return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
 
 
 class _TrackedStream:
@@ -437,6 +454,54 @@ class TestInvokeChatConnectionNonStream:
                     request, _connection(), request.deadline, _attempt_context(), stream=False
                 )
         assert acompletion.await_count == 0
+
+    @pytest.mark.parametrize(("fmt", "mime"), [("PNG", "image/png"), ("JPEG", "image/jpeg")])
+    async def test_real_image_bytes_rejected_even_for_vision_model(self, fmt: str, mime: str) -> None:
+        """真实 Pillow PNG/JPEG（data URL 承载）→ 显式拒绝零出站。
+
+        连接模型取视觉模型 ``gpt-4o``：能力表未落地时不得因模型名疑似支持图片而放行。
+        """
+
+        binary_ref = _data_url_image(fmt, mime)
+        request = _chat_request(
+            messages=(ChatMessage(role="user", content_parts=(ImageContentPart(mime=mime, binary_ref=binary_ref),)),)
+        )
+        acompletion = AsyncMock(return_value=_nonstream_response(finish_reason="stop"))
+        with patch("services.ai_service.acompletion", acompletion):
+            with pytest.raises(ModelTurnProtocolError) as excinfo:
+                await LiteLLMClient(MagicMock()).invoke_chat_connection(
+                    request, _connection(model="gpt-4o"), request.deadline, _attempt_context(), stream=False
+                )
+        assert excinfo.value.code == "image_not_resolvable"
+        assert excinfo.value.field_path == "$.messages[0].content_parts[0]"
+        assert acompletion.await_count == 0
+
+    async def test_real_image_bytes_rejected_before_stream_starts(self) -> None:
+        """真流路径与出口映射共用同一门：图片分型在建立流前拒绝，零出站、零事件。"""
+
+        request = _chat_request(
+            messages=(
+                ChatMessage(
+                    role="user",
+                    content_parts=(ImageContentPart(mime="image/png", binary_ref=_data_url_image("PNG", "image/png")),),
+                ),
+            )
+        )
+        events: list[ChatStreamEvent] = []
+        acompletion = AsyncMock(return_value=_stream_chunks([_text_delta("x", finish_reason="stop")]))
+        with patch("services.ai_service.acompletion", acompletion):
+            with pytest.raises(ModelTurnProtocolError) as excinfo:
+                await LiteLLMClient(MagicMock()).invoke_chat_connection(
+                    request,
+                    _connection(model="gpt-4o"),
+                    request.deadline,
+                    _attempt_context(),
+                    stream=True,
+                    on_event=_events_from(events),
+                )
+        assert excinfo.value.code == "image_not_resolvable"
+        assert acompletion.await_count == 0
+        assert events == []
 
 
 # ---------------------------------------------------------------------------
