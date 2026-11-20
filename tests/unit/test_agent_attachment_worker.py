@@ -25,6 +25,7 @@ from PIL import Image
 from pypdf import PageObject, PdfWriter
 
 import services.agent_service.attachment_worker as attachment_worker
+import services.agent_service.attachments as attachments
 
 from core.agent_types import (
     AllAtom,
@@ -74,15 +75,21 @@ def _parse(
         selection=selection or Selection(kind="all"),
         budget=budget or AttachmentBudget(),
         deadline=_deadline(),
+        timeout_s=30.0,
         csv_header_confirmed=csv_header_confirmed,
         read_expansion_consent=read_expansion_consent,
     )
 
 
 def _parse_expired(
-    kind: AttachmentKind, data: bytes, selection: Selection | None = None, budget: AttachmentBudget | None = None
+    kind: AttachmentKind,
+    data: bytes,
+    selection: Selection | None = None,
+    budget: AttachmentBudget | None = None,
+    *,
+    timeout_s: float = 30.0,
 ):
-    """以已过期的 deadline 解析（模拟 30 秒预算耗尽时的部分读取）。"""
+    """以已过期的 deadline 解析（模拟预算耗尽时的部分读取）。"""
 
     return parse_attachment(
         kind=kind,
@@ -90,6 +97,7 @@ def _parse_expired(
         selection=selection or Selection(kind="all"),
         budget=budget or AttachmentBudget(),
         deadline=time.monotonic() - 1.0,
+        timeout_s=timeout_s,
     )
 
 
@@ -795,6 +803,22 @@ class TestXlsxExtraction:
         assert parsed.limitations[0]["code"] == "extract_timeout"
         _assert_selected_range_contract(selection, parsed)
 
+    def test_timeout_limitation_reports_actual_injected_timeout(self) -> None:
+        """超时文案必须反映实际注入时限，不硬编码 30 秒。"""
+
+        data = _xlsx_bytes(sheets=2)
+        selection = Selection(
+            kind="limited",
+            ranges=(
+                RowsRange(kind="rows", sheet="S1", start=1, end=3),
+                RowsRange(kind="rows", sheet="S2", start=1, end=1),
+            ),
+        )
+        parsed = _parse_expired(AttachmentKind.XLSX, data, selection, timeout_s=7.5)
+        assert parsed.limitations[0]["code"] == "extract_timeout"
+        assert "7.5 秒" in parsed.limitations[0]["message"]
+        assert "30 秒" not in parsed.limitations[0]["message"]
+
     def test_timeout_partial_sheets_marks_incomplete_sheet_unread(self) -> None:
         data = _xlsx_bytes(sheets=2)
         selection = Selection(kind="limited", ranges=(SheetsRange(kind="sheets", names=("S1", "S2")),))
@@ -819,6 +843,7 @@ class TestXlsxExtraction:
             selection=selection,
             budget=AttachmentBudget(),
             deadline=10.0,
+            timeout_s=30.0,
         )
         assert parsed.read_state is ReadState.PARTIAL
         assert parsed.read_ranges == [to_wire_dict(RowsRange(kind="rows", sheet="S1", start=1, end=1))]
@@ -2391,6 +2416,29 @@ class TestWorkerLifecycle:
 
         assert result.body_text == "hello"
         assert worker.active_pids() == ()
+
+    @pytest.mark.asyncio
+    async def test_parent_header_exact_limit_is_accepted_and_one_over_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """I36：父侧限额只计请求头自身（不含 framing 换行）；恰上限通过，超 1 字节即拒。"""
+
+        valid = json.dumps(
+            _worker_entry(monkeypatch, b"hello", kind=AttachmentKind.TXT, selection=Selection(kind="all"))
+        ).encode("utf-8")
+        script = f"import sys\nsys.stdout.buffer.write({valid!r})\n"
+        worker = SubprocessAttachmentWorker(command=(sys.executable, "-c", script), timeout_s=5.0)
+        request = _request(b"hello")
+        header_size = len(worker._build_worker_header(request, 5.0))
+
+        monkeypatch.setattr(attachments, "MAX_HEADER_BYTES", header_size)
+        result = await worker.extract(request)
+        assert result.body_text == "hello"
+
+        monkeypatch.setattr(attachments, "MAX_HEADER_BYTES", header_size - 1)
+        with pytest.raises(AttachmentWorkerError) as exc:
+            await worker.extract(request)
+        assert exc.value.code == "attachment_request_too_large"
 
     @pytest.mark.asyncio
     async def test_read_range_outside_selection_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:

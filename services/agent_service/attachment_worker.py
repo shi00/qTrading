@@ -1348,7 +1348,9 @@ def _select_xlsx_sheets(selection: Selection, sheet_names: list[str]) -> list[st
     return selected_sheets
 
 
-def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, deadline: float) -> ParsedAttachment:
+def _parse_xlsx(
+    data: bytes, selection: Selection, budget: AttachmentBudget, deadline: float, timeout_s: float
+) -> ParsedAttachment:
     _reject_unsupported_selection(selection, (SheetsRange, RowsRange))
     _check_no_overlap(selection, RowsRange)
     metadata = _inspect_xlsx_container(data)
@@ -1425,9 +1427,9 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
                     limitations.append(
                         _limitation(
                             "extract_timeout",
-                            "所选范围未在 30 秒内完成，已完成行保留"
+                            f"所选范围未在 {timeout_s:g} 秒内完成，已完成行保留"
                             if rows_axis
-                            else "所选范围未在 30 秒内完成，未完成的表记为未读",
+                            else f"所选范围未在 {timeout_s:g} 秒内完成，未完成的表记为未读",
                         )
                     )
                     break
@@ -1542,6 +1544,7 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
             mismatched_sheets=mismatched_sheets,
             partial_sheet=partial_sheet,
             partial_last_row=partial_last_row,
+            timeout_s=timeout_s,
         )
         if unread_ranges:
             coverage = "limited"
@@ -1587,6 +1590,7 @@ def _xlsx_read_unread_atoms(
     mismatched_sheets: set[str],
     partial_sheet: str | None,
     partial_last_row: int,
+    timeout_s: float,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """按选择轴与实际迭代结果生成契约合法的已读/未读原子（§3.3.1 / D06）。
 
@@ -1610,7 +1614,7 @@ def _xlsx_read_unread_atoms(
             return [to_wire_dict(AllAtom())], []
         raise AttachmentParseError(
             "attachment_time_exceeded",
-            "所选范围未在 30 秒内完成，且 selection=all 无法表达部分读取",
+            f"所选范围未在 {timeout_s:g} 秒内完成，且 selection=all 无法表达部分读取",
         )
     read_atoms: list[dict[str, Any]] = []
     unread_atoms: list[dict[str, Any]] = []
@@ -1985,11 +1989,14 @@ def parse_attachment(
     selection: Selection,
     budget: AttachmentBudget,
     deadline: float,
+    timeout_s: float,
     csv_header_confirmed: bool = False,
     read_expansion_consent: bool = False,
 ) -> ParsedAttachment:
     """按种类解析显式选择范围（纯函数；不读写外部路径）。
 
+    ``timeout_s`` 为本次提取的有效时限（秒）：超时限制文案按实际值呈现，不硬编码
+    默认 30 秒，避免与可注入配置不一致。
     ``csv_header_confirmed`` 由请求方显式传递「用户已确认 CSV 首条为表头」；
     缺省 False 表示未知/未确认，首条按数据行计入记录行限额（I23）。
     ``read_expansion_consent`` 由请求方显式传递「已同意为定位选区读取选区外内容」
@@ -2004,6 +2011,7 @@ def parse_attachment(
             selection=selection,
             budget=budget,
             deadline=deadline,
+            timeout_s=timeout_s,
             csv_header_confirmed=csv_header_confirmed,
             read_expansion_consent=read_expansion_consent,
         )
@@ -2019,6 +2027,7 @@ def _dispatch_parse(
     selection: Selection,
     budget: AttachmentBudget,
     deadline: float,
+    timeout_s: float,
     csv_header_confirmed: bool,
     read_expansion_consent: bool,
 ) -> ParsedAttachment:
@@ -2031,7 +2040,7 @@ def _dispatch_parse(
         return _parse_json(data, selection, budget, read_expansion_consent)
     if knit is AttachmentKind.XLSX:
         try:
-            return _parse_xlsx(data, selection, budget, deadline)
+            return _parse_xlsx(data, selection, budget, deadline, timeout_s)
         except AgentValidationError:
             # D06 限额违规保持原错误码（AgentValidationError 是 ValueError 子类）。
             raise
@@ -2077,13 +2086,15 @@ def _handle_request(header: dict[str, Any], payload: bytes) -> dict[str, Any]:
         read_expansion_consent = header.get("read_expansion_consent", False)
         if not isinstance(read_expansion_consent, bool):
             raise AttachmentParseError("invalid_request", "worker read_expansion_consent is invalid")
-        deadline = time.monotonic() + float(header.get("timeout_s", 30.0))
+        timeout_s = float(header.get("timeout_s", 30.0))
+        deadline = time.monotonic() + timeout_s
         parsed = parse_attachment(
             kind=kind,
             data=payload,
             selection=selection,
             budget=budget,
             deadline=deadline,
+            timeout_s=timeout_s,
             csv_header_confirmed=csv_header_confirmed,
             read_expansion_consent=read_expansion_consent,
         )

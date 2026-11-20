@@ -339,29 +339,7 @@ class SubprocessAttachmentWorker:
                 f"declared kind {request.kind.value!r} does not match content kind {detected.value!r}",
             )
         worker_timeout_s = self._timeout_s if self._timeout_s is not None else self._budget.extract_timeout_s
-        header = {
-            "schema_version": 1,
-            "kind": request.kind.value,
-            "selection": to_wire_dict(request.selection),
-            "csv_header_confirmed": request.csv_header_confirmed,
-            "read_expansion_consent": request.read_expansion_consent,
-            "source_digest": request.source_digest,
-            "budget": {
-                "max_files": self._budget.max_files,
-                "max_source_bytes": self._budget.max_source_bytes,
-                "max_pages": self._budget.max_pages,
-                "max_sheets": self._budget.max_sheets,
-                "max_rows": self._budget.max_rows,
-                "max_codepoints": self._budget.max_codepoints,
-                "extract_timeout_s": self._budget.extract_timeout_s,
-            },
-            # worker 自身 deadline 必须与父侧监督使用同一有效时限：若下发 budget 值而
-            # 父侧按可注入 ``worker_timeout_s`` 监督，两者不等时父进程会先杀仍在自身
-            # 时限内的 worker（I36 竞态）。
-            "timeout_s": worker_timeout_s,
-            "payload_bytes": len(request.data),
-        }
-        header_bytes = json.dumps(header, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        header_bytes = self._build_worker_header(request, worker_timeout_s)
         # 字节口径：``MAX_HEADER_BYTES`` 只计请求头自身；其后的 ``\n`` 是 framing 分隔符，
         # 不计入限额（worker 侧按同一口径剥离换行后再判定，I36）。
         if len(header_bytes) > MAX_HEADER_BYTES:
@@ -419,6 +397,35 @@ class SubprocessAttachmentWorker:
         # 可能来自异常退出；「非 0 + 完整结果」无冻结合同，保持既有语义——以结果协议为
         # 准，不新造错误码（I36）。
         return self._decode_result(request, stdout, process.pid, elapsed_s)
+
+    def _build_worker_header(self, request: AttachmentExtractionRequest, worker_timeout_s: float) -> bytes:
+        """构造 worker 请求头字节（不含 framing 换行与 payload）。
+
+        worker 自身 deadline 必须与父侧监督使用同一有效时限：若下发 budget 值而
+        父侧按可注入 ``worker_timeout_s`` 监督，两者不等时父进程会先杀仍在自身时限
+        内的 worker（I36 竞态）。
+        """
+
+        header = {
+            "schema_version": 1,
+            "kind": request.kind.value,
+            "selection": to_wire_dict(request.selection),
+            "csv_header_confirmed": request.csv_header_confirmed,
+            "read_expansion_consent": request.read_expansion_consent,
+            "source_digest": request.source_digest,
+            "budget": {
+                "max_files": self._budget.max_files,
+                "max_source_bytes": self._budget.max_source_bytes,
+                "max_pages": self._budget.max_pages,
+                "max_sheets": self._budget.max_sheets,
+                "max_rows": self._budget.max_rows,
+                "max_codepoints": self._budget.max_codepoints,
+                "extract_timeout_s": self._budget.extract_timeout_s,
+            },
+            "timeout_s": worker_timeout_s,
+            "payload_bytes": len(request.data),
+        }
+        return json.dumps(header, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
     def _supervise(
         self,
