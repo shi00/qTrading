@@ -267,10 +267,7 @@ class MCPInboundLimitBinding:
 PRE_PARSE_LIMIT_FAMILIES: tuple[str, ...] = ("receive_bytes", "structure_depth")
 
 #: HTTP 传输的入站插入点：我们注入的 ``httpx2`` 传输在 SDK 之前看到每个响应字节，
-#: 且 streamable HTTP 另有 SDK 级单事件上限。stdio 无任何前置插入点（SDK 的
-#: ``mcp.client.stdio.stdio_client`` 不读字节给调用方、无帧长参数，逐行解析在库内
-#: 完成），故 stdio 不在此表中：其 ``receive_bytes`` / ``structure_depth`` 在准入时被拒，
-#: 而不是按「预算有值」放行。
+#: 且 streamable HTTP 另有 SDK 级单事件上限。
 _HTTP_INBOUND_BINDINGS: tuple[MCPInboundLimitBinding, ...] = (
     MCPInboundLimitBinding(
         family="receive_bytes",
@@ -296,15 +293,29 @@ _HTTP_INBOUND_BINDINGS: tuple[MCPInboundLimitBinding, ...] = (
     ),
 )
 
+#: stdio 传输的入站插入点：``BudgetedStdioTransport`` 自管子进程，读任务拿到的是原始
+#: stdout 字节块，限额判定发生在切行、解码与 SDK JSON 解析之前（I03）。
+_STDIO_INBOUND_BINDINGS: tuple[MCPInboundLimitBinding, ...] = (
+    MCPInboundLimitBinding(
+        family="receive_bytes",
+        insertion_point="services.agent_service.mcp_stdio_transport._BudgetedLineReader.feed",
+        source=(
+            "自管 stdio 子进程的 stdout 原始字节块在进入缓冲区/切行前按块计入 "
+            "MCPBudgetGuard.receive_bytes，先于 SDK 的 jsonrpc_message_adapter 解析"
+        ),
+    ),
+    MCPInboundLimitBinding(
+        family="structure_depth",
+        insertion_point="services.agent_service.mcp_stdio_transport._BudgetedLineReader.feed",
+        source="同一插入点以 JsonDepthScanner 逐字节判定嵌套深度，发生在 SDK JSON 解析之前",
+    ),
+)
+
 #: 传输 → 已绑定真实插入点的入站限额族（证据缺失即准入拒绝）。
 MCP_INBOUND_LIMIT_BINDINGS: Mapping[MCPTransportKind, tuple[MCPInboundLimitBinding, ...]] = {
     MCPTransportKind.STREAMABLE_HTTP: _HTTP_INBOUND_BINDINGS,
     MCPTransportKind.SSE: _HTTP_INBOUND_BINDINGS,
-    # I03 DECISION（2026-11-18）：本地 stdio 保持禁用。stdio 无 SDK 解析前的字节/深度
-    # 插入点，配置了前置限额族即由 ``require_pre_parse_bindings`` 拒绝（CAPABILITY_UNVERIFIED）；
-    # 若要放开，必须先实现受控 stdio 中继（自管子进程 + 帧/深度限额 + env 白名单 + 审核 + 停止），
-    # 再把真实插入点登记到此处——不得只删限额族绕过准入。
-    MCPTransportKind.STDIO: (),
+    MCPTransportKind.STDIO: _STDIO_INBOUND_BINDINGS,
 }
 
 

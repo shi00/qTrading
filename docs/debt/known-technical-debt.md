@@ -69,7 +69,7 @@
 | P3-Sidecar-macOS26-SDK-Constraint | theseus 的 PG 16.15.0 macOS 归档构建于 macOS 26.0 SDK、引用 `_strchrnul`，仅 macOS 26+ 可运行；sidecar release workflow 的 macOS job 依赖 `macos-26` runner | P3 | ① sidecar release workflow 触发且 macOS 构建/运行失败时；② 或需支持 macOS 26 以下版本时；③ 或 GitHub Actions `macos-26` 镜像变更时 |
 | P3-E2E-MockAssets-Provenance-Blocked | E2E 离线资产（`tests/e2e/mock_assets`，138 文件：116 woff2 / 8 js / 8 wasm / 6 symbols）缺来源 URL、engineRevision、Flet-Web 版本、包与资源摘要、许可证与 NOTICE、下载与变换方式，来源链 blocked | P3 | ① 新增/替换 mock_assets 资产时；② 或 Flet/CanvasKit 升级导致 engineRevision 变化时；③ 或合规审计启动时 |
 | P2-AgentDelivery-Residual-Facts | Agent 交付残留在事实层不可定位/不可区分：终态 manifest 不含暂存路径、回执无残留字段；`publish_claimed` 后可确证失败不持久化 `error_code`；`unknown` 落库失败未转译；XLSX 坏 XML 与非法控制字符未映射为回执；`_read_complete` 无页数上限；无文件 ID 卷整体拒绝交付 | P2 | ① F-02/F-05 交付 UI 接线时须补「残留/未确证」可视字段；② 或出现用户报告「文件可能已保存」但无法核对原因时；③ 或交付接入非 NTFS/ReFS 目标卷时 |
-| P2-AgentMCP-Residual-Risks | 共享 MCP 残余：错误分类只覆盖 Timeout/Connection（其余异常标 FAILED 可诱导重试）；连接不复核载入配置的审核身份与工具范围；connection_test 可能关闭既有共享会话；目录/接收/解码/schema 四族计量无服务路径调用点；retention 无释放；`_in_flight` 按 operation_id 去重不足以隔离并发；`mark_session_lost` 不关会话不清在途；`disconnect` 异常路径残留 config/guard；`call` 在 claim 后才取会话 | P2 | ① 真实 FastMCP transport/预算数值冻结（E-02-5 spike）落地前须逐条收敛；② 或 F-04 接线出现重复调用/误重试/连接误关时 |
+| P2-AgentMCP-Residual-Risks | 共享 MCP 残余：错误分类只覆盖 Timeout/Connection（其余异常标 FAILED 可诱导重试）；连接不复核载入配置的审核身份与工具范围；connection_test 可能关闭既有共享会话；`retention_bytes` 无调用点且无释放；`_in_flight` 按 operation_id 去重不足以隔离并发；`mark_session_lost` 不关会话不清在途；`disconnect` 异常路径残留 config/guard；`call` 在 claim 后才取会话；stdio 超限的异常类型不保证原样抵达调用方（诊断记录 `inbound_limit:<family>`） | P2 | ① E-02-5 剩余条目（retention/并发隔离/会话归属）在 F-04 接线前逐条收敛；② 或 F-04 接线出现重复调用/误重试/连接误关时 |
 | P3-AgentSource-Residual-Risks | E-01 残余：父进程范围复核缺「伪造越界/重叠 selected_range 被拒」负向用例；worker 自身 deadline 与父进程 communicate 超时同值（竞态下父进程常先 kill）；超时 limitation 硬编码「30 秒」与实际可注入超时不符；header 恰 64KiB 的 off-by-one；`_json_safe` 将 NaN→null/Decimal→字符串后求摘要（理论上与 None 同摘要） | P3 | ① 附件 worker 接入 F 系列真实链路前；② 或出现部分结果丢失/超时文案与配置不一致的报告时；③ 或扩到新解析格式需复用 `_json_safe` 摘要时 |
 | P3-AgentDelivery-Resume-NotImplemented | Agent 交付中断后的续接与残留清理未实现：中断后沿原 manifest 续接、认领前后目标身份/摘要查回与补存成功回执（HANDOFF §10.2 L581-583）、按成果维度查原 `unknown`、unknown/取消后残留清理 | P3 | ① 交付 UI（F-05）上线前须至少支持「按 `read_delivery` 查回 + 明确重导为新的 delivery」；② 或出现中断后用户重复导出/覆盖旧目标的事故时 |
 | P3-AgentSearch-IndexPlan | 历史搜索/指纹在真实数据量下的执行计划与延迟未经隔离 PG 实测，GIN 表达式索引（`to_tsvector('simple')`）与 `ILIKE` 查询的匹配方式未验证 | P3 | 验收阶段以获准隔离 PG 在 D10 规模（1000 主会话/10 万公开消息/单会话 1 万条）实测计划/延迟/峰值，P95 超 2 秒或未走索引即升级 |
@@ -734,7 +734,7 @@ E-01 里程碑第二轮独立检视 PASS（B1-B6 已闭环：CSV 多段行限额
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P2-AgentMCP-Residual-Risks** | MCP 错误分类只覆盖 `Timeout/Connection`（其余异常标 FAILED 可诱导重试）；连接不复核载入配置的审核身份/工具范围；`connection_test` 可能关闭既有共享会话；目录/接收/解码/schema 四族计量在服务路径无调用点；retention 无释放；`_in_flight` 按 operation_id 去重不足以隔离并发；`mark_session_lost` 不关会话不清在途；`disconnect` 异常路径残留 config/guard；`call` 在 claim 后才取会话 | ① E-02-5（真实 FastMCP transport、逐 send 门、预算数值冻结）落地前逐条收敛；② 或 F-04 接线出现重复调用/误重试/连接误关时 |
+| **P2-AgentMCP-Residual-Risks** | MCP 错误分类只覆盖 `Timeout/Connection`（其余异常标 FAILED 可诱导重试）；连接不复核载入配置的审核身份/工具范围；`connection_test` 可能关闭既有共享会话；`retention_bytes` 无调用点且无释放；`_in_flight` 按 operation_id 去重不足以隔离并发；`mark_session_lost` 不关会话不清在途；`disconnect` 异常路径残留 config/guard；`call` 在 claim 后才取会话；stdio 超限的异常类型不保证原样抵达调用方（诊断记录 `inbound_limit:<family>`，在途请求以 `CONNECTION_CLOSED` 失败） | ① E-02-5 剩余条目（retention/并发隔离/会话归属）在 F-04 接线前逐条收敛；② 或 F-04 接线出现重复调用/误重试/连接误关时 |
 
 **产生背景与现状**
 
@@ -742,7 +742,9 @@ E-02 里程碑独立检视（B1-B3 已修：结果不可编码 → unknown、单
 
 **E-02-5 spike 已实证（`mcp_fastmcp.py`）**：stdio 传输插入点、逐 send 门（关闭/deadline 过期在 SDK 请求前拒绝）、FD 级 stderr 尾部、四诊断通道形状、真实发现/调用。
 
-**spike 新增未收敛项**：① 类型化客户端在库内解析，`receive_bytes` 族仍无真实计量入口（当前仅以解码后表示计 `decoded_bytes`）；② 子进程退出码不可经 FastMCP 观测，`exit_status` 恒 `None`（已标注 unknown，不填 0）；③ HTTP/SSE 仅完成传输构造，未做真实往返实证；④ 会话内自建 `MCPBudgetGuard` 与连接管理器的 guard 分族计量（decoded/catalog vs single_result/retention），尚未合并为单一账本。
+**I03 已收敛**：① stdio 改为自管进程的 `BudgetedStdioTransport`，`receive_bytes` / `structure_depth` 在 SDK 解析前按原始字节计量并登记真实插入点（准入不再拒绝），超限 fail-closed 拆除连接且不挂起；② 子进程由本进程自管，`exit_status` 在关闭后可观测为实际退出码（未观测到仍为 `None`，不填 0）；③ 目录/解码/schema/单条四族已在 `FastMCPSession.list_tools` / `call_tool` 以增量计数接入。
+
+**仍未收敛**：① `retention_bytes` 无调用点且无释放；② HTTP/SSE 仅完成传输构造，未做真实往返实证；③ 会话内自建 `MCPBudgetGuard` 与连接管理器的 guard 分族计量（decoded/catalog vs single_result/retention），尚未合并为单一账本；④ stdio 超限不保证以 `MCPBudgetExceeded` 原类型抵达调用方（SDK 默认 `message_handler` 消费读流 `Exception` 值），调用方看到 `CONNECTION_CLOSED`，原因在诊断 `inbound_limit:<family>`。
 
 **期望的最终解法**
 

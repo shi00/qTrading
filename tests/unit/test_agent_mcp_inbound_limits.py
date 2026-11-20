@@ -8,7 +8,7 @@
 2. 深 JSON 在完整帧到达之前拒绝（增量扫描，不做完整解析）；
 3. progress 帧洪泛超出接收预算即拒绝（且不续期 deadline）；
 4. 有真实插入点的传输（streamable HTTP / SSE）准入通过；
-5. 无插入点证据的传输（stdio）在准入即拒（``CAPABILITY_UNVERIFIED``）；
+5. stdio 的前置限额族已绑定真实插入点（``_BudgetedLineReader.feed``），保存与启连均准入；
 6. 取消沿入站包装层原样传播（不吞 ``CancelledError``）；
 7. 压缩响应无法前置判定帧长/深度，显式拒绝而不是按「未限流」放行。
 """
@@ -311,8 +311,13 @@ class TestInsertionPointAdmission:
             for binding in MCP_INBOUND_LIMIT_BINDINGS[kind]:
                 assert binding.insertion_point and binding.source
 
-    def test_stdio_has_no_pre_parse_insertion_point(self) -> None:
-        assert missing_pre_parse_bindings(MCPTransportKind.STDIO, _budget()) == PRE_PARSE_LIMIT_FAMILIES
+    def test_stdio_binds_both_pre_parse_families(self) -> None:
+        bound = {binding.family for binding in MCP_INBOUND_LIMIT_BINDINGS[MCPTransportKind.STDIO]}
+        assert set(PRE_PARSE_LIMIT_FAMILIES) <= bound
+        assert missing_pre_parse_bindings(MCPTransportKind.STDIO, _budget()) == ()
+        for binding in MCP_INBOUND_LIMIT_BINDINGS[MCPTransportKind.STDIO]:
+            assert binding.insertion_point.startswith("services.agent_service.mcp_stdio_transport.")
+            assert binding.source
 
     async def test_transport_with_insertion_point_is_admitted(self) -> None:
         config = _config(MCPTransportKind.STREAMABLE_HTTP)
@@ -324,27 +329,23 @@ class TestInsertionPointAdmission:
         assert store.saved == [config]
         assert factory.opened == 1
 
-    async def test_transport_without_insertion_point_is_refused_at_save(self) -> None:
+    async def test_stdio_is_admitted_at_save(self) -> None:
+        """stdio 前置限额族已有真实插入点：保存不再因 ``CAPABILITY_UNVERIFIED`` 被拒。"""
+
         config = _config(MCPTransportKind.STDIO)
         manager, store, factory = _manager(config)
 
-        with pytest.raises(AgentServiceError) as exc:
-            await manager.save_config(config)
+        await manager.save_config(config)
 
-        assert exc.value.code is AgentErrorCode.CAPABILITY_UNVERIFIED
-        assert "receive_bytes" in exc.value.sanitized_message
-        assert "structure_depth" in exc.value.sanitized_message
-        assert store.saved == []
+        assert store.saved == [config]
         assert factory.opened == 0
 
-    async def test_transport_without_insertion_point_is_refused_at_connect(self) -> None:
-        """存储值不被信任：加载后的配置在启连点同样因缺插入点被拒，且零启连。"""
+    async def test_stdio_is_admitted_at_connect(self) -> None:
+        """存储值不被信任：加载后的 stdio 配置在启连点重新过准入并通过。"""
 
         config = _config(MCPTransportKind.STDIO)
         manager, _store, factory = _manager(config)
 
-        with pytest.raises(AgentServiceError) as exc:
-            await manager.connect(_identity())
+        await manager.connect(_identity())
 
-        assert exc.value.code is AgentErrorCode.CAPABILITY_UNVERIFIED
-        assert factory.opened == 0
+        assert factory.opened == 1

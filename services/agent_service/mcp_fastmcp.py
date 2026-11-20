@@ -5,16 +5,17 @@
 - :class:`FastMCPClientFactory` 实现 ``MCPClientSessionPort`` / ``MCPClientFactoryPort``
   （:mod:`services.agent_service.mcp`），由共享连接管理器在**用户显式启连/测试**
   时调用；保存配置与普通读取不触发任何进程/网络。
-- stdio：``StdioTransport(绝对 command, args, 最小环境, cwd, log_file=<有界排空器>)``，
-  不经 shell；``log_file`` 接受一个 OS 管道写端，由后台线程持续读取子进程 stderr
-  （FD 级，避免管道不读导致阻塞），逐行先脱敏再进入有界内存缓冲，**不落盘**。
+- stdio：``BudgetedStdioTransport``（:mod:`services.agent_service.mcp_stdio_transport`，
+  绝对 command、args、显式环境、cwd、errlog=<有界排空器>），不经 shell；errlog 接受
+  一个 OS 管道写端，由后台线程持续读取子进程 stderr（FD 级，避免管道不读导致阻塞），
+  逐行先脱敏再进入有界内存缓冲，**不落盘**。自管子进程使入站限额有了解析前的真实插入点。
 - stdio 环境（I42）：锁定版 SDK 的 ``mcp.client.stdio.stdio_client`` 以
   ``get_default_environment() | (server.env or {})`` 生成子进程环境（源码实证：
   ``mcp/client/stdio.py`` 的 ``stdio_client`` → ``_create_platform_compatible_process``），
   即**不复制父进程完整 ``os.environ``**，只继承一份固定的非秘密 OS 清单（Windows 12 键 /
-  POSIX 6 键）。本模块仍**显式覆盖**该清单的全部键，使子进程环境完全由本模块决定
-  （SDK 若调整默认清单也不会引入新的隐式继承），且 ``TEMP`` / ``TMP`` 强制指向本次连接
-  专属受管目录（非应用/用户临时目录），关闭或连接失败时删除，不留残留。
+  POSIX 6 键）。本模块仍**显式覆盖**该清单的全部键并把完整环境交给自管进程，使子进程
+  环境完全由本模块决定（SDK 默认清单变化也不会引入新的隐式继承），且 ``TEMP`` / ``TMP``
+  强制指向本次连接专属受管目录（非应用/用户临时目录），关闭或连接失败时删除，不留残留。
 - streamable_http / sse：``StreamableHttpTransport`` / ``SSETransport``，只用已冻结
   的 URL；SSE 仍须显式核准（由 ``validate_transport_config`` 保证）。两条 HTTP 传输
   都注入显式 ``httpx_client_factory``（见下），不依赖 SDK 默认 client。
@@ -45,27 +46,28 @@ SSE 兼容模式下若服务端上报的消息端点路径与配置端点不同�
   ``structure_depth``，超限即拒绝，**完整消息对象从未被构造**；streamable HTTP 另把
   已冻结的 ``receive_bytes`` 传给 SDK 的 ``max_sse_event_size``，形成解析前的第二道
   上限。压缩响应（非 identity 编码）无法前置判定帧长/深度，一律拒绝而非放行。
-- stdio：锁定版 SDK 的 ``mcp.client.stdio.stdio_client`` 逐行读子进程 stdout 并在库内
-  解析，不向调用方暴露字节或帧长参数，故无任何前置插入点；带 ``receive_bytes`` /
-  ``structure_depth`` 的 stdio 配置由连接管理器在准入时拒绝（``CAPABILITY_UNVERIFIED``）。
+- stdio：``BudgetedStdioTransport`` 自管子进程，把 stdout 原始字节块先交给
+  ``_BudgetedLineReader.feed``：``receive_bytes`` 按块计入、``structure_depth`` 由增量
+  扫描器判定，二者都在切行/解码/解析之前执行，超限块不进入缓冲区，**完整消息对象从未
+  被构造**。超限以 fail-closed 方式拆除连接（读流关闭，在途请求立即失败而非挂起），
+  原因记入诊断 ``inbound_limit:<family>``；不承诺以 ``MCPBudgetExceeded`` 原类型抵达
+  调用方（SDK 默认 ``message_handler`` 会消费读流中的 ``Exception`` 值）。
 
 仍属残留（不得宣称已验证）
 --------------------------
-http/SSE 的逐请求往返耗时、子进程退出码不可观测。目录/解码/schema/单条/留存五族只能
-在解析后得到（条目数、规范长度无法从字节流预知），故其拒绝点必然晚于接收；但计量本身
-改为**增量计数**：累计超过该族剩余额度即中止，不再为比较而完整物化规范 JSON 文本，
-且总接收量仍由解析前的 ``receive_bytes`` 门约束（超出的字节不会交给 SDK）。
+http/SSE 的逐请求往返耗时不可观测。目录/解码/schema/单条四族只能在解析后得到
+（条目数、规范长度无法从字节流预知），故其拒绝点必然晚于接收；但计量本身改为
+**增量计数**：累计超过该族剩余额度即中止，不再为比较而完整物化规范 JSON 文本，且总
+接收量仍由解析前的 ``receive_bytes`` 门约束（超出的字节不会交给 SDK）。留存族当前
+无调用点与释放。stdio 超限的失败原因是诊断记录而非原异常类型，调用方看到的是连接关闭
+（``CONNECTION_CLOSED``）。
 
 四诊断通道
 ----------
 :class:`MCPSessionDiagnostics` 固定四路：``stderr_tail``（FD 级、有界且已脱敏的尾部）、
 ``last_error``（最后一次错误类别）、``protocol_errors``（按序记录，留存前脱敏且条数有界）、
-``exit_status``（**经 FastMCP 托管进程时不可观测，保持 None「未知」而不是 0**）。
-
-仍属残留（不得宣称已验证）
---------------------------
-子进程退出码不可观测，保持 ``None``「未知」；stdio 的入站字节/结构深度无前置插入点
-（见上节，已在准入时拒绝而非放行）。见 ``docs/debt/known-technical-debt.md`` 的
+``exit_status``（stdio 自管进程退出后可观测；未观测到保持 ``None``「未知」而不是 0；
+HTTP/SSE 无子进程，保持 ``None``）。见 ``docs/debt/known-technical-debt.md`` 的
 P2-AgentMCP-Residual-Risks。
 """
 
@@ -85,7 +87,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import httpx2
 from fastmcp import Client
-from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
+from fastmcp.client.transports import SSETransport, StreamableHttpTransport
 
 from core.agent_types import AgentErrorCode, AgentServiceError, AgentValidationError, MCPTransportKind
 from services.agent_service.mcp import (
@@ -101,6 +103,7 @@ from services.agent_service.mcp_budget import (
     encode_json_text_capped,
     measure_json_bytes,
 )
+from services.agent_service.mcp_stdio_transport import BudgetedStdioTransport
 from utils.sanitizers import DataSanitizer
 
 if TYPE_CHECKING:
@@ -230,6 +233,11 @@ class MCPSessionDiagnostics:
     last_error: str | None = None
     protocol_errors: list[str] = field(default_factory=list)
     exit_status: int | None = None
+
+    def set_exit_status(self, code: int | None) -> None:
+        """写入实际观测到的子进程退出码；未观测到（``None``）保持「未知」，不伪造 0。"""
+        if code is not None:
+            self.exit_status = code
 
     def record(self, error: str) -> None:
         """记录一次协议错误：留存前脱敏，条数超上限时丢弃最旧。"""
@@ -849,13 +857,16 @@ class FastMCPClientFactory:
             assert command is not None
             assert drain is not None
             assert stdio_env is not None
-            return StdioTransport(
-                command=command,
-                args=list(transport.args),
+            assert inbound is not None
+            return BudgetedStdioTransport(
+                command,
+                list(transport.args),
+                guard=inbound,
                 env=stdio_env.env,
                 cwd=transport.cwd,
-                keep_alive=False,
-                log_file=cast("TextIO", drain),
+                errlog=cast("TextIO", drain),
+                on_exit_status=diagnostics.set_exit_status,
+                on_limit_exceeded=lambda family: diagnostics.record(f"inbound_limit:{family}"),
             )
         assert transport.url is not None
         factory = _guarded_http_client(_ApprovedHTTPTarget.from_url(transport.url), diagnostics, label, inbound=inbound)
