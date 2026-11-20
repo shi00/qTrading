@@ -479,11 +479,17 @@ class _FrozenSourceFacts:
 
 @dataclass(frozen=True, slots=True)
 class LeafDispatchFacts:
-    """叶派发身份事实（I43）：execution/round 归属 + owner/run 代次（DB 权威值）。"""
+    """叶派发身份事实（I43）：execution/round 归属 + owner/run 代次 + 成果归属（DB 权威值）。
+
+    ``session_id`` / ``input_revision`` 供叶成果 ``ResearchResultDraft`` 的归属字段
+    使用（R2-I41 / DD §3.5）：只读权威事实，不由调用方猜测或按常量填充（R21）。
+    """
 
     user_scope: str
     owner_epoch: int
     run_epoch: int
+    session_id: str
+    input_revision: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -4847,7 +4853,7 @@ class AgentDao(BaseDao):
     # ------------------------------------------------------------------
 
     async def read_leaf_dispatch_facts(self, execution_id: str, round_id: str) -> LeafDispatchFacts:
-        """叶派发身份事实（I43）：user_scope / owner_epoch / run_epoch 权威值。
+        """叶派发身份事实（I43）：user_scope / owner_epoch / run_epoch / 成果归属权威值。
 
         只读、不推断：execution 或 round 缺失、或轮不属该执行 → ``INPUT_INVALID``
         （调用方违反「先备后派发」契约，零写）。
@@ -4865,7 +4871,9 @@ class AgentDao(BaseDao):
                     sa.select(
                         AgentExecution.user_scope,
                         AgentExecution.owner_epoch,
+                        AgentExecution.session_id,
                         AgentRound.run_epoch,
+                        AgentRound.input_revision,
                     )
                     .select_from(AgentExecution)
                     .join(
@@ -4889,6 +4897,8 @@ class AgentDao(BaseDao):
             user_scope=row.user_scope,
             owner_epoch=int(row.owner_epoch),
             run_epoch=int(row.run_epoch),
+            session_id=row.session_id,
+            input_revision=int(row.input_revision),
         )
 
     async def read_authoritative_data_consent(

@@ -1,37 +1,38 @@
 """研究边界能力（``ResearchBoundary``）的生产装配点（I65）。
 
-现状（必须如实保留）：
-
-- 本模块提供**装配函数**与从 DAO 读取来源键的生产策略提供器；
-- 但生产叶主体仍是 ``leaf_runtime.unavailable_leaf_agent``（恒 ``failed``），
-  没有 pydantic-ai ``Agent`` 构造点，故 ``ResearchBoundary`` 暂无生产**消费方**；
-- ``BOUNDARY_HOST_WIRED`` 固定为 ``False``，任何「边界已生效」的结论不得据此宣称。
+生产消费方：:func:`services.agent_service.leaf_agent.run_leaf_agent` 构造
+pydantic-ai ``Agent`` 时把 :func:`build_leaf_boundary` 的产物装入 ``capabilities``，
+在每次模型请求前按最新来源事实与上下文窗口判定（DD §10.3）。
 
 本模块只做装配与事实读取，不授权（授权仍在派发点按最新事实核定）。
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, Protocol
 
 from core.agent_types import AgentErrorCode, AgentServiceError, Mode
+from core.model_management_types import ExecutionSnapshot
 from services.agent_service.capabilities import ResearchBoundary, ResearchBoundaryPolicy
 
 __all__ = [
     "BOUNDARY_HOST_WIRED",
     "DaoResearchBoundaryPolicyProvider",
     "ResearchBoundaryRunScope",
+    "build_leaf_boundary",
     "build_research_boundary",
+    "resolve_leaf_context_window",
 ]
 
-#: 边界能力是否已有生产宿主（叶 Agent）消费；当前为 ``False``（见模块说明）。
-BOUNDARY_HOST_WIRED: Final[bool] = False
+#: 边界能力是否已有生产宿主（叶 Agent）消费；生产宿主见模块说明。
+BOUNDARY_HOST_WIRED: Final[bool] = True
 
 
 @dataclass(frozen=True, slots=True)
 class ResearchBoundaryRunScope:
-    """一次叶运行的边界作用域（由未来叶 Agent 装配作为 ``RunContext.deps`` 注入）。"""
+    """一次叶运行的边界作用域（叶 Agent 装配作为 ``RunContext.deps`` 注入）。"""
 
     user_scope: str
     execution_id: str
@@ -81,6 +82,65 @@ class DaoResearchBoundaryPolicyProvider:
 
 
 def build_research_boundary(provider: DaoResearchBoundaryPolicyProvider) -> ResearchBoundary:
-    """未来叶 Agent 构造处的唯一边界装配入口（当前无生产调用方）。"""
+    """叶 Agent 构造处的唯一边界装配入口。"""
 
     return ResearchBoundary(policy_provider=provider)
+
+
+def resolve_leaf_context_window(snapshot: ExecutionSnapshot, *, scenario_id: str) -> int | None:
+    """解析叶运行所用首候选连接的上下文窗口（D9）。
+
+    路径：``routes[scenario_id].candidates[0].connection_id`` →
+    ``connections[connection_id].context_window``。路由/候选/连接/窗口任一缺失或
+    非法 → ``None``：由能力按「窗口未知拒绝放行」处理（R21），不猜默认窗口。
+    """
+
+    if not isinstance(scenario_id, str) or not scenario_id:
+        return None
+    route = next(
+        (item for item in snapshot.routes if isinstance(item, Mapping) and item.get("scenario_id") == scenario_id),
+        None,
+    )
+    if route is None:
+        return None
+    candidates = route.get("candidates")
+    if not isinstance(candidates, Sequence) or isinstance(candidates, (str, bytes)) or not candidates:
+        return None
+    first = candidates[0]
+    if not isinstance(first, Mapping):
+        return None
+    connection_id = first.get("connection_id")
+    if not isinstance(connection_id, str) or not connection_id:
+        return None
+    connection = next(
+        (
+            item
+            for item in snapshot.connections
+            if isinstance(item, Mapping) and item.get("connection_id") == connection_id
+        ),
+        None,
+    )
+    if connection is None:
+        return None
+    window = connection.get("context_window")
+    if isinstance(window, bool) or not isinstance(window, int) or window < 1:
+        return None
+    return window
+
+
+def build_leaf_boundary(
+    dao: _BoundarySourceReader,
+    *,
+    snapshot: ExecutionSnapshot,
+    scenario_id: str,
+) -> ResearchBoundary:
+    """叶 Agent 的生产边界：执行模式 + 空工具集 + 首候选连接窗口（D9）。"""
+
+    provider = DaoResearchBoundaryPolicyProvider(
+        dao=dao,
+        mode=Mode.EXECUTE,
+        allowed_tool_names=frozenset(),
+        context_window_tokens=resolve_leaf_context_window(snapshot, scenario_id=scenario_id),
+        estimated_input_tokens=None,
+    )
+    return build_research_boundary(provider)

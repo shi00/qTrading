@@ -9,9 +9,10 @@
   再由 :func:`~services.agent_service.model.derive_model_call_id` 确定性派生
   （R2-I41：恢复重放复得同一 ``model_call_id``，不新造随机身份）；
 - 模型绑定解析 / 叶 Agent 执行以可注入端口表达：生产默认解析 ``agent_research``
-  场景路由（未配置路由即显式失败、不静默换模型），叶 Agent 主体由后续执行分片
-  接线；当前默认主体如实返回 ``failed``（错误码 ``leaf_agent_unavailable``），
-  不伪造 ``complete`` 或空成果（R21）。
+  场景路由（未配置路由即显式失败、不静默换模型），叶 Agent 主体由
+  :mod:`services.agent_service.leaf_agent` 提供（真实 pydantic-ai ``Agent`` 单次
+  运行 + 成果可靠保存 + 边界能力消费）；
+  ``unavailable_leaf_agent`` 仅作显式「未接线、零外发」替身保留。
 
 不在本模块：DAG 准入校验（派发前 ``validate_plan_spec_proposal``）、叶成果落库、
 主会话/UI 研究界面。
@@ -63,8 +64,8 @@ class LeafModelBinding:
 #: 叶身份 → 冻结模型绑定（生产实现按场景路由解析；不可用即抛错，零模型外发）。
 ModelBindingResolver = Callable[[LeafExecutionContext], Awaitable[LeafModelBinding]]
 
-#: 叶 Agent 主体：给定模型桥与叶上下文产出叶终态事实（成果落库属执行分片）。
-LeafAgentRunner = Callable[[GatewayModel, LeafExecutionContext], Awaitable[NodeOutcome]]
+#: 叶 Agent 主体：给定模型桥、叶上下文与冻结绑定产出叶终态事实（成果落库在其中）。
+LeafAgentRunner = Callable[[GatewayModel, LeafExecutionContext, LeafModelBinding], Awaitable[NodeOutcome]]
 
 #: 叶资料许可提供者（I43）：返回该叶的 15 键冻结资料上下文；``None`` = 无决定。
 DataConsentProvider = Callable[[LeafExecutionContext], Awaitable[Mapping[str, Any] | None]]
@@ -203,11 +204,16 @@ async def resolve_agent_model_binding(
     )
 
 
-async def unavailable_leaf_agent(model: GatewayModel, context: LeafExecutionContext) -> NodeOutcome:
-    """默认叶 Agent 主体：执行分片未接线时如实报失败，不伪造成果（R21）。"""
+async def unavailable_leaf_agent(
+    model: GatewayModel,
+    context: LeafExecutionContext,
+    binding: LeafModelBinding,
+) -> NodeOutcome:
+    """显式「未接线、零外发」叶主体替身：如实报失败，不伪造成果（R21）。"""
 
     logger.warning(
-        "[LeafRuntime] leaf agent runner not wired, leaf fails without outbound (execution=%s round=%s node=%s)",
+        "[LeafRuntime] leaf agent runner explicitly unavailable, leaf fails without outbound "
+        "(execution=%s round=%s node=%s)",
         context.execution_id,
         context.round_id,
         context.node.node_id,
@@ -216,10 +222,10 @@ async def unavailable_leaf_agent(model: GatewayModel, context: LeafExecutionCont
 
 
 def default_leaf_runtime(dao: Any | None = None) -> LeafRuntimeWiring:
-    """生产默认装配：真实场景路由解析 + 资料许可提供者 + 如实失败的叶 Agent 主体。
+    """生产默认装配：真实场景路由解析 + 资料许可提供者 + 真实叶 Agent 主体。
 
-    ``dao`` 缺省时提供者在解析时惰性取 ``CacheManager().agent_dao``；无法取得时
-    掷错（叶失败、零外发），不降级为「无许可约束」。
+    ``dao`` 缺省时提供者与叶主体在运行时惰性取 ``CacheManager().agent_dao``；无法
+    取得时掷错/如实失败（叶失败、零外发），不降级为「无许可约束」。
     """
 
     provider: DataConsentProvider = (
@@ -231,9 +237,12 @@ def default_leaf_runtime(dao: Any | None = None) -> LeafRuntimeWiring:
     async def _model_binding(context: LeafExecutionContext) -> LeafModelBinding:
         return await resolve_agent_model_binding(context, data_consent_provider=provider)
 
+    # lazy-import：leaf_agent 依赖本模块的类型与常量，模块级互引会成环。
+    from services.agent_service.leaf_agent import build_leaf_agent_runner
+
     return LeafRuntimeWiring(
         model_binding=_model_binding,
-        agent_runner=unavailable_leaf_agent,
+        agent_runner=build_leaf_agent_runner(dao),
         data_consent_provider=provider,
     )
 
@@ -267,7 +276,7 @@ def build_leaf_runner(*, model_binding: ModelBindingResolver, agent_runner: Leaf
     async def _run(context: LeafExecutionContext) -> NodeOutcome:
         resolved = await model_binding(context)
         model = build_gateway_model(context, resolved)
-        return await agent_runner(model, context)
+        return await agent_runner(model, context, resolved)
 
     return _run
 

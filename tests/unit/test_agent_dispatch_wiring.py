@@ -250,7 +250,7 @@ def test_installed_leaf_runner_uses_persistent_identity_for_model_calls() -> Non
             executor=cast(Any, executor), snapshot=_SNAPSHOT, binding={"scenario_id": "agent_research"}
         )
 
-    async def _run(model: Any, ctx: LeafExecutionContext) -> NodeOutcome:
+    async def _run(model: Any, ctx: LeafExecutionContext, binding: LeafModelBinding) -> NodeOutcome:
         seen.append(model)
         await model.request(
             [ModelRequest(parts=[UserPromptPart(content="梳理公司业务")])],
@@ -533,11 +533,10 @@ def test_unavailable_leaf_agent_reports_failed_without_faking_success() -> None:
     from services.agent_service.leaf_runtime import unavailable_leaf_agent
 
     context = _leaf_context()
-    model = build_gateway_model(
-        context, LeafModelBinding(executor=cast(Any, _FakeExecutor()), snapshot=_SNAPSHOT, binding={})
-    )
+    binding = LeafModelBinding(executor=cast(Any, _FakeExecutor()), snapshot=_SNAPSHOT, binding={})
+    model = build_gateway_model(context, binding)
 
-    outcome = asyncio.run(unavailable_leaf_agent(model, context))
+    outcome = asyncio.run(unavailable_leaf_agent(model, context, binding))
 
     assert outcome.state == "failed"
     assert outcome.error_code == LEAF_AGENT_UNAVAILABLE

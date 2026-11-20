@@ -65,6 +65,7 @@ from services.agent_service.dispatch import (
     RootWorkflowResultReader,
     RootWorkflowSubmitter,
 )
+from services.agent_service.leaf_runtime import default_leaf_runtime
 from services.agent_service.runtime import CloseCommandIdentity, CloseFactOutcome, OwnerLoopBridge
 from services.agent_service.skills import ManagedSkillStore, SkillCatalogService
 from services.agent_service.units import UnitConversion
@@ -525,7 +526,7 @@ async def wire_agent_runtime(
         return AgentWiring(service=service, bridge=bridge, failure="runtime_url_unresolved")
 
     try:
-        install_leaf_runtime(leaf_runtime)
+        install_leaf_runtime(leaf_runtime if leaf_runtime is not None else default_leaf_runtime(dao))
     except Exception as e:  # 叶运行链未装好即零派发（launch/派发都不进行）
         logger.warning("[AgentWiring] leaf runtime install failed: %s (zero dispatch)", type(e).__name__)
         return AgentWiring(service=service, bridge=bridge, failure=f"leaf_runtime_install_failed:{type(e).__name__}")
