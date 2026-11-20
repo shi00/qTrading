@@ -59,8 +59,9 @@ class TestDaoResearchBoundaryPolicyProvider:
             await _provider(dao)(_ctx(user_scope=""))
         assert exc.value.code is AgentErrorCode.POLICY_DENIED
 
-    def test_boundary_assembly_is_still_hostless(self) -> None:
+    def test_boundary_assembly_is_hosted_by_leaf_agent(self) -> None:
         boundary = build_research_boundary(_provider(_Dao(frozenset())))
         assert isinstance(boundary, ResearchBoundary)
         assert boundary.id == "research_boundary"
-        assert BOUNDARY_HOST_WIRED is False
+        # 叶 Agent 已消费边界（feat 83d2f3a50）；常量必须与真实装配一致，不得回退为未接线。
+        assert BOUNDARY_HOST_WIRED is True
