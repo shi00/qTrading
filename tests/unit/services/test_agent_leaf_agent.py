@@ -152,8 +152,9 @@ class _FakeAgent:
         self.deps = deps
         self.message_history = message_history
         self.deferred_tool_results = deferred_tool_results
-        if type(self).error is not None:
-            raise type(self).error
+        error = type(self).error
+        if error is not None:
+            raise error
         output = type(self).outputs.pop(0) if type(self).outputs else type(self).output
         return _RunResult(output=output, messages=list(type(self).messages))
 
