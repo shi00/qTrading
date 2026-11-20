@@ -442,6 +442,9 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
     # use_ref 仅允许 None 初始值，这里存可见性布尔快照。
     research_open_ref: Any = ft.use_ref(None)
     research_open_ref.current = research_open
+    # 观察入口按钮引用（每渲染刷新）：显式关闭观察层后把焦点还给入口，避免焦点
+    # 随观察层卸载丢失（返焦）。
+    research_toggle_holder: Any = ft.use_ref(None)
 
     def _collapse_research() -> None:
         """只收起观察层：不清空草稿、不停止/取消研究（观察不控制执行）。"""
@@ -449,11 +452,19 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             research_open_ref.current = False
             set_research_open(False)
 
+    def _return_focus_to_toggle() -> None:
+        """把焦点还给观察入口按钮（返焦；观察层非模态，不抢占业务导航焦点）。"""
+        toggle = research_toggle_holder.current
+        page = _get_page()
+        if toggle is not None and page is not None:
+            page.run_task(toggle.focus)
+
     def _toggle_research(_e: ft.ControlEvent | None = None) -> None:
         opening = not bool(research_open_ref.current)
         research_open_ref.current = opening
         set_research_open(opening)
         if not opening:
+            _return_focus_to_toggle()
             return
         set_decision_notice(None)
         _refresh_research()
@@ -790,6 +801,16 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
     )
     # MINOR-10: 刷新导航栏切换按钮引用 (供键盘 Ctrl+F 聚焦最新实例)
     nav_toggle_holder.current = collapse_btn
+    # P02: 公共区研究入口（不新增第八业务导航；展开非模态观察层）
+    research_toggle = ft.IconButton(
+        icon=ft.Icons.SCIENCE_OUTLINED,
+        selected=research_open,
+        selected_icon=ft.Icons.SCIENCE,
+        icon_size=AppStyles.FONT_SIZE_HEADLINE,
+        tooltip=I18n.get("agent_research_toggle"),
+        on_click=safe_on_click(_toggle_research),
+    )
+    research_toggle_holder.current = research_toggle
     brand_text = ft.Text(
         I18n.get("app_brand"),
         size=AppStyles.FONT_SIZE_LG,
@@ -809,14 +830,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
                 ),
                 brand_text,
                 # P02: 公共区研究入口（不新增第八业务导航；展开非模态观察层）
-                ft.IconButton(
-                    icon=ft.Icons.SCIENCE_OUTLINED,
-                    selected=research_open,
-                    selected_icon=ft.Icons.SCIENCE,
-                    icon_size=AppStyles.FONT_SIZE_HEADLINE,
-                    tooltip=I18n.get("agent_research_toggle"),
-                    on_click=safe_on_click(_toggle_research),
-                ),
+                research_toggle,
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             spacing=5,

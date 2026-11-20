@@ -652,6 +652,9 @@ def _build_decision_card(
     if decision.answerable:
         rows.append(
             ft.TextField(
+                # 输入态（含未上屏的输入法组合串与光标/选区）跟随决定归属，而不是
+                # 列表位置：决定列表增删后同位置控件不再是同一张卡。
+                key=f"agent_research_answer_{decision.decision_id}",
                 value=draft,
                 label=I18n.get("agent_research_answer_label"),
                 hint_text=I18n.get("agent_research_answer_hint"),

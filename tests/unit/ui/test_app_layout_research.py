@@ -10,7 +10,9 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Iterator
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -1045,3 +1047,176 @@ class TestObservationPanelHonestBranches:
             if isinstance(control, ft.Text) and control.value == "agent_research_more_items"
         ]
         assert len(markers) == 2, "消息与成果各有一条「更多」提示"
+
+
+def _pending_decision(decision_id: str, *, question: str | None = "选哪个？") -> PendingDecision:
+    """面板渲染用决定投影（user_choice，可答复）。"""
+
+    return PendingDecision(
+        decision_id=decision_id,
+        execution_id="e-1",
+        round_id="r-1",
+        decision_kind="user_choice",
+        revision=2,
+        created_at="2026-11-17T01:02:03.000000Z",
+        expires_at=None,
+        question_text=question,
+    )
+
+
+def _answer_fields(panel: ft.Container) -> dict[str, ft.TextField]:
+    """按 key 索引答复输入框（验证输入态绑定身份而非列表位置）。"""
+
+    fields: dict[str, ft.TextField] = {}
+    for control in _iter_controls(panel):
+        if isinstance(control, ft.TextField) and control.key is not None:
+            fields[str(control.key)] = control
+    return fields
+
+
+class TestDesktopInputEvidence:
+    """I88：生产桌面输入的组件级替代证据（无 GUI 环境下不得伪称 GUI 实测）。
+
+    覆盖返焦、IME/CJK 草稿往返、Enter/Esc 不批准不关闭、输入框身份绑定决定。
+    """
+
+    def test_close_returns_focus_to_research_entry(self, layout_env) -> None:
+        _open_panel(layout_env)
+        page = layout_env["page"]
+        toggle = _research_button(layout_env)
+        panel = _observation_control(layout_env)
+        assert panel is not None
+        page.run_task.reset_mock()
+
+        panel.kwargs["on_close"]()
+
+        _rerender(layout_env)
+        assert _observation_control(layout_env) is None, "关闭应卸载观察层"
+        assert page.run_task.call_count == 1
+        assert page.run_task.call_args.args[0] == toggle.focus, "关闭后焦点应回到观察入口（返焦）"
+
+    def test_nav_collapse_leaves_focus_with_navigation(self, layout_env) -> None:
+        _open_panel(layout_env)
+        page = layout_env["page"]
+        toggle = _research_button(layout_env)
+        page.run_task.reset_mock()
+
+        _invoke(_nav_rail(layout_env).on_change, SimpleNamespace(control=SimpleNamespace(selected_index=2)))
+
+        scheduled = [call.args[0] for call in page.run_task.call_args_list if call.args]
+        assert toggle.focus not in scheduled, "导航收起不返焦（焦点应留给导航目标）"
+        assert len(scheduled) == 1, "导航收起只调度切页，不附加焦点动作"
+
+    def test_ime_composition_draft_round_trips_after_collapse(self, layout_env, monkeypatch) -> None:
+        _open_panel(layout_env)
+        vm = _shared_vm()
+        vm.set_answer_draft("d-1", "选中方案")  # IME 组合串上屏后的 CJK 文本
+
+        _invoke(_nav_rail(layout_env).on_change, SimpleNamespace(control=SimpleNamespace(selected_index=1)))
+        _rerender(layout_env)
+        assert _observation_control(layout_env) is None, "导航收起观察层"
+
+        _open_panel(layout_env)
+        _drive_last_run_task(layout_env)  # 重开后的只读刷新：决定列表重新载入
+        _rerender(layout_env)
+        reopened = _observation_control(layout_env)
+        assert reopened is not None
+        assert reopened.kwargs["state"].draft_for("d-1") == "选中方案", "收起/重开后草稿保真"
+        rendered = _render_panel(reopened.kwargs["state"], monkeypatch=monkeypatch)
+        assert _find_field(rendered).value == "选中方案", "输入框按状态快照回填草稿"
+        assert layout_env["service"].answer_calls == [], "收起/重开不得触发答复提交"
+
+    def test_enter_and_escape_do_not_submit_or_close(self, layout_env) -> None:
+        _open_panel(layout_env)
+        vm = _shared_vm()
+        vm.set_answer_draft("d-1", "选中方案")
+        page = layout_env["page"]
+        page.run_task.reset_mock()
+
+        for key, ctrl in (("Enter", False), ("Enter", True), ("Escape", False), ("Escape", True)):
+            _invoke(
+                page.on_keyboard_event,
+                SimpleNamespace(ctrl=ctrl, alt=False, meta=False, shift=False, key=key),
+            )
+
+        _rerender(layout_env)
+        assert _observation_control(layout_env) is not None, "Enter/Esc 不得关闭观察层"
+        assert page.run_task.call_args_list == [], "Enter/Esc 不得派发切页"
+        assert layout_env["service"].answer_calls == [], "键盘（含 IME 上屏 Enter）不得提交决定"
+        assert vm.state.draft_for("d-1") == "选中方案", "键盘事件不得改动草稿"
+        assert vm.state.submitting is False
+
+    def test_answer_field_binds_decision_identity_across_reorder(self, monkeypatch) -> None:
+        d1, d2 = _pending_decision("d-1"), _pending_decision("d-2")
+        base = ResearchObserverState(
+            available=True,
+            session_id="s-1",
+            session_title="研究 A",
+            decisions=(d1, d2),
+            pending_count=2,
+            answer_drafts=(("d-1", "甲方案"), ("d-2", "乙方案")),
+        )
+        expected = {"agent_research_answer_d-1": "甲方案", "agent_research_answer_d-2": "乙方案"}
+
+        first = _answer_fields(_render_panel(base, monkeypatch=monkeypatch))
+        assert {key: field.value for key, field in first.items()} == expected
+
+        reordered = _answer_fields(_render_panel(replace(base, decisions=(d2, d1)), monkeypatch=monkeypatch))
+        assert {key: field.value for key, field in reordered.items()} == expected, (
+            "决定重排后输入态仍按决定身份绑定，不按列表位置（避免 IME 组合串串卡）"
+        )
+
+
+class TestDesktopInputLatencyBaseline:
+    """输入路径 P95 基准（固定负载、无 GUI 依赖的替代证据）。
+
+    xdist 并行下计时不可横向比较（须 ``-n0`` 复测）；阈值取宽松冒烟界，
+    不是生产 SLA。失败消息完整输出 p50/p95/max 与全部样本（保留失败样本）。
+    """
+
+    _WARMUP = 3
+    _SAMPLES = 40
+    _VM_P95_LIMIT_MS = 50.0  # 与 PerfThreshold.MEMORY_COMPUTE 同量级（单次内存命令）
+    _PANEL_RENDER_P95_LIMIT_MS = 500.0
+
+    @classmethod
+    def _samples_ms(cls, func: Any) -> list[float]:
+        for _ in range(cls._WARMUP):
+            func()
+        samples: list[float] = []
+        for _ in range(cls._SAMPLES):
+            started = time.perf_counter()
+            func()
+            samples.append((time.perf_counter() - started) * 1000.0)
+        return samples
+
+    @staticmethod
+    def _assert_p95(label: str, samples_ms: list[float], limit_ms: float) -> None:
+        from scripts.probe.news_match_perf import percentile
+
+        p50 = percentile(samples_ms, 0.50)
+        p95 = percentile(samples_ms, 0.95)
+        detail = (
+            f"{label}: p50={p50:.3f}ms p95={p95:.3f}ms max={max(samples_ms):.3f}ms "
+            f"limit={limit_ms:.0f}ms samples_ms={[round(v, 3) for v in samples_ms]}"
+        )
+        assert p95 <= limit_ms, detail
+
+    def test_answer_draft_update_p95(self, layout_env) -> None:
+        _open_panel(layout_env)
+        vm = _shared_vm()
+        counter = iter(range(1_000_000))
+
+        samples = self._samples_ms(lambda: vm.set_answer_draft("d-1", f"草稿{next(counter)}"))
+        self._assert_p95("set_answer_draft", samples, self._VM_P95_LIMIT_MS)
+
+    def test_panel_render_p95(self, layout_env, monkeypatch) -> None:
+        _open_panel(layout_env)
+        _drive_last_run_task(layout_env)  # 刷新出可答复决定，覆盖输入框渲染路径
+        _rerender(layout_env)
+        vm = _shared_vm()
+        vm.set_answer_draft("d-1", "选中方案")
+        state = vm.state
+
+        samples = self._samples_ms(lambda: _render_panel(state, monkeypatch=monkeypatch))
+        self._assert_p95("ResearchObserverPanel render", samples, self._PANEL_RENDER_P95_LIMIT_MS)
