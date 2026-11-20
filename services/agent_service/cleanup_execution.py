@@ -194,9 +194,11 @@ class CleanupExecutionService:
                 verified_counts=deletion.verified_counts,
                 complete=True,
             )
-        except AgentServiceError:
-            raise
         except Exception as exc:
+            # 删除尝试之后任一步失败（含执行器/DAO 抛出的 ``AgentServiceError``：
+            # 阶段写入被拒、持久化不可用等）都必须落 ``retry_pending`` 并保留原
+            # job/fence，重进沿原集合续跑；不得直接抛出而丢失阶段事实。
+            # 并发方已 ``verified`` 的情形由 ``_mark_retry`` 内部保留终态并照原样抛出。
             await self._mark_retry(record.user_scope, record.cleanup_job_id, "cleanup_execution_failed", exc)
             raise
 

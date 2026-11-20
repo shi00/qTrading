@@ -99,6 +99,7 @@ class _Dao:
         fail_categories: frozenset[str] = frozenset(),
         verified_crash: BaseException | None = None,
         fail_stages: frozenset[str] = frozenset(),
+        fail_phases: frozenset[CleanupPhase] = frozenset(),
     ) -> None:
         self.phases: list[dict[str, object]] = []
         self.stages: list[dict[str, object]] = []
@@ -107,6 +108,7 @@ class _Dao:
         self._fail_categories = fail_categories
         self._verified_crash = verified_crash
         self._fail_stages = fail_stages
+        self._fail_phases = fail_phases
 
     async def save_cleanup_attempt_stage(self, user_scope: str, cleanup_job_id: str, *, stage: str) -> None:
         if stage in self._fail_stages:
@@ -132,6 +134,12 @@ class _Dao:
             raise AgentServiceError(
                 AgentErrorCode.INPUT_INVALID,
                 f"phase write rejected: {error_category}",
+                f"{user_scope}/{cleanup_job_id}",
+            )
+        if phase in self._fail_phases:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                f"phase write unavailable: {phase.value}",
                 f"{user_scope}/{cleanup_job_id}",
             )
         if phase is CleanupPhase.VERIFIED and self._verified_crash is not None:
@@ -473,6 +481,85 @@ class TestCleanupExecutionFailures:
             await service.confirm_and_execute(_command(record))
 
         assert str(exc.value) == "lost during delete"
+        assert dao.phases == []
+        assert store.record.phase is CleanupPhase.VERIFIED
+
+    @pytest.mark.asyncio
+    async def test_delete_agent_service_error_marks_retry_pending(self) -> None:
+        """I83：执行器以 ``AgentServiceError`` 失败也必须落 retry_pending，不得只抛错。"""
+
+        record = _record()
+        error = AgentServiceError(AgentErrorCode.PERSISTENCE_UNAVAILABLE, "delete unavailable", "owner-1/job-1")
+        service, _, dao, _ = _service(record, executor=_Executor(error=error))
+
+        with pytest.raises(AgentServiceError) as exc:
+            await service.confirm_and_execute(_command(record))
+
+        assert exc.value is error
+        assert dao.phases[0]["phase"] is CleanupPhase.RETRY_PENDING
+        assert dao.phases[0]["error_category"] == "cleanup_execution_failed"
+
+    @pytest.mark.asyncio
+    async def test_tombstone_agent_service_error_marks_retry_pending(self) -> None:
+        """I83：应用域 tombstone 抛 ``AgentServiceError`` 时同样保留原集合可续跑。"""
+
+        record = _record()
+        error = AgentServiceError(AgentErrorCode.PERSISTENCE_UNAVAILABLE, "tombstone unavailable", "owner-1/job-1")
+        service, store, dao, _ = _service(record, dao=_Dao(tombstone_error=error))
+
+        with pytest.raises(AgentServiceError) as exc:
+            await service.confirm_and_execute(_command(record))
+
+        assert exc.value is error
+        assert dao.phases[0]["phase"] is CleanupPhase.RETRY_PENDING
+        assert dao.phases[0]["error_category"] == "cleanup_execution_failed"
+        assert store.record.exact_ids == _IDS
+
+    @pytest.mark.asyncio
+    async def test_verified_write_agent_service_error_marks_retry_pending(self) -> None:
+        """I83：``verified`` 阶段写入被拒时也要先落 retry_pending 再抛原错误。"""
+
+        record = _record()
+        dao = _Dao(fail_phases=frozenset({CleanupPhase.VERIFIED}))
+        service, _, _, _ = _service(record, dao=dao)
+
+        with pytest.raises(AgentServiceError) as exc:
+            await service.confirm_and_execute(_command(record))
+
+        assert "phase write unavailable" in str(exc.value)
+        assert dao.tombstones[0][0] == "owner-1"
+        assert [phase["phase"] for phase in dao.phases] == [CleanupPhase.RETRY_PENDING]
+        assert dao.phases[0]["error_category"] == "cleanup_execution_failed"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_verified_keeps_terminal_state_for_agent_service_error(self) -> None:
+        """并发方已 verified：``AgentServiceError`` 也不得把终态回退为 retry_pending。"""
+
+        record = _record()
+        store = _Store(record)
+
+        class _VerifyingExecutor:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            async def preflight(self, ids, *, user_scope: str) -> NativePreflight:
+                self.calls.append("preflight")
+                return NativePreflight(tuple(ids), dict(_zeros()), ())
+
+            async def delete(self, ids) -> NativeCleanupResult:
+                self.calls.append("delete")
+                store.record = _record(phase=CleanupPhase.VERIFIED, fence_committed=True)
+                raise AgentServiceError(AgentErrorCode.PERSISTENCE_UNAVAILABLE, "delete unavailable", "owner-1/job-1")
+
+        dao = _Dao(fail_categories=frozenset({"cleanup_execution_failed"}))
+        service = CleanupExecutionService(
+            jobs=CleanupService(store, _Facts()), store=store, dao=dao, executor=_VerifyingExecutor()
+        )
+
+        with pytest.raises(AgentServiceError) as exc:
+            await service.confirm_and_execute(_command(record))
+
+        assert "delete unavailable" in str(exc.value)
         assert dao.phases == []
         assert store.record.phase is CleanupPhase.VERIFIED
 
