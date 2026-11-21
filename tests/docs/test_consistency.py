@@ -6325,6 +6325,19 @@ class TestGovernanceIdGlossary:
 class TestGovernanceIdGenericForm:
     """H6-c：治理 ID 通用形态（大写前缀 + 短横 + 数字）+ 豁免清单 + 入口/非入口分级。"""
 
+    def test_license_identifiers_are_not_collected_as_ids(self):
+        """许可证标识（BSD-2-Clause / LGPL-3.0-only）不得被截断成未登记治理 ID。"""
+        from check_docs_consistency import _collect_governance_ids
+
+        ids = _collect_governance_ids("许可 Apache-2.0 / MIT / BSD-2-Clause / BSD-3-Clause / LGPL-3.0-only。")
+        assert ids == set()
+
+    def test_sentence_final_id_is_still_collected(self):
+        """句末治理 ID（后接句点）仍须采集，不能因许可证豁免而漏检。"""
+        from check_docs_consistency import _collect_governance_ids
+
+        assert "P2-07" in _collect_governance_ids("见 P2-07.")
+
     def test_generic_form_detects_business_domain_id(self, tmp_path, monkeypatch):
         """通用形态：入口文档出现未登记业务域 ID（BT 前缀下清单外新编号）→ 报错（原白名单漏检业务域命名空间）."""
         from check_docs_consistency import check_governance_id_glossary

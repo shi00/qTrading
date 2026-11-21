@@ -29,6 +29,7 @@
 
 | ID | 一句话 | 级别 | upgrade 触发条件 |
 |----|--------|------|------------------|
+| P2-AgentCleanup-Residual-Risks | 清理后命令/轮次/执行摘要重放统一降级为 `INPUT_CONFLICT`、孤儿 `agent_body_payload` 行不回收、运行库引擎的 `is_disposed` 守卫语义失效、原生清理准入/预检的权威事实与逐 ID 核验提供器未装配（I81 已改契约：不再接受调用方布尔，unknown 交付阻断已入准入） | P2 | ① 需区分清理后幂等与异输入重放；② 清理后磁盘计量出现偏差；③ 运行库 handle 接入清理链路；④ 原生清理执行器接入生产装配 |
 | P3-ExcStrategies-NoteLazy-Classify | strategies/ 层 except Exception 已标记 NOTE(lazy)（ceiling 动态化），待评估统一走 classify\_error | P3 | ① 策略层再次出现未分类 `except Exception` 的新实例时；② 或策略层异常处理被独立重构时 |
 | P3-ExcUtils-NoteLazy-Classify | utils/ 层 except Exception 已标记 NOTE(lazy)，待评估统一走 classify\_error | P3 | ① utils 层再次出现未分类 `except Exception` 的新实例时；② 或 utils 层异常处理被统一改造时 |
 | P3-RedlineAuto-Coverage-Partial | 红线自动化覆盖部分实现（R1/R4/R9/R12/R13/R14/R15 已落地；R20/R21/R24 为报告模式（warning 不阻断），R22/R23 为阻断式检查，五者均为部分自动化；R16 部分落地，事件处理器内同步 IO 暂缓） | P3 | ① pre-commit / CI 检出红线违规新实例时；② 或事件处理器识别逻辑（use\_viewmodel 工厂体 + Flet 事件回调精确 AST 定位）出现误报案例时 |
@@ -67,6 +68,16 @@
 | P3-Polars-Streaming-Order-Semantics | Polars 2.x 流式默认与严格化把错误从「显式异常」变为「结果不同」；行序仅在显式 `maintain_order` 处保证，当前靠各 lazy 管线末步显式 sort 兜底 | P3 | ① 新增 lazy 管线未在末步显式 sort，或新增依赖行序的断言/导出时；② 或 Polars 大版本升级再次调整流式/行序语义时；③ 或出现顺序相关的 Golden / 单测偶发不一致时 |
 | P3-Sidecar-macOS26-SDK-Constraint | theseus 的 PG 16.15.0 macOS 归档构建于 macOS 26.0 SDK、引用 `_strchrnul`，仅 macOS 26+ 可运行；sidecar release workflow 的 macOS job 依赖 `macos-26` runner | P3 | ① sidecar release workflow 触发且 macOS 构建/运行失败时；② 或需支持 macOS 26 以下版本时；③ 或 GitHub Actions `macos-26` 镜像变更时 |
 | P3-E2E-MockAssets-Provenance-Blocked | E2E 离线资产（`tests/e2e/mock_assets`，138 文件：116 woff2 / 8 js / 8 wasm / 6 symbols）缺来源 URL、engineRevision、Flet-Web 版本、包与资源摘要、许可证与 NOTICE、下载与变换方式，来源链 blocked | P3 | ① 新增/替换 mock_assets 资产时；② 或 Flet/CanvasKit 升级导致 engineRevision 变化时；③ 或合规审计启动时 |
+| P2-AgentDelivery-Residual-Facts | Agent 交付残留在事实层不可定位/不可区分：终态 manifest 不含暂存路径、回执无残留字段；`publish_claimed` 后可确证失败不持久化 `error_code`；`unknown` 落库失败未转译；XLSX 坏 XML 与非法控制字符未映射为回执；`_read_complete` 无页数上限；无文件 ID 卷整体拒绝交付 | P2 | ① F-02/F-05 交付 UI 接线时须补「残留/未确证」可视字段；② 或出现用户报告「文件可能已保存」但无法核对原因时；③ 或交付接入非 NTFS/ReFS 目标卷时 |
+| P2-AgentMCP-Residual-Risks | 共享 MCP 残余：HTTP/SSE 仅完成传输构造、未做真实往返实证；stdio 超限不保证以 `MCPBudgetExceeded` 原类型抵达调用方（诊断记录 `inbound_limit:<family>`）；`retention_bytes` 已接入计量但无释放/留存生命周期；remote 传输 `trust_limited` 须由 UI 如实标注 | P2 | ① E-02-5 剩余条目（HTTP/SSE 实证、retention 留存归属）在 F-04 接线前逐条收敛；② 或出现 remote 结果被呈现为「已验证」/留存累计误判超限时 |
+| P3-AgentSource-Residual-Risks | E-01 残余：`_json_safe` 将 NaN→null/Decimal→字符串后求摘要（理论上与 None 同摘要） | P3 | 扩到新解析格式需复用 `_json_safe` 摘要时先补类型标签，或出现摘要碰撞事故时 |
+| P3-AgentDelivery-Resume-NotImplemented | Agent 交付中断后的续接与残留清理未实现：中断后沿原 manifest 续接、认领前后目标身份/摘要查回与补存成功回执（HANDOFF §10.2 L581-583）、按成果维度查原 `unknown`、unknown/取消后残留清理 | P3 | ① 交付 UI（F-05）上线前须至少支持「按 `read_delivery` 查回 + 明确重导为新的 delivery」；② 或出现中断后用户重复导出/覆盖旧目标的事故时 |
+| P3-AgentSearch-IndexPlan | 历史搜索/指纹在真实数据量下的执行计划与延迟未经隔离 PG 实测，GIN 表达式索引（`to_tsvector('simple')`）与 `ILIKE` 查询的匹配方式未验证 | P3 | 验收阶段以获准隔离 PG 在 D10 规模（1000 主会话/10 万公开消息/单会话 1 万条）实测计划/延迟/峰值，P95 超 2 秒或未走索引即升级 |
+| P3-AgentSkill-VersionReadNoRehash | 已发布 Skill 版本的幂等匹配只比对 `.skill-manifest.json` 与入站 inspection，受管读取/服务侧不重算 digest（当前无正式 Harness loader 接入执行链） | P3 | ① 正式 Harness loader 接入执行链前；② 或出现已发布版本目录被就地篡改/链接替换的报告时 |
+| P3-AgentResearchBoundary-Unwired | `ResearchBoundary` 已接入叶 Agent（模型请求前）与 MCP 派发（授权冻结来源事实摘要、派发前新鲜重核、禁用源零派发）；剩余缺口为决定表无 schema/审核范围/边界摘要列，`DaoToolGrantPort` 仅能比对参数摘要，其余摘要不参与持久化 claim 比对 | P3 | ① 出现重启/跨进程后旧决定配合已变更边界仍被派发的实例时；② 或决定表新增摘要列迁移时 |
+| P3-AgentSkill-InvocationFlags-Unwired | `SKILL.md` 的 `disable-model-invocation`/`user-invocable` 已解析进 `SkillManifest`，但全仓无消费方；原文件保版可重读 | P3 | ① 正式 Harness loader/技能选择器接入时；② 或出现禁用的 Skill 被模型自动调用的实例时 |
+| P3-AgentAttachment-CsvHeader-AppConfirm | `csv_header_confirmed` 仅由 `AttachmentExtractionRequest` 透传，APP/UI 无「用户确认表头」入口，默认 `False` → 不扣首条（偏严格，不少算/不丢数据） | P3 | ① 附件确认 UI/服务编排落地时；② 或出现用户已确认表头却仍被少算/多扣的实例时 |
+| P3-AgentAttachment-Openpyxl-PrivateSteps | XLSX 解析复刻 `load_workbook` 私有步骤，延迟导入 `openpyxl.reader.excel.ExcelReader` 与 `openpyxl.styles.stylesheet.apply_stylesheet`；已有容器前置预算保护 | P3 | ① openpyxl 主/次版本升级前；② 或出现受支持 XLSX 解析结构错乱/异常时 |
 
 ## 技术债清单
 
@@ -700,6 +711,182 @@ review08（AKShare 开源组件复用专项，2026-09-23）发现：Tushare 积�
 **期望的最终解法**
 
 出 ADR 并完成试点（权限降级 → 切源 → 来源标注两侧可区分）。前置：P2-REV06-External-SchemaValidation（review06 F9）关闭 + 候选接口联网可用性验证 + D3 结论。upgrade 触发条件：① 用户报告 Tushare 积分不足导致功能缺失时；② 或前置条件满足时；③ 或数据源接入架构调整时。
+
+### Agent 运行时来源读取与附件（E-01）
+
+#### P3-AgentSource-Residual-Risks：来源读取/附件 worker 残余
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-AgentSource-Residual-Risks** | `_json_safe` 摘要碰撞（NaN→null/Decimal→字符串后求摘要，理论上与 None 同摘要） | 扩到新解析格式需复用 `_json_safe` 摘要时先补类型标签；或出现摘要碰撞事故时 |
+
+**产生背景与现状**
+
+E-01 里程碑第二轮独立检视 PASS（B1-B6 已闭环：CSV 多段行限额累计、跨表行段不误判重叠、XLSX 超时原子前缀块 + 父进程 `decode_selected_range` 复核、取消只终止本请求子进程、回测 `executed_at`/`available_at_unknown`、worker 校验 `source_digest`）。以上为不阻塞交付的覆盖面残余。
+
+**期望的最终解法**
+
+接 F 系列时补负向用例、统一 worker/父进程超时余量、文案改为按实际配置渲染、修正 64KiB 边界、`_json_safe` 对非有限数用类型标记而非 `null`。
+
+### Agent 运行时共享 MCP（E-02）
+
+#### P2-AgentMCP-Residual-Risks：共享 MCP 静态范围内的残余风险
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P2-AgentMCP-Residual-Risks** | MCP 错误分类只覆盖 `Timeout/Connection`（其余异常标 FAILED 可诱导重试）；连接不复核载入配置的审核身份/工具范围；`connection_test` 可能关闭既有共享会话；`retention_bytes` 无调用点且无释放；`_in_flight` 按 operation_id 去重不足以隔离并发；`mark_session_lost` 不关会话不清在途；`disconnect` 异常路径残留 config/guard；`call` 在 claim 后才取会话；stdio 超限的异常类型不保证原样抵达调用方（诊断记录 `inbound_limit:<family>`，在途请求以 `CONNECTION_CLOSED` 失败） | ① E-02-5 剩余条目（retention/并发隔离/会话归属）在 F-04 接线前逐条收敛；② 或 F-04 接线出现重复调用/误重试/连接误关时 |
+
+**产生背景与现状**
+
+E-02 里程碑独立检视（B1-B3 已修：结果不可编码 → unknown、单条结果按单条比较、门内强制单一 deadline）。以上为静态范围残余：真实 transport 接入前无法端到端验证计量与诊断通道；`ToolDispatchVerdict` 与 core `ToolGrantState` 平行建模需在 C-04 接线时映射。
+
+**E-02-5 spike 已实证（`mcp_fastmcp.py`）**：stdio 传输插入点、逐 send 门（关闭/deadline 过期在 SDK 请求前拒绝）、FD 级 stderr 尾部、四诊断通道形状、真实发现/调用。
+
+**I03 已收敛**：① stdio 改为自管进程的 `BudgetedStdioTransport`，`receive_bytes` / `structure_depth` 在 SDK 解析前按原始字节计量并登记真实插入点（准入不再拒绝），超限 fail-closed 拆除连接且不挂起；② 子进程由本进程自管，`exit_status` 在关闭后可观测为实际退出码（未观测到仍为 `None`，不填 0）；③ 目录/解码/schema/单条四族已在 `FastMCPSession.list_tools` / `call_tool` 以增量计数接入。
+
+**仍未收敛**：① `retention_bytes` 已接入计量（调用门按单条结果字节计入）但无释放/留存生命周期：累计只增，何时释放取决于 F-04 结果留存归属设计；② HTTP/SSE 仅完成传输构造，未做真实往返实证；③ stdio 超限不保证以 `MCPBudgetExceeded` 原类型抵达调用方（SDK 默认 `message_handler` 消费读流 `Exception` 值），调用方看到 `CONNECTION_CLOSED`，原因在诊断 `inbound_limit:<family>`。
+
+**已收敛（逐条核对）**：错误分类——已派发后除 `MCPCallNotDispatched`（确定未出站）外一律 `UNKNOWN`（含超时/断线/通用异常），不标 `FAILED`（`test_general_transport_error_after_dispatch_is_unknown` 等）；载入配置复核——每次使用点重核并新增「连接期间存储值偏离冻结态（审核记录/工具范围/传输/预算/期限）即拒」（`config_changed_after_connect`）；`connection_test` 只关闭自有临时会话、不替换/不关闭共享连接（`test_test_only_discovers_and_never_calls_research_tools` 后续断言）；在途隔离——登记先于 claim，同一 `operation_id` 并发重复即 `INPUT_CONFLICT`（零 claim/零外发）；会话归属——`call` 先取会话/期限/账本再 claim；`mark_session_lost` 请求关闭并保留在途归属至 owner 退出被确认（I53 设计）；`disconnect` 在摘下会话前的任何拒绝都保持连接完整，摘下后失败只保留关闭句柄，`config`/`guard` 已随 `_forget_connection_state` 清除。
+
+**已收敛（每连接单一账本）**：连接管理器在启连时创建唯一 `MCPBudgetGuard` 并经 `MCPClientFactoryPort.open(config, guard=...)` 注入会话，`receive_bytes` / `structure_depth`（传输层入站）与目录/schema/解码/单条/留存（会话解析后）各族均累计在该实例上；会话不再自建第二个 guard 分族计量（连接测试的临时会话由工厂为该次连接自建，仍是单一实例）。
+
+**期望的最终解法**
+
+随 E-02-5 spike 与 F-04 接线逐条收敛并补断言；届时删除本条目。
+
+### Agent 运行时交付（E-05）#### P2-AgentDelivery-Residual-Facts：交付残留在事实层不可定位/不可区分
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P2-AgentDelivery-Residual-Facts** | 终态 manifest 不含暂存路径、回执无残留字段；`publish_claimed` 后可确证失败不持久化 `error_code`；`unknown` 落库失败未转译；XLSX 坏 XML/非法控制字符未映射为回执；`_read_complete` 无页数上限；无文件 ID 卷整体拒绝交付 | ① F-02/F-05 交付 UI 接线时须补「残留/未确证」可视字段；② 或出现用户报告「文件可能已保存」但无法核对原因时；③ 或交付接入非 NTFS/ReFS 目标卷时 |
+
+**产生背景与现状**
+
+E-05 里程碑独立检视（三轮）确认主链路可靠（阶段顺序、取消先胜、unknown 吸收、目标身份确证已闭环），但以下残留在事实层不可表达：终态（`unknown`/`cancelled_before_publish`）manifest 按 wire 校验不含 `staged_path`，`DeliveryReceipt` 无残留字段，残留只能按 `.{target}.{hint}.*.staged` 约定推导后复核摘要/身份；`publish_claimed` 后 `os.replace` 前的可确证失败只回在回执上，持久层无法区分「未替换」与「不可确证」；`_unknown` 落库失败、XLSX XML 级损坏、openpyxl 非法控制字符未转成回执错误码；`_read_complete` 仅防游标不前进，无页数上限；`st_ino == 0` 的卷（FAT/exFAT/部分 SMB）整体拒绝交付（fail-closed，不误报成功）。
+
+**期望的最终解法**
+
+交付 UI 接线时同步补：① manifest/回执增加「残留（路径+身份）」与「失败可确证性」字段；② `_unknown` 落库失败转译为可核结果；③ XLSX 异常全集映射；④ 页数上限；⑤ 发行说明/UI 明确「目标卷须提供文件 ID（NTFS/ReFS）」。upgrade 触发条件同上。
+
+#### P3-AgentDelivery-Resume-NotImplemented：交付中断续接与残留清理未实现
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-AgentDelivery-Resume-NotImplemented** | 中断后沿原 manifest 续接、认领前后目标身份/摘要查回与补存成功回执（HANDOFF §10.2 L581-583）、按成果维度查原 unknown、unknown/取消后残留清理均未实现 | ① 交付 UI（F-05）上线前须至少支持「按 `read_delivery` 查回 + 明确重导为新的 delivery」；② 或出现中断后用户重复导出/覆盖旧目标的事故时 |
+
+**产生背景与现状**
+
+E-05 提供 `read_delivery(operation_id)` 查回原 manifest 与修订，但尚未实现「按成果/交付维度定位原 unknown」「沿原 manifest 从 `staged`/`validated` 续接」「发布认领后中断的目标身份查回与补存成功回执」。当前中断后的安全路径是：查回原交付 → 未发布则作为新的 delivery 命令重导（同版重导会重核当前来源状态）。
+
+**期望的最终解法**
+
+按 HANDOFF §10.2 中断边界表实现续接与残留清理；在此之前 UI 必须显式区分「可能已保存（unknown）」与「确认未发布」，禁止盲重导。upgrade 触发条件同上。
+
+#### P2-AgentCleanup-Residual-Risks：交付回执留存与摘要幂等的清理残余
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P2-AgentCleanup-Residual-Risks** | ① 清理后 `agent_command.input_digest`、`agent_round.frozen_digest/actual_digest`、`agent_execution.intent_digest` 换 tombstone 或置 NULL，7 条命令重放路径与 `bind_actual_input`/`accept_execution` 重放统一降级为 `INPUT_CONFLICT`；② `agent_body_payload` 仅按受清 owner 的当前 `body_ref` 发现，历史半清理留下的孤儿行不会被回收；③ `AgentRuntimeNativeStore` 已补 `_check_engine`，但运行库引擎由 `assemble_agent_runtime` 单独创建、`AgentRuntimeHandle.close()` 直接 dispose 而未经 `mark_disposed`，故 `is_disposed` 对运行库引擎恒 False（当前生产未装配该 store，仅测试构造）；④ 清理准入谓词已改由 `CleanupAdmissionFactsPort` 权威事实派生并新增 unknown 交付阻断（I81），但生产事实提供器尚未装配；⑤ `NativeCleanupExecutor.preflight` 已改为经 `NativeVerificationPort` 逐 ID 核验归属/终态/集合外引用/writer 退出/unknown 交付，生产核验提供器尚未装配（当前准入仍无生产调用方） | ① 需要清理后命令/轮次重放区分「幂等」与「异输入」时处理 ①；② 清理后磁盘计量与实际正文留存出现偏差时处理 ②；③ 运行库 handle 接入清理链路或支持额外引擎登记时处理 ③；④ 接入清理预览/准入服务时补齐 unknown 交付阻断与用例；⑤ 原生清理执行器接入生产装配（装配准入前）时补齐逐 ID 归属/终态/集合外引用校验 |
+
+**产生背景与现状**
+
+E-06 里程碑独立检视（基线 `e0e8c651a^..` 与增量 `e627fd4fb..c320374f4`）确认主链路可靠（fence 前置、九域核 0、tombstone 集合外不变、body payload 准确删行、结构载荷与可 NULL 摘要清理、NOT NULL 摘要换 tombstone）。已关闭：阶段单调性——`save_cleanup_phase` 与 `commit_cleanup_fence` 均对已 `verified` 作业拒绝回退写入（例见 `test_verified_phase_is_terminal_and_cannot_regress` / `test_fence_write_rejected_after_verified`）；操作结果读回——`read_operation` 按所属会话 `cleaned_at` 把「已清结果」报为 `result_cleaned`；交付回执——清理时一并清空 `delivery_manifest`（私有 target 路径与输出摘要随之清除），`read_delivery` 增 `manifest_cleaned` 标志按会话 `cleaned_at` 报「已清理」，且清理会话禁止从零重开交付（`test_cleaned_session_reports_manifest_cleaned` / `test_save_delivery_on_cleaned_session_is_rejected`）。仍存 ①②③⑤：① 是 §10.7 第 5 行「幂等核定所需摘要逐项说明用途」的裁决项；② 孤儿行无 owner 引用，本条不主张全表删除（防止越界）；③ 运行库引擎 dispose 语义未接入登记；⑤ I81 已将准入改为权威事实端口、预检改为逐 ID 核验端口并补 unknown 交付阻断，剩余缺口是生产事实/核验提供器的装配。
+
+**期望的最终解法**
+
+① 逐项冻结哪些摘要属幂等/身份必需，其余保持 tombstone；② 若出现磁盘计量偏差，改为「按集合内 owner 全量（含历史 body_ref 快照）回收」，不得使用 LIKE/前缀/全表删除；③ 运行库 handle 接入清理链路时补引擎 dispose 登记；⑤ 原生清理执行器接入生产装配前，实现 `NativeVerificationPort`（逐 ID 归属 user_scope/session/execution、终态可终止、集合外引用、writer 已退出、unknown 交付）与 `CleanupAdmissionFactsPort`（由存储面/在途/交付事实派生准入谓词），缺失即拒绝而非按已清处理。
+
+### Agent 运行时历史搜索与指纹查询（D32）
+
+#### P3-AgentSearch-IndexPlan：历史搜索/指纹在真实数据量下的执行计划与延迟未实测（检视 D32）
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-AgentSearch-IndexPlan** | `agent_message` 的 `idx_agent_message_search` 是 `to_tsvector('simple', search_text)` 的 GIN 表达式索引，而查询走 `ILIKE`；指纹全量成员比对与部分快照查询无分页；真实计划/延迟/峰值均未在隔离 PG 上实测 | 验收阶段以获准隔离 PG 在 D10 规模（1000 主会话/10 万公开消息/单会话 1 万条）实测计划/延迟/峰值，P95 超 2 秒或未走索引即升级 |
+
+**产生背景与现状**
+
+PR #2281 检视 D32 指出：模型里存在 GIN 索引，不等于查询走索引。`idx_agent_message_search` 是表达式索引（`to_tsvector('simple', search_text)`），只对匹配该表达式或等价全文谓词（`@@`/`to_tsvector(...)`）的查询生效；对 `ILIKE '%关键词%'` 不生效，前缀通配的 `ILIKE` 也无法使用普通 B-tree。指纹查询走全量成员比对、部分快照查询当前无分页上限，但真实数据量下的执行计划、延迟与内存峰值都没有实测数据，因此「是否超过 2 秒」既不能断言也不能否认。用户裁决：D32 延后，不在 PR #2281 修复范围。
+
+**期望的最终解法**
+
+在获准的隔离 PG 上以 D10 规模数据（1000 主会话 / 10 万公开消息 / 单会话 1 万条）实测：① 搜索与指纹查询的 `EXPLAIN (ANALYZE, BUFFERS)` 计划是否命中索引（含表达式索引与 ILIKE 的匹配关系）；② P95 延迟与内存峰值；③ 部分快照/指纹是否需要分页上限。不得以「模型里已有 GIN 索引」代证性能，也不得以未实测的估计代替结论。upgrade 触发条件同上。
+
+### Agent 运行时检视 risk 项复核残项（PR #2281，2026-11-18）
+
+> 复核基线 `3284cf8d3`；8 项结论见 `reviews/PR2281-检视问题拓扑与调度台账.md` §7。其中 I40/I41 已关闭，I44 已被 I07 的传输守卫消除（既有 `P2-AgentMCP-Residual-Risks` 覆盖），I45 已由既有 `P3-AgentSource-Residual-Risks` 覆盖，I24 已修（标准 writer 冻结 CSV 正文）；以下 3 项为新增登记。
+
+#### P3-AgentSkill-VersionReadNoRehash：已发布 Skill 版本读取不重哈希（I39）
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-AgentSkill-VersionReadNoRehash** | 幂等匹配仅比对 `.skill-manifest.json` 与入站 inspection（`_version_matches`），受管读取/服务侧不重算 digest；`ReadOnlyWorkspace` 只护路径与普通文件，防不了已发布目录被就地篡改 | ① 正式 Harness loader 接入执行链前；② 或出现已发布版本目录被就地篡改/链接替换的报告时 |
+
+**产生背景与现状**
+
+PR #2281 检视 I39（risk）指出：导入侧已做字节/链接拒绝与版本不可覆盖，但「读取已发布版本」并不重新计算内容摘要——幂等判定只把目录内清单与本次入站预检结果比较，服务读取信任清单。当前仓库内没有正式 Harness loader（技能执行链未接线），因此篡改面限于「直接修改已发布目录」，尚未进入运行期执行路径。
+
+**期望的最终解法**
+
+正式 loader 落地时，在 `ReadOnlyWorkspace` 的同句柄读取中重算文件摘要与总量，并与 `.skill-manifest.json` 比对；不一致即拒绝加载并标记版本不可信。补充「发布后就地篡改」「链接替换」负向用例。
+
+#### P3-AgentResearchBoundary-Unwired：MCP 决定/claim 的摘要持久化缺口（I43 剩余）
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-AgentResearchBoundary-Unwired** | `ResearchBoundary` 已接入叶 Agent（模型请求前）与 MCP 派发（授权冻结来源事实摘要、派发前新鲜重核、禁用源零派发）；剩余缺口为决定表无 schema/审核范围/边界摘要列，`DaoToolGrantPort` 仅能比对参数摘要，其余摘要不参与持久化 claim 比对 | ① 出现重启/跨进程后旧决定配合已变更边界仍被派发的实例时；② 或决定表新增摘要列迁移时 |
+
+**产生背景与现状**
+
+检视 I43（risk）原指出 `mcp_tools.py` 的请求/claim 结构与 `ResearchBoundary`、资料 owner、源 claim 没有真实生产组合。已收敛部分：① 能力类经 `build_leaf_boundary` 装入叶 Agent `capabilities`（模型请求前按最新来源/窗口判定）；② MCP 侧新增 `ToolBoundaryPort` 生产实现 `DaoToolBoundaryPort`（`AgentDao.read_boundary_source_keys`），`ToolRuntime` 在保存决定前冻结来源事实摘要并写入决定载荷，`MCPToolDispatcher` 在 claim 前新鲜重核，摘要不符即拒绝旧许可、已登记来源存在禁用版本即零决定/零 claim/零派发；③ `ToolGrantPort.claim` 增加 `boundary_digest` 并强制非空。
+
+未收敛部分：决定表只持久化 `parameter_digest`，`schema_digest` / `audit_scope_digest` / `boundary_digest` 无独立列，claim 无法回读持久化的授权时摘要做比对（当前由派发点新鲜重核兜底）。
+
+**期望的最终解法**
+
+决定表新增三类摘要列并纳入迁移；`DaoToolGrantPort.claim` 回读并逐项比对，不符即 `REVOKED`。补齐后删除本条目。
+
+#### P3-AgentSkill-InvocationFlags-Unwired：Skill 调用旗标已解析但无消费方（I47）
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-AgentSkill-InvocationFlags-Unwired** | `SKILL.md` 的 `disable-model-invocation`/`user-invocable` 已解析进 `SkillManifest`，但全仓无消费方（无 loader/技能选择器） | ① 正式 Harness loader/技能选择器接入时；② 或出现禁用的 Skill 被模型自动调用的实例时 |
+
+**产生背景与现状**
+
+检视 I47（risk）指出调用旗标未复制进资产注册。复核确认：flags 已在 `parse_skill_manifest` 中解析（`skills.py:767/770`），但除定义与解析外无任何消费方；由于没有正式 loader，旗标当前不影响行为，原 `SKILL.md` 完整保版、未来 loader 可重读。
+
+**期望的最终解法**
+
+loader/技能选择器接入时按旗标约束「模型可自动调用」与「用户可显式调用」；不得为元数据副本另建第二正本，仍以版本内 `SKILL.md` 为唯一来源。
+
+#### P3-AgentAttachment-CsvHeader-AppConfirm：CSV 表头确认缺 APP 层来源（I23）
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-AgentAttachment-CsvHeader-AppConfirm** | `csv_header_confirmed` 仅由 `AttachmentExtractionRequest` 透传，APP/UI 无「用户确认表头」入口，默认 `False` → 不扣首条（偏严格，不少算/不丢数据） | ① 附件确认 UI/服务编排落地时；② 或出现用户已确认表头却仍被少算/多扣的实例时 |
+
+**产生背景与现状**
+
+PR #2281 检视 I23 修复后，`csv_header_confirmed` 已作为显式请求字段贯穿 `attachments.py → worker → parse_attachment`，默认 `False`。复核确认：APP/UI 层没有任何提供该确认的来源（全仓仅服务层与测试引用），因此当前行为恒为「未确认 → 不扣首条」。方向偏严格：不会把数据行当表头扣掉，也不影响行数限额的保守判定。
+
+**期望的最终解法**
+
+附件确认 UI/服务编排落地时提供「首条是表头」的显式确认并写入请求字段；在确认前保持默认严格语义，不得改为「无字段即视为表头」。
+
+#### P3-AgentAttachment-Openpyxl-PrivateSteps：XLSX 解析依赖 openpyxl 私有步骤（I08）
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-AgentAttachment-Openpyxl-PrivateSteps** | XLSX 解析复刻 `load_workbook` 私有步骤，延迟导入 `openpyxl.reader.excel.ExcelReader` 与 `openpyxl.styles.stylesheet.apply_stylesheet`；已有容器前置预算保护 | ① openpyxl 主/次版本升级前；② 或出现受支持 XLSX 解析结构错乱/异常时 |
+
+**产生背景与现状**
+
+PR #2281 I08 修复在 openpyxl 分配前增加容器预算与结构门，但为在「预算门之后、展开之前」取得共享字符串与样式，复刻了 `load_workbook` 的私有步骤（`ExcelReader` 实例化与 `apply_stylesheet` 调用）。这些符号不在 openpyxl 公共 API 契约内，升级可能改变签名/顺序；当前锁定 `openpyxl>=3.1.5` 下工作正常并有结构/限额测试。
+
+**期望的最终解法**
+
+openpyxl 升级时复核私有步骤签名与调用顺序，或改用公开 API（如 `load_workbook(read_only=True)` + 预检查）替代；升级前跑 XLSX 结构/类型/限额全量用例。
 
 ## 已接受的权衡（Accepted Tradeoffs）
 

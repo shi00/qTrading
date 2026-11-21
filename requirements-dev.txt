@@ -27,6 +27,8 @@ anyio==4.16.0
     #   mcp
     #   openai
     #   py-key-value-aio
+    #   pydantic-ai-slim
+    #   pydantic-graph
     #   sse-starlette
     #   starlette
     #   watchfiles
@@ -87,6 +89,7 @@ charset-normalizer==3.5.2
     # via requests
 click==8.5.0
     # via
+    #   dbos
     #   huggingface-hub
     #   import-linter
     #   litellm
@@ -97,6 +100,8 @@ colorama==0.4.6 ; sys_platform == 'win32'
     #   tqdm
 coverage==7.17.2
     # via pytest-cov
+croniter==7.0.0
+    # via dbos
 cryptography==50.0.2
     # via
     #   astockscreener (pyproject.toml)
@@ -110,6 +115,8 @@ cyclonedx-python-lib==11.12.0
     # via pip-audit
 cyclopts==5.3.3
     # via fastmcp-slim
+dbos==3.4.0
+    # via astockscreener (pyproject.toml)
 decorator==5.3.1
     # via akshare
 defusedxml==0.7.1
@@ -136,11 +143,11 @@ execnet==2.1.2
     # via pytest-xdist
 fastapi==0.162.0
     # via astockscreener (pyproject.toml)
-fastmcp==4.1.6
+fastmcp==4.2.0
     # via
     #   astockscreener (pyproject.toml)
     #   flet-mcp
-fastmcp-slim==4.1.6
+fastmcp-slim==4.2.0
     # via fastmcp
 fastuuid==0.14.0
     # via litellm
@@ -169,10 +176,16 @@ frozenlist==1.8.0
     #   aiosignal
 fsspec==2026.9.0
     # via huggingface-hub
+genai-prices==0.2.3
+    # via
+    #   pydantic-ai-harness
+    #   pydantic-ai-slim
 greenlet==3.5.6
     # via sqlalchemy
 griffelib==2.4.1
-    # via fastmcp-slim
+    # via
+    #   fastmcp-slim
+    #   pydantic-ai-slim
 grimp==3.19
     # via import-linter
 h11==0.16.0
@@ -198,11 +211,15 @@ httpx==0.28.1
     #   flet
     #   litellm
     #   openai
+    #   pydantic-ai-harness
 httpx2==2.16.0
     # via
+    #   astockscreener (pyproject.toml)
     #   fastmcp-slim
+    #   genai-prices
     #   huggingface-hub
     #   mcp
+    #   pydantic-ai-slim
 httpx2-jsfetch==1.0 ; sys_platform == 'emscripten'
     # via httpx2
 huggingface-hub==2.4.0
@@ -256,6 +273,8 @@ jsonref==1.1.0
     # via fastmcp-slim
 jsonschema==4.26.0
     # via
+    #   astockscreener (pyproject.toml)
+    #   fastmcp-slim
     #   litellm
     #   mcp
 jsonschema-path==0.5.0
@@ -272,6 +291,8 @@ litellm==1.103.10
     # via astockscreener (pyproject.toml)
 llama-cpp-python==0.3.36
     # via astockscreener (pyproject.toml)
+logfire-api==5.6.0
+    # via pydantic-graph
 lxml==6.1.3
     # via
     #   akshare
@@ -333,6 +354,7 @@ opentelemetry-api==1.45.2
     #   fastapi
     #   fastmcp-slim
     #   mcp
+    #   pydantic-ai-slim
 packageurl-python==0.17.6
     # via cyclonedx-python-lib
 packaging==26.3
@@ -382,6 +404,12 @@ propcache==0.5.4
     # via
     #   aiohttp
     #   yarl
+psycopg==3.3.8
+    # via
+    #   astockscreener (pyproject.toml)
+    #   dbos
+psycopg-binary==3.3.8 ; implementation_name != 'pypy'
+    # via psycopg
 psycopg2-binary==2.9.13
     # via astockscreener (pyproject.toml)
 py-key-value-aio==0.4.6
@@ -399,14 +427,25 @@ pydantic==2.14.3
     #   astockscreener (pyproject.toml)
     #   fastapi
     #   fastmcp-slim
+    #   genai-prices
     #   litellm
     #   mcp
     #   mcp-types
     #   openai
     #   openapi-pydantic
+    #   pydantic-ai-slim
+    #   pydantic-graph
     #   pydantic-settings
+pydantic-ai-harness==0.66.0
+    # via astockscreener (pyproject.toml)
+pydantic-ai-slim==2.66.0
+    # via
+    #   astockscreener (pyproject.toml)
+    #   pydantic-ai-harness
 pydantic-core==2.50.4
     # via pydantic
+pydantic-graph==2.66.0
+    # via pydantic-ai-slim
 pydantic-settings==2.16.2
     # via
     #   fastmcp-slim
@@ -424,6 +463,8 @@ pyluach==2.3.0
     # via exchange-calendars
 pyparsing==3.3.3
     # via pip-requirements-parser
+pypdf==6.21.4
+    # via astockscreener (pyproject.toml)
 pyperclip==1.11.0
     # via fastmcp-slim
 pyright==1.1.414
@@ -459,6 +500,8 @@ pytest-xdist==3.8.0
 python-dateutil==2.9.0.post0
     # via
     #   botocore
+    #   croniter
+    #   dbos
     #   pandas
 python-dotenv==1.2.4
     # via
@@ -476,9 +519,11 @@ pywin32-ctypes==0.2.3 ; sys_platform == 'win32'
     # via keyring
 pyyaml==6.0.3
     # via
+    #   dbos
     #   fastmcp-slim
     #   huggingface-hub
     #   jsonschema-path
+    #   pydantic-ai-harness
 readerwriterlock==1.0.10
     # via astockscreener (pyproject.toml)
 referencing==0.37.0
@@ -539,6 +584,7 @@ sqlalchemy==2.1.8
     # via
     #   astockscreener (pyproject.toml)
     #   alembic
+    #   dbos
 sqlparse==0.6.1
     # via astockscreener (pyproject.toml)
 sse-starlette==3.6.0
@@ -603,16 +649,19 @@ typing-inspection==0.4.5
     #   fastapi
     #   mcp
     #   pydantic
+    #   pydantic-ai-slim
+    #   pydantic-graph
     #   pydantic-settings
 tzdata==2026.6
     # via
     #   astockscreener (pyproject.toml)
     #   exchange-calendars
     #   pandas
+    #   psycopg
     #   tzlocal
 tzlocal==5.4.5
     # via apscheduler
-uncalled-for==0.6.0
+uncalled-for==0.6.1
     # via fastmcp-slim
 urllib3==2.8.0
     # via

@@ -9,7 +9,7 @@
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 import flet as ft
 
@@ -19,6 +19,19 @@ from utils.log_decorators import UILogger
 from utils.shutdown import ShutdownCoordinator
 
 logger = logging.getLogger(__name__)
+
+#: 关闭门（Agent 关闭前置）：返回 True 表示已取得可释放依赖的就绪证据。
+BeforeCleanup = Callable[[], Awaitable[bool]]
+
+
+def _shutdown_blocked_dialog(page: ft.Page) -> ft.AlertDialog:
+    """关闭门未就绪时的提示对话框（保留进程与依赖，不执行清理）。"""
+    return ft.AlertDialog(
+        modal=True,
+        title=ft.Text(I18n.get("shutdown_blocked_title")),
+        content=ft.Text(I18n.get("shutdown_blocked_content")),
+        actions=[ft.TextButton(I18n.get("common_confirm"), on_click=lambda _e: page.pop_dialog())],
+    )
 
 
 def build_locale_configuration(locale_str: str) -> ft.LocaleConfiguration:
@@ -161,10 +174,13 @@ async def perform_window_shutdown(
     page: ft.Page,
     *,
     is_web_mode_fn: Callable[[], bool],
+    before_cleanup: BeforeCleanup | None = None,
 ) -> bool:
     """执行窗口关闭 shutdown 流程.
 
     流程：
+    0. 显示进度对话框后先消费关闭门（``before_cleanup``）；未就绪即取消本次关闭
+       并保留进程与依赖（不 cleanup / 不 destroy / 不强退），返回 False
     1. 入口立即显示非阻塞进度对话框（无 actions，不可手动取消）
     2. 启动 watchdog
     3. 执行 cleanup（timeout=60s, step_timeout=35s）
@@ -173,7 +189,7 @@ async def perform_window_shutdown(
     6. cleanup 失败：log error，sleep 0.2s，force_exit(1)，对话框不关闭（进程即将退出），返回 False
 
     Returns:
-        True 表示 cleanup 成功；False 表示 cleanup 不完整（已 force_exit）
+        True 表示 cleanup 成功；False 表示关闭被阻断或 cleanup 不完整（后者已 force_exit）
     """
     logger.info("[Main] Window close confirmed by user.")
     # 立即显示关闭进度对话框，告知用户正在关闭数据库（避免窗口卡死无反馈）。
@@ -184,6 +200,12 @@ async def perform_window_shutdown(
         content=ft.Text(I18n.get("shutdown_in_progress_content")),
     )
     page.show_dialog(shutdown_dialog)  # type: ignore[arg-type]  # [reason: ft.AlertDialog 为 DialogControl 子类，page.show_dialog 运行时接受]
+    if before_cleanup is not None and not await before_cleanup():
+        # 关闭门未就绪：不得先关账本/引擎/数据库（R2-I35），保留进程供重试。
+        logger.error("[Main] Agent close gate not ready; window shutdown cancelled, resources kept alive.")
+        page.pop_dialog()
+        page.show_dialog(_shutdown_blocked_dialog(page))  # type: ignore[arg-type]  # [reason: ft.AlertDialog 为 DialogControl 子类，运行时接受]
+        return False
     # Phase 2 Step 8 (_step8_stop_embedded_postgres, 35s) 加入后，步骤超时和 = 55s。
     # watchdog 70s + do_cleanup 60s 容纳 55s 步骤之和 + 5s margin，保证 Step 8 graceful stop 完整执行。
     coordinator.start_watchdog(70.0)
@@ -240,16 +262,22 @@ async def perform_upgrade_exit(
     page: ft.Page,
     *,
     is_web_mode_fn: Callable[[], bool],
+    before_cleanup: BeforeCleanup | None = None,
 ) -> None:
     """Upgrade 失败后的清理并强制退出.
 
     流程：
+    0. 先消费关闭门（``before_cleanup``）；未就绪即保留进程与依赖（不 cleanup /
+       不 destroy / 不强退），不把「未收敛」当「已关闭」
     1. 执行 cleanup（timeout_s=5.0, step_timeout_s=10.0）
     2. cleanup 被 cancel：force_exit(1) 并 raise CancelledError（R2 红线，与 perform_window_shutdown 对齐）
     3. cleanup 失败仅记录日志
     4. 非 web_mode 时销毁窗口（destroy 失败仅记录日志）
     5. force_exit(1)
     """
+    if before_cleanup is not None and not await before_cleanup():
+        logger.error("[Main] Agent close gate not ready; upgrade exit cancelled, resources kept alive.")
+        return
     # upgrade exit 路径：属于异常终止的快速退出模式，timeout_s=5.0 是整个 cleanup 链的硬上限（asyncio.wait_for 总超时）。
     # step_timeout_s=10.0 通过 min(default_timeout, step_timeout_s) 作用于各步骤（Step 0 为 6.0s，Step 8 为 10.0s，
     # 其余步骤保持其默认值）。各步骤与 Step 8 实际能执行的时长均受 5.0s 总时长硬性钳制，以确保升级失败后能够迅速退出。
@@ -280,10 +308,14 @@ async def perform_upgrade_exit(
 
 async def handle_disconnect(
     coordinator: ShutdownCoordinator,
+    *,
+    before_cleanup: BeforeCleanup | None = None,
 ) -> None:
     """处理外部 disconnect 事件.
 
     流程：
+    0. 先消费关闭门（``before_cleanup``）；未就绪即保留进程与依赖（不 cleanup /
+       不强退），等待后续可重试的收敛，不把「未收敛」当「已关闭」
     1. 启动 watchdog（70s）
     2. 执行 cleanup（timeout=60s, step_timeout=35s）
     3. cleanup 被 cancel：force_exit(1) 并 raise CancelledError（R2 红线，与 perform_window_shutdown 对齐）
@@ -295,6 +327,9 @@ async def handle_disconnect(
     若据此短路会既不 force_exit 也失去 watchdog 兜底，导致进程悬挂。
     多入口重复 force_exit 由 ``ShutdownCoordinator.force_exit`` 的首次请求生效保护消解。
     """
+    if before_cleanup is not None and not await before_cleanup():
+        logger.error("[Main] Agent close gate not ready; disconnect cleanup cancelled, resources kept alive.")
+        return
     # Phase 2 Step 8 加入后，disconnect 路径同步调整：watchdog 70s + do_cleanup 60s
     coordinator.start_watchdog(70)
     try:

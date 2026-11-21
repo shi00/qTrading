@@ -57,6 +57,32 @@ async def get_app_state(engine, key: str) -> str | None:
 
 
 @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+async def list_app_state(engine, prefix: str) -> dict[str, str]:
+    """按前缀列出 app_state（只读；无新表）。
+
+    与 ``get_app_state`` 的「无值=空」不同，查询失败必须传播：把读取失败伪装成
+    「没有任何配置」会让调用方据空结果做出错误决定（R21）。
+    引擎已释放（R5）与取消（R2）始终传播。
+    """
+    if engine is None:
+        return {}
+    try:
+        await _guard_engine(engine, "list")
+        async with engine.connect() as conn:
+            result = await conn.execute(
+                sa.select(AppState.config_key, AppState.config_value).where(AppState.config_key.startswith(prefix))
+            )
+            return {row[0]: row[1] for row in result}
+    except asyncio.CancelledError:
+        raise
+    except EngineDisposedError:
+        raise
+    except Exception as e:
+        logger.warning("[AppState] Failed to list prefix='%s': %s", prefix, type(e).__name__)
+        raise
+
+
+@log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
 async def set_app_state(engine, key: str, value: str, *, strict: bool = False) -> None:
     """覆盖写 app_state。
 

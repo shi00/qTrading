@@ -452,6 +452,7 @@ class AIUsageDao(BaseDao):
         owner_epoch: int,
         owner_lease_expires_at: datetime.datetime,
         budget_policy_snapshot: dict[str, Any] | None = None,
+        run_id: str | None = None,
     ) -> bool:
         """建立 / 幂等复用父请求行（F16，方案最小方案「场景入口创建父请求」）。
 
@@ -461,6 +462,11 @@ class AIUsageDao(BaseDao):
         零尝试请求在请求页（以 invocation 为主表）同样可查（R21：失败不伪装
         为未发生）。预留登记仍走 :meth:`try_reserve`，本方法不追加预留元素。
 
+        ``run_id``（R2-I05）：调用方业务批次身份（如 ``StockAgentCall.operation_id``），
+        与股票研究请求同一身份族——落库后可按批次查回其全部单股研究请求与费用事实。
+        仅首次插入写入，冲突时 ``COALESCE`` 保留既有值（同一 invocation 的批次归属
+        不随后续重放漂移）。
+
         返回 True = 新建或幂等复用（upsert 命中即有行）。
         """
         self._check_engine(context="ai_usage.create_invocation")
@@ -469,14 +475,15 @@ class AIUsageDao(BaseDao):
                 sa.text(
                     """
                     INSERT INTO ai_invocation (
-                        invocation_id, scenario_id, trigger, budget_policy_snapshot,
+                        invocation_id, scenario_id, trigger, run_id, budget_policy_snapshot,
                         owner_session_id, owner_epoch, owner_lease_expires_at
                     ) VALUES (
-                        :invocation_id, :scenario_id, :trigger,
+                        :invocation_id, :scenario_id, :trigger, :run_id,
                         CAST(:budget_policy_snapshot AS jsonb),
                         :owner_session_id, :owner_epoch, :owner_lease_expires_at
                     )
                     ON CONFLICT (invocation_id) DO UPDATE SET
+                        run_id = COALESCE(ai_invocation.run_id, EXCLUDED.run_id),
                         updated_at = (now() AT TIME ZONE 'UTC')
                     """
                 ),
@@ -484,6 +491,7 @@ class AIUsageDao(BaseDao):
                     "invocation_id": invocation_id,
                     "scenario_id": scenario_id,
                     "trigger": trigger,
+                    "run_id": run_id,
                     "budget_policy_snapshot": (
                         json.dumps(budget_policy_snapshot, ensure_ascii=False) if budget_policy_snapshot else None
                     ),
@@ -1968,6 +1976,55 @@ class AIUsageDao(BaseDao):
             "effective_reserved_cny": _decimal_or_zero(effective_row),
             "unconfirmed_reserved_cny": _decimal_or_zero(unconfirmed_row),
             **integrity,
+        }
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    async def read_active_reserved_cny(self, *, invocation_ids: list[str] | tuple[str, ...]) -> dict[str, Decimal]:
+        """逐 invocation 汇总活跃预留金额（只读；费用投影的「预留中」列）。
+
+        活跃状态 = ``reserved`` / ``dispatched`` / ``held_unconfirmed``（与预算门
+        ``_read_active_reservations_sum`` 同口径：三者都占用预算，直到 settled /
+        released）。本方法**只读**，不改写预留状态、不结算、不估算。
+
+        金额为 JSONB 文本，逐元素先经非负小数正则过滤再 ``::numeric``（存量垃圾
+        ``NaN`` / 负值 / 非数值文本按事实零计入，不 crash、不抵消合法预留）；
+        无活跃预留的 invocation 不出现在返回映射中（调用方按事实零处理，R21）。
+        """
+        self._check_engine(context="ai_usage.read_active_reserved_cny")
+        ids = [str(item) for item in invocation_ids]
+        if not ids:
+            return {}
+        async with self._guarded_begin() as conn:
+            rows = (
+                await conn.execute(
+                    sa.text(
+                        """
+                        SELECT
+                            i.invocation_id,
+                            COALESCE(SUM(
+                                CASE
+                                    WHEN elem->>'amount_cny' ~ '^[0-9]+(\\.[0-9]+)?$'
+                                        THEN CASE
+                                            WHEN (elem->>'amount_cny')::numeric <= 1e15
+                                                THEN (elem->>'amount_cny')::numeric
+                                            ELSE 0
+                                        END
+                                    ELSE 0
+                                END
+                            ), 0)
+                        FROM ai_invocation i, jsonb_array_elements(i.reservations) AS elem
+                        WHERE i.invocation_id = ANY(CAST(:invocation_ids AS text[]))
+                          AND elem->>'state' = ANY(CAST(:states AS text[]))
+                          AND elem->>'amount_cny' IS NOT NULL
+                        GROUP BY i.invocation_id
+                        """
+                    ),
+                    {"invocation_ids": ids, "states": list(_ACTIVE_RESERVATION_STATES)},
+                )
+            ).fetchall()
+        return {
+            str(row[0]): _finite_non_negative_or_zero(Decimal(str(row[1])), context="active_reserved_projection")
+            for row in rows
         }
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)

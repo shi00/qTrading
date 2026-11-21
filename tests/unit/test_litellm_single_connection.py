@@ -24,6 +24,7 @@ import httpx
 import pytest
 
 from services.ai_service.litellm_client import LiteLLMClient
+from core.errors import AIProviderParamsRejectedError
 from core.model_management_types import (
     AdapterResponse,
     AttemptContext,
@@ -433,6 +434,136 @@ class TestInvokeSingleConnection:
 
 
 # ---------------------------------------------------------------------------
+# M17：Agent 出口单候选钉定（禁跨部署 fallback / 禁部署级 auto_router）
+# ---------------------------------------------------------------------------
+class TestFixedCandidateEgressM17:
+    """Agent 出口每请求候选可核：跨部署 fallback / 部署级 auto_router 零出站拒绝。
+
+    复核结论（M17）：两个 Agent 出口（``invoke_single_connection`` /
+    ``invoke_chat_connection``）直调 ``litellm.acompletion``、不经 Router；但 litellm
+    在请求未传 fallbacks 时读取全局 ``litellm.model_fallbacks`` 并静默改发其它部署
+    （失败即换模型，Router 式 fallback 还可能非流式重发截断已产出流式内容），部署级
+    ``auto_router/`` 亦会在部署内部再路由——两者都让「单连接单路径 / 固定候选」
+    声明不成立。修复为命中即零出站拒绝，且不改全局配置（旧链 Router 部署级
+    fallback 行为保持不变）。
+    """
+
+    @staticmethod
+    def _chat_request():
+        from core.model_management_types import ChatMessage, ChatTurnRequest, TextContentPart
+
+        return ChatTurnRequest(
+            model_call_id="mc-m17",
+            messages=(ChatMessage(role="user", content_parts=(TextContentPart(text="hi"),)),),
+            instructions=(),
+            tools=(),
+            output_schema=None,
+            frozen_params={},
+            max_output_tokens=16,
+            deadline=asyncio.get_running_loop().time() + 60.0,
+            output_tools=(),
+        )
+
+    async def test_single_connection_rejects_global_cross_deployment_fallbacks(self):
+        """全局 ``litellm.model_fallbacks`` 非空 → 拒绝且零出站（无换模型重发/截断）。"""
+        client = LiteLLMClient(MagicMock())
+        request = _request()
+        with (
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service.litellm", SimpleNamespace(model_fallbacks=["openai/gpt-4o"])),
+            patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_ac,
+        ):
+            with pytest.raises(ValueError, match="cross-deployment fallbacks"):
+                await client.invoke_single_connection(request, _connection(), request.deadline, _attempt_context())
+        mock_ac.assert_not_awaited()
+
+    async def test_chat_connection_rejects_global_cross_deployment_fallbacks(self):
+        """聊天回合出口同判：跨部署 fallback 命中即拒绝（不静默换模型续写/截断）。"""
+        client = LiteLLMClient(MagicMock())
+        request = self._chat_request()
+        with (
+            patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=True),
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service.litellm", SimpleNamespace(model_fallbacks=["openai/gpt-4o"])),
+            patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_ac,
+        ):
+            with pytest.raises(ValueError, match="cross-deployment fallbacks"):
+                await client.invoke_chat_connection(
+                    request, _connection(), request.deadline, _attempt_context(), stream=True
+                )
+        mock_ac.assert_not_awaited()
+
+    async def test_rejects_deployment_auto_router_model(self):
+        """部署级 ``auto_router/...`` 模型在部署内部再路由 → 拒绝且零出站。"""
+        client = LiteLLMClient(MagicMock())
+        request = _request()
+        conn = _connection(model="auto_router/complexity_router")
+        with (
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service.litellm", SimpleNamespace(model_fallbacks=None)),
+            patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_ac,
+        ):
+            with pytest.raises(ValueError, match="auto_router"):
+                await client.invoke_single_connection(request, conn, request.deadline, _attempt_context())
+        mock_ac.assert_not_awaited()
+
+    async def test_candidate_fixed_and_router_not_used(self):
+        """候选即连接声明、不经 Router、无 per-request fallback 注入（固定可核）。"""
+        client = LiteLLMClient(MagicMock())
+        request = _request()
+        router_loader = MagicMock()
+        with (
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service.litellm", SimpleNamespace(model_fallbacks=None)),
+            patch("services.ai_service._ensure_router_loaded", router_loader),
+            patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_ac,
+        ):
+            mock_ac.return_value = _fake_response()
+            await client.invoke_single_connection(request, _connection(), request.deadline, _attempt_context())
+
+        router_loader.assert_not_called()
+        kwargs = mock_ac.await_args.kwargs
+        assert kwargs["model"] == "deepseek/deepseek-chat"
+        assert kwargs["num_retries"] == 0
+        assert "fallbacks" not in kwargs
+
+    def test_legacy_router_deployment_fallbacks_unchanged(self):
+        """旧链 Router 部署级 fallback 构造不被 M17 守卫改变（全局 fallback 也不拦截）。"""
+        from services.ai_service.litellm_client import _ensure_router_loaded
+
+        captured: dict = {}
+
+        def router_ctor(**kwargs):
+            captured.update(kwargs)
+            return "ROUTER_INSTANCE"
+
+        litellm_mock = MagicMock()
+        litellm_mock.Router.side_effect = router_ctor
+        litellm_mock.model_fallbacks = ["openai/gpt-4o"]
+        failover_config = {
+            "primary": "deepseek/deepseek-chat",
+            "fallbacks": ["openai/gpt-4"],
+            "primary_config": {
+                "provider": "deepseek",
+                "model": "deepseek-chat",
+                "api_key": "sk-primary-key",
+                "base_url": "https://api.deepseek.com",
+            },
+        }
+        with (
+            patch("services.ai_service._router_import_attempted", False),
+            patch("services.ai_service._litellm_router", None),
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("utils.config_handler.ConfigHandler.get_failover_config", return_value=failover_config),
+            patch("services.ai_service.litellm", litellm_mock),
+        ):
+            assert _ensure_router_loaded({"openai": {"api_key": "sk-openai", "base_url": "https://api.openai.com/v1"}})
+
+        assert captured["fallbacks"] == [{"deepseek/deepseek-chat": ["openai/gpt-4"]}]
+        assert captured["context_window_fallbacks"] == [{"deepseek/deepseek-chat": ["openai/gpt-4"]}]
+
+
+# ---------------------------------------------------------------------------
 # 受控端点：真实锁定 litellm 断言实际出站次数（判定证据）
 # ---------------------------------------------------------------------------
 class TestSingleConnectionNoHiddenRetry:
@@ -553,6 +684,132 @@ class TestSingleConnectionNoHiddenRetry:
             resolve_credential("keyring:model-connection-leak")
         assert "sk-super-secret-value" not in str(excinfo.value)
         assert os.environ.get("QTR_NO_RETRY_KEY") != "sk-test-local-endpoint"
+
+
+# ---------------------------------------------------------------------------
+# M20：严格出站（禁删参 / 禁隐式重发）
+# ---------------------------------------------------------------------------
+class TestStrictNoDropNoResend:
+    """锁定 SDK 的 422 删参重发分支必须在 Agent 出口不可达（M20）。
+
+    证据口径：真实锁定 litellm + 受控端点（返回 FastAPI 形态 422，报错参数名在
+    ``detail[*].loc`` 中，正是 SDK 删参重发分支的触发条件），断言出站恰 1 次、
+    首包参数原样、错误含 attempt 身份，且全局 ``litellm.drop_params`` 未被切换。
+    """
+
+    async def test_422_refused_without_hidden_resend(self, monkeypatch: pytest.MonkeyPatch, real_litellm):
+        monkeypatch.setenv("QTR_STRICT_422_KEY", "sk-test-local-endpoint")
+        for var in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+            monkeypatch.delenv(var, raising=False)
+        # 还原运行时全局（_ensure_litellm_loaded 首次加载时置 True，旧链依赖该兜底）
+        real_litellm.drop_params = True
+
+        request_count = 0
+        bodies: list[bytes] = []
+
+        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            nonlocal request_count
+            request_count += 1
+            head = await reader.readuntil(b"\r\n\r\n")
+            length = 0
+            for line in head.decode("latin-1").split("\r\n"):
+                if line.lower().startswith("content-length:"):
+                    length = int(line.split(":", 1)[1].strip())
+            bodies.append(await reader.readexactly(length) if length else b"")
+            detail = json.dumps({"detail": [{"loc": ["body", "max_tokens"], "msg": "extra fields not permitted"}]})
+            body = json.dumps(
+                {"error": {"message": detail, "type": "invalid_request_error", "param": None, "code": None}}
+            ).encode()
+            writer.write(
+                b"HTTP/1.1 422 Unprocessable Entity\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"Connection: close\r\n\r\n" + body
+            )
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+
+        conn = _connection(
+            provider="openai",
+            model="research-model",
+            api_base=f"http://127.0.0.1:{port}/v1",
+            credential_ref="env:QTR_STRICT_422_KEY",
+        )
+        client = LiteLLMClient(MagicMock())
+        request = _request(deadline=asyncio.get_running_loop().time() + 30.0)
+        try:
+            with pytest.raises(AIProviderParamsRejectedError) as excinfo:
+                await asyncio.wait_for(
+                    client.invoke_single_connection(request, conn, request.deadline, _attempt_context()),
+                    timeout=25.0,
+                )
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        # 出站一次：SDK 的删参重发（同 attempt 第二次 send）未发生
+        assert request_count == 1, f"expected exactly 1 outbound request, got {request_count}"
+        # 首包参数原样：未删参（max_tokens / temperature / messages 均按请求发送）
+        sent = json.loads(bodies[0])
+        assert sent["model"] == "research-model"
+        assert sent["max_tokens"] == 128
+        assert sent["temperature"] == pytest.approx(0.2)
+        assert sent["messages"][-1]["content"] == "hello"
+        # 原 attempt 可核：错误身份携带 attempt / invocation
+        assert "att-1" in str(excinfo.value)
+        assert "inv-1" in str(excinfo.value)
+        # 旧链不回退：全局 drop_params 未在本次调用中被临时切换
+        assert real_litellm.drop_params is True
+
+    async def test_openai_family_injects_strict_client(self, monkeypatch: pytest.MonkeyPatch):
+        """OpenAI 系连接按调用注入独立 client（禁删参策略的作用点）。"""
+        monkeypatch.setenv("QTR_STRICT_INJECT_KEY", "sk-inject")
+        with (
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_ac,
+        ):
+            mock_ac.return_value = _fake_response()
+            conn = _connection(
+                provider="openai",
+                model="research-model",
+                api_base="https://api.example.com/v1",
+                credential_ref="env:QTR_STRICT_INJECT_KEY",
+            )
+            request = _request()
+            await LiteLLMClient(MagicMock()).invoke_single_connection(
+                request, conn, request.deadline, _attempt_context()
+            )
+
+        kwargs = mock_ac.await_args.kwargs
+        assert kwargs["client"] is not None
+        assert kwargs["drop_params"] is False
+        assert kwargs["num_retries"] == 0
+
+    async def test_native_provider_keeps_default_call_shape(self, monkeypatch: pytest.MonkeyPatch):
+        """原生 SDK provider（anthropic）无 422 删参分支，不注入 client（行为不变）。"""
+        monkeypatch.setenv("QTR_STRICT_NATIVE_KEY", "sk-native")
+        with (
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_ac,
+        ):
+            mock_ac.return_value = _fake_response()
+            conn = _connection(
+                provider="anthropic",
+                model="claude-3-5-sonnet",
+                api_base="https://api.anthropic.com",
+                credential_ref="env:QTR_STRICT_NATIVE_KEY",
+            )
+            request = _request()
+            await LiteLLMClient(MagicMock()).invoke_single_connection(
+                request, conn, request.deadline, _attempt_context()
+            )
+
+        kwargs = mock_ac.await_args.kwargs
+        assert "client" not in kwargs
+        assert kwargs["drop_params"] is False
 
 
 # ---------------------------------------------------------------------------

@@ -20,8 +20,15 @@
   失败尝试即时提交 failed 终态（结算该次预留 + 记失败事实，R21 不静默）；
 - **D5 降级**：有限额费用型在预留被拒（余额不足 / owner 失权）或账本不可用
   （try_reserve / mark_dispatched persisted=False）时零出站；usage_only 预留
-  或落账不可用时允许进程内一次性派发身份；失败候选收敛错误提交终态
-  （§6.2 步骤 5，F16：终态携带预留 ID 经 F22 转换 / F23 背书收敛预留）；
+  或落账不可用时允许进程内一次性派发身份（**仅旧直推链**；Agent 聊天回合见
+  下条严格策略）；失败候选收敛错误提交终态（§6.2 步骤 5，F16：终态携带预留
+  ID 经 F22 转换 / F23 背书收敛预留）；
+- **M08 必需登记严格（Agent 聊天回合，``execute_chat_turn``）**：reserve /
+  mark_dispatched / begin_attempt 任一登记未确认（persisted=False 或无有效
+  预留）即零出站并中断候选遍历（不外发、不换候选 / 不重试绕过）；begin 后续
+  成功不得补放行此前 unknown 的必需登记（前置登记失败即已收敛，不进入 begin）；
+  原因随候选决策记录并告警（R21 不静默）。旧直推入口 ``execute`` 既有
+  usage_only 降级行为不变；
 - **R2**：CancelledError 始终传播，不包装为失败；取消传播边界先经受限清理
   （F19）：尽力提交 cancelled 终态或幂等重提交在途终态（短超时，提交失败仅记
   日志）后 re-raise——attempt 不再永久停留 dispatched；外发已开始的取消按
@@ -41,31 +48,84 @@
   仅在旧版快照（键缺失 / 非法）上按构造默认兼容，且 **warning 留痕**——不静默
   回退（用户策略丢失不得伪装成功，R21）；``fallback_enabled=False`` 只派发路由
   首个候选，其余候选记 skipped（不静默）。
+
+B-02-3（HANDOFF §6.1）：旧入口 ``execute`` 与新入口 ``execute_chat_turn`` 共享
+同一遍历主干与逐尝试执行段（预留 → 派发绑定 → 授权 → attempt 登记 → 执行 →
+usage → 结算），入口差异经 :class:`_AttemptPolicy` 参数化：
+
+- **execute_chat_turn 契约**：完整模型回合；``on_event`` 可等待（背压经 await
+  透传，SQ-02「实际 delta 有界事件」）；返回 :class:`core.model_management_types.ChatTurnOutcome`
+  ——transport 与 settlement 两维分离、各自可表达 unknown（INV-07）；旧
+  ``execute`` 校验入口行为不变；
+- **binding**（受理冻结模型绑定，无秘密 mapping）：必需 ``scenario_id``（路由
+  查找键）与 ``task_id``（真实子任务标识，F34 落账 / F26 资格门控）；缺失 /
+  非字符串在入口 fail-closed（ValueError，零副作用）。invocation 身份取
+  ``model_call_id``（一回合一 invocation，model_call → invocation → attempt
+  稳定关联，HANDOFF 模型桥关联要求）；
+  # NOTE(lazy): trigger 沿旧链固定 "manual"。 ceiling: Agent 回合触发身份未在
+  # 设计正本冻结。 upgrade: D 系列 workflow 接线冻结触发语义时经 binding 显式携带。
+- **§6.4-5 已公开分片后失败**：任一真实事件送达调用方（on_event 之前即置位，
+  保守口径）后失败——保 partial/unknown 及原 attempt，不重试不换候选（不换
+  模型拼接）；未公开分片前的失败沿冻结候选策略处理（与旧链一致）；
+- **拒绝不换候选规避**（DD §10.1）：``finish_reason="refused"`` 的完整回合以
+  failed 终态 + 完整 response 承载并中断候选遍历（halt），禁止换候选绕过；
+  用量已观测不丢弃（R21）；
+- **协议失败**：断流 / 缺 finish / 畸形闭合参数经适配器层
+  ``ModelTurnProtocolError`` 呈现为确认失败（B-02-1 已实现协议侧），不因迭代
+  耗尽成功（§6.4-4）；取消传播边界沿共享 F19 受限清理后 re-raise（R2）。
+- **M07 资料核权（逐实际 attempt）**：binding 携带 ``data_consent``（受理冻结
+  operation/资料上下文）时，每次实际尝试（含同候选重试与后续备用候选）在预留
+  / 派发 / 外发之前以该 attempt 的准确 ``attempt_id`` 重建请求并调资料 owner
+  ``authorize_data_attempt``——连接授权 + 绑定一致核 + 源 claim 串成同一门；
+  deny / unknown / owner 能力缺失 / 核权异常一律零出站（不进 reserve、不
+  mark_dispatched、不外发），原因随候选决策记录（R21 不静默）并中断遍历。
+  未携带该键时不改变既有链路（旧直推入口政策不变）。
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
 import logging
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal, cast
 
+from core.agent_types import (
+    DataAttemptAuthorization,
+    DataAttemptOutcome,
+    SourceKind,
+    validate_data_attempt_authorization,
+)
 from core.errors import AIContentRefusedError
 from core.model_management_types import (
     AdapterResponse,
     AttemptContext,
     CandidateDecision,
+    ChatStreamEvent,
+    ChatStreamEventHandler,
+    ChatInferenceAdapter,
+    ChatTurnOutcome,
+    ChatTurnRequest,
+    ChatTurnResponse,
+    ChatTurnSettlementState,
+    ChatTurnTransportState,
     ExecutionSnapshot,
+    FunctionToolSpec,
+    ImageContentPart,
     InferenceAdapter,
     InferenceRequest,
+    ModelTurnProtocolError,
     NormalizedLLMUsage,
     ResolvedConnection,
     ScenarioExecutionResult,
+    LOCAL_ADAPTER_KINDS,
+    TextContentPart,
     adapter_kind_requires_egress,
-    ensure_inference_adapter,
+    ensure_registered_adapter,
 )
 from services.ai_service.connection_pricing import (
     ConnectionPricing,
@@ -81,6 +141,10 @@ from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.loop_local import get_loop_local
 
 logger = logging.getLogger(__name__)
+
+# 可注册适配器并集（检视 M01）：新旧入口协议分别校验——旧入口要求 ``.invoke``，
+# chat 入口要求 ``.invoke_chat``；组装期只拒绝两者皆缺的对象。
+_EntryAdapter = InferenceAdapter | ChatInferenceAdapter
 
 # 重试退避（秒）：首次 1s、第二次 2s（方案 D7），随 retry_index 指数递增至封顶
 _RETRY_BACKOFF_BASE_S: Final[float] = 1.0
@@ -116,6 +180,11 @@ _CANCEL_CLEANUP_MARGIN_S: Final[float] = 1.0
 # F19：取消终态错误码（与超时 / 失败 / 仍运行可区分的账本事实）
 _CANCELLED_ERROR_CODE: Final[str] = "CANCELLED"
 
+# M08：终态状态序（单调守卫）——同一 attempt 的终态写回只允许「不更低」的事实：
+# 重复写同序经 DAO revision 水位幂等，过期（更低序）结果零覆盖并记录忽略原因
+# （R21 不静默）。成功事实一旦落账，迟到的失败 / 取消写回不得将其回退。
+_TERMINAL_STATUS_RANK: Final[Mapping[str, int]] = {"cancelled": 0, "failed": 1, "succeeded": 2}
+
 
 def _cancel_cleanup_budget(recorder: Any) -> float:
     """取消边界清理预算（秒，F19-003）：≥ recorder 落账内部超时 + 余量。
@@ -141,6 +210,145 @@ def _default_local_only_mode_reader() -> bool:
     return ConfigHandler.is_ai_local_only_mode()
 
 
+#: 资料核权上下文键（M07，``execute_chat_turn`` 的 binding 可选键 ``data_consent``）：
+#: 受理冻结操作/资料上下文，逐实际 attempt 以真实 ``attempt_id`` 重建核权请求。
+#: 全部键必填——缺键即入口 fail-closed（不静默降级为「无资料约束」）。
+#: I43：叶装配侧（``resolve_leaf_data_consent``）按同一元组产出冻结上下文。
+DATA_CONSENT_BINDING_KEYS: Final[tuple[str, ...]] = (
+    "user_scope",
+    "operation_id",
+    "consent_id",
+    "expected_consent_revision",
+    "connection_id",
+    "connection_revision",
+    "security_revision",
+    "credential_version",
+    "purpose",
+    "target_fingerprint",
+    "scope_version",
+    "source_selections",
+    "source_scope_digest",
+    "owner_epoch",
+    "run_epoch",
+)
+
+
+def _parse_data_consent_binding(raw: object, invocation_id: str) -> DataAttemptAuthorization:
+    """binding ``data_consent`` → 核权请求模板（M07）。
+
+    模板随受理冻结操作/资料上下文（operation / consent / 绑定连接复合引用 /
+    安全修订 / 源选择与摘要 / 代次）；``attempt_id`` 为占位——真实 attempt 在
+    派发前逐次重建（每次实际尝试独立核权，不复用外层一次许可）。入口即校验
+    上下文自洽（含 ``source_scope_digest`` 新鲜重算，不信调用方摘要），脏上下文
+    fail-closed（``ValueError`` 子类，零副作用）。
+    """
+
+    if not isinstance(raw, Mapping):
+        raise ValueError("binding 'data_consent' must be a mapping with the frozen operation context")
+    missing = [key for key in DATA_CONSENT_BINDING_KEYS if key not in raw]
+    if missing:
+        raise ValueError(f"binding 'data_consent' missing keys: {', '.join(missing)}")
+    selections = raw["source_selections"]
+    template = DataAttemptAuthorization(
+        user_scope=raw["user_scope"],
+        operation_id=raw["operation_id"],
+        # 占位身份：入口只校验上下文自洽；真实 attempt_id 在 _attempt_once 逐次注入。
+        attempt_id=invocation_id,
+        consent_id=raw["consent_id"],
+        expected_consent_revision=raw["expected_consent_revision"],
+        connection_id=raw["connection_id"],
+        connection_revision=raw["connection_revision"],
+        security_revision=raw["security_revision"],
+        credential_version=raw["credential_version"],
+        purpose=raw["purpose"],
+        target_fingerprint=raw["target_fingerprint"],
+        scope_version=raw["scope_version"],
+        source_selections=tuple(selections) if isinstance(selections, list | tuple) else selections,
+        source_scope_digest=raw["source_scope_digest"],
+        owner_epoch=raw["owner_epoch"],
+        run_epoch=raw["run_epoch"],
+    )
+    validate_data_attempt_authorization(template)
+    return template
+
+
+#: I43：operation 行作用域键（叶装配侧给出 execution/round/node，operation_id 仍
+#: 逐次取本次模型调用身份 ``model_call_id``——一模型调用一 operation）。
+_DATA_OPERATION_SCOPE_KEYS: Final[tuple[str, ...]] = ("execution_id", "round_id", "node_id")
+
+#: I43 稳定原因码：无资料许可即拒绝 / 闭包不可核 / 闭包超集。
+_DATA_CONSENT_REQUIRED: Final[str] = "data_consent_required"
+_SOURCE_CLOSURE_UNVERIFIABLE: Final[str] = "source_closure_unverifiable"
+_SOURCE_CLOSURE_MISMATCH: Final[str] = "source_closure_mismatch"
+
+
+@dataclass(frozen=True, slots=True)
+class _DataOperationScope:
+    """模型调用 operation 的归属作用域（I43，来自叶装配侧 binding）。"""
+
+    execution_id: str
+    round_id: str
+    node_id: str
+
+
+def _parse_data_operation_scope(raw: object) -> _DataOperationScope | None:
+    """binding ``data_operation_scope`` → operation 归属（缺省 = 旧链路，不启用）。"""
+
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise ValueError("binding 'data_operation_scope' must be a mapping")
+    missing = [key for key in _DATA_OPERATION_SCOPE_KEYS if key not in raw]
+    if missing:
+        raise ValueError(f"binding 'data_operation_scope' missing keys: {', '.join(missing)}")
+    values: dict[str, str] = {}
+    for key in _DATA_OPERATION_SCOPE_KEYS:
+        value = raw[key]
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"binding 'data_operation_scope' requires non-empty text at '{key}'")
+        values[key] = value
+    return _DataOperationScope(**values)
+
+
+#: 消息 metadata 中可识别的资料引用三元组键（与 ``DataConsentSourceItem`` 源身份
+#: 同名；当前桥层只有该结构可无歧义解析为许可集合成员）。
+_SOURCE_REF_METADATA_KEYS: Final[frozenset[str]] = frozenset({"source_kind", "source_id", "source_version"})
+
+
+def _chat_payload_source_refs(request: ChatTurnRequest) -> frozenset[tuple[str, str, str]] | None:
+    """本次 chat 出站 payload 引用的资料集合（I43 闭包校验输入）。
+
+    可识别引用：``ChatMessage.metadata`` 恰含 ``source_kind`` / ``source_id`` /
+    ``source_version`` 三元组（wire 拼写与 ``SourceKind`` 一致）。以下情形按
+    **不可核**（返回 ``None``，调用方 fail-closed）：
+    - 消息携带图片 part（``binary_ref`` 无许可集合对应身份，无法证明 ⊆ 许可集）；
+    - metadata 出现三元组之外的键或三元组不完整（未识别的引用声明类型）；
+    - ``source_kind`` 不在冻结 ``SourceKind`` 值域内。
+
+    未覆盖载体（不参与解析，报告中登记）：正文文本、工具调用参数、instructions、
+    工具 schema——桥层当前不携带可无歧义映射到源身份的引用结构，不在此自造协议。
+    """
+
+    refs: set[tuple[str, str, str]] = set()
+    for message in request.messages:
+        if message.metadata:
+            keys = set(message.metadata)
+            if keys != _SOURCE_REF_METADATA_KEYS:
+                return None
+            kind = message.metadata["source_kind"]
+            if kind not in SourceKind._value2member_map_:
+                return None
+            source_id = message.metadata["source_id"]
+            source_version = message.metadata["source_version"]
+            if not source_id or not source_version:
+                return None
+            refs.add((kind, source_id, source_version))
+        for part in message.content_parts:
+            if isinstance(part, ImageContentPart):
+                return None
+    return frozenset(refs)
+
+
 @dataclass(slots=True)
 class _LoopState:
     """Executor 逐事件循环状态（R11）：同连接信号量 + 冷却表。"""
@@ -158,7 +366,7 @@ class ScenarioExecutor:
         config_service: Any,
         recorder: Any,
         compatibility: Any,
-        adapters: Mapping[str, InferenceAdapter],
+        adapters: Mapping[str, _EntryAdapter],
         clock: Callable[[], float] | None = None,
         retry_attempts: int = 1,
         retry_max_attempts: int = 2,
@@ -168,11 +376,12 @@ class ScenarioExecutor:
         self._config_service = config_service
         self._recorder = recorder
         self._compatibility = compatibility
-        # 检视 F02：注入点逐项协议校验——错误形状 adapter 在组装期 TypeError 快速失败，
-        # 而非执行期 adapter.invoke AttributeError 被误判为模型故障重试。
-        self._adapters: dict[str, InferenceAdapter] = {}
+        # 检视 M01：组装期只校验「满足至少一个入口协议」——旧入口（.invoke）与
+        # 新入口（.invoke_chat）由各自执行路径派发前分别复核；错误形状（两者皆缺）
+        # 仍在组装期 TypeError 快速失败，不为测试替身放宽。
+        self._adapters: dict[str, _EntryAdapter] = {}
         for kind, adapter in adapters.items():
-            ensure_inference_adapter(kind, adapter)
+            ensure_registered_adapter(kind, adapter)
             self._adapters[kind] = adapter
         self._clock = clock
         # F19-003：清理预算按 recorder 落账内部超时推导（不得先于落账被掐断）
@@ -194,63 +403,289 @@ class ScenarioExecutor:
         snapshot: ExecutionSnapshot,
         validate_output: Callable[[AdapterResponse], Any],
     ) -> ScenarioExecutionResult:
-        """按快照路由执行：候选遍历 + 失败切换，返回场景终态。"""
+        """按快照路由执行：候选遍历 + 失败切换，返回场景终态。
+
+        旧校验入口（HANDOFF §6.1：行为不变）——请求身份投影为
+        :class:`_TurnIdentity` 后与 ``execute_chat_turn`` 共享遍历主干
+        （:meth:`_execute_traversal`）与逐尝试执行段；适配器调用（invoke）与
+        响应校验收敛（validate_output）由旧链策略承载。
+        """
+        identity = _TurnIdentity(
+            invocation_id=request.invocation_id,
+            scenario_id=request.scenario_id,
+            task_id=str(request.task_id),
+            deadline=request.deadline,
+            run_id=request.run_id,
+            payload=request.payload,
+        )
+
+        async def _finalize_legacy(response: Any, scope: _AttemptScope, duration_ms: float) -> _CandidateOutcome:
+            """旧链成功响应收敛（校验入口行为不变）：F27 输出非法类——不重试
+            同候选，允许切换备用候选（与内容安全拒绝的终止语义严格区分：输出
+            非法是质量事实而非安全策略，换候选不构成绕过）。"""
+            legacy_response = cast(AdapterResponse, response)
+            try:
+                validated = validate_output(legacy_response)
+            except Exception as e:
+                await self._submit_failed_terminal(
+                    scope.identity,
+                    scope.attempt_id,
+                    f"output validation failed: {type(e).__name__}",
+                    scope.reservation_id,
+                    metadata=scope.metadata,
+                    ledger=scope.ledger,
+                    duration_ms=duration_ms,
+                )
+                return _CandidateOutcome(
+                    status="failed",
+                    reason=f"output validation failed: {type(e).__name__}",
+                    outputs=(),
+                    usages=(),
+                    attempt_id=scope.attempt_id,
+                )
+
+            usage_tuple = (legacy_response.usage,) if legacy_response.usage is not None else ()
+            await self._submit_terminal_logged(
+                _terminal_record(
+                    scope.identity,
+                    scope.attempt_id,
+                    usage=legacy_response.usage,
+                    actual_model=legacy_response.actual_model,
+                    status="succeeded",
+                    error_code=None,
+                    reservation_id=scope.reservation_id,
+                    metadata=scope.metadata,
+                    duration_ms=duration_ms,
+                ),
+                scope.ledger,
+            )
+            return _CandidateOutcome(
+                status="succeeded",
+                reason="ok",
+                outputs=(
+                    # F03：统一公共输出类型 ScenarioOutput——保留校验器 metadata
+                    # （actual_model 等模型身份）与程序生成溯源（连接身份 /
+                    # security_revision 等，Executor 侧权威，后置覆盖同源键）。
+                    ScenarioOutput(
+                        output=dict(validated.output)
+                        if isinstance(validated.output, Mapping)
+                        else {"output": validated.output},
+                        metadata={
+                            **dict(validated.metadata),
+                            **scope.metadata,
+                        },
+                    ),
+                ),
+                usages=usage_tuple,
+                attempt_id=scope.attempt_id,
+            )
+
+        policy = _AttemptPolicy(
+            invoke=_legacy_invoke(request),
+            finalize=_finalize_legacy,
+            on_adapter_failure=None,
+            adapter_check=_legacy_adapter_check,
+        )
+        result = await self._execute_traversal(identity, snapshot, policy)
+        return ScenarioExecutionResult(
+            scenario_id=request.scenario_id,
+            invocation_id=request.invocation_id,
+            status=result.status,  # type: ignore[arg-type]
+            outputs=result.outputs,
+            candidate_decisions=result.decisions,
+            actual_usage=result.usages,
+        )
+
+    # ------------------------------------------------------------------
+    # 完整聊天回合入口（B-02-3，HANDOFF §6.1）
+    # ------------------------------------------------------------------
+
+    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE, log_args=False)
+    async def execute_chat_turn(
+        self,
+        request: ChatTurnRequest,
+        snapshot: ExecutionSnapshot,
+        *,
+        binding: Mapping[str, Any],
+        on_event: ChatStreamEventHandler | None = None,
+    ) -> ChatTurnOutcome:
+        """完整模型聊天回合（B-02-3，HANDOFF §6.1 / DD §10.1，SQ-02）。
+
+        与旧 :meth:`execute` 共享遍历主干与逐尝试执行段（预留 → 派发绑定 →
+        授权 → attempt 登记 → 执行 → usage → 结算）；差异：
+
+        - **入口协议**（HANDOFF §6.1）：``binding`` 为受理冻结模型绑定（无秘密
+          mapping，必需 ``scenario_id`` / ``task_id``，缺失 fail-closed 零副作用）；
+          可选 ``data_consent`` 为冻结 operation/资料上下文（M07：逐实际 attempt
+          派发前新鲜核权，见模块契约）；invocation 身份取 ``model_call_id``
+          （一回合一 invocation，model_call → invocation → attempt 稳定关联）；
+          ``on_event`` 可等待（真实 delta 有界事件，背压经 await 透传）；
+        - **聊天适配器**：经 :class:`core.model_management_types.ChatInferenceAdapter`
+          协议（``invoke_chat``）执行——非聊天适配器（FinBERT 等）派发前淘汰
+          （rejected，零预留副作用）；``stream=True``；``response_format`` 按
+          ``request.output_mode`` 生成真实封装（native → OpenAI ``json_schema``
+          封装，text/tool/prompted → 无），不把裸 schema 透传给 LiteLLM，路由与
+          业务 final 校验不在本入口（§6.1，由调用方承载）；
+        - **§6.4-5**：任一真实事件送达调用方后失败——保 partial/unknown 及原
+          attempt，不重试不换候选（不换模型拼接）；未公开分片前沿冻结候选策略；
+        - **拒绝不换候选规避**（DD §10.1）：refused 完整回合以 failed 终态 +
+          完整 response 承载并中断遍历，用量已观测不丢弃（R21）；
+        - **终态**：transport 与 settlement 两维分离（INV-07）；取消沿共享 F19
+          受限清理后 re-raise（R2），不产出 outcome。
+
+        Raises:
+            ValueError: ``request`` 协议非法或 ``binding`` 缺 ``scenario_id`` /
+                ``task_id``（零副作用 fail-closed）。
+            asyncio.CancelledError: 取消始终传播（R2）。
+        """
+        request.ensure_valid()
+        scenario_id = binding.get("scenario_id")
+        task_id = binding.get("task_id")
+        if not isinstance(scenario_id, str) or not scenario_id or not isinstance(task_id, str) or not task_id:
+            raise ValueError(
+                "execute_chat_turn requires a frozen binding mapping with non-empty "
+                "'scenario_id' (route lookup key) and 'task_id' (real subtask identity)"
+            )
+        identity = _TurnIdentity(
+            invocation_id=request.model_call_id,
+            scenario_id=scenario_id,
+            task_id=task_id,
+            deadline=request.deadline,
+            run_id=None,
+            payload=_chat_estimation_payload(request),
+        )
+        # M07：受理冻结资料/操作上下文（可选键）。声明即逐实际 attempt 新鲜核权；
+        # 未声明不改变既有链路（旧直推入口与未接线调用方政策不变）。
+        raw_data_consent = binding.get("data_consent")
+        operation_scope = _parse_data_operation_scope(binding.get("data_operation_scope"))
+        require_data_consent = binding.get("require_data_consent", False)
+        if not isinstance(require_data_consent, bool):
+            raise ValueError("binding 'require_data_consent' must be a bool when present")
+        if operation_scope is not None:
+            # I43：operation 身份逐调用取本次 model_call_id（一模型调用一 operation），
+            # 不沿用叶装配期的占位身份；归属作用域由 binding 冻结。
+            if not isinstance(raw_data_consent, Mapping):
+                raise ValueError("binding 'data_operation_scope' requires frozen 'data_consent' context")
+            raw_data_consent = {**raw_data_consent, "operation_id": identity.invocation_id}
+        data_authorization = (
+            _parse_data_consent_binding(raw_data_consent, identity.invocation_id)
+            if raw_data_consent is not None
+            else None
+        )
+        exposure = _ChatStreamExposure()
+
+        async def _invoke_chat(
+            adapter: _EntryAdapter, connection: ResolvedConnection, attempt_context: AttemptContext
+        ) -> ChatTurnResponse:
+            # 准入已核 invoke_chat 存在性（_chat_adapter_check）；协议结构化cast
+            return await cast(ChatInferenceAdapter, adapter).invoke_chat(
+                request,
+                connection,
+                request.deadline,
+                attempt_context,
+                stream=True,
+                response_format=_chat_response_format(request),
+                on_event=_make_tracked_event(exposure, on_event),
+            )
+
+        async def _on_chat_failure(error: Exception, scope: _AttemptScope) -> _CandidateOutcome | None:
+            if not exposure.exposed:
+                return None
+            # §6.4-5：已公开分片后失败——保 partial/unknown 及原 attempt，
+            # 不重试不换候选（不换模型拼接）；失败事实已由共享段提交终态（R21）。
+            return _CandidateOutcome(
+                status="failed",
+                decision_hint="failed",
+                reason=f"chat stream failed after public fragments: {type(error).__name__}",
+                outputs=(),
+                usages=(),
+                attempt_id=scope.attempt_id,
+                partial_text=exposure.partial_text,
+                stop_traversal=True,
+            )
+
+        policy = _AttemptPolicy(
+            invoke=_invoke_chat,
+            finalize=self._finalize_chat,
+            on_adapter_failure=_on_chat_failure,
+            adapter_check=_chat_adapter_check,
+            capability_check=_chat_capability_check(request),
+            data_authorization=data_authorization,
+            # I43：agent research 叶链无 ``data_consent`` 决定即零外发拒绝（不放行
+            # 「无资料发送」）；闭包校验在执行器内对本次 payload 引用集合复核。
+            require_data_consent=require_data_consent,
+            data_operation_scope=operation_scope,
+            source_closure=(_chat_payload_source_refs(request) if data_authorization is not None else None),
+            # M08：Agent 聊天回合严格路径——必需登记（reserve / mark_dispatched /
+            # begin_attempt）逐项 fail-closed，不回退进程内派发身份。
+            strict_required_registration=True,
+        )
+        result = await self._execute_traversal(identity, snapshot, policy)
+        candidate = result.candidate
+        if result.status == "succeeded" and candidate is not None:
+            outcome = ChatTurnOutcome(
+                model_call_id=request.model_call_id,
+                invocation_id=identity.invocation_id,
+                status="succeeded",
+                transport_state="ok",
+                settlement_state=candidate.settlement_state,
+                attempt_id=candidate.attempt_id,
+                response=candidate.chat_response,
+                partial_text=None,
+                error_code=None,
+            )
+            outcome.ensure_valid()
+            return outcome
+        # 失败终态：拒绝回合（完整 response，传输事实成立）、分片后失败
+        # （partial/unknown）与确认失败分别承载（INV-07，R21 不伪装）。
+        transport: ChatTurnTransportState = "failed"
+        if candidate is not None and candidate.chat_response is not None:
+            transport = "ok"
+        outcome = ChatTurnOutcome(
+            model_call_id=request.model_call_id,
+            invocation_id=identity.invocation_id,
+            status="failed",
+            transport_state=transport,
+            settlement_state=candidate.settlement_state if candidate is not None else None,
+            attempt_id=candidate.attempt_id if candidate is not None else None,
+            response=candidate.chat_response if candidate is not None else None,
+            partial_text=candidate.partial_text if candidate is not None else None,
+            error_code=result.failure_reason,
+        )
+        outcome.ensure_valid()
+        return outcome
+
+    # ------------------------------------------------------------------
+    # 候选遍历共享主干（新旧入口唯一执行路径，HANDOFF §6.1）
+    # ------------------------------------------------------------------
+
+    async def _execute_traversal(
+        self,
+        identity: _TurnIdentity,
+        snapshot: ExecutionSnapshot,
+        policy: _AttemptPolicy,
+    ) -> _TraversalResult:
+        """候选遍历共享主干：快照解析 / F16 父请求建立 / 逐候选门控与执行。
+
+        门控序 / 决策记录 / 冷却 / 中断语义与旧 ``execute`` 逐点一致；成功候选
+        与失败收敛以 :class:`_TraversalResult` 中性承载，公共终态由各入口包装。
+        """
         loop = asyncio.get_running_loop()
         clock = self._clock or loop.time
         state = get_loop_local(_LOOP_STATE_KEY, _LoopState)
 
-        route = next((r for r in snapshot.routes if r.get("scenario_id") == request.scenario_id), None)
-        connections_by_id: dict[str, ResolvedConnection] = {}
-        eligibility_by_id: dict[str, _ConnectionEligibility] = {}
-        # F17 计价冻结快照（快照语义：普通保存只影响后续请求）：连接解析点随
-        # 资格证据一并提取 billing 计价块，不再丢弃；billing 缺失 / 畸形 →
-        # None（未知语义，不伪装 usage_only / 免费，R21）。
-        pricing_by_id: dict[str, ConnectionPricing | None] = {}
-        for raw in snapshot.connections:
-            try:
-                resolved, eligibility = _resolve_connection(raw)
-            except (KeyError, TypeError, ValueError) as e:
-                logger.warning(
-                    "[ScenarioExecutor] snapshot connection malformed (%s): %s",
-                    raw.get("connection_id", "?") if isinstance(raw, Mapping) else "?",
-                    type(e).__name__,
-                )
-                continue
-            billing = raw.get("billing") if isinstance(raw, Mapping) else None
-            pricing_by_id[resolved.connection_id] = parse_connection_pricing(
-                billing, connection_hint=resolved.connection_id
-            )
-            connections_by_id[resolved.connection_id] = resolved
-            eligibility_by_id[resolved.connection_id] = eligibility
-        decisions: list[CandidateDecision] = []
-
-        # F16 父请求建立（先于候选遍历）：每请求一个 invocation（批次轨道每股 /
-        # 单次场景各产生父请求），全候选被门控拒绝 / deadline 耗尽等零尝试请求
-        # 同样在请求页可查（R21：失败不伪装为未发生）。owner 身份 per-invocation
-        # 生成（F23 fencing 最小身份），租约覆盖 deadline + 用量确认窗口。
-        now_cst = datetime.now(UTC) + _CST_OFFSET
-        owner_session_id = uuid.uuid4().hex
-        owner_epoch = 1
-        owner_lease_expires_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=_OWNER_LEASE_SECONDS)
-        month = f"{now_cst.year}{now_cst.month:02d}"
-        budget_policy_snapshot = _budget_policy_snapshot(route)
-        invocation_outcome = await self._recorder.ensure_invocation(
-            invocation_id=request.invocation_id,
-            scenario_id=request.scenario_id,
-            trigger="manual",
-            owner_session_id=owner_session_id,
-            owner_epoch=owner_epoch,
-            owner_lease_expires_at=owner_lease_expires_at,
-            budget_policy_snapshot=budget_policy_snapshot,
-        )
-        if not invocation_outcome.persisted:
-            logger.warning(
-                "[ScenarioExecutor] invocation row unavailable (%s); fee candidates will fail closed",
-                invocation_outcome.error_code,
-            )
-
+        context = await self._prepare_traversal(identity, snapshot)
+        route = context.route
         if route is None:
-            return self._terminal(request, "failed", (), decisions, ())
+            # F16：ensure_invocation 已在 _prepare_traversal 先于本判定建立
+            # （零尝试请求同样在请求页可查，R21）
+            return _TraversalResult(
+                status="failed",
+                decisions=(),
+                outputs=(),
+                usages=(),
+                failure_reason=f"no route for scenario {identity.scenario_id}",
+            )
 
         candidates: tuple[Mapping[str, Any], ...] = route.get("candidates", ())  # type: ignore[assignment]
         # F27 路由策略（快照冻结语义）：分派侧保存的零重试 / 禁备用策略在消费端
@@ -286,141 +721,47 @@ class ScenarioExecutor:
                 for cand in candidates[1:]
             )
             candidates = candidates[:1]
-        # R01-D1：local-only 政策请求级新鲜读——每次 execute 读取一次（函数局部，
-        # 不落实例字段，配置切换下一次 execute 即时生效；同请求内判定一致不混版）。
+        # R01-D1：local-only 政策请求级新鲜读——每次遍历读取一次（函数局部，
+        # 不落实例字段，配置切换下一次遍历即时生效；同请求内判定一致不混版）。
         local_only = self._local_only_mode_reader()
+        decisions: list[CandidateDecision] = []
+        last_outcome: _CandidateOutcome | None = None
         for cand in candidates:
-            remaining = request.deadline - clock()
-            if remaining <= 0:
-                decisions.append(
-                    CandidateDecision(
-                        task_id=str(cand.get("task_id", "")),
-                        candidate_index=int(cand.get("candidate_index", 0)),
-                        connection_id=cand.get("connection_id"),
-                        decision="skipped",
-                        reason="deadline exhausted",
-                    )
-                )
-                break
-
-            connection = connections_by_id.get(str(cand.get("connection_id", "")))
-            if connection is None:
-                decisions.append(
-                    CandidateDecision(
-                        task_id=str(cand.get("task_id", "")),
-                        candidate_index=int(cand.get("candidate_index", 0)),
-                        connection_id=cand.get("connection_id"),
-                        decision="rejected",
-                        reason="connection not found in snapshot",
-                    )
-                )
+            admission = await self._admit_candidate(identity, context, cand, clock, state, local_only, policy)
+            if admission.decision is not None:
+                decisions.append(admission.decision)
+                if admission.stop:
+                    break
                 continue
 
-            # F26 连接资格门控：派发前按冻结快照证据核实启用 / 任务适用性——
-            # 禁用或已确认不支持该任务的连接不派发（零副作用：不取信号量、不绑
-            # 派发身份、不授权）；原因随决策记录不静默（R21）；unknown 等未确认
-            # 状态不门控（按既有确认政策处理），UI 保留不适用项不代表允许执行。
-            ineligibility = _ineligibility_reason(eligibility_by_id[connection.connection_id], request.task_id)
-            if ineligibility is not None:
-                decisions.append(
-                    CandidateDecision(
-                        task_id=str(cand.get("task_id", "")),
-                        candidate_index=int(cand.get("candidate_index", 0)),
-                        connection_id=connection.connection_id,
-                        decision="rejected",
-                        reason=ineligibility,
-                    )
-                )
-                continue
+            connection = admission.connection
+            semaphore = admission.semaphore
+            cooldown_key = admission.cooldown_key
+            if connection is None or semaphore is None or cooldown_key is None:
+                # 准入不变量（类型收窄；_admit_candidate 保证 admitted 即齐备）
+                raise AssertionError("admitted candidate must carry connection, semaphore and cooldown key")
 
-            # R01-D1 local-only 政策门控（候选层强制，SEC-03 语义）：仅本地模式下需
-            # 外发的适配器候选（adapter_kind_requires_egress）派发前一律拒绝——不进
-            # 授权链，零授权 / 零派发 / 零外发副作用；设备内本地 kind（gguf_*）不受
-            # 此政策约束照常执行。与 F26 同点同模式（rejected + 原因记录，R21 不静默；
-            # reason 含 "policy" 供消费端映射 policy_blocked）。注意：候选的
-            # requires_egress_grant=False 仅代表「免 grant」，不构成「禁外发」——
-            # 禁外发必须在此候选层淘汰，不得以 grant 语义实现。
-            if local_only and adapter_kind_requires_egress(connection.adapter_kind):
-                decisions.append(
-                    CandidateDecision(
-                        task_id=str(cand.get("task_id", "")),
-                        candidate_index=int(cand.get("candidate_index", 0)),
-                        connection_id=connection.connection_id,
-                        decision="rejected",
-                        reason="local-only policy forbids egress candidate",
-                    )
-                )
-                continue
-
-            cooldown_key = (connection.connection_id, connection.connection_revision)
-            if state.cooldowns.get(cooldown_key, 0.0) > clock():
-                decisions.append(
-                    CandidateDecision(
-                        task_id=str(cand.get("task_id", "")),
-                        candidate_index=int(cand.get("candidate_index", 0)),
-                        connection_id=connection.connection_id,
-                        decision="skipped",
-                        reason=f"cooldown until {state.cooldowns[cooldown_key]:.0f}",
-                    )
-                )
-                continue
-
-            # F16 预留纪律：适配器缺失的候选在预留前淘汰（无法产生任何实际尝试，
-            # 预留只会造成保守多占）；与 F26 门控同思路（派发前淘汰，零预留副作用）。
-            if connection.adapter_kind not in self._adapters:
-                decisions.append(
-                    CandidateDecision(
-                        task_id=str(cand.get("task_id", "")),
-                        candidate_index=int(cand.get("candidate_index", 0)),
-                        connection_id=connection.connection_id,
-                        decision="rejected",
-                        reason=f"no adapter for kind {connection.adapter_kind}",
-                    )
-                )
-                continue
-
-            # 方案 §6.2 步骤 3：先取得连接并发许可（排队计入 deadline），再绑定派发，
-            # 最后逐次 authorize_attempt——不在安全许可后再排队（步骤 4）。
-            # F29：排队等待同样受请求级冻结绝对 deadline 约束——按剩余预算 wait_for
-            # 等待许可，超时候选记 skipped 并收敛遍历（排队不得无限等待，过期后不得
-            # 再做新准备启动出站）；超时点先于 _run_candidate（无 attempt 状态，
-            # 与 F19 取消收敛正交），CancelledError 不捕获始终传播（R2）。
-            semaphore = state.semaphores.setdefault(
-                connection.connection_id, asyncio.Semaphore(max(1, connection.concurrency_limit))
-            )
-            try:
-                await asyncio.wait_for(semaphore.acquire(), timeout=max(0.0, request.deadline - clock()))
-            except TimeoutError:
-                decisions.append(
-                    CandidateDecision(
-                        task_id=str(cand.get("task_id", "")),
-                        candidate_index=int(cand.get("candidate_index", 0)),
-                        connection_id=connection.connection_id,
-                        decision="skipped",
-                        reason="deadline exhausted waiting for connection permit",
-                    )
-                )
-                break
             try:
                 # F18：预留 / 派发绑定 / 授权 / 执行均按真实尝试粒度在重试循环内
                 # 逐次进行（每次真实尝试独立身份），见 _run_candidate。
                 outcome = await self._run_candidate(
-                    request,
+                    identity,
                     snapshot,
                     connection,
                     cand,
                     clock,
-                    validate_output,
-                    month=month,
-                    owner_session_id=owner_session_id,
-                    owner_epoch=owner_epoch,
-                    owner_lease_expires_at=owner_lease_expires_at,
-                    pricing=pricing_by_id.get(connection.connection_id),
+                    policy,
+                    month=context.month,
+                    owner_session_id=context.owner_session_id,
+                    owner_epoch=context.owner_epoch,
+                    owner_lease_expires_at=context.owner_lease_expires_at,
+                    pricing=context.pricing_by_id.get(connection.connection_id),
                     total_attempts=total_attempts,
                 )
             finally:
                 semaphore.release()
 
+            last_outcome = outcome
             if outcome.status == "succeeded":
                 decisions.append(
                     CandidateDecision(
@@ -431,14 +772,22 @@ class ScenarioExecutor:
                         reason="ok",
                     )
                 )
-                return self._terminal(
-                    request, "succeeded", outcome.outputs, [*decisions, *fallback_skipped], outcome.usages
+                return _TraversalResult(
+                    status="succeeded",
+                    decisions=(*decisions, *fallback_skipped),
+                    outputs=outcome.outputs,
+                    usages=outcome.usages,
+                    candidate=outcome,
                 )
 
-            if outcome.halt_candidates:
-                # D5：费用型预留被拒 / 派发绑定失权——invocation 级事实（预算耗尽 /
-                # owner 失权），切换候选无济，中断整个候选遍历（F16 既有 break 语义；
-                # 非连接侧故障，不进冷却）
+            if outcome.halt_candidates or outcome.stop_traversal:
+                # 中断整个候选遍历：halt_candidates = invocation 级事实（D5 费用型
+                # 预留被拒 / 派发绑定失权 / 内容拒绝 / 必需登记失败，切换候选无济，
+                # 不进冷却）；stop_traversal = §6.4-5 已公开分片后失败（保原
+                # attempt 不换候选，属连接侧事实沿常规失败路径进冷却——R-B02-2
+                # 行为与契约一致化：break 前登记连接冷却）。
+                if outcome.stop_traversal and not outcome.halt_candidates:
+                    state.cooldowns[cooldown_key] = clock() + self._cooldown_seconds
                 decisions.append(
                     CandidateDecision(
                         task_id=str(cand.get("task_id", "")),
@@ -462,7 +811,198 @@ class ScenarioExecutor:
                 )
             )
 
-        return self._terminal(request, "failed", (), [*decisions, *fallback_skipped], ())
+        return _TraversalResult(
+            status="failed",
+            decisions=(*decisions, *fallback_skipped),
+            outputs=(),
+            usages=(),
+            candidate=last_outcome,
+            failure_reason=_traversal_failure_reason([*decisions, *fallback_skipped]),
+        )
+
+    async def _prepare_traversal(self, identity: _TurnIdentity, snapshot: ExecutionSnapshot) -> _TraversalContext:
+        """遍历准备（新旧入口共享）：快照连接解析 / F17 计价冻结 / F16 父请求建立。"""
+        connections_by_id: dict[str, ResolvedConnection] = {}
+        eligibility_by_id: dict[str, _ConnectionEligibility] = {}
+        # F17 计价冻结快照（快照语义：普通保存只影响后续请求）：连接解析点随
+        # 资格证据一并提取 billing 计价块，不再丢弃；billing 缺失 / 畸形 →
+        # None（未知语义，不伪装 usage_only / 免费，R21）。
+        pricing_by_id: dict[str, ConnectionPricing | None] = {}
+        for raw in snapshot.connections:
+            try:
+                resolved, eligibility = _resolve_connection(raw)
+            except (KeyError, TypeError, ValueError) as e:
+                logger.warning(
+                    "[ScenarioExecutor] snapshot connection malformed (%s): %s",
+                    raw.get("connection_id", "?") if isinstance(raw, Mapping) else "?",
+                    type(e).__name__,
+                )
+                continue
+            billing = raw.get("billing") if isinstance(raw, Mapping) else None
+            pricing_by_id[resolved.connection_id] = parse_connection_pricing(
+                billing, connection_hint=resolved.connection_id
+            )
+            connections_by_id[resolved.connection_id] = resolved
+            eligibility_by_id[resolved.connection_id] = eligibility
+
+        route = next((r for r in snapshot.routes if r.get("scenario_id") == identity.scenario_id), None)
+
+        # F16 父请求建立（先于候选遍历）：每请求一个 invocation（批次轨道每股 /
+        # 单次场景各产生父请求），全候选被门控拒绝 / deadline 耗尽等零尝试请求
+        # 同样在请求页可查（R21：失败不伪装为未发生）。owner 身份 per-invocation
+        # 生成（F23 fencing 最小身份），租约覆盖 deadline + 用量确认窗口。
+        now_cst = datetime.now(UTC) + _CST_OFFSET
+        owner_session_id = uuid.uuid4().hex
+        owner_epoch = 1
+        owner_lease_expires_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=_OWNER_LEASE_SECONDS)
+        month = f"{now_cst.year}{now_cst.month:02d}"
+        budget_policy_snapshot = _budget_policy_snapshot(route)
+        invocation_outcome = await self._recorder.ensure_invocation(
+            invocation_id=identity.invocation_id,
+            scenario_id=identity.scenario_id,
+            trigger="manual",
+            owner_session_id=owner_session_id,
+            owner_epoch=owner_epoch,
+            owner_lease_expires_at=owner_lease_expires_at,
+            budget_policy_snapshot=budget_policy_snapshot,
+            # R2-I05：业务批次身份随父请求落库（股票研究请求 = operation_id），
+            # 费用/治理事实与批次同一身份，可按批次查回全部单股请求。
+            run_id=identity.run_id,
+        )
+        if not invocation_outcome.persisted:
+            logger.warning(
+                "[ScenarioExecutor] invocation row unavailable (%s); fee candidates will fail closed",
+                invocation_outcome.error_code,
+            )
+        return _TraversalContext(
+            route=route,
+            connections_by_id=connections_by_id,
+            eligibility_by_id=eligibility_by_id,
+            pricing_by_id=pricing_by_id,
+            month=month,
+            owner_session_id=owner_session_id,
+            owner_epoch=owner_epoch,
+            owner_lease_expires_at=owner_lease_expires_at,
+        )
+
+    async def _admit_candidate(
+        self,
+        identity: _TurnIdentity,
+        context: _TraversalContext,
+        cand: Mapping[str, Any],
+        clock: Callable[[], float],
+        state: _LoopState,
+        local_only: bool,
+        policy: _AttemptPolicy,
+    ) -> _CandidateAdmission:
+        """候选准入门控（新旧入口共享，序与旧 ``execute`` 逐点一致）。
+
+        deadline → 连接存在性 → F26 资格 → R01-D1 local-only → 冷却 → 适配器
+        存在性（+ 入口协议附加检查）→ 连接并发许可（F29：排队计入 deadline；
+        未取得许可不进入 _run_candidate——无 attempt 状态，与 F19 取消收敛正交；
+        CancelledError 不捕获始终传播，R2）。适配器缺失 / 协议不满足属确定性
+        配置事实，派发前淘汰（F16 预留纪律：零预留副作用）且不进连接冷却。
+        """
+
+        def _decision(connection_id: Any, decision: Literal["skipped", "rejected"], reason: str) -> CandidateDecision:
+            return CandidateDecision(
+                task_id=str(cand.get("task_id", "")),
+                candidate_index=int(cand.get("candidate_index", 0)),
+                connection_id=connection_id,
+                decision=decision,
+                reason=reason,
+            )
+
+        remaining = identity.deadline - clock()
+        if remaining <= 0:
+            return _CandidateAdmission(decision=_decision(None, "skipped", "deadline exhausted"), stop=True)
+
+        connection = context.connections_by_id.get(str(cand.get("connection_id", "")))
+        if connection is None:
+            return _CandidateAdmission(
+                decision=_decision(cand.get("connection_id"), "rejected", "connection not found in snapshot")
+            )
+
+        # F26 连接资格门控：派发前按冻结快照证据核实启用 / 任务适用性——
+        # 禁用或已确认不支持该任务的连接不派发（零副作用：不取信号量、不绑
+        # 派发身份、不授权）；原因随决策记录不静默（R21）；unknown 等未确认
+        # 状态不门控（按既有确认政策处理），UI 保留不适用项不代表允许执行。
+        ineligibility = _ineligibility_reason(context.eligibility_by_id[connection.connection_id], identity.task_id)
+        if ineligibility is not None:
+            return _CandidateAdmission(decision=_decision(connection.connection_id, "rejected", ineligibility))
+
+        # 请求级必需能力核验（M06，仅 chat 入口）：按请求必需能力（stream /
+        # tools）与该连接冻结证据的 revision 核验——unknown / unsupported /
+        # 证据版本过期一律派发前淘汰（零预留副作用），不按模型故障重试、不进
+        # 冷却；旧直推入口不设此检查（既有政策不变）。
+        if policy.capability_check is not None:
+            capability_reason = policy.capability_check(connection, context.eligibility_by_id[connection.connection_id])
+            if capability_reason is not None:
+                return _CandidateAdmission(decision=_decision(connection.connection_id, "rejected", capability_reason))
+
+        # R01-D1 local-only 政策门控（候选层强制，SEC-03 语义）：仅本地模式下需
+        # 外发的适配器候选（adapter_kind_requires_egress）派发前一律拒绝——不进
+        # 授权链，零授权 / 零派发 / 零外发副作用；设备内本地 kind（gguf_*）不受
+        # 此政策约束照常执行。与 F26 同点同模式（rejected + 原因记录，R21 不静默；
+        # reason 含 "policy" 供消费端映射 policy_blocked）。注意：候选的
+        # requires_egress_grant=False 仅代表「免 grant」，不构成「禁外发」——
+        # 禁外发必须在此候选层淘汰，不得以 grant 语义实现。
+        if local_only and adapter_kind_requires_egress(connection.adapter_kind):
+            return _CandidateAdmission(
+                decision=_decision(connection.connection_id, "rejected", "local-only policy forbids egress candidate")
+            )
+
+        cooldown_key = (connection.connection_id, connection.connection_revision)
+        if state.cooldowns.get(cooldown_key, 0.0) > clock():
+            return _CandidateAdmission(
+                decision=_decision(
+                    connection.connection_id,
+                    "skipped",
+                    f"cooldown until {state.cooldowns[cooldown_key]:.0f}",
+                )
+            )
+
+        # F16 预留纪律：适配器缺失 / 不满足入口协议的候选在预留前淘汰（无法产生
+        # 任何实际尝试，预留只会造成保守多占）；与 F26 门控同思路（派发前淘汰，
+        # 零预留副作用）。
+        adapter = self._adapters.get(connection.adapter_kind)
+        if adapter is None:
+            return _CandidateAdmission(
+                decision=_decision(
+                    connection.connection_id, "rejected", f"no adapter for kind {connection.adapter_kind}"
+                )
+            )
+        if policy.adapter_check is not None:
+            check_reason = policy.adapter_check(adapter, connection)
+            if check_reason is not None:
+                return _CandidateAdmission(decision=_decision(connection.connection_id, "rejected", check_reason))
+
+        # 方案 §6.2 步骤 3：先取得连接并发许可（排队计入 deadline），再绑定派发，
+        # 最后逐次 authorize_attempt——不在安全许可后再排队（步骤 4）。
+        # F29：排队等待同样受请求级冻结绝对 deadline 约束——按剩余预算 wait_for
+        # 等待许可，超时候选记 skipped 并收敛遍历（排队不得无限等待，过期后不得
+        # 再做新准备启动出站）；超时点先于 _run_candidate（无 attempt 状态，
+        # 与 F19 取消收敛正交），CancelledError 不捕获始终传播（R2）。
+        semaphore = state.semaphores.setdefault(
+            connection.connection_id, asyncio.Semaphore(max(1, connection.concurrency_limit))
+        )
+        try:
+            await asyncio.wait_for(semaphore.acquire(), timeout=max(0.0, identity.deadline - clock()))
+        except TimeoutError:
+            return _CandidateAdmission(
+                decision=_decision(
+                    connection.connection_id,
+                    "skipped",
+                    "deadline exhausted waiting for connection permit",
+                ),
+                stop=True,
+            )
+        return _CandidateAdmission(
+            decision=None,
+            connection=connection,
+            semaphore=semaphore,
+            cooldown_key=cooldown_key,
+        )
 
     # ------------------------------------------------------------------
     # 单候选执行（重试内循环）
@@ -470,12 +1010,12 @@ class ScenarioExecutor:
 
     async def _run_candidate(
         self,
-        request: InferenceRequest,
+        identity: _TurnIdentity,
         snapshot: ExecutionSnapshot,
         connection: ResolvedConnection,
         cand: Mapping[str, Any],
         clock: Callable[[], float],
-        validate_output: Callable[[AdapterResponse], Any],
+        policy: _AttemptPolicy,
         *,
         month: str,
         owner_session_id: str,
@@ -484,17 +1024,54 @@ class ScenarioExecutor:
         pricing: ConnectionPricing | None,
         total_attempts: int | None = None,
     ) -> _CandidateOutcome:
-        adapter = self._adapters.get(connection.adapter_kind)
-        if adapter is None:
-            # 候选不合格（无适配器），未授权未执行，不建 attempt（§6.2 步骤 2）
-            return _CandidateOutcome(
-                status="failed",
-                decision_hint="rejected",
-                reason=f"no adapter for kind {connection.adapter_kind}",
-                outputs=(),
-                usages=(),
-            )
+        """单候选执行（重试内循环，新旧入口共享执行段，HANDOFF §6.1）。
 
+        预留 → 派发绑定 → 授权 → attempt 登记 → 执行（``policy.invoke``）→
+        usage 观察 → 收敛（``policy.finalize`` / ``policy.on_adapter_failure``）
+        共享；出口统一投影**响应来源 attempt** 的结算事实（``settlement_state``）
+        与身份（ChatTurnOutcome 承载，旧入口不消费）——M08：不再用最后一次尝试
+        顶替来源 attempt；无 attempt 的失败（如 deadline 耗尽）保持 ``None``。
+        """
+        trail = _AttemptTrail()
+        outcome = await self._candidate_attempts(
+            trail,
+            identity,
+            snapshot,
+            connection,
+            cand,
+            clock,
+            policy,
+            month=month,
+            owner_session_id=owner_session_id,
+            owner_epoch=owner_epoch,
+            owner_lease_expires_at=owner_lease_expires_at,
+            pricing=pricing,
+            total_attempts=total_attempts,
+        )
+        return replace(
+            outcome,
+            settlement_state=_settlement_state(trail.ledger_for(outcome.attempt_id)),
+        )
+
+    async def _candidate_attempts(
+        self,
+        trail: _AttemptTrail,
+        identity: _TurnIdentity,
+        snapshot: ExecutionSnapshot,
+        connection: ResolvedConnection,
+        cand: Mapping[str, Any],
+        clock: Callable[[], float],
+        policy: _AttemptPolicy,
+        *,
+        month: str,
+        owner_session_id: str,
+        owner_epoch: int,
+        owner_lease_expires_at: Any,
+        pricing: ConnectionPricing | None,
+        total_attempts: int | None = None,
+    ) -> _CandidateOutcome:
+        # 适配器存在性已由 _admit_candidate 准入保证（派发前淘汰，零预留副作用）
+        adapter = self._adapters[connection.adapter_kind]
         # F19：单次预留金额按连接计价快照 + 请求 payload 估算（dispatch 不持有
         # payload，不伪造金额）；未配置月限额 → usage_only（金额 NULL 不占预算）。
         # D13-005：限额已配置但金额不可估算（计价快照缺失 / usage_only 模式 /
@@ -503,7 +1080,7 @@ class ScenarioExecutor:
         # 拒绝本候选、零出站（不静默降级 usage_only，R21）；计价可估算路径不受影响。
         budget_limit = cand.get("budget_limit_cny")
         budget_amount = (
-            _estimate_reservation_amount(pricing, request.payload, model=connection.model)
+            _estimate_reservation_amount(pricing, identity.payload, model=connection.model)
             if budget_limit is not None
             else None
         )
@@ -532,6 +1109,10 @@ class ScenarioExecutor:
         # - 终止类：内容拒绝等非瞬态失败经 retry 策略判 False → 原样重抛（不重试、
         #   不换候选绕过）；取消（R2）永不重试、清理后 re-raise。
         attempt_counter = 0
+        # M08：最近一次真实尝试身份（来源 attempt 记录）——重试循环外抛后的失败
+        # 收敛只引用该 attempt，不借用「当前」状态；deadline 耗尽等无 attempt
+        # 事实的失败保持 None（契约：零出站失败 attempt_id=None）。
+        last_attempt_id: str | None = None
 
         def _should_retry_transient(retry_state: RetryCallState) -> bool:
             raw = retry_state.outcome.exception() if retry_state.outcome is not None else None
@@ -544,7 +1125,7 @@ class ScenarioExecutor:
         def _wait_backoff(retry_state: RetryCallState) -> float:
             raw = retry_state.outcome.exception() if retry_state.outcome is not None else None
             exc = raw if isinstance(raw, Exception) else Exception()
-            return _backoff_seconds(exc, retry_state.attempt_number - 1, now=clock(), deadline=request.deadline)
+            return _backoff_seconds(exc, retry_state.attempt_number - 1, now=clock(), deadline=identity.deadline)
 
         retryer = AsyncRetrying(
             sleep=asyncio.sleep,
@@ -555,18 +1136,37 @@ class ScenarioExecutor:
         )
 
         async def _attempt_once() -> _CandidateOutcome:
-            nonlocal last_reason, attempt_counter
+            nonlocal last_reason, attempt_counter, last_attempt_id
             # F18：每次真实尝试独立身份——独立 attempt / reservation 与递增
             # retry_index（外部重试 = 新的真实调用 = 新账目事实）；同一次写账的
             # 持久化重放沿用该次身份，由 DAO 幂等（ON CONFLICT DO NOTHING /
             # usage_revision 水位）承载，不在本层重试。
             retry_index = attempt_counter
             attempt_counter += 1
-            if request.deadline - clock() <= 0:
+            if identity.deadline - clock() <= 0:
                 last_reason = "deadline exhausted"
                 raise _DeadlineExhaustedError()
 
+            # I43：无许可即拒绝——agent research 叶链未取得 ``data_consent`` 决定时
+            # 零外发（不登记 attempt、不进预留、不外发），并中断候选遍历（换候选
+            # 无济：许可缺失是 operation 级事实）。
+            if policy.require_data_consent and policy.data_authorization is None:
+                last_reason = _DATA_CONSENT_REQUIRED
+                logger.warning(
+                    "[ScenarioExecutor] data consent required but absent, zero outbound (task=%s)",
+                    identity.task_id,
+                )
+                return _CandidateOutcome(
+                    status="failed",
+                    decision_hint="rejected",
+                    reason=_DATA_CONSENT_REQUIRED,
+                    outputs=(),
+                    usages=(),
+                    halt_candidates=True,
+                )
+
             attempt_id = uuid.uuid4().hex
+            last_attempt_id = attempt_id
             reservation_token = uuid.uuid4().hex
             # F34：尝试起点计时（预留 / 派发 / 授权 / 执行全程计入尝试耗时），
             # 终态构造时点为终点——duration_ms 不再恒 None（R21：未知留 None，
@@ -576,11 +1176,118 @@ class ScenarioExecutor:
             # 不漂移）/ retry_index / 连接身份 / 计价冻结快照在预留前构建，观察与
             # 终态（含取消清理）一律携带本份（copy 增量），不依赖事后重算；
             # security_revision 于 authorize 线性化点就位。
-            attempt_metadata = _metadata(request, cand, connection, None, 0, pricing, retry_index, month=month)
-            # F19：单次尝试的终态收敛状态（取消边界清理依据）
-            ledger = _AttemptLedgerState()
+            attempt_metadata = _metadata(identity, cand, connection, None, 0, pricing, retry_index, month=month)
+            # F19：单次尝试的终态收敛状态（取消边界清理依据；M08：按 attempt
+            # 身份登记进轨迹，出口按来源 attempt 取，不再单槽顶替）
+            ledger = trail.register(attempt_id)
             # F19②：外发事实起点——adapter.invoke 开始后消费不可证明（收费未知语义分界）
             outbound_started = False
+
+            # M07：资料核权门（逐实际 attempt，先于一切账目副作用）。每次实际尝试
+            # （含同候选重试与后续备用候选）以该 attempt 的准确 operation/资料上下文
+            # 新鲜核权——资料 owner 许可（authorize_data_attempt 内含连接授权 +
+            # 绑定一致核 + 源 claim 单胜者）不通过即零出站：不进 reserve、不
+            # mark_dispatched、不外发；拒绝原因随候选决策记录（R21 不静默）。
+            # 许可为 operation 级事实，切换候选无济 → halt（首次失败后撤用，后续
+            # 重试/备用同样零出站）。
+            if policy.data_authorization is not None:
+                # M15：操作冻结的连接版本不得被快照里的同 ID 替身顶替——同一
+                # 连接 ID 版本不等即版本切换瞬间的瞬态竞态，零出站并中断遍历
+                # （不回退到其他候选），不得按策略拒绝或按当前版本放行。
+                frozen = policy.data_authorization
+                if (
+                    connection.connection_id == frozen.connection_id
+                    and connection.connection_revision != frozen.connection_revision
+                ):
+                    last_reason = "connection revision changed (transient)"
+                    logger.warning(
+                        "[ScenarioExecutor] frozen connection revision mismatch, zero outbound "
+                        "(task=%s, connection=%s, frozen=%s, snapshot=%s)",
+                        identity.task_id,
+                        connection.connection_id,
+                        frozen.connection_revision,
+                        connection.connection_revision,
+                    )
+                    return _CandidateOutcome(
+                        status="failed",
+                        decision_hint="rejected",
+                        reason=last_reason,
+                        outputs=(),
+                        usages=(),
+                        halt_candidates=True,
+                    )
+                # I43：先备后核——operation 身份取本次 ``model_call_id``，行必须存在
+                # 才能落许可 claim（DAO 缺 operation 行即 INPUT_INVALID）。准备失败
+                # 同样零出站且不切换候选（operation 级事实）。
+                if policy.data_operation_scope is not None:
+                    prepare_denial = await self._ensure_data_operation(
+                        policy.data_operation_scope, policy.data_authorization, identity
+                    )
+                    if prepare_denial is not None:
+                        last_reason = prepare_denial
+                        logger.warning(
+                            "[ScenarioExecutor] data operation prepare failed, zero outbound (task=%s, reason=%s)",
+                            identity.task_id,
+                            prepare_denial,
+                        )
+                        return _CandidateOutcome(
+                            status="failed",
+                            decision_hint="rejected",
+                            reason=prepare_denial,
+                            outputs=(),
+                            usages=(),
+                            halt_candidates=True,
+                        )
+                denial = await self._authorize_data_attempt(policy.data_authorization, attempt_id)
+                if denial is not None:
+                    last_reason = denial
+                    logger.warning(
+                        "[ScenarioExecutor] data consent gate denied attempt, zero outbound (task=%s, reason=%s)",
+                        identity.task_id,
+                        denial,
+                    )
+                    return _CandidateOutcome(
+                        status="failed",
+                        decision_hint="rejected",
+                        reason=denial,
+                        outputs=(),
+                        usages=(),
+                        halt_candidates=True,
+                    )
+                # I43：闭包校验——本次出站 payload 引用的资料必须 ⊆ 已授权
+                # ``source_selections``；引用结构不可识别即不可核（fail-closed）。
+                if policy.source_closure is None:
+                    last_reason = _SOURCE_CLOSURE_UNVERIFIABLE
+                    logger.warning(
+                        "[ScenarioExecutor] payload source closure unverifiable, zero outbound (task=%s)",
+                        identity.task_id,
+                    )
+                    return _CandidateOutcome(
+                        status="failed",
+                        decision_hint="rejected",
+                        reason=_SOURCE_CLOSURE_UNVERIFIABLE,
+                        outputs=(),
+                        usages=(),
+                        halt_candidates=True,
+                    )
+                permitted = {
+                    (item.source_kind.value, item.source_id, item.source_version)
+                    for item in policy.data_authorization.source_selections
+                }
+                if not policy.source_closure <= permitted:
+                    last_reason = _SOURCE_CLOSURE_MISMATCH
+                    logger.warning(
+                        "[ScenarioExecutor] payload references sources outside consent scope, zero outbound (task=%s)",
+                        identity.task_id,
+                    )
+                    return _CandidateOutcome(
+                        status="failed",
+                        decision_hint="rejected",
+                        reason=_SOURCE_CLOSURE_MISMATCH,
+                        outputs=(),
+                        usages=(),
+                        halt_candidates=True,
+                    )
 
             try:
                 # F16 逐实际尝试原子预留（每次真实尝试独立预留，预留 ↔ attempt 生命
@@ -590,9 +1297,9 @@ class ScenarioExecutor:
                 # 前次失败尝试的预留已随其 failed 终态 settled 退出在途占用，预算
                 # 门逐尝试独立判定，无跨尝试双计。
                 reserve_outcome = await self._recorder.try_reserve(
-                    invocation_id=request.invocation_id,
-                    scenario_id=request.scenario_id,
-                    task_id=str(request.task_id),
+                    invocation_id=identity.invocation_id,
+                    scenario_id=identity.scenario_id,
+                    task_id=identity.task_id,
                     trigger="manual",
                     month=month,
                     reservation_id=reservation_token,
@@ -621,12 +1328,33 @@ class ScenarioExecutor:
                         usages=(),
                         halt_candidates=True,
                     )
-                # usage_only：预留未持久化 → 降级进程内派发身份（reservation_id=None）
+                elif policy.strict_required_registration:
+                    # M08：Agent 严格路径——usage_only（无金额上限）同样要求预留
+                    # 登记逐项确认。账本不可用 / 超时 / owner 失权 → 必需登记
+                    # unknown，零出站且不回退进程内派发身份；此后 begin 即使成功
+                    # 也不补放行本次未确认的登记（本分支先于 begin 收敛）。
+                    reason = f"required budget reservation unavailable: {reserve_outcome.error_code}"
+                    logger.warning(
+                        "[ScenarioExecutor] required budget reservation failed (%s), zero outbound (task=%s)",
+                        reserve_outcome.error_code,
+                        identity.task_id,
+                    )
+                    return _CandidateOutcome(
+                        status="failed",
+                        decision_hint="rejected",
+                        reason=reason,
+                        outputs=(),
+                        usages=(),
+                        halt_candidates=True,
+                        attempt_id=attempt_id,
+                    )
+                # 旧直推链（非 Agent）：usage_only 预留未持久化 → 维持既有降级
+                # 进程内派发身份（reservation_id=None）
 
                 # 派发绑定（D5）：预留 reserved→dispatched（F23：错误预留 ID /
                 # owner 失权 rowcount=0）；有限额费用型 persisted=False 时禁止派发
                 dispatch_outcome = await self._recorder.mark_dispatched(
-                    invocation_id=request.invocation_id,
+                    invocation_id=identity.invocation_id,
                     reservation_id=reservation_id,
                     owner_session_id=owner_session_id,
                     owner_epoch=owner_epoch,
@@ -642,6 +1370,25 @@ class ScenarioExecutor:
                         usages=(),
                         halt_candidates=True,
                     )
+                if not dispatch_outcome.persisted and policy.strict_required_registration:
+                    # M08：Agent 严格路径——usage_only 的派发绑定同样属必需登记，
+                    # 未确认（账本不可用 / 超时 / owner 失权）即零出站，不因后续
+                    # begin 成功补放行；预留留 reserved 由 F23 租约自愈。
+                    reason = f"required dispatch binding unavailable: {dispatch_outcome.error_code}"
+                    logger.warning(
+                        "[ScenarioExecutor] required dispatch binding failed (%s), zero outbound (task=%s)",
+                        dispatch_outcome.error_code,
+                        identity.task_id,
+                    )
+                    return _CandidateOutcome(
+                        status="failed",
+                        decision_hint="rejected",
+                        reason=reason,
+                        outputs=(),
+                        usages=(),
+                        halt_candidates=True,
+                        attempt_id=attempt_id,
+                    )
 
                 # D13-002：外发确认按真实执行位置区分——litellm_chat 出站需 SEC-01 许可，
                 # gguf_* 设备内本地模型不外发不签发。
@@ -656,6 +1403,12 @@ class ScenarioExecutor:
                 # gguf_* 设备内本地模型不外发免 grant，凭据撤销等安全检查保留）。
                 # R2：CancelledError 不被 except Exception 捕获（BaseException），
                 # 直接传播至本迭代取消边界。
+                # M15：Agent 严格准入按本 attempt 实际派发连接的冻结版本核权（同 ID
+                # 已在上方与操作冻结版本比对）；旧直推链路（无资料/操作冻结上下文）
+                # 传 None，维持「未知版本不参与比对」的既有政策，不放宽也不加严。
+                strict_connection_revision = (
+                    connection.connection_revision if policy.data_authorization is not None else None
+                )
                 try:
                     permit = await self._config_service.authorize_attempt(
                         connection.connection_id,
@@ -665,6 +1418,7 @@ class ScenarioExecutor:
                         connection.credential_version,
                         attempt_id,
                         requires_egress_grant=requires_egress,
+                        connection_revision=strict_connection_revision,
                     )
                 except Exception as e:
                     reason = f"authorize failed: {type(e).__name__}"
@@ -673,7 +1427,7 @@ class ScenarioExecutor:
                         # 提交 failed 终态经活跃预留背书补记（F23）并转换预留 settled，
                         # 不留悬挂占用；usage_only（无预留）不补记，维持既有零副作用
                         await self._submit_failed_terminal(
-                            request,
+                            identity,
                             attempt_id,
                             reason,
                             reservation_id,
@@ -687,6 +1441,7 @@ class ScenarioExecutor:
                         reason=reason,
                         outputs=(),
                         usages=(),
+                        attempt_id=attempt_id,
                     )
                 # F19③：许可线性化点的安全修订固化进审计元数据（F01：permit 权威）
                 attempt_metadata["security_revision"] = getattr(permit, "security_revision", 0)
@@ -699,7 +1454,7 @@ class ScenarioExecutor:
                     if reservation_id is not None:
                         # 本次尝试已预留 / 派发，失败终态即时收敛（结算该次预留）
                         await self._submit_failed_terminal(
-                            request,
+                            identity,
                             attempt_id,
                             last_reason,
                             reservation_id,
@@ -708,8 +1463,11 @@ class ScenarioExecutor:
                             duration_ms=_elapsed_ms(clock, attempt_started_at),
                         )
                     # C12：原自管循环 break 语义等价——结束本候选，返回失败终态
-                    # （不重试；Tenacity 对成功返回值直接透传）
-                    return _CandidateOutcome(status="failed", reason=last_reason, outputs=(), usages=())
+                    # （不重试；Tenacity 对成功返回值直接透传）。M08：携带该次
+                    # 尝试身份（本尝试已预留/派发，出口不得顶替为其他 attempt）。
+                    return _CandidateOutcome(
+                        status="failed", reason=last_reason, outputs=(), usages=(), attempt_id=attempt_id
+                    )
                 effective_connection = replace(connection, adapter_options=compatibility.resolved_options)
 
                 # D13-002：在许可线性化点为本次 attempt 签发外发确认许可（纯绑定，零 IO），
@@ -718,7 +1476,7 @@ class ScenarioExecutor:
                 attempt_context = AttemptContext(
                     owner_session_id=owner_session_id,
                     owner_epoch=owner_epoch,
-                    invocation_id=request.invocation_id,
+                    invocation_id=identity.invocation_id,
                     attempt_id=attempt_id,
                 )
                 if requires_egress:
@@ -728,36 +1486,61 @@ class ScenarioExecutor:
                             attempt_context=attempt_context,
                             resolved_connection=effective_connection,
                             now=clock(),
-                            deadline=request.deadline,
+                            deadline=identity.deadline,
                         ),
                     )
 
                 # 真正进入适配器执行前建立实际尝试记录（§6.2 步骤 4）。F18：每次真实
                 # 尝试独立 attempt 行（携带该次 retry_index）；同一次写账的持久化重放
-                # 沿用该次身份（幂等，不重建）。落账失败降级继续执行（执行已授权开始，
-                # 费用型此前已被预留/派发门拦截）。F16：owner 齐传启用 F23 身份强门；
+                # 沿用该次身份（幂等，不重建）。F16：owner 齐传启用 F23 身份强门；
                 # attempt_row 携带预留 ID。
                 begin_outcome = await self._recorder.begin_attempt(
                     attempt_id=attempt_id,
-                    invocation_id=request.invocation_id,
+                    invocation_id=identity.invocation_id,
                     configured_model=connection.model,
                     attempt_row=self._attempt_row(
-                        request, cand, connection, snapshot, permit, reservation_id, retry_index
+                        identity, cand, connection, snapshot, permit, reservation_id, retry_index
                     ),
                     owner_session_id=owner_session_id,
                     owner_epoch=owner_epoch,
                 )
                 if not begin_outcome.persisted:
+                    # 必需登记失败（DD SQ-02 / F27「必需记录失败 0 出站」）：账本不可用 /
+                    # 超时 / owner 失权均为 invocation 级事实，切换候选无济——本尝试零
+                    # 出站并明确失败；有活跃预留时提交 failed 终态经 F23 背书补记并转换
+                    # settled（不留悬挂占用）；usage_only（无预留）无账本副作用可收敛，
+                    # 维持零补记。与费用型预留 / 派发失败处置一致，中断整个候选遍历。
+                    reason = f"attempt registration unavailable: {begin_outcome.error_code}"
                     logger.warning(
-                        "[ScenarioExecutor] attempt row unavailable (%s), continuing in-memory execution",
+                        "[ScenarioExecutor] required attempt registration failed (%s), zero outbound (task=%s)",
                         begin_outcome.error_code,
+                        identity.task_id,
+                    )
+                    if reservation_id is not None:
+                        await self._submit_failed_terminal(
+                            identity,
+                            attempt_id,
+                            reason,
+                            reservation_id,
+                            metadata=attempt_metadata,
+                            ledger=ledger,
+                            duration_ms=_elapsed_ms(clock, attempt_started_at),
+                        )
+                    return _CandidateOutcome(
+                        status="failed",
+                        decision_hint="rejected",
+                        reason=reason,
+                        outputs=(),
+                        usages=(),
+                        halt_candidates=True,
+                        attempt_id=attempt_id,
                     )
 
                 # F19②：外发事实起点（await 表达式即视为外发已发起，此后取消时
                 # 无法证明是否已被上游消费）
                 outbound_started = True
                 try:
-                    response = await adapter.invoke(request, effective_connection, request.deadline, attempt_context)
+                    response = await policy.invoke(adapter, effective_connection, attempt_context)
                 except Exception as e:
                     # F27：先分类后处置——终止判定（内容安全拒绝）先于重试判定，
                     # 禁止先重试再发现。
@@ -770,10 +1553,10 @@ class ScenarioExecutor:
                         logger.warning(
                             "[ScenarioExecutor] content refused by provider policy, "
                             "halting candidate traversal (task=%s)",
-                            request.task_id,
+                            identity.task_id,
                         )
                         await self._submit_failed_terminal(
-                            request,
+                            identity,
                             attempt_id,
                             last_reason,
                             reservation_id,
@@ -787,13 +1570,14 @@ class ScenarioExecutor:
                             outputs=(),
                             usages=(),
                             halt_candidates=True,
+                            attempt_id=attempt_id,
                         )
                     last_reason = f"adapter error: {type(e).__name__}"
                     # F18：失败尝试即时收敛（结算该次预留 + 记失败事实，R21 不静默），
                     # 再退避重试——迟到响应在适配器层被丢弃，无第二次观察通道，费用
                     # 未知以 None 承载（R21 禁止填 0 伪装）。
                     await self._submit_failed_terminal(
-                        request,
+                        identity,
                         attempt_id,
                         last_reason,
                         reservation_id,
@@ -801,6 +1585,15 @@ class ScenarioExecutor:
                         ledger=ledger,
                         duration_ms=_elapsed_ms(clock, attempt_started_at),
                     )
+                    # 入口特有失败收敛（chat §6.4-5：已公开分片后失败——保原 attempt
+                    # 不重试不换候选）；返回 None 走共享默认（C12 Tenacity 瞬态重试 /
+                    # 切换）。
+                    if policy.on_adapter_failure is not None:
+                        override = await policy.on_adapter_failure(
+                            e, _AttemptScope(identity, attempt_id, reservation_id, attempt_metadata, ledger)
+                        )
+                        if override is not None:
+                            return override
                     # C12：瞬态判定（_should_retry_transient）、退避（_wait_backoff）
                     # 与次数预算（stop_after_attempt）交由 Tenacity 承接——失败事实已
                     # 即时收敛，异常原样上抛：transient → 退避重试；非瞬态 / 次数耗尽
@@ -820,72 +1613,20 @@ class ScenarioExecutor:
                 attempt_metadata = {
                     **attempt_metadata,
                     "actual_model": response.actual_model,
-                    **_encoder_usage_metadata(pricing, request, connection.model, response),
+                    **_encoder_usage_metadata(pricing, identity, connection.model, response),
                 }
-                self._recorder.observe_usage(_observation_from(request, attempt_id, response, attempt_metadata))
+                scope = _AttemptScope(identity, attempt_id, reservation_id, attempt_metadata, ledger)
+                self._recorder.observe_usage(_observation_from(identity, attempt_id, response, attempt_metadata))
 
-                try:
-                    validated = validate_output(response)
-                except Exception as e:
-                    # F27 输出非法类：响应合法返回但业务输出不合法——不重试同候选，
-                    # 允许切换备用候选（与内容安全拒绝的终止语义严格区分：输出非法
-                    # 是质量事实而非安全策略，换候选不构成绕过）。
-                    await self._submit_failed_terminal(
-                        request,
-                        attempt_id,
-                        f"output validation failed: {type(e).__name__}",
-                        reservation_id,
-                        metadata=attempt_metadata,
-                        ledger=ledger,
-                        duration_ms=_elapsed_ms(clock, attempt_started_at),
-                    )
-                    return _CandidateOutcome(
-                        status="failed",
-                        reason=f"output validation failed: {type(e).__name__}",
-                        outputs=(),
-                        usages=(),
-                    )
-
-                usage_tuple = (response.usage,) if response.usage is not None else ()
-                await self._submit_terminal_logged(
-                    _terminal_record(
-                        request,
-                        attempt_id,
-                        usage=response.usage,
-                        actual_model=response.actual_model,
-                        status="succeeded",
-                        error_code=None,
-                        reservation_id=reservation_id,
-                        metadata=attempt_metadata,
-                        duration_ms=_elapsed_ms(clock, attempt_started_at),
-                    ),
-                    ledger,
-                )
-                return _CandidateOutcome(
-                    status="succeeded",
-                    reason="ok",
-                    outputs=(
-                        # F03：统一公共输出类型 ScenarioOutput——保留校验器 metadata
-                        # （actual_model 等模型身份）与程序生成溯源（连接身份 /
-                        # security_revision 等，Executor 侧权威，后置覆盖同源键）。
-                        ScenarioOutput(
-                            output=dict(validated.output)
-                            if isinstance(validated.output, Mapping)
-                            else {"output": validated.output},
-                            metadata={
-                                **dict(validated.metadata),
-                                **attempt_metadata,
-                            },
-                        ),
-                    ),
-                    usages=usage_tuple,
-                )
+                # 成功响应收敛（入口差异经 policy.finalize：旧链校验 + ScenarioOutput；
+                # chat 拒绝处置 + response 原样承载）
+                return await policy.finalize(response, scope, _elapsed_ms(clock, attempt_started_at))
             except asyncio.CancelledError:
                 # F19：取消传播边界的受限清理——尽力收敛终态（cancelled 终态或在途
                 # 终态幂等重提交，短超时）后必须 re-raise（R2 不吞取消；提交失败
                 # 不阻断取消传播）。attempt 不再永久停留 dispatched。
                 await self._cleanup_on_cancel(
-                    request,
+                    identity,
                     attempt_id=attempt_id,
                     reservation_token=reservation_token,
                     outbound_started=outbound_started,
@@ -904,14 +1645,143 @@ class ScenarioExecutor:
             # R2：清理已在 _attempt_once 的取消边界完成，此处仅放行传播
             raise
         except _DeadlineExhaustedError:
+            # M08：deadline 耗尽未产生本次 attempt（检查先于 attempt 身份建立），
+            # attempt_id 保持 None——不得借用上一个已结束尝试（契约：零出站失败
+            # attempt_id=None，结算事实无账目投影）。
             return _CandidateOutcome(status="failed", reason=last_reason, outputs=(), usages=())
         except Exception as e:
             last_reason = f"adapter error: {type(e).__name__}"
-            return _CandidateOutcome(status="failed", reason=last_reason, outputs=(), usages=())
+            # M08：来源 attempt = 触发该异常的真实尝试（非「当前」遍历状态）。
+            return _CandidateOutcome(
+                status="failed", reason=last_reason, outputs=(), usages=(), attempt_id=last_attempt_id
+            )
+
+    async def _ensure_data_operation(
+        self,
+        scope: _DataOperationScope,
+        template: DataAttemptAuthorization,
+        identity: _TurnIdentity,
+    ) -> str | None:
+        """确保本次模型调用的 operation 行存在（I43）：``None``=就绪，否则脱敏原因码。
+
+        operation 身份统一取本次 ``model_call_id``（``identity.invocation_id``，
+        一模型调用一 operation），归属 execution/round/node 随 binding 冻结；
+        owner/run 代次由 DAO 读 DB 权威值。能力缺失 / 持久化失败一律 fail-closed
+        （零出站，原因仅含稳定码与异常类型，R9/R21）。
+        """
+
+        ensure = getattr(self._config_service, "ensure_model_operation", None)
+        if ensure is None:
+            return "data operation unavailable: owner capability missing"
+        try:
+            await ensure(
+                user_scope=template.user_scope,
+                operation_id=identity.invocation_id,
+                execution_id=scope.execution_id,
+                round_id=scope.round_id,
+                node_id=scope.node_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            return f"data operation prepare failed: {type(e).__name__}"
+        return None
+
+    async def _authorize_data_attempt(self, template: DataAttemptAuthorization, attempt_id: str) -> str | None:
+        """资料核权门（M07）：返回 ``None``=放行，否则脱敏原因码（零出站）。
+
+        以该实际尝试的 ``attempt_id`` 重建请求（operation / 许可 / 绑定连接 /
+        源选择随受理冻结模板），交资料 owner 新鲜核权——连接授权、绑定一致核、
+        源 claim 在同一门内完成，不复用外层一次许可。owner 能力缺失 / 核权异常 /
+        deny / unknown 一律 fail-closed（unknown 不当 allow），原因仅含稳定码与
+        脱敏原因（R9/R21）。
+        """
+
+        request = replace(template, attempt_id=attempt_id)
+        authorize = getattr(self._config_service, "authorize_data_attempt", None)
+        if authorize is None:
+            return "data authorization unavailable: owner capability missing"
+        try:
+            receipt = await authorize(request)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            return f"data authorization failed: {type(e).__name__}"
+        outcome = getattr(receipt, "outcome", None)
+        if outcome is DataAttemptOutcome.ALLOW:
+            return None
+        reason = getattr(receipt, "reason", None)
+        suffix = f": {reason}" if isinstance(reason, str) and reason else ""
+        return f"data authorization {getattr(outcome, 'value', 'unknown')}{suffix}"
+
+    async def _finalize_chat(self, response: Any, scope: _AttemptScope, duration_ms: float) -> _CandidateOutcome:
+        """chat 入口成功响应收敛（B-02-3）：拒绝处置 + 终态落账 + response 承载。
+
+        - 拒绝回合（finish_reason=refused，DD §10.1「拒绝不换候选规避」）：拒绝
+          是完成的模型回合——failed 终态携带稳定码 CONTENT_REFUSED 与已观测用量
+          （R21 不丢弃），halt 候选遍历（禁止换候选绕过），完整 response 随
+          outcome 供调用方读取原文；
+        - 其余：succeeded 终态 + response 原样承载（业务 final 校验不在本入口，
+          §6.1——由调用方 workflow / Gateway 层承载）。
+        """
+        chat_response = cast(ChatTurnResponse, response)
+        if chat_response.finish_reason == "refused":
+            logger.warning(
+                "[ScenarioExecutor] chat turn refused by provider policy, halting candidate traversal (task=%s)",
+                scope.identity.task_id,
+            )
+            await self._submit_terminal_logged(
+                _terminal_record(
+                    scope.identity,
+                    scope.attempt_id,
+                    usage=chat_response.usage,
+                    actual_model=chat_response.actual_model,
+                    status="failed",
+                    error_code=_CONTENT_REFUSED_ERROR_CODE,
+                    reservation_id=scope.reservation_id,
+                    metadata=scope.metadata,
+                    duration_ms=duration_ms,
+                ),
+                scope.ledger,
+            )
+            return _CandidateOutcome(
+                status="failed",
+                decision_hint="rejected",
+                reason=_CONTENT_REFUSED_ERROR_CODE,
+                outputs=(),
+                usages=(),
+                halt_candidates=True,
+                attempt_id=scope.attempt_id,
+                chat_response=chat_response,
+            )
+
+        usage_tuple = (chat_response.usage,) if chat_response.usage is not None else ()
+        await self._submit_terminal_logged(
+            _terminal_record(
+                scope.identity,
+                scope.attempt_id,
+                usage=chat_response.usage,
+                actual_model=chat_response.actual_model,
+                status="succeeded",
+                error_code=None,
+                reservation_id=scope.reservation_id,
+                metadata=scope.metadata,
+                duration_ms=duration_ms,
+            ),
+            scope.ledger,
+        )
+        return _CandidateOutcome(
+            status="succeeded",
+            reason="ok",
+            outputs=(),
+            usages=usage_tuple,
+            attempt_id=scope.attempt_id,
+            chat_response=chat_response,
+        )
 
     async def _submit_failed_terminal(
         self,
-        request: InferenceRequest,
+        identity: _TurnIdentity,
         attempt_id: str,
         error_code: str,
         reservation_id: str | None,
@@ -932,7 +1802,7 @@ class ScenarioExecutor:
         """
         await self._submit_terminal_logged(
             _terminal_record(
-                request,
+                identity,
                 attempt_id,
                 usage=None,
                 actual_model=None,
@@ -950,19 +1820,37 @@ class ScenarioExecutor:
 
         F19：记录登记进 ledger——提交被取消打断（CancelledError 传播）时由
         取消边界幂等重提交（DAO revision 水位保证不双计）；持久化成功即收敛
-        完成（清 pending），此后取消无需再收敛该尝试。
+        完成（清 pending），此后取消无需再收敛该尝试。``submitted`` 标记终态
+        已提交（B-02-3 结算事实投影依据：concluded → settled / submitted 未
+        concluded → deferred）。
+
+        M08：写回目标恒为该记录自带的来源 attempt（``ledger`` 为该 attempt 的
+        结算状态）。已持久化事实的状态序单调（``_TERMINAL_STATUS_RANK``）：
+        重复（同序）经 DAO revision 水位幂等；迟到 / 乱序（更低序）结果零覆盖，
+        仅记录忽略原因（R21 不静默），不得把已成功的尝试改回失败 / 取消。
         """
+        rank = _TERMINAL_STATUS_RANK.get(str(getattr(record, "status", "")), 0)
+        if ledger.committed_rank is not None and rank < ledger.committed_rank:
+            logger.info(
+                "[ScenarioExecutor] stale terminal write ignored (attempt=%s..., status=%s < committed_rank=%d)",
+                str(getattr(record, "attempt_id", ""))[:8],
+                getattr(record, "status", "?"),
+                ledger.committed_rank,
+            )
+            return
         ledger.pending = record
+        ledger.submitted = True
         outcome = await self._recorder.submit_terminal(record)
         if outcome.persisted:
             ledger.concluded = True
             ledger.pending = None
+            ledger.committed_rank = rank if ledger.committed_rank is None else max(ledger.committed_rank, rank)
         else:
             logger.info("[ScenarioExecutor] terminal not persisted (%s)", outcome.error_code)
 
     async def _cleanup_on_cancel(
         self,
-        request: InferenceRequest,
+        identity: _TurnIdentity,
         *,
         attempt_id: str,
         reservation_token: str,
@@ -998,7 +1886,7 @@ class ScenarioExecutor:
             # F34：新建 cancelled 终态携带该次尝试真实耗时；在途重提交沿用原
             # 记录构造时点的耗时（终态确定时点，不虚增清理等待时长）
             record = _terminal_record(
-                request,
+                identity,
                 attempt_id,
                 usage=None,
                 actual_model=None,
@@ -1033,7 +1921,7 @@ class ScenarioExecutor:
 
     @staticmethod
     def _attempt_row(
-        request: InferenceRequest,
+        identity: _TurnIdentity,
         cand: Mapping[str, Any],
         connection: ResolvedConnection,
         snapshot: ExecutionSnapshot,
@@ -1042,9 +1930,9 @@ class ScenarioExecutor:
         retry_index: int,
     ) -> dict[str, Any]:
         return {
-            # F34：真实子任务标识（request.task_id），与终态元数据 / 预留同源——
+            # F34：真实子任务标识（identity.task_id），与终态元数据 / 预留同源——
             # 候选携带的 task_id 是分派器 scene ID 占位，不落账
-            "task_id": str(request.task_id),
+            "task_id": identity.task_id,
             "candidate_index": int(cand.get("candidate_index", 0)),
             # F18：该次真实尝试的序号（逐尝试递增），不再固定 0
             "retry_index": retry_index,
@@ -1055,23 +1943,6 @@ class ScenarioExecutor:
             "reservation_id": reservation_id,
         }
 
-    def _terminal(
-        self,
-        request: InferenceRequest,
-        status: str,
-        outputs: tuple[Mapping[str, Any], ...],
-        decisions: list[CandidateDecision],
-        usages: tuple[NormalizedLLMUsage, ...],
-    ) -> ScenarioExecutionResult:
-        return ScenarioExecutionResult(
-            scenario_id=request.scenario_id,
-            invocation_id=request.invocation_id,
-            status=status,  # type: ignore[arg-type]
-            outputs=outputs,
-            candidate_decisions=tuple(decisions),
-            actual_usage=usages,
-        )
-
 
 def _resolve_connection(raw: Mapping[str, Any]) -> tuple[ResolvedConnection, _ConnectionEligibility]:
     """快照连接定义（mapping，S2 快照契约）→ (ResolvedConnection, 资格证据)。
@@ -1079,19 +1950,28 @@ def _resolve_connection(raw: Mapping[str, Any]) -> tuple[ResolvedConnection, _Co
     必需字段（connection_id / connection_revision / adapter_kind / model）缺失即抛
     KeyError / ValueError（缺失不伪装，R21 邻域语义），由调用方降级 rejected。
 
-    F26 资格证据（``enabled`` / ``capabilities``）随同一解析点提取，不再丢弃：
-    防御性解析（非 Mapping / 缺 ``support`` 键的证据条目按无证据处理，视为
-    unknown，不门控）；``enabled`` 缺键取 schema 默认 True（与改动前行为一致）。
+    F26 资格证据（``enabled`` / ``capabilities``）随同一解析点提取，不再丢弃；
+    证据条目完整解析 ``support`` / ``source`` / ``connection_revision``（M06：
+    旧实现只保 support 丢掉证据版本，无法识别过期证据）。防御性解析（非
+    Mapping / 缺 ``support`` 键的条目按无证据处理，视为 unknown，不门控）；
+    ``enabled`` 缺键取 schema 默认 True（与改动前行为一致）。
     """
     adapter_kind = str(raw["adapter_kind"])
     if adapter_kind not in ("litellm_chat", "gguf_chat", "gguf_sentiment"):
         raise ValueError(f"unknown adapter_kind: {adapter_kind}")
-    capabilities: dict[str, str] = {}
+    capabilities: dict[str, _CapabilityEvidence] = {}
     capabilities_raw = raw.get("capabilities")
     if isinstance(capabilities_raw, Mapping):
         for evidence_task_id, evidence in capabilities_raw.items():
-            if isinstance(evidence, Mapping) and evidence.get("support") is not None:
-                capabilities[str(evidence_task_id)] = str(evidence["support"])
+            if not isinstance(evidence, Mapping) or evidence.get("support") is None:
+                continue
+            revision = evidence.get("connection_revision")
+            revision_valid = isinstance(revision, int) and not isinstance(revision, bool)
+            capabilities[str(evidence_task_id)] = _CapabilityEvidence(
+                support=str(evidence["support"]),
+                source=str(evidence["source"]) if evidence.get("source") is not None else None,
+                connection_revision=revision if revision_valid else None,
+            )
     resolved = ResolvedConnection(
         connection_id=str(raw["connection_id"]),
         connection_revision=int(raw["connection_revision"]),
@@ -1117,9 +1997,67 @@ def _ineligibility_reason(eligibility: _ConnectionEligibility, task_id: str) -> 
     """
     if not eligibility.enabled:
         return "connection disabled in snapshot"
-    if eligibility.capabilities.get(task_id) == "unsupported":
+    evidence = eligibility.capabilities.get(task_id)
+    if evidence is not None and evidence.support == "unsupported":
         return f"connection unsupported for task {task_id}"
     return None
+
+
+#: chat 入口请求必需能力（M06）：固定框架始终按 ``stream=True`` 调用；请求携带
+#: 任何工具（含结构 final 工具）时还要求工具能力。证据键与任务名同源约定
+#: （``CapabilityEvidenceConfig`` 的 capabilities 映射可按能力名承载）。
+_CHAT_STREAM_CAPABILITY: Final[str] = "stream"
+_CHAT_TOOLS_CAPABILITY: Final[str] = "tools"
+
+
+def _required_chat_capabilities(request: ChatTurnRequest) -> tuple[str, ...]:
+    """请求必需能力投影（M06）：stream 恒定必需，工具存在时必须工具能力。"""
+    required = [_CHAT_STREAM_CAPABILITY]
+    if request.tools or request.output_tools:
+        required.append(_CHAT_TOOLS_CAPABILITY)
+    return tuple(required)
+
+
+def _chat_capability_check(
+    request: ChatTurnRequest,
+) -> Callable[[ResolvedConnection, _ConnectionEligibility], str | None]:
+    """chat 准入的请求必需能力 / 证据版本核验（M06）。
+
+    真实 Profile 的能力事实来自连接冻结证据：必需能力必须为 ``supported`` 且
+    证据记录的 ``connection_revision`` 与派发连接一致（缺失版本视为未知 →
+    过期）。unknown / unsupported / 旧证据 → 返回拒绝原因（派发前淘汰、零
+    预留副作用），与模型故障重试语义严格区分。
+
+    I50：设备内本地 kind（``gguf_*``）一律不构成已准入的聊天能力——本地 worker
+    只在子进程内 stream 后聚合最终文本，没有绑定 ``request_id`` / 运行代次的
+    chunk / tool / final IPC 与聊天消费者，取消后的晚到消息也无处流式串入。
+    因此此处按 kind 直接拒绝（而不是依赖适配器恰好缺 ``invoke_chat`` 兜底），
+    避免配置声明 ``stream``/``tools`` 支持、或未来补一个聚合式 ``invoke_chat``
+    时把「无真实流式/工具往返」伪装成已准入。
+    """
+    required = _required_chat_capabilities(request)
+
+    def _check(connection: ResolvedConnection, eligibility: _ConnectionEligibility) -> str | None:
+        if connection.adapter_kind in LOCAL_ADAPTER_KINDS:
+            return (
+                f"chat requires real streaming/tool IPC; {connection.adapter_kind} is not admitted "
+                "(aggregated text only, no chunk/tool/final frames)"
+            )
+        for capability in required:
+            evidence = eligibility.capabilities.get(capability)
+            if evidence is None:
+                return f"chat requires confirmed {capability} capability (no evidence)"
+            if evidence.connection_revision != connection.connection_revision:
+                return (
+                    f"chat requires {capability} evidence at connection revision "
+                    f"{connection.connection_revision} (stale evidence: "
+                    f"{'unknown revision' if evidence.connection_revision is None else evidence.connection_revision})"
+                )
+            if evidence.support != "supported":
+                return f"chat requires supported {capability} capability (evidence: {evidence.support})"
+        return None
+
+    return _check
 
 
 # F27 适配器异常分类（终止判定先于重试判定的判据正本；映射表式，不散落 if-else）
@@ -1214,15 +2152,370 @@ def _route_fallback_enabled(route: Mapping[str, Any] | None) -> bool | None:
 
 
 @dataclass(frozen=True, slots=True)
-class _ConnectionEligibility:
-    """冻结连接资格证据（F26）：快照连接映射的启用状态 + 任务能力支持状态。
+class _CapabilityEvidence:
+    """单条能力证据（M06）：支持状态 + 来源 + 采集时的连接版本。
 
-    仅承载解析后的「已确认」资格事实：``enabled=False`` 或任务能力
+    ``connection_revision`` 为 None 表示证据未记录版本（未知 → 不可证明与
+    当前连接同版，按过期处理）。
+    """
+
+    support: str
+    source: str | None
+    connection_revision: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ConnectionEligibility:
+    """冻结连接资格证据（F26）：快照连接映射的启用状态 + 能力支持证据。
+
+    资格门控仍只认「已确认」事实：``enabled=False`` 或任务能力
     ``support == "unsupported"`` 才构成派发门控；无证据即 unknown 语义（不门控）。
+    chat 入口另行按请求必需能力与证据版本核验（见 ``_chat_capability_check``）。
     """
 
     enabled: bool
-    capabilities: Mapping[str, str]
+    capabilities: Mapping[str, _CapabilityEvidence]
+
+
+@dataclass(frozen=True, slots=True)
+class _TurnIdentity:
+    """共享执行段的请求身份投影（新旧入口各自投影，HANDOFF §6.1）。
+
+    ``payload`` 为预留估算投影（F19 金额估算输入，非出站形状）：旧入口原样
+    携带 InferenceRequest.payload；chat 入口经 :func:`_chat_estimation_payload`
+    投影完整输入（instructions / 消息正文 / 历史工具调用参数 / tools 与
+    output_tools schema / output schema / max_output_tokens）。
+    """
+
+    invocation_id: str
+    scenario_id: str
+    task_id: str
+    deadline: float
+    run_id: str | None
+    payload: Mapping[str, Any]
+
+
+@dataclass(slots=True)
+class _TraversalContext:
+    """遍历准备产物（新旧入口共享）：路由 / 连接 / 资格 / 计价 / F16 owner 身份。"""
+
+    route: Mapping[str, Any] | None
+    connections_by_id: dict[str, ResolvedConnection]
+    eligibility_by_id: dict[str, _ConnectionEligibility]
+    pricing_by_id: dict[str, ConnectionPricing | None]
+    month: str
+    owner_session_id: str
+    owner_epoch: int
+    owner_lease_expires_at: Any
+
+
+@dataclass(frozen=True, slots=True)
+class _CandidateAdmission:
+    """候选准入结果（共享遍历主干）：``decision`` 非 None 即未准入（含原因）；
+    ``stop=True`` 表示收敛整个遍历（deadline 耗尽，与旧 break 语义一致）；
+    准入时携带许可句柄（connection / semaphore / cooldown_key 齐备）。"""
+
+    decision: CandidateDecision | None
+    stop: bool = False
+    connection: ResolvedConnection | None = None
+    semaphore: asyncio.Semaphore | None = None
+    cooldown_key: tuple[str, int] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _TraversalResult:
+    """候选遍历中性终态（新旧入口各自包装为公共结果，HANDOFF §6.1）。
+
+    ``candidate``：succeeded 时的原始候选结果 / 失败时最后一个实际执行的候选
+    结果（chat 终态投影 settlement / attempt / partial 的来源）；``failure_reason``
+    为失败收敛原因（chat error_code 来源，旧入口不消费）。
+    """
+
+    status: Literal["succeeded", "failed"]
+    decisions: tuple[CandidateDecision, ...]
+    outputs: tuple[Mapping[str, Any], ...]
+    usages: tuple[NormalizedLLMUsage, ...]
+    candidate: _CandidateOutcome | None = None
+    failure_reason: str | None = None
+
+
+@dataclass(slots=True)
+class _AttemptScope:
+    """单次尝试的共享执行段上下文（policy 回调句柄，HANDOFF §6.1）。
+
+    ``metadata`` 为派发时点固化的审计元数据（响应后增量覆盖 actual_model，与
+    取消清理同源）；``reservation_id`` 贯穿终态（F16/F22/F23）。
+    """
+
+    identity: _TurnIdentity
+    attempt_id: str
+    reservation_id: str | None
+    metadata: dict[str, Any]
+    ledger: _AttemptLedgerState
+
+
+@dataclass(frozen=True, slots=True)
+class _AttemptPolicy:
+    """入口差异策略（HANDOFF §6.1 共享执行段参数化）。
+
+    - ``invoke``：适配器调用形态（旧链 ``adapter.invoke``；chat
+      ``adapter.invoke_chat`` + 事件追踪包装）；
+    - ``finalize``：成功响应收敛（共享段 observe_usage 之后的校验 / 终态 /
+      输出投影；入口特有失败处置亦在其中返回对应结果）；
+    - ``on_adapter_failure``：适配器异常且非终止类（content_refused 已在共享段
+      halt）提交失败终态后的入口特有收敛——返回结果即按其收敛（不重试不切换），
+      返回 None 走共享默认（F27 退避重试 / 切换候选）；
+    - ``adapter_check``：准入期附加协议检查（chat：invoke_chat 存在性）；
+      返回拒绝原因或 None。
+    - ``capability_check``：准入期请求必需能力核验（M06，仅 chat 入口使用）——
+      按连接冻结证据核验请求必需能力与证据 revision；返回拒绝原因或 None。
+    - ``data_authorization``：资料核权模板（M07，仅 chat 入口在 binding 携带
+      ``data_consent`` 时设置）——每个实际 attempt 在预留/派发/外发前以该
+      attempt 的 ``attempt_id`` 重建请求并新鲜核权（资料 owner 许可内含连接
+      授权 + 绑定核 + 源 claim 单胜者）；拒绝/未知/异常一律零出站。
+    - ``strict_required_registration``：Agent 聊天回合必需登记严格策略（M08）——
+      reserve / mark_dispatched / begin_attempt 任一未确认即零出站；默认 False
+      保持旧直推链既有 usage_only 降级行为不变。
+    """
+
+    invoke: Callable[[_EntryAdapter, ResolvedConnection, AttemptContext], Awaitable[Any]]
+    finalize: Callable[[Any, _AttemptScope, float], Awaitable[_CandidateOutcome]]
+    on_adapter_failure: Callable[[Exception, _AttemptScope], Awaitable[_CandidateOutcome | None]] | None = None
+    adapter_check: Callable[[_EntryAdapter, ResolvedConnection], str | None] | None = None
+    capability_check: Callable[[ResolvedConnection, _ConnectionEligibility], str | None] | None = None
+    data_authorization: DataAttemptAuthorization | None = None
+    strict_required_registration: bool = False
+    #: I43：无许可即拒绝（agent research 叶链 fail-closed，零外发）。
+    require_data_consent: bool = False
+    #: I43：operation 归属作用域（设置时每次模型调用先 ``ensure_model_operation``，
+    #: operation_id 取本次 ``model_call_id``）。
+    data_operation_scope: _DataOperationScope | None = None
+    #: I43：本次出站 payload 引用的资料集合（``None`` = 不可核 → fail-closed）。
+    source_closure: frozenset[tuple[str, str, str]] | None = None
+
+
+@dataclass(slots=True)
+class _ChatStreamExposure:
+    """chat 回合的公开分片追踪（§6.4-5）：任一真实事件送达调用方（on_event
+    之前即置位，保守口径——handler 异常时分片亦已到达调用边界）即 ``exposed``——
+    其后失败保原 attempt，不重试不换候选（不换模型拼接）。``partial_parts``
+    累积已公开 text delta（partial 证据）。"""
+
+    exposed: bool = False
+    partial_parts: list[str] = field(default_factory=list)
+
+    @property
+    def partial_text(self) -> str | None:
+        return "".join(self.partial_parts) or None
+
+
+@dataclass(slots=True)
+class _AttemptTrail:
+    """单候选内逐尝试轨迹，按「响应来源 attempt」登记（检视 M08）。
+
+    旧实现只有「最后一次尝试」单槽（``attempt_id`` / ``ledger``），出口与终态
+    写回都借此顶替来源 attempt：跨候选 / 跨调用时会把零出站失败的
+    ``ChatTurnOutcome.attempt_id`` 错挂到上一个已结束的尝试（与契约「零出站
+    失败 attempt_id=None」冲突），也会让结算事实投影错位。现以 attempt_id
+    为键逐次登记，出口只取响应来源 attempt 的事实，不再有「当前 attempt」顶替。
+    """
+
+    ledgers: dict[str, _AttemptLedgerState] = field(default_factory=dict)
+
+    def register(self, attempt_id: str) -> _AttemptLedgerState:
+        """登记一次真实尝试的结算状态（逐尝试新建，无共享可变态）。"""
+        ledger = _AttemptLedgerState()
+        self.ledgers[attempt_id] = ledger
+        return ledger
+
+    def ledger_for(self, attempt_id: str | None) -> _AttemptLedgerState | None:
+        """响应来源 attempt 的结算状态；``None``（无 attempt）→ 无账目事实。"""
+        if attempt_id is None:
+            return None
+        return self.ledgers.get(attempt_id)
+
+
+def _settlement_state(ledger: _AttemptLedgerState | None) -> ChatTurnSettlementState | None:
+    """结算事实投影（ChatTurnOutcome.settlement_state）：``concluded`` →
+    settled；``submitted``（终态已提交、持久化未确认，F20 重放承接）→ deferred；
+    无账目事实 → None。``unknown``（收费无法证明）仅由取消路径 F19
+    held_unconfirmed 语义承载——取消传播不产出 outcome，该值供类型完备性。"""
+    if ledger is None:
+        return None
+    if ledger.concluded:
+        return "settled"
+    if ledger.submitted:
+        return "deferred"
+    return None
+
+
+def _traversal_failure_reason(decisions: list[CandidateDecision]) -> str:
+    """失败收敛原因（chat error_code 来源）：取最后一条决策原因；无决策时
+    （空候选）回退诚实缺省（R21 不伪装）。"""
+    for decision in reversed(decisions):
+        if decision.reason:
+            return decision.reason
+    return "no eligible candidate"
+
+
+def _make_tracked_event(
+    exposure: _ChatStreamExposure,
+    on_event: ChatStreamEventHandler | None,
+) -> ChatStreamEventHandler:
+    """事件追踪包装（§6.4-5）：送达即置 exposed（保守口径）；text delta 累积为
+    partial 证据；on_event 可等待，await 语义透传（背压）。"""
+
+    async def _tracked(event: ChatStreamEvent) -> None:
+        exposure.exposed = True
+        if event.kind == "text" and isinstance(event.text_delta, str):
+            exposure.partial_parts.append(event.text_delta)
+        if on_event is not None:
+            outcome = on_event(event)
+            if inspect.isawaitable(outcome):
+                await outcome
+
+    return _tracked
+
+
+def _chat_adapter_check(adapter: _EntryAdapter, connection: ResolvedConnection) -> str | None:
+    """chat 入口准入附加检查（HANDOFF §6.1）：非聊天适配器（FinBERT 等）不接
+    ChatInferenceAdapter 协议——派发前淘汰（零预留副作用）。"""
+    if not callable(getattr(adapter, "invoke_chat", None)):
+        return f"no chat adapter for kind {connection.adapter_kind}"
+    return None
+
+
+def _legacy_adapter_check(adapter: _EntryAdapter, connection: ResolvedConnection) -> str | None:
+    """旧入口准入附加检查（检视 M01）：仅实现聊天协议的适配器不得走旧入口——
+    派发前淘汰（零预留副作用），不以执行期 AttributeError 呈现。"""
+    if not callable(getattr(adapter, "invoke", None)):
+        return f"no legacy invoke adapter for kind {connection.adapter_kind}"
+    return None
+
+
+def _legacy_invoke(
+    request: InferenceRequest,
+) -> Callable[[_EntryAdapter, ResolvedConnection, AttemptContext], Awaitable[Any]]:
+    """旧链适配器调用形态（共享执行段参数化，HANDOFF §6.1）：单 prompt 出口，
+    校验收敛经 ``validate_output``（入口行为不变）。``.invoke`` 存在性已由
+    :func:`_legacy_adapter_check` 在准入期核验（零预留淘汰）。"""
+
+    async def _invoke(adapter: _EntryAdapter, connection: ResolvedConnection, attempt_context: AttemptContext) -> Any:
+        return await cast(InferenceAdapter, adapter).invoke(request, connection, request.deadline, attempt_context)
+
+    return _invoke
+
+
+#: native 结构化输出的 json_schema 名（与固定 SDK ``openai._map_json_schema``
+#: 的 ``DEFAULT_OUTPUT_TOOL_NAME`` 同值）：OpenAI chat completions 的
+#: ``response_format.json_schema.name`` 为必填字段。
+_NATIVE_OUTPUT_SCHEMA_NAME: Final[str] = "final_result"
+
+
+def _chat_response_format(request: ChatTurnRequest) -> Mapping[str, Any] | None:
+    """按 ``output_mode`` 生成真实出站 ``response_format``（固定 SDK 语义）。
+
+    - ``text`` / ``tool``：无供应商结构化约束（tool 模式的结构 final 经
+      output tool 承载）→ ``None``；
+    - ``native``：OpenAI chat completions 原生 ``json_schema`` 封装（与 SDK
+      ``OpenAIChatModel._map_json_schema`` 同形：``type`` + ``json_schema.name``
+      + ``json_schema.schema``）。LiteLLM（锁定版 ``type_to_response_format_param``
+      的 dict 分支）对 dict **原样透传、不补封装**，裸 schema 直传会被供应商当作
+      非法 response_format 或静默忽略，故封装必须在桥层生成；
+    - ``prompted``：schema 已由 SDK 注入 instructions，出站不得再发原生封装
+      （否则越权改变输出模式语义）。
+
+    ``request.ensure_valid`` 已拒绝模式与 schema 不自洽的请求；此处仅保留
+    native 缺 schema 的防御性 fail-closed。
+    """
+    if request.output_mode != "native":
+        return None
+    if request.output_schema is None:
+        raise ModelTurnProtocolError("invalid_field", "$.output_schema")
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": _NATIVE_OUTPUT_SCHEMA_NAME,
+            "schema": dict(request.output_schema),
+        },
+    }
+
+
+#: llm_tokens 预留估算的输入投影键（M09）：消息正文 + 历史工具调用参数 +
+#: tools / output_tools schema + output schema 全部计入。漏项会让预留金额系统性
+#: 偏低，而真实 usage 只能在派发后结算，补不回派发前的少估。
+_LLM_INPUT_PROJECTION_KEYS: Final[tuple[str, ...]] = (
+    "system_prompt",
+    "prompt",
+    "tool_calls_text",
+    "tools_schema",
+    "output_tools_schema",
+    "output_schema",
+)
+
+#: 预留估算不可估信号键（M09 / R21）：存在桥层无尺寸 / 计费语义的输入（图片
+#: part）时，投影无法覆盖实际完整输入 → 显式不可估，不以偏低数值冒充估算。
+_ESTIMATION_UNESTIMABLE_KEY: Final[str] = "unestimable_input"
+
+
+def _serialize_tool_specs(specs: tuple[FunctionToolSpec, ...]) -> str:
+    """工具规范序列化（估算投影用）：按工具名稳定排序的 JSON，覆盖 description
+    与完整 ``json_schema``（出站 tools 的真实计费输入）。"""
+    if not specs:
+        return ""
+    payload = [
+        {
+            "name": spec.name,
+            "description": spec.description,
+            "json_schema": spec.json_schema,
+            "schema_version": spec.schema_version,
+            "output_tool": spec.output_tool,
+        }
+        for spec in sorted(specs, key=lambda item: item.name)
+    ]
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _chat_estimation_payload(request: ChatTurnRequest) -> dict[str, Any]:
+    """chat 回合的预留估算投影（F19 金额估算输入，非出站形状）。
+
+    M09：投影必须覆盖实际完整输入——``instructions`` + 消息正文 + 历史工具调用
+    参数（``assistant_tool_calls`` 的 name / arguments_json）+ ``tools`` /
+    ``output_tools`` schema + ``output_schema``（出站 response_format）+
+    ``max_output_tokens``；键口径与 :func:`_estimate_reservation_amount` 的
+    llm_tokens 估算对齐。只估算正文会让预留金额系统性偏低（供应商硬额可能在
+    usage 结算前即被超出，而结算补不回少估）。
+
+    图片 part 在桥层无二进制解析 / 计费语义 → 标
+    ``unestimable_input``，估算显式返回不可估（R21），不以正文估算冒充完整输入。
+    """
+    prompt_parts: list[str] = []
+    tool_calls: list[str] = []
+    has_image = False
+    for message in request.messages:
+        for part in message.content_parts:
+            if isinstance(part, TextContentPart):
+                prompt_parts.append(part.text)
+            else:
+                has_image = True
+        for call in message.assistant_tool_calls:
+            tool_calls.append(f"{call.name}:{call.arguments_json}")
+    payload: dict[str, Any] = {
+        "system_prompt": "\n".join(request.instructions),
+        "prompt": "\n".join(prompt_parts),
+        "tool_calls_text": "\n".join(tool_calls),
+        "tools_schema": _serialize_tool_specs(request.tools),
+        "output_tools_schema": _serialize_tool_specs(request.output_tools),
+        "output_schema": (
+            json.dumps(request.output_schema, ensure_ascii=False, sort_keys=True, default=str)
+            if request.output_schema is not None
+            else ""
+        ),
+        "max_tokens": request.max_output_tokens,
+    }
+    if has_image:
+        payload[_ESTIMATION_UNESTIMABLE_KEY] = True
+    return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -1261,9 +2554,16 @@ class _CandidateOutcome:
     """单候选执行内部结果。
 
     ``decision_hint``：失败时候选决策标记（authorize 失败属 rejected，其余 switched）。
-    ``halt_candidates``（F18）：费用型预留被拒 / 派发绑定失权时置 True——预算 /
-    owner 为 invocation 级事实，切换候选无济，中断整个候选遍历（D5 既有 break
-    语义）；置位时不进连接冷却（非连接侧故障）。
+    ``halt_candidates``（F18）：费用型预留被拒 / 派发绑定失权 / 内容拒绝 / 必需
+    登记失败时置 True——预算 / owner / 内容 / 登记为 invocation 级事实，切换候选
+    无济，中断整个候选遍历（D5 既有 break 语义）；置位时不进连接冷却（非连接侧
+    故障）。
+
+    B-02-3 扩展（共享执行段出口统一投影，旧入口不消费）：
+    ``attempt_id`` / ``settlement_state``（ChatTurnOutcome 身份关联与结算事实）、
+    ``chat_response``（chat 回合最终响应，拒绝回合随 failed 终态承载）、
+    ``partial_text``（§6.4-5 已公开分片证据）、``stop_traversal``（已公开分片后
+    失败——中断遍历，属连接侧事实沿常规失败路径进冷却）。
     """
 
     status: str
@@ -1272,6 +2572,11 @@ class _CandidateOutcome:
     usages: tuple[NormalizedLLMUsage, ...]
     decision_hint: Literal["skipped", "rejected", "attempted", "switched", "succeeded", "failed"] = "switched"
     halt_candidates: bool = False
+    attempt_id: str | None = None
+    settlement_state: ChatTurnSettlementState | None = None
+    chat_response: ChatTurnResponse | None = None
+    partial_text: str | None = None
+    stop_traversal: bool = False
 
 
 @dataclass(slots=True)
@@ -1280,15 +2585,22 @@ class _AttemptLedgerState:
 
     ``pending``：最后构建、尚未确认持久化的终态记录——提交被取消打断时由
     取消边界幂等重提交（DAO revision 水位保证不双计）；``concluded``：终态
-    已持久化，此后取消无需再收敛该尝试（与 pending 互斥维护：持久化即清空）。
+    已持久化，此后取消无需再收敛该尝试（与 pending 互斥维护：持久化即清空）；
+    ``submitted``（B-02-3）：终态已提交（持久化未确认时由 F20 重放队列承接）——
+    结算事实投影依据（concluded → settled / submitted 未 concluded → deferred /
+    均无 → 无账目事实）；``committed_rank``（M08）：已持久化终态的状态序
+    （见 ``_TERMINAL_STATUS_RANK``，单调不减），用于让重复 / 乱序的迟到写回
+    幂等且不覆盖较新事实。
     """
 
     pending: Any = None
     concluded: bool = False
+    submitted: bool = False
+    committed_rank: int | None = None
 
 
 def _observation_from(
-    request: InferenceRequest,
+    identity: _TurnIdentity,
     attempt_id: str,
     response: AdapterResponse,
     metadata: dict[str, Any],
@@ -1297,7 +2609,7 @@ def _observation_from(
 
     return AttemptUsageObservation(
         attempt_id=attempt_id,
-        invocation_id=request.invocation_id,
+        invocation_id=identity.invocation_id,
         usage=response.usage,
         actual_model=response.actual_model,
         metadata=metadata,
@@ -1305,7 +2617,7 @@ def _observation_from(
 
 
 def _terminal_record(
-    request: InferenceRequest,
+    identity: _TurnIdentity,
     attempt_id: str,
     *,
     usage: NormalizedLLMUsage | None,
@@ -1320,7 +2632,7 @@ def _terminal_record(
 
     return AttemptTerminalRecord(
         attempt_id=attempt_id,
-        invocation_id=request.invocation_id,
+        invocation_id=identity.invocation_id,
         status=status,
         usage=usage,
         error_code=error_code,
@@ -1345,19 +2657,22 @@ def _estimate_reservation_amount(
 
     dispatch 不持有请求 payload，单次金额只能在执行侧逐候选估算；估算口径与
     结算同源（``compute_cost_cny``，不可计价一律 ``None``）：
-    - ``llm_tokens``：输入 = ``system_prompt`` + ``prompt`` 的 token 估算；输出
-      取 payload ``max_tokens``（未声明时按 ``OUTPUT_RESERVE_TOKENS`` 保守预留）；
+    - ``llm_tokens``：输入 = ``_LLM_INPUT_PROJECTION_KEYS`` 各投影键的 token 估算
+      之和（正文字段 + 历史工具调用参数 + tools/output_tools schema + output
+      schema）；输出取 payload ``max_tokens``（未声明时按
+      ``OUTPUT_RESERVE_TOKENS`` 保守预留）；
     - ``encoder_input_tokens``：payload ``texts`` 逐条 token 估算求和；
-    - 计价快照缺失 / ``mode`` 非 ``estimate_cost`` / 单价或用量不可得 → ``None``
-      （R21：未知成本不以 0 占位）。D13-005：限额已配置时 ``None`` 由调用方按
+    - 计价快照缺失 / ``mode`` 非 ``estimate_cost`` / 单价或用量不可得 / 投影标
+      ``unestimable_input``（存在无计费语义的输入）→ ``None``（R21：未知成本不
+      以 0 或正文估算冒充）。D13-005：限额已配置时 ``None`` 由调用方按
       fail-closed 拒绝（不静默降级 usage_only 绕过预算门）。
     """
     if pricing is None or pricing.mode != "estimate_cost":
         return None
     if pricing.pricing_unit == "llm_tokens":
-        input_tokens = _estimate_tokens(payload.get("system_prompt"), model) + _estimate_tokens(
-            payload.get("prompt"), model
-        )
+        if payload.get(_ESTIMATION_UNESTIMABLE_KEY):
+            return None
+        input_tokens = sum(_estimate_tokens(payload.get(key), model) for key in _LLM_INPUT_PROJECTION_KEYS)
         if input_tokens <= 0:
             return None
         raw_max_tokens = payload.get("max_tokens")
@@ -1409,7 +2724,7 @@ def _reported_encoder_input_tokens(usage: NormalizedLLMUsage | None) -> int | No
 
 def _encoder_usage_metadata(
     pricing: ConnectionPricing | None,
-    request: InferenceRequest,
+    identity: _TurnIdentity,
     model: str,
     response: AdapterResponse | None = None,
 ) -> dict[str, Any]:
@@ -1425,7 +2740,7 @@ def _encoder_usage_metadata(
     if pricing is None or pricing.pricing_unit != "encoder_input_tokens":
         return {}
     metadata: dict[str, Any] = {}
-    texts = request.payload.get("texts")
+    texts = identity.payload.get("texts")
     if isinstance(texts, (list, tuple)) and texts:
         metadata["text_count"] = len(texts)
         estimate = sum(_estimate_tokens(text, model) for text in texts)
@@ -1453,7 +2768,7 @@ def _budget_policy_snapshot(route: Mapping[str, Any] | None) -> dict[str, Any] |
 
 
 def _metadata(
-    request: InferenceRequest,
+    identity: _TurnIdentity,
     cand: Mapping[str, Any],
     connection: ResolvedConnection,
     response: AdapterResponse | None,
@@ -1472,8 +2787,8 @@ def _metadata(
     F19③：``month`` 为必传参数（execute 起点冻结值），不再于本函数内重算
     系统时间——观察 / 失败终态 / 取消终态的归属月与预留归属月同源（月界不
     漂移），审计字段在派发时点固化，不依赖事后重算。
-    F34：``task_id`` 取请求的真实子任务标识（``request.task_id``）——候选携带
-    的 ``task_id`` 是分派器冻结的 scene ID 占位（scenario_dispatch 以
+    F34：``task_id`` 取请求身份投影的真实子任务标识（``identity.task_id``）——
+    候选携带的 ``task_id`` 是分派器冻结的 scene ID 占位（scenario_dispatch 以
     scenario_id 填充），不落账；预留 / attempt 行 / 终态元数据三处同源。
     """
     return {
@@ -1482,15 +2797,15 @@ def _metadata(
         "adapter_kind": connection.adapter_kind,
         "configured_model": connection.model,
         "actual_model": response.actual_model if response is not None else None,
-        "scenario_id": request.scenario_id,
-        "task_id": str(request.task_id),
+        "scenario_id": identity.scenario_id,
+        "task_id": identity.task_id,
         "trigger": str(cand.get("trigger", "manual")),
         "candidate_index": int(cand.get("candidate_index", 0)),
         "retry_index": retry_index,
         # F01：许可线性化点的安全修订（permit），不再混用快照授权范围版本
         "security_revision": security_revision,
         "month": month,
-        "run_id": request.run_id,
+        "run_id": identity.run_id,
         # F17：连接计价冻结快照（mode / pricing_unit / 价格来源 / 单价 / 汇率 /
         # 生效时点，金额十进制字符串保精度）。成本不在此计算——由 Recorder 在
         # 终态落账时点按真实 usage 经 connection_pricing.compute_cost_cny 计算
@@ -1500,5 +2815,5 @@ def _metadata(
         # 派发时点尚无适配器真实用量 → 不写 encoder_input_tokens（结算侧
         # compute_cost_cny 与账本列依赖真实 token，由响应返回后增量覆盖）。
         # 非 encoder 计价连接不引入该键。
-        **_encoder_usage_metadata(pricing, request, connection.model),
+        **_encoder_usage_metadata(pricing, identity, connection.model),
     }

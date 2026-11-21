@@ -27,6 +27,7 @@ import pandas as pd
 from core.errors import StrategyParamError
 from data.persistence.quality_gate import QualityGateError
 from services.task_manager import TaskManager
+from ui.agent_decision_arbiter import get_decision_arbiter
 from ui.viewmodels import Message
 from ui.viewmodels.screener_types import (
     LogEntry,
@@ -53,6 +54,12 @@ _STREAM_THROTTLE = 0.05  # seconds
 # UX-02: 整批 AI 分析失败占比严格超过该阈值时, 在结果页顶部警告横幅提示
 # 「AI 分析未能完成」, 避免用户在 50 行表格里自己数灰色行 (报告 04 §1.1 / 05 §1.2)。
 _AI_FAILED_RATIO_BANNER_THRESHOLD = 0.30
+
+#: 旧运行期确认在统一仲裁层的许可身份（R2-I04）：与研究决定共用唯一人工许可
+#: 槽位，防止同一时刻出现两份可被批准的许可。它们不是 research round 决定
+#: （无 execution/round），故以 ``begin_runtime_ack`` 登记而非 ``begin_submit``。
+_RUNTIME_EGRESS_DECISION_ID = "runtime-egress-ack"
+_RUNTIME_UNPRICED_DECISION_ID = "runtime-unpriced-ack"
 
 
 def _build_ai_failed_banner_message(result_df: pd.DataFrame | None) -> Message | None:
@@ -496,6 +503,18 @@ class AIStreamMixin:
 
     # --- AI Streaming Handlers ---
 
+    def _runtime_ack_owner(self, kind: str) -> str:
+        """运行期确认的仲裁 owner（按 VM 实例 + 确认类型隔离，避免互相释放）。"""
+
+        return f"screener-{kind}:{id(self)}"
+
+    def _release_runtime_ack_permits(self) -> None:
+        """释放本 VM 持有的旧确认许可（幂等；dispose / 异常路径兜底）。"""
+
+        arbiter = get_decision_arbiter()
+        arbiter.end_submit(self._runtime_ack_owner("egress"))
+        arbiter.end_submit(self._runtime_ack_owner("unpriced"))
+
     async def _request_egress_ack(self, preview: str, provider: str) -> bool:
         """SEC-01 gap3: 运行时 AI 外发确认桥接（由策略层经 context 注入回调调用）。
 
@@ -503,13 +522,23 @@ class AIStreamMixin:
         ScreenerView 的 loop 内 await），写入 state 由 View 渲染确认对话框；用户在
         View 点击「同意/拒绝」调 ``resolve_ai_egress_ack`` 落地。返回值即用户决策。
 
+        R2-I04：渲染前先占用统一仲裁的唯一人工许可槽位；已有研究决定在途时
+        fail-closed 返回 False（不弹第二份许可、不经旧对话框绕过仲裁）。取消/
+        异常路径在 finally 释放槽位。
+
         CancelledError 直接传播（R2：调取方/停机路径需要感知取消，不能吞没）。
         """
-        loop = self._get_loop_or_none() or asyncio.get_running_loop()
-        # 若上一个确认尚未结算（异常路径残留），先按拒绝关闭，避免 Future 悬挂。
+        arbiter = get_decision_arbiter()
+        owner = self._runtime_ack_owner("egress")
+        # 若上一个确认尚未结算（异常路径残留），先按拒绝关闭并释放其许可。
         prev = self._egress_ack_future
         if prev is not None and not prev.done():
             prev.set_result(False)
+        arbiter.end_submit(owner)
+        if arbiter.begin_runtime_ack(owner, _RUNTIME_EGRESS_DECISION_ID) is not None:
+            return False
+
+        loop = self._get_loop_or_none() or asyncio.get_running_loop()
         future = loop.create_future()
         self._egress_ack_future = future
         self._set_state(
@@ -519,12 +548,19 @@ class AIStreamMixin:
         try:
             return await future
         finally:
-            self._egress_ack_future = None
+            # 只释放本次请求占用的许可：并发/残留请求的 finally 不得释放新许可。
+            if self._egress_ack_future is future:
+                self._egress_ack_future = None
+                arbiter.end_submit(owner)
 
     def resolve_ai_egress_ack(self, confirmed: bool) -> None:
-        """SEC-01 gap3: 用户对运行时 AI 外发确认的决策落地（View 调）。"""
+        """SEC-01 gap3: 用户对运行时 AI 外发确认的决策落地（View 调）。
+
+        只结算待决 Future，不清空 ``_egress_ack_future``：许可槽位由等待方在
+        收到结果后的 finally 释放（本方法可能被迟到的旧点击调用，不能代释放）。
+        """
+
         future = self._egress_ack_future
-        self._egress_ack_future = None
         self._set_state(pending_egress_ack_preview="", pending_egress_ack_provider="")
         if future is not None and not future.done():
             future.set_result(bool(confirmed))
@@ -538,24 +574,37 @@ class AIStreamMixin:
         ``_confirm_unpriced`` 在确认后置 ``_ai_unpriced_acknowledged = True`` 达成
         （作用域止于本次运行，下次 ``run_ai_analysis`` 重置并重新提示）。
 
+        R2-I04：与外发确认共用统一仲裁槽位；研究决定在途时 fail-closed 返回 False。
+
         R2：CancelledError 直接传播（不吞没）。
         """
-        loop = self._get_loop_or_none() or asyncio.get_running_loop()
+        arbiter = get_decision_arbiter()
+        owner = self._runtime_ack_owner("unpriced")
         prev = self._unpriced_ack_future
         if prev is not None and not prev.done():
             prev.set_result(False)
+        arbiter.end_submit(owner)
+        if arbiter.begin_runtime_ack(owner, _RUNTIME_UNPRICED_DECISION_ID) is not None:
+            return False
+
+        loop = self._get_loop_or_none() or asyncio.get_running_loop()
         future = loop.create_future()
         self._unpriced_ack_future = future
         self._set_state(pending_unpriced_ack=True)
         try:
             return await future
         finally:
-            self._unpriced_ack_future = None
+            if self._unpriced_ack_future is future:
+                self._unpriced_ack_future = None
+                arbiter.end_submit(owner)
 
     def resolve_ai_unpriced_ack(self, confirmed: bool) -> None:
-        """AI-01: 用户对「不可计价调用保守确认」的决策落地（View 调）。"""
+        """AI-01: 用户对「不可计价调用保守确认」的决策落地（View 调）。
+
+        同 ``resolve_ai_egress_ack``：只结算 Future，许可槽位由等待方 finally 释放。
+        """
+
         future = self._unpriced_ack_future
-        self._unpriced_ack_future = None
         self._set_state(pending_unpriced_ack=False)
         if future is not None and not future.done():
             future.set_result(bool(confirmed))
@@ -1095,7 +1144,10 @@ class AIStreamMixin:
                             )
                         import uuid as _uuid
 
-                        run_id = _uuid.uuid4().hex[:16]
+                        # F34/AC23：沿用批次预存的调用身份作运行身份，使落库结果与
+                        # 模型账本费用链（run_id/invocation_id）同源可回查；无身份
+                        # （AI 未运行等）仍按原方式生成（不伪造批次身份）。
+                        run_id = context.get("_ai_operation_id") or _uuid.uuid4().hex[:16]
                         try:
                             saved = await self.review_mgr.save_results(
                                 strategy.name_key,

@@ -206,7 +206,12 @@ class TestLoad:
     async def test_load_builds_state(self):
         vm, _ = _make_vm(_snapshot())
         await vm.load()
-        assert {r.scenario_id for r in vm.state.routes} == {"news_annotation", "stock_analysis", "news_risk"}
+        assert {r.scenario_id for r in vm.state.routes} == {
+            "news_annotation",
+            "stock_analysis",
+            "news_risk",
+            "agent_research",
+        }
         assert len(vm.state.available_connections) == 2
         assert vm.state.selected_scenario == "news_annotation"
         assert vm.state.routes == vm.state.committed_routes
@@ -669,7 +674,7 @@ class TestRouteRoundtripFidelity:
         assert vm.state.save_state == "committed"
         payload = service.save_draft.await_args.args[0]
         rows = {r["scenario_id"]: r["route_revision"] for r in payload["scenario_routes"]}
-        assert rows == {"news_annotation": 1, "stock_analysis": 1, "news_risk": 1}
+        assert rows == {"news_annotation": 1, "stock_analysis": 1, "news_risk": 1, "agent_research": 1}
 
     @pytest.mark.asyncio
     async def test_route_revision_increments_once_per_semantic_change(self):
@@ -825,7 +830,12 @@ class TestPayloadBuilders:
 
         payload = vm.all_routes_payload()
 
-        assert [r["scenario_id"] for r in payload] == ["news_annotation", "stock_analysis", "news_risk"]
+        assert [r["scenario_id"] for r in payload] == [
+            "news_annotation",
+            "stock_analysis",
+            "news_risk",
+            "agent_research",
+        ]
         stock = next(r for r in payload if r["scenario_id"] == "stock_analysis")
         assert stock["candidates"] == ["conn-a"]
 
@@ -944,14 +954,24 @@ class TestRebaseSnapshot:
         assert vm.build_payload("stock_analysis")["config_revision"] == 6
         # 已分叉草稿保留（连接域提交不丢路由草稿——F30 回归标准）
         assert _route_candidates(vm, "stock_analysis") == ("conn-a",)
-        assert vm.state.dirty_counts == (("news_annotation", 0), ("stock_analysis", 1), ("news_risk", 0))
+        assert vm.state.dirty_counts == (
+            ("news_annotation", 0),
+            ("stock_analysis", 1),
+            ("news_risk", 0),
+            ("agent_research", 0),
+        )
 
     @pytest.mark.asyncio
     async def test_rebase_undiverged_draft_no_phantom_dirty(self):
         """未分叉草稿随新基线：基线前移后内容等于新基线，不标脏。"""
         vm, service = _make_vm(_snapshot(config_revision=5))
         await vm.load()
-        assert vm.state.dirty_counts == (("news_annotation", 0), ("stock_analysis", 0), ("news_risk", 0))
+        assert vm.state.dirty_counts == (
+            ("news_annotation", 0),
+            ("stock_analysis", 0),
+            ("news_risk", 0),
+            ("agent_research", 0),
+        )
 
         service.get_snapshot = AsyncMock(return_value=_snapshot(config_revision=6))
         ok = await vm.rebase_snapshot()

@@ -168,6 +168,24 @@ class TestEnsureInvocation:
         assert kwargs["owner_session_id"] == "owner-1"
 
     @pytest.mark.asyncio
+    async def test_ensure_invocation_forwards_business_run_id(self):
+        """R2-I05：业务批次身份随父请求落库（按批次查回同一请求族的费用事实）。"""
+        dao = _dao_mock()
+        dao.create_invocation = AsyncMock(return_value=True)
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        await recorder.ensure_invocation(
+            invocation_id="stock_research_x",
+            scenario_id="stock_analysis",
+            trigger="manual",
+            owner_session_id="owner-1",
+            owner_epoch=1,
+            owner_lease_expires_at="2026-10-23T00:15:00",
+            budget_policy_snapshot=None,
+            run_id="stock_batch_abc",
+        )
+        assert dao.create_invocation.await_args.kwargs["run_id"] == "stock_batch_abc"
+
+    @pytest.mark.asyncio
     async def test_ensure_invocation_dao_unavailable(self):
         recorder = UsageRecorder(dao_provider=lambda: None)
         outcome = await recorder.ensure_invocation(
@@ -340,7 +358,7 @@ class TestBeginAttempt:
     @pytest.mark.asyncio
     async def test_begin_attempt_inserts_attempt_row(self):
         dao = _dao_mock()
-        dao.insert_attempt = AsyncMock(return_value=None)
+        dao.insert_attempt = AsyncMock(return_value=True)
         recorder = UsageRecorder(dao_provider=lambda: dao)
         outcome = await recorder.begin_attempt(
             attempt_id="att-1",
@@ -352,8 +370,23 @@ class TestBeginAttempt:
         dao.insert_attempt.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_begin_attempt_owner_gate_rejected_surfaces_false(self):
+        """必需登记语义（DD SQ-02/F27）：owner 门拒绝（DAO False = 行未建立）如实
+        呈现 persisted=False + OWNER_LEASE_LOST——不硬编码成功掩盖登记失败。"""
+        dao = _dao_mock()
+        dao.insert_attempt = AsyncMock(return_value=False)
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        outcome = await recorder.begin_attempt(
+            attempt_id="att-1",
+            invocation_id="inv-1",
+            configured_model="glm-4-air",
+        )
+        assert outcome == PersistenceOutcome(persisted=False, error_code="OWNER_LEASE_LOST")
+
+    @pytest.mark.asyncio
     async def test_begin_attempt_unavailable_degrades(self):
-        """attempt 行建立失败降级 persisted=False（执行已授权开始，不阻断）。"""
+        """必需登记语义：账本不可用 → persisted=False / DB_UNAVAILABLE，
+        调用方必须零出站（不得降级为进程内继续执行）。"""
         recorder = UsageRecorder(dao_provider=lambda: None)
         outcome = await recorder.begin_attempt(
             attempt_id="att-1",

@@ -130,18 +130,23 @@ class BacktestDAO(BaseDao):
             pk_columns=["run_id"],
         )
 
-    async def get_result(self, run_id: str) -> dict | None:
+    async def get_result(self, run_id: str, *, suppress_errors: bool = True) -> dict | None:
         """
         根据 run_id 获取回测结果。
 
         Args:
             run_id: 回测运行 ID
+            suppress_errors: 查询失败时是否吞错返回 None（默认 True，保持旧调用
+                行为不变）。§9.13（C-01 配套严格读）：Agent 新调用必须显式传
+                ``suppress_errors=False``——成功查询确无行才是不存在，数据库失败
+                须分类/传播（DatabaseQueryError），不能据 None 构造
+                「报告不存在/已读/已核验」。
 
         Returns:
-            回测结果字典，如果不存在返回 None
+            回测结果字典，如果不存在返回 None（仅限查询成功确无行）。
         """
         stmt = sa.select(BacktestResultModel).where(BacktestResultModel.run_id == run_id).limit(1)
-        results = await self._read_db_select(stmt)
+        results = await self._read_db_select(stmt, suppress_errors=suppress_errors)
         if results is None or results.empty:
             return None
         return results.iloc[0].to_dict()

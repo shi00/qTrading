@@ -297,6 +297,15 @@ def WatchlistView(
         if page is not None:
             page.run_task(vm.search_stocks, keyword)
 
+    def _on_load_existing_note(ts_code: str) -> None:
+        """WatchlistAddDialog on_load_existing_note: 调度 VM 按 ts_code 读取旧备注 (R16)。
+
+        R2-I13：重复关注/改备注前必须已知原备注，读取结果经 state 回传对话框展示。
+        """
+        page = _get_page()
+        if page is not None:
+            page.run_task(vm.load_existing_note, ts_code)
+
     def _on_add_dialog_close() -> None:
         """WatchlistAddDialog on_close: 关闭对话框并清空搜索状态。
 
@@ -558,7 +567,9 @@ def WatchlistView(
                     is_searching=state.is_searching,
                     search_error=state.search_error,
                     is_submitting=add_submitting,
+                    existing_note=state.existing_note,
                     on_search=_on_add_search,
+                    on_load_existing_note=_on_load_existing_note,
                     on_add=_on_add,
                     on_close=_on_add_dialog_close,
                 ),

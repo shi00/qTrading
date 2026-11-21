@@ -25,6 +25,26 @@ from typing import Any, Final
 
 import sqlalchemy as sa
 
+from core.agent_types import (
+    AgentErrorCode,
+    AgentServiceError,
+    AgentValidationError,
+    CommandReceipt,
+    ConnectionAuthorizationRef,
+    DataAttemptAuthorization,
+    DataAttemptOutcome,
+    DataAttemptReceipt,
+    DataConsentBinding,
+    DataConsentClaim,
+    DataConsentCommand,
+    DataConsentRevokeCommand,
+    DataConsentState,
+    derive_data_consent_command_identity,
+    derive_data_consent_revoke_identity,
+    evaluate_data_attempt,
+    local_target_fingerprint,
+    validate_data_attempt_authorization,
+)
 from core.model_management_types import (
     AttemptPermit,
     ConfigurationSaveOutcome,
@@ -41,7 +61,9 @@ from utils.loop_local import get_loop_local
 from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
-_PURPOSES = ("news_annotation", "stock_analysis", "news_risk", "synthetic_test")
+# §10.2：外发用途注册面新增 agent_research（旧 grant 不自动获得新用途，
+# 仅允许以该用途显式创建新 grant）；与 EGRESS_PURPOSES 对齐。
+_PURPOSES = ("news_annotation", "stock_analysis", "news_risk", "agent_research", "synthetic_test")
 
 # legacy 封口月份格式（S6 D4）：与 LegacySealConfig.month 正则一致，服务侧先行校验给出精确错误
 _MONTH_SEAL_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -205,6 +227,26 @@ def _fresh_seal_baseline_is_zero(record: Mapping[str, Any]) -> bool:
     )
 
 
+class ConnectionRevisionChangedError(Exception):
+    """冻结连接版本与新鲜快照不一致（M15）：同 ID 版本切换瞬间的瞬态拒绝。
+
+    操作在受理时冻结 ``connection_id + connection_revision``；新鲜读取若发现
+    同一连接 ID 已是另一版本，说明该连接正被替换，冻结对象本次不可用。这是
+    竞态而非策略事实：调用方不得映射为策略拒绝（DENY），零出站后可由上层
+    重试取得稳定快照。显式继承 ``Exception`` 而非 ``PermissionError``——避免
+    既有 ``except PermissionError`` 分支将其误归为非瞬态策略拒绝。
+    """
+
+    def __init__(self, connection_id: str, frozen_revision: int, actual_revision: Any) -> None:
+        super().__init__(
+            f"连接版本已切换（瞬态）：connection={connection_id}, "
+            f"frozen_revision={frozen_revision}, actual_revision={actual_revision}"
+        )
+        self.connection_id = connection_id
+        self.frozen_revision = frozen_revision
+        self.actual_revision = actual_revision
+
+
 class ModelConfigurationService:
     """统一模型配置 / 凭据 / 授权应用服务（非单例，DI 组装）。"""
 
@@ -213,6 +255,7 @@ class ModelConfigurationService:
         *,
         legacy_seal_dao: Any | None = None,
         legacy_usage_reader: Callable[[dt.date], Awaitable[tuple[int, int, int]]] | None = None,
+        agent_dao: Any | None = None,
     ) -> None:
         # 同 operation_id 的安全重试复用同一凭据版本（MM-12）：进程内租约映射，
         # 不持久化；服务实例销毁即释放（keyring 项由保守清理策略保留）。
@@ -227,6 +270,9 @@ class ModelConfigurationService:
         # - legacy_usage_reader：当月 legacy 用量读取器，返回 (cost_cents, unpriced_calls, unpriced_tokens)。
         self._legacy_seal_dao: Any | None = legacy_seal_dao
         self._legacy_usage_reader: Callable[[dt.date], Awaitable[tuple[int, int, int]]] | None = legacy_usage_reader
+        # R04 资料许可 owner 可选 DI（C-02-4b）：AgentDao（鸭子类型，agent_dao）；
+        # 默认 None → 运行时经 CacheManager 惰性解析（同 _resolve_legacy_seal_dao）。
+        self._agent_dao: Any | None = agent_dao
 
     # ------------------------------------------------------------------
     # 读取
@@ -768,11 +814,20 @@ class ModelConfigurationService:
         attempt_id: str,
         *,
         requires_egress_grant: bool = True,
+        connection_revision: int | None = None,
+        local_target_user_scope: str | None = None,
     ) -> AttemptPermit:
         """逐次安全许可（MM-01/MM-02）：新鲜读取 security_state，撤销 / 缺失即拒绝。
 
         许可取得是尝试开始的线性化点；安全状态读取 / 校验失败禁止发放许可，
         不用旧缓存、默认值或冻结快照放行。
+
+        M15：``connection_revision`` 为操作受理时冻结的连接版本。传入即按
+        ``connection_id + connection_revision`` 精确授权——新鲜快照里同 ID 连接
+        已是另一版本（替换瞬间）时抛 :class:`ConnectionRevisionChangedError`
+        （瞬态拒绝，零许可），不得改用当前版本或快照里的替身连接顶替。
+        ``None`` 表示调用方未冻结版本（旧直推链路），维持既有「未知版本不参与
+        比对」政策；该宽松口径不得外推到 Agent 严格准入。
 
         F06：凭据版本撤销校验绑定**实际执行对象**——``credential_version`` 为
         快照冻结连接的版本（出站解析 ``credential_ref`` 即由该版本派生），而非
@@ -785,6 +840,14 @@ class ModelConfigurationService:
         不产生外发）免 grant 匹配，但仍校验连接存在与凭据撤销。默认 ``True``
         （安全默认：未声明本地的调用一律要求外发授权）。空用途 / 外发缺目标
         一律拒绝（授权服务拒绝空身份是正确安全行为，不因本地路径放宽）。
+
+        M21：本地免 grant 路径不得信任调用方自报目标字符串。资料核权
+        （:meth:`authorize_data_attempt`）传入 ``local_target_user_scope`` 时，
+        按本次新鲜读取的冻结连接 ``connection_id + connection_revision`` 与
+        真实 ``adapter_kind`` 经 :func:`local_target_fingerprint` 重算本地目标，
+        与请求目标严格比对；非 ``gguf_chat``（含云端 kind）或未冻结版本一律
+        拒绝——云端绑定声明本地免 grant 不因此放宽，仍要求原 grant 策略。
+        ``None`` 表示旧直推本地链路（目标非 AR-09 本地目标），维持既有政策。
         """
 
         def _authorize() -> AttemptPermit:
@@ -795,6 +858,13 @@ class ModelConfigurationService:
             connection = next((c for c in mm["connections"] if c["connection_id"] == connection_id), None)
             if connection is None:
                 raise PermissionError(f"连接不存在: {connection_id}")
+
+            # M15：操作冻结版本精确匹配——同 ID 版本切换是瞬态竞态，不得以当前
+            # 连接（或快照替身）顶替冻结对象，也不得误报为策略拒绝。
+            if connection_revision is not None and connection.get("connection_revision") != connection_revision:
+                raise ConnectionRevisionChangedError(
+                    connection_id, connection_revision, connection.get("connection_revision")
+                )
 
             # 凭据版本撤销立即阻止新许可（MM-02）：校验对象为实际执行版本（F06）
             if credential_version is not None:
@@ -823,6 +893,18 @@ class ModelConfigurationService:
                         f"无匹配外发授权（connection={connection_id}, purpose={purpose}, "
                         f"scope_version={scope_version}），拒绝发放许可"
                     )
+            elif local_target_user_scope is not None:
+                # M21：本地资料目标由 owner 按权威输入重算，不信任自报字符串。
+                adapter_kind = connection.get("adapter_kind")
+                if adapter_kind != "gguf_chat":
+                    raise PermissionError("本地资料目标仅限设备内聊天连接，拒绝发放许可")
+                if connection_revision is None:
+                    raise PermissionError("本地资料目标缺冻结连接版本，拒绝发放许可")
+                expected_target = local_target_fingerprint(
+                    local_target_user_scope, connection_id, connection_revision, adapter_kind
+                )
+                if target_fingerprint != expected_target:
+                    raise PermissionError("本地资料目标与冻结连接重算结果不符，拒绝发放许可")
 
             return AttemptPermit(
                 attempt_id=attempt_id,
@@ -1035,3 +1117,297 @@ class ModelConfigurationService:
             }
 
         return await ThreadPoolManager().run_async(TaskType.IO, _preview)
+
+    # ------------------------------------------------------------------
+    # R04 资料许可 owner（§10.2 L1773：原 owner 内扩展四方法，C-02-4b）
+    # ------------------------------------------------------------------
+
+    def _resolve_agent_dao(self) -> Any:
+        """解析资料许可 DAO（R04）：DI 优先，否则经 CacheManager 惰性获取。
+
+        无法取得 DAO（engine 未初始化 / 属性缺失）时 fail-closed 抛
+        PERSISTENCE_UNAVAILABLE——资料许可持久事实不得降级为内存态（§9.8）。
+        """
+        if self._agent_dao is not None:
+            return self._agent_dao
+
+        from data.cache.cache_manager import (
+            CacheManager,
+        )  # lazy-import: CacheManager 依赖重链（引擎/DAO 全量注册），仅资料许可路径需要，函数体内导入避免模块级连锁
+
+        dao = getattr(CacheManager(), "agent_dao", None)
+        if dao is None:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "agent dao unavailable: CacheManager engine not initialized",
+                "model_configuration_service/data_consent",
+            )
+        return dao
+
+    def _translate_validation(self, exc: AgentValidationError) -> AgentServiceError:
+        """core 合同校验失败 → 服务边界 INPUT_INVALID（code/field_path 保留）。"""
+        return AgentServiceError(AgentErrorCode.INPUT_INVALID, exc.code, exc.field_path)
+
+    async def save_data_consent(self, command: DataConsentCommand) -> DataConsentBinding:
+        """保存资料许可绑定（R04）：owner 状态机核转 + DAO 持久事务（§10.2）。
+
+        状态迁移由可信调用上下文（本 owner）核定（§9.8「许可主体/用户域和状态
+        迁移由可信调用上下文及原决定核定」）：建行仅 pending/approved；更新仅
+        pending→approved（撤销走 :meth:`revoke_data_consent`；revoked/expired
+        终态不可再迁移）。版本一致性由 DAO CAS 兜底（revision 失配
+        REVISION_CONFLICT），本方法预检与 CAS 间的状态漂移由 revision 相等性
+        传递保证（revision 变化必然伴随状态迁移）。
+
+        重放顺序（检视 M15）：先按原命令身份（同键同完整输入）查回原回执并
+        直接返回（零新增事实），再做状态迁移预检——批准已提交但回执丢失时，
+        同命令重传不得被「仅 pending 可批准」预检拒绝；同键异输入
+        ``INPUT_CONFLICT``；不同命令再批终态仍 ``POLICY_DENIED``。
+
+        Raises:
+            AgentServiceError: INPUT_INVALID（更新目标不存在）/ POLICY_DENIED
+                （owner 状态机拒绝）/ 其余 DAO 事务错误码透传。
+        """
+        dao = self._resolve_agent_dao()
+        try:
+            # 预校验（含 consent ID/目标一致性），把 core 合同错误转译为服务边界错误。
+            derive_data_consent_command_identity(command)
+        except AgentValidationError as exc:
+            raise self._translate_validation(exc) from exc
+        identity = f"{command.command.user_scope}/{command.consent_id}"
+        # 原命令同输入重放优先于迁移预检：回执丢失的重传必须查回原回执。
+        replayed = await dao.read_data_consent_save_replay(command)
+        if replayed is not None:
+            return replayed
+        if command.command.expected_revision >= 1:
+            current = await dao.read_data_consent_decision(command.command.user_scope, command.consent_id)
+            if current is None:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "data consent decision does not exist",
+                    identity,
+                )
+            if current.state is not DataConsentState.PENDING:
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    "owner state machine: only pending consent can be approved",
+                    identity,
+                )
+            if command.binding.state is not DataConsentState.APPROVED:
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    "owner state machine: update only allows pending -> approved",
+                    identity,
+                )
+        elif command.binding.state not in (DataConsentState.PENDING, DataConsentState.APPROVED):
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                "owner state machine: creation state must be pending or approved",
+                identity,
+            )
+        return await dao.save_data_consent_decision(command)
+
+    async def read_data_consent(self, consent_id: str, *, user_scope: str) -> DataConsentBinding:
+        """读取资料许可绑定（R04）：所有读写同时校验 user_scope（§9.1.6）。
+
+        缺失即 INPUT_INVALID（读取面不虚构绑定）；payload 不可靠重读由 DAO
+        fail-closed 抛 OPERATION_UNKNOWN（R21，不把坏数据伪装为无许可）。
+        """
+        binding = await self._resolve_agent_dao().read_data_consent_decision(user_scope, consent_id)
+        if binding is None:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                "data consent does not exist",
+                f"{user_scope}/{consent_id}",
+            )
+        return binding
+
+    async def revoke_data_consent(self, command: DataConsentRevokeCommand) -> CommandReceipt:
+        """撤销资料许可（R04）：入口校验后交 DAO CAS 事务（撤销立即阻止新许可）。"""
+        try:
+            derive_data_consent_revoke_identity(command)
+        except AgentValidationError as exc:
+            raise self._translate_validation(exc) from exc
+        return await self._resolve_agent_dao().revoke_data_consent_decision(command)
+
+    async def authorize_data_attempt(self, request: DataAttemptAuthorization) -> DataAttemptReceipt:
+        """资料核权（R04，§10.2 L1774 可靠顺序）：新鲜重算摘要 → 既有
+        authorize_attempt 新鲜核连接 → 绑定一致性/用途/目的地/期限核 → claim
+        行锁单胜者 → 回执（allow/deny/unknown 分列，unknown 不当 allow）。
+
+        - 摘要每次新鲜重算（§9.8「每 attempt 核权均重算，不信调用方 digest」），
+          请求自带摘要与重算不一致 → INPUT_INVALID（调用方输入不自洽，不是核权
+          拒绝）；授权判定一律使用重算值；
+        - 连接核权按绑定 ``requires_egress_grant`` 参数化（本地免外发路径显式
+          false，仍核连接存在与凭据撤销）；按受理冻结的 ``connection_id +
+          connection_revision`` 精确匹配（M15）：同 ID 版本切换瞬间 →
+          unknown ``connection_revision_transient``（瞬态、可重试，零出站），
+          其余授权拒绝（PermissionError）→ deny ``connection_denied``；
+        - 本地免 grant 路径的目标由 owner 重算（M21）：按冻结 ``connection_id +
+          connection_revision`` 与真实 ``adapter_kind`` 重算
+          :func:`local_target_fingerprint` 后与请求比对，伪摘要 / 错连接版 /
+          非聊天 kind 一律 deny（云端绑定声明本地亦不放宽）；
+        - claim 阶段撤销先胜（POLICY_DENIED）→ deny（脱敏原因码透传）；claim
+          INPUT_CONFLICT / operation 缺失（INPUT_INVALID）→ 原样抛出（调用方
+          违反先备后派发 / attempt 身份契约，不是核权拒绝路径）；
+        - 绑定不可靠重读（DAO OPERATION_UNKNOWN）→ unknown ``consent_unreadable``
+          （R21 fail-closed，不把坏数据当无许可放行）；
+        - ``verified_connection_grant_id`` 记显式 null：AttemptPermit 不返回
+          grant ID，不冒认已核对象（§9.8）。
+        """
+        try:
+            recomputed = validate_data_attempt_authorization(request)
+        except AgentValidationError as exc:
+            raise self._translate_validation(exc) from exc
+        dao = self._resolve_agent_dao()
+        now = dt.datetime.now(dt.UTC)
+        authorized_at = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+        def _receipt(
+            outcome: DataAttemptOutcome,
+            *,
+            binding: DataConsentBinding | None = None,
+            revision: int | None = None,
+            reason: str | None = None,
+        ) -> DataAttemptReceipt:
+            return DataAttemptReceipt(
+                outcome=outcome,
+                operation_id=request.operation_id,
+                attempt_id=request.attempt_id,
+                consent_id=request.consent_id,
+                consent_revision=revision,
+                binding=binding,
+                reason=reason,
+                authorized_at=authorized_at,
+            )
+
+        try:
+            binding = await dao.read_data_consent_decision(request.user_scope, request.consent_id)
+        except AgentServiceError as exc:
+            if exc.code is AgentErrorCode.OPERATION_UNKNOWN:
+                return _receipt(DataAttemptOutcome.UNKNOWN, reason="consent_unreadable")
+            raise
+        if binding is None:
+            return _receipt(DataAttemptOutcome.DENY, reason="consent_not_found")
+
+        # §10.2 L1774 第 2 步：既有 authorize_attempt 新鲜核连接/凭据撤销。
+        # M15：按受理冻结的连接 ID + revision 精确授权；同 ID 版本切换瞬间是
+        # 瞬态竞态（可重试），回执 unknown 而非策略 deny，零出站不外推旧链回退。
+        try:
+            permit = await self.authorize_attempt(
+                request.connection_id,
+                request.target_fingerprint,
+                request.purpose,
+                request.scope_version,
+                request.credential_version,
+                request.attempt_id,
+                requires_egress_grant=binding.requires_egress_grant,
+                connection_revision=request.connection_revision,
+                local_target_user_scope=request.user_scope,
+            )
+        except ConnectionRevisionChangedError:
+            return _receipt(
+                DataAttemptOutcome.UNKNOWN,
+                binding=binding,
+                revision=binding.consent_revision,
+                reason="connection_revision_transient",
+            )
+        except PermissionError:
+            return _receipt(
+                DataAttemptOutcome.DENY,
+                binding=binding,
+                revision=binding.consent_revision,
+                reason="connection_denied",
+            )
+
+        # 新鲜 permit 与请求声明值交叉核（调用方陈旧视图不得借道放行）：
+        # 实际安全修订/凭据版本以本次核权为准，与声明分叉即拒绝（§9.8 L1520）。
+        if permit.security_revision != request.security_revision:
+            return _receipt(
+                DataAttemptOutcome.DENY,
+                binding=binding,
+                revision=binding.consent_revision,
+                reason="security_revision_mismatch",
+            )
+        if permit.credential_version != request.credential_version:
+            return _receipt(
+                DataAttemptOutcome.DENY,
+                binding=binding,
+                revision=binding.consent_revision,
+                reason="credential_mismatch",
+            )
+
+        # 第 3 步：绑定准确集合/版/用途/目的地/寿命核（重算摘要参与判定）。
+        deny_reason = evaluate_data_attempt(binding, request, now, recomputed_digest=recomputed)
+        if deny_reason is not None:
+            return _receipt(
+                DataAttemptOutcome.DENY,
+                binding=binding,
+                revision=binding.consent_revision,
+                reason=deny_reason,
+            )
+
+        # 第 4 步：claim 单胜者落定（decision 行锁下复核 + operation claims 追加）。
+        claim = DataConsentClaim(
+            schema_version=1,
+            consent_id=request.consent_id,
+            consent_revision=binding.consent_revision,
+            connection_authorization_ref=ConnectionAuthorizationRef(
+                connection_id=request.connection_id,
+                target_fingerprint=request.target_fingerprint,
+                purpose=request.purpose,
+                scope_version=request.scope_version,
+                verified_connection_grant_id=None,
+            ),
+            security_revision=request.security_revision,
+            credential_version=request.credential_version,
+            scope_version=request.scope_version,
+            source_scope_digest=recomputed,
+            purpose=request.purpose,
+            target_fingerprint=request.target_fingerprint,
+            attempt_id=request.attempt_id,
+            operation_id=request.operation_id,
+            owner_epoch=request.owner_epoch,
+            run_epoch=request.run_epoch,
+            authorized_at=authorized_at,
+            outcome=DataAttemptOutcome.ALLOW,
+        )
+        try:
+            await dao.claim_data_consent(request, claim)
+        except AgentServiceError as exc:
+            if exc.code is AgentErrorCode.POLICY_DENIED:
+                return _receipt(
+                    DataAttemptOutcome.DENY,
+                    binding=binding,
+                    revision=binding.consent_revision,
+                    reason=exc.sanitized_message,
+                )
+            raise
+        return _receipt(
+            DataAttemptOutcome.ALLOW,
+            binding=binding,
+            revision=binding.consent_revision,
+        )
+
+    async def ensure_model_operation(
+        self,
+        *,
+        user_scope: str,
+        operation_id: str,
+        execution_id: str,
+        round_id: str,
+        node_id: str,
+    ) -> None:
+        """确保本次模型调用的 operation 行存在（I43「先备后派发」）。
+
+        幂等（DAO ``ON CONFLICT DO NOTHING``）：同一 ``operation_id``（= 模型调用
+        身份）重放不新建事实；代次由 DAO 取 DB 权威值。DAO 缺失 → fail-closed
+        ``PERSISTENCE_UNAVAILABLE``（不回退进程内派发身份）。
+        """
+
+        await self._resolve_agent_dao().ensure_model_operation(
+            user_scope=user_scope,
+            operation_id=operation_id,
+            execution_id=execution_id,
+            round_id=round_id,
+            node_id=node_id,
+        )

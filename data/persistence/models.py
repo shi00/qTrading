@@ -3,7 +3,10 @@ SQLAlchemy ORM models for A-Stock Screener.
 These models represent the database schema previously defined in schema.sql.
 """
 
+from typing import Any
+
 from sqlalchemy import (
+    CHAR,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -12,10 +15,14 @@ from sqlalchemy import (
     DateTime,
     Double,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
+    SmallInteger,
     String,
+    Text,
     UniqueConstraint,
     text,
 )
@@ -1169,6 +1176,1137 @@ class AiUsageMonthly(Base):
     last_usage_revision = Column(Integer, nullable=False, server_default=text("0"))
     created_at = Column(DateTime(timezone=False), server_default=text("(now() AT TIME ZONE 'UTC')"), nullable=False)
     updated_at = Column(DateTime(timezone=False), server_default=text("(now() AT TIME ZONE 'UTC')"), nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# Agent 运行时应用表（任务 C-01；物理契约正本 = Agent 详细设计 §9.2—§9.11）
+#
+# 建表原则（§9.1）：全部 session/execution/round 引用设 FK RESTRICT；复合 FK 携
+# user_scope（§9.2「凡引用表可跨用户域」）；ID 列 TEXT、digest 列 CHAR(64)、
+# 状态 TEXT+CHECK 枚举；时间列 TIMESTAMPTZ（设计正本 §9.2，与既有 ai_* 表的
+# timezone=False 惯例不同——新表按设计正本）。密钥/连接URL/Flet对象/Engine/
+# 隐藏推理不落任何 Agent 表（§9.1.4）。
+#
+# 待冻结枚举说明（不臆造合同）：delivery_state / consumption_state / io_state /
+# payload_kind / command_kind / decision_kind / marker_kind / relation_kind /
+# native_state / stop_reason / source_available_state / cleanup phase 的 wire
+# 值未在设计 §4.4/§5.1 冻结，本版仅 TEXT NOT NULL 不加值域 CHECK，待 C-02/C-03
+# 在 core/agent_types.py 冻结枚举后补 CHECK。
+# ---------------------------------------------------------------------------
+
+
+def _agent_common_columns() -> tuple[Column[Any], ...]:
+    """§9.2 共用列：每表独立实例（不可跨表共享 Column 对象）。"""
+
+    return (
+        Column("user_scope", Text, nullable=False),
+        Column("schema_version", SmallInteger, nullable=False, server_default=text("1")),
+        Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+        Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+        Column("revision", BigInteger, nullable=False, server_default=text("1")),
+    )
+
+
+def _agent_common_checks() -> tuple[CheckConstraint, CheckConstraint]:
+    """§9.2 共用 CHECK：结构版只接受已支持版本（当前 1）；revision 起点 1。
+
+    显式名不带表前缀，由 metadata naming convention 渲染为
+    ``ck_<table>_<name>``（与 ck_stock_basic_valid_ts_code_format 同惯例）。
+    """
+
+    return (
+        CheckConstraint("schema_version = 1", name="schema_version"),
+        CheckConstraint("revision >= 1", name="revision"),
+    )
+
+
+#: 建表顺序（无 use_alter FK 依赖序，供迁移与测试断言使用）。
+AGENT_RUNTIME_TABLE_ORDER: tuple[str, ...] = (
+    "agent_session",
+    "agent_execution",
+    "agent_asset_version",
+    "agent_round",
+    "agent_message",
+    "agent_artifact",
+    "agent_command",
+    "agent_operation",
+    "agent_decision",
+    "agent_body_payload",
+    "agent_source_link",
+    "agent_resource_slot",
+    "agent_read_mark",
+    "agent_cleanup_job",
+)
+
+
+class AgentSession(Base):
+    """研究会话（§9.3）：目录元数据/草稿 CAS/聊天分支来源；不迁 workflow/批准。
+
+    draft_transfer_ref 指向原转移 fence 命令（循环 FK 延后创建，RESTRICT）；
+    draft_payload 清理后置 NULL，无凭据/有效批准/额外源副本；cleaned_at 表示
+    正文清理完成、保不可复活身份。索引：目录序 (user_scope, pinned DESC,
+    updated_at DESC, session_id) 与归档筛选。
+    """
+
+    __tablename__ = "agent_session"
+    user_scope, schema_version, created_at, updated_at, revision = _agent_common_columns()
+
+    session_id = Column(Text, primary_key=True)
+    title = Column(Text, nullable=False)
+    title_user_set = Column(Boolean, nullable=False, server_default=text("false"))
+    pinned = Column(Boolean, nullable=False, server_default=text("false"))
+    archived = Column(Boolean, nullable=False, server_default=text("false"))
+    draft_revision = Column(BigInteger, nullable=False, server_default=text("1"))
+    draft_payload = Column(JSONB(none_as_null=True))
+    draft_transfer_ref = Column(Text)
+    causal_head_ref = Column(Text)
+    source_module = Column(Text)
+    origin_ref = Column(Text)
+    parent_session_id = Column(Text)
+    branch_metadata = Column(JSONB(none_as_null=True))
+    event_seq = Column(BigInteger, nullable=False, server_default=text("0"))
+    cleaned_at = Column(DateTime(timezone=True))
+    __table_args__ = (
+        UniqueConstraint("user_scope", "session_id", name="agent_session_user_scope_session_id"),
+        ForeignKeyConstraint(
+            ["user_scope", "parent_session_id"],
+            ["agent_session.user_scope", "agent_session.session_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_session_parent",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "draft_transfer_ref"],
+            ["agent_command.user_scope", "agent_command.command_record_id"],
+            ondelete="RESTRICT",
+            use_alter=True,
+            name="fk_agent_session_draft_transfer",
+        ),
+        CheckConstraint("draft_revision >= 1", name="draft_revision"),
+        CheckConstraint("event_seq >= 0", name="event_seq"),
+        *_agent_common_checks(),
+        Index(
+            "idx_agent_session_directory",
+            "user_scope",
+            text("pinned DESC"),
+            text("updated_at DESC"),
+            "session_id",
+        ),
+        Index("idx_agent_session_archived", "user_scope", "archived"),
+    )
+
+
+class AgentExecution(Base):
+    """研究执行（§9.4）：root/leaf/comparison_lane 三类稳定身份；一层主子。
+
+    根意图键 (user_scope, source_module, business_request_id) 在根/比较路上
+    部分唯一；叶必须为 NULL（由父输入引用）。current_round_id 循环 FK 延后创建
+    （不级联删）。累计计数跨轮不清零；active_ms 有未关闭区间时仅为下界。
+    """
+
+    __tablename__ = "agent_execution"
+    user_scope, schema_version, created_at, updated_at, revision = _agent_common_columns()
+
+    execution_id = Column(Text, primary_key=True)
+    session_id = Column(Text, nullable=False)
+    execution_kind = Column(Text, nullable=False)
+    source_module = Column(Text)
+    business_request_id = Column(Text)
+    intent_digest = Column(CHAR(64))
+    parent_execution_id = Column(Text)
+    node_id = Column(Text, nullable=False)
+    comparison_group_ref = Column(Text)
+    comparison_lane_ref = Column(Text)
+    current_round_id = Column(Text)
+    display_state = Column(Text, nullable=False)
+    goal_coverage = Column(Text, nullable=False)
+    owner_epoch = Column(BigInteger, nullable=False, server_default=text("1"))
+    dispatch_closed = Column(Boolean, nullable=False, server_default=text("false"))
+    deletion_fenced = Column(Boolean, nullable=False, server_default=text("false"))
+    model_attempt_count = Column(BigInteger, nullable=False, server_default=text("0"))
+    tool_call_count = Column(BigInteger, nullable=False, server_default=text("0"))
+    active_ms = Column(BigInteger, nullable=False, server_default=text("0"))
+    event_seq = Column(BigInteger, nullable=False, server_default=text("0"))
+    last_verified_at = Column(DateTime(timezone=True))
+    ended_at = Column(DateTime(timezone=True))
+    unknown_refs = Column(JSONB(none_as_null=True))
+    __table_args__ = (
+        UniqueConstraint("user_scope", "execution_id", name="agent_execution_user_scope_execution_id"),
+        ForeignKeyConstraint(
+            ["user_scope", "session_id"],
+            ["agent_session.user_scope", "agent_session.session_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_execution_session",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "parent_execution_id"],
+            ["agent_execution.user_scope", "agent_execution.execution_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_execution_parent",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "current_round_id"],
+            ["agent_round.user_scope", "agent_round.round_id"],
+            ondelete="RESTRICT",
+            use_alter=True,
+            name="fk_agent_execution_current_round",
+        ),
+        CheckConstraint("execution_kind IN ('root', 'leaf', 'comparison_lane')", name="kind"),
+        CheckConstraint(
+            "display_state IN ("
+            "'queued','running','waiting_dependency','waiting_user','pausing','paused',"
+            "'ending','unknown','ended','failed','complete','partial','planned','withdrawn',"
+            "'closed_unknown')",
+            name="display_state",
+        ),
+        CheckConstraint("goal_coverage IN ('full', 'partial', 'none', 'unknown')", name="goal_coverage"),
+        CheckConstraint(
+            "(execution_kind = 'leaf' AND source_module IS NULL AND business_request_id IS NULL) "
+            "OR (execution_kind IN ('root', 'comparison_lane') "
+            "AND source_module IS NOT NULL AND business_request_id IS NOT NULL)",
+            name="intent_keys",
+        ),
+        CheckConstraint(
+            "parent_execution_id IS NULL OR parent_execution_id <> execution_id",
+            name="no_self_parent",
+        ),
+        CheckConstraint(
+            "model_attempt_count >= 0 AND tool_call_count >= 0 AND active_ms >= 0",
+            name="counters_nonneg",
+        ),
+        CheckConstraint("event_seq >= 0", name="event_seq"),
+        *_agent_common_checks(),
+        Index(
+            "idx_agent_execution_intent_key",
+            "user_scope",
+            "source_module",
+            "business_request_id",
+            unique=True,
+            postgresql_where=text("execution_kind IN ('root', 'comparison_lane')"),
+        ),
+        Index(
+            "idx_agent_execution_parent_node",
+            "parent_execution_id",
+            "node_id",
+            unique=True,
+            postgresql_where=text("parent_execution_id IS NOT NULL"),
+        ),
+        Index("idx_agent_execution_session_recent", "session_id", text("updated_at DESC")),
+        Index("idx_agent_execution_display_owner", "display_state", "owner_epoch"),
+        Index("idx_agent_execution_parent", "parent_execution_id"),
+        Index("idx_agent_execution_comparison_group", "comparison_group_ref"),
+    )
+
+
+class AgentAssetVersion(Base):
+    """受管资产版本（§9.10）：source/skill/role/prompt 等冻结快照，非第二设置库。
+
+    body_text/body_ref 互斥；普通草稿只存引用，已选内容表示在此受管。获准清理
+    后 display_name 换固定 tombstone、digest 换 tombstone 摘要、私人 origin 清除。
+    """
+
+    __tablename__ = "agent_asset_version"
+    user_scope, schema_version, created_at, updated_at, revision = _agent_common_columns()
+
+    asset_id = Column(Text, primary_key=True)
+    asset_version = Column(Text, primary_key=True)
+    asset_kind = Column(Text, nullable=False)
+    display_name = Column(Text, nullable=False)
+    digest = Column(CHAR(64), nullable=False)
+    origin_ref = Column(Text)
+    metadata_payload = Column(JSONB(none_as_null=True))
+    body_text = Column(Text)
+    body_ref = Column(Text)
+    read_state = Column(Text, nullable=False)
+    verification_state = Column(Text, nullable=False)
+    available_at = Column(DateTime(timezone=True))
+    disabled_at = Column(DateTime(timezone=True))
+    cleaned_at = Column(DateTime(timezone=True))
+    disabled_revision = Column(BigInteger, nullable=False, server_default=text("0"))
+    tombstoned = Column(Boolean, nullable=False, server_default=text("false"))
+    __table_args__ = (
+        UniqueConstraint("user_scope", "asset_id", "asset_version", name="agent_asset_version_user_scope_version"),
+        ForeignKeyConstraint(
+            ["user_scope", "body_ref"],
+            ["agent_body_payload.user_scope", "agent_body_payload.body_ref"],
+            deferrable=True,
+            initially="DEFERRED",
+            use_alter=True,
+            name="fk_agent_asset_version_body",
+        ),
+        CheckConstraint(
+            "asset_kind IN ('source', 'skill', 'role', 'prompt', 'mcp_schema', "
+            "'plan', 'comparison_manifest', 'summary')",
+            name="kind",
+        ),
+        CheckConstraint(
+            "read_state IN ('unread', 'ready', 'partial', 'unavailable', 'disabled', 'unknown')",
+            name="read_state",
+        ),
+        CheckConstraint(
+            "verification_state IN ('program_verified', 'human_verified', 'unverified', "
+            "'unknown', 'source_unavailable')",
+            name="verification_state",
+        ),
+        CheckConstraint("body_text IS NULL OR body_ref IS NULL", name="body_exclusive"),
+        CheckConstraint("disabled_revision >= 0", name="disabled_revision"),
+        *_agent_common_checks(),
+        Index("idx_agent_asset_version_disabled", "tombstoned", postgresql_where=text("tombstoned")),
+        Index("idx_agent_asset_version_asset", "asset_id"),
+    )
+
+
+class AgentRound(Base):
+    """研究轮次（§9.5）：每新轮新身份，每轮独立 workflow；不能更新旧轮覆盖历史。
+
+    同一 execution 仅一有效运行轮（active_round 部分唯一）；plan_asset 复合 FK
+    到 asset_version（plan 提案版本）。goal_coverage 初值 unknown；final_saved /
+    convergence_confirmed 分别判断（工具成功/报告写完/计划 completed 不单独证明
+    目标完成）。
+    """
+
+    __tablename__ = "agent_round"
+    user_scope, schema_version, created_at, updated_at, revision = _agent_common_columns()
+
+    round_id = Column(Text, primary_key=True)
+    execution_id = Column(Text, nullable=False)
+    round_number = Column(BigInteger, nullable=False)
+    workflow_id = Column(Text, nullable=False)
+    workflow_code_version = Column(Text, nullable=False)
+    run_epoch = Column(BigInteger, nullable=False)
+    previous_round_id = Column(Text)
+    input_revision = Column(BigInteger, nullable=False)
+    plan_revision = Column(BigInteger, nullable=False)
+    frozen_manifest = Column(JSONB(none_as_null=True))
+    actual_input = Column(JSONB(none_as_null=True))
+    frozen_digest = Column(CHAR(64))
+    actual_digest = Column(CHAR(64))
+    plan_asset_id = Column(Text)
+    plan_asset_version = Column(Text)
+    model_binding = Column(JSONB(none_as_null=True))
+    native_state = Column(Text)
+    stop_reason = Column(Text)
+    goal_coverage = Column(Text, nullable=False, server_default=text("'unknown'"))
+    final_saved = Column(Boolean, nullable=False, server_default=text("false"))
+    convergence_confirmed = Column(Boolean, nullable=False, server_default=text("false"))
+    active_round = Column(Boolean, nullable=False, server_default=text("false"))
+    last_verified_at = Column(DateTime(timezone=True))
+    ended_at = Column(DateTime(timezone=True))
+    sdk_history_ref = Column(Text)
+    __table_args__ = (
+        UniqueConstraint("user_scope", "round_id", name="agent_round_user_scope_round_id"),
+        UniqueConstraint("execution_id", "round_number", name="agent_round_execution_round_number"),
+        UniqueConstraint("workflow_id", name="agent_round_workflow_id"),
+        ForeignKeyConstraint(
+            ["user_scope", "execution_id"],
+            ["agent_execution.user_scope", "agent_execution.execution_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_round_execution",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "previous_round_id"],
+            ["agent_round.user_scope", "agent_round.round_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_round_previous",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "plan_asset_id", "plan_asset_version"],
+            ["agent_asset_version.user_scope", "agent_asset_version.asset_id", "agent_asset_version.asset_version"],
+            ondelete="RESTRICT",
+            name="fk_agent_round_plan_asset",
+        ),
+        CheckConstraint("round_number >= 1", name="number"),
+        CheckConstraint("input_revision >= 1 AND plan_revision >= 1", name="revisions"),
+        CheckConstraint("goal_coverage IN ('full', 'partial', 'none', 'unknown')", name="goal_coverage"),
+        CheckConstraint(
+            "previous_round_id IS NULL OR previous_round_id <> round_id",
+            name="no_self_previous",
+        ),
+        CheckConstraint("(plan_asset_id IS NULL) = (plan_asset_version IS NULL)", name="plan_asset_pair"),
+        *_agent_common_checks(),
+        Index("idx_agent_round_active", "execution_id", unique=True, postgresql_where=text("active_round")),
+    )
+
+
+class AgentMessage(Base):
+    """公开消息与可靠事件统一存储（§9.6）：不另建第二事件推进器。
+
+    event_id 由准确 execution/round/node/原生事件 ID 规范组合生成；
+    UNIQUE(session_id, event_id) 去重。纯 session 事件 execution/round/seq 可空，
+    执行事件必须同时有。body_text/body_ref 互斥（body_ref 复合 FK 携 user_scope
+    到 agent_body_payload，循环 FK 可延迟）。search_text 仅可读公开文本，清理时
+    同步删除；GIN 表达式索引覆盖完整已保存公开正文（含尾词）。
+    """
+
+    __tablename__ = "agent_message"
+    user_scope, schema_version, created_at, updated_at, revision = _agent_common_columns()
+
+    message_id = Column(Text, primary_key=True)
+    session_id = Column(Text, nullable=False)
+    execution_id = Column(Text)
+    round_id = Column(Text)
+    node_id = Column(Text)
+    event_id = Column(Text, nullable=False)
+    session_seq = Column(BigInteger, nullable=False)
+    execution_seq = Column(BigInteger)
+    event_kind = Column(Text, nullable=False)
+    payload_kind = Column(Text, nullable=False)
+    subject_id = Column(Text, nullable=False)
+    subject_revision = Column(BigInteger, nullable=False)
+    role = Column(Text)
+    role_id = Column(Text)
+    role_version = Column(Text)
+    body_text = Column(Text)
+    body_ref = Column(Text)
+    #: 三表示分列（I76）：``body_text`` 为原值；``model_text`` 为模型可见投影；
+    #: ``search_text`` 为公开导出/索引投影。模型与导出读取必须各用其投影，不得把
+    #: 原值直接当投影；``body_untrusted`` 记录来源（True=外部不可信已中和，
+    #: False=用户自述，NULL=旧行未记录，不臆断为可信）。
+    model_text = Column(Text)
+    body_untrusted = Column(Boolean)
+    payload = Column(JSONB(none_as_null=True))
+    input_revision = Column(BigInteger)
+    occurred_at = Column(DateTime(timezone=True), nullable=False)
+    committed_at = Column(DateTime(timezone=True), nullable=False)
+    native_fact_ref = Column(Text)
+    tool_call_id = Column(Text)
+    search_text = Column(Text)
+    __table_args__ = (
+        UniqueConstraint("user_scope", "message_id", name="agent_message_user_scope_message_id"),
+        UniqueConstraint("session_id", "event_id", name="agent_message_session_event"),
+        UniqueConstraint("session_id", "session_seq", name="agent_message_session_seq"),
+        ForeignKeyConstraint(
+            ["user_scope", "session_id"],
+            ["agent_session.user_scope", "agent_session.session_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_message_session",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "execution_id"],
+            ["agent_execution.user_scope", "agent_execution.execution_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_message_execution",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "round_id"],
+            ["agent_round.user_scope", "agent_round.round_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_message_round",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "body_ref"],
+            ["agent_body_payload.user_scope", "agent_body_payload.body_ref"],
+            deferrable=True,
+            initially="DEFERRED",
+            use_alter=True,
+            name="fk_agent_message_body",
+        ),
+        CheckConstraint(
+            "event_kind IN ("
+            "'session_changed','draft_saved','execution_accepted','input_bound',"
+            "'execution_changed','node_changed','public_message_saved','source_read_saved',"
+            "'source_disabled','tool_call_recorded','tool_result_saved','decision_required',"
+            "'command_changed','artifact_saved','usage_changed','read_mark_saved',"
+            "'cleanup_changed')",
+            name="event_kind",
+        ),
+        CheckConstraint(
+            "(execution_id IS NULL AND round_id IS NULL) OR (execution_id IS NOT NULL AND round_id IS NOT NULL)",
+            name="execution_round_pair",
+        ),
+        CheckConstraint("(execution_id IS NULL) = (execution_seq IS NULL)", name="execution_seq_pair"),
+        CheckConstraint("body_text IS NULL OR body_ref IS NULL", name="body_exclusive"),
+        CheckConstraint(
+            "role IS NULL OR role IN ('user', 'assistant', 'tool', 'public_status')",
+            name="role",
+        ),
+        CheckConstraint("subject_revision >= 1", name="subject_revision"),
+        CheckConstraint("session_seq >= 0", name="session_seq_nonneg"),
+        CheckConstraint("input_revision IS NULL OR input_revision >= 1", name="input_revision"),
+        *_agent_common_checks(),
+        Index(
+            "idx_agent_message_execution_seq",
+            "execution_id",
+            "execution_seq",
+            unique=True,
+            postgresql_where=text("execution_id IS NOT NULL"),
+        ),
+        Index("idx_agent_message_round", "round_id"),
+        Index("idx_agent_message_node", "node_id"),
+        Index(
+            "idx_agent_message_search",
+            text("to_tsvector('simple', search_text)"),
+            postgresql_using="gin",
+            postgresql_where=text("search_text IS NOT NULL"),
+        ),
+    )
+
+
+class AgentArtifact(Base):
+    """成果与计划版本（§9.7）：复合 PK 不原位覆盖；最终成功先保证完整 result 保存。
+
+    result_payload 为 ResearchResult 结构/限制/证据及正文定位，不重复存 body；
+    读取组合 body_text/body_ref 重建完整 ResearchResult。result_digest 活动期为
+    原规范结果摘要，获准清理后换固定 tombstone 摘要（不因 NOT NULL 保旧正文 digest）。
+    """
+
+    __tablename__ = "agent_artifact"
+    user_scope, schema_version, created_at, updated_at, revision = _agent_common_columns()
+
+    artifact_id = Column(Text, primary_key=True)
+    artifact_version = Column(BigInteger, primary_key=True)
+    session_id = Column(Text, nullable=False)
+    execution_id = Column(Text, nullable=False)
+    round_id = Column(Text, nullable=False)
+    artifact_kind = Column(Text, nullable=False)
+    input_revision = Column(BigInteger, nullable=False)
+    actual_input_digest = Column(CHAR(64), nullable=False)
+    actual_model_ref = Column(Text, nullable=False)
+    summary = Column(Text)
+    body_text = Column(Text)
+    body_ref = Column(Text)
+    result_payload = Column(JSONB(none_as_null=True))
+    result_digest = Column(CHAR(64), nullable=False)
+    source_available_state = Column(Text, nullable=False)
+    published_at = Column(DateTime(timezone=True))
+    cleaned_at = Column(DateTime(timezone=True))
+    __table_args__ = (
+        UniqueConstraint("user_scope", "artifact_id", "artifact_version", name="agent_artifact_user_scope_version"),
+        ForeignKeyConstraint(
+            ["user_scope", "session_id"],
+            ["agent_session.user_scope", "agent_session.session_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_artifact_session",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "execution_id"],
+            ["agent_execution.user_scope", "agent_execution.execution_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_artifact_execution",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "round_id"],
+            ["agent_round.user_scope", "agent_round.round_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_artifact_round",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "body_ref"],
+            ["agent_body_payload.user_scope", "agent_body_payload.body_ref"],
+            deferrable=True,
+            initially="DEFERRED",
+            use_alter=True,
+            name="fk_agent_artifact_body",
+        ),
+        CheckConstraint("artifact_version >= 1", name="version"),
+        CheckConstraint("input_revision >= 1", name="input_revision"),
+        CheckConstraint(
+            "artifact_kind IN ('plan', 'explanation', 'comparison', 'candidate', "
+            "'news', 'backtest', 'period', 'stock_final')",
+            name="kind",
+        ),
+        CheckConstraint("body_text IS NULL OR body_ref IS NULL", name="body_exclusive"),
+        *_agent_common_checks(),
+        Index("idx_agent_artifact_session_recent", "session_id", text("published_at DESC")),
+        Index("idx_agent_artifact_execution", "execution_id"),
+        Index("idx_agent_artifact_round", "round_id"),
+        Index("idx_agent_artifact_kind", "artifact_kind"),
+    )
+
+
+class AgentCommand(Base):
+    """命令与草稿转移 fence（§9.8）：保存/投递/消费三态分列，不共用 success 布尔。
+
+    command_record_id 按 §3.2 由用户域/规范准确 target_id/client_command_id 确定；
+    UNIQUE(user_scope, target_id, client_command_id) 承载受理幂等。transfer_id 在
+    用户域唯一；transfer_source_claimed=true 的源键部分唯一（claim 与原阶段同事务
+    保存，含保护后冲突/unknown）。
+    """
+
+    __tablename__ = "agent_command"
+    user_scope, schema_version, created_at, updated_at, revision = _agent_common_columns()
+
+    command_record_id = Column(Text, primary_key=True)
+    client_command_id = Column(Text, nullable=False)
+    target_id = Column(Text, nullable=False)
+    command_kind = Column(Text, nullable=False)
+    session_id = Column(Text)
+    execution_id = Column(Text)
+    round_id = Column(Text)
+    expected_revision = Column(BigInteger, nullable=False)
+    input_revision = Column(BigInteger)
+    input_digest = Column(CHAR(64), nullable=False)
+    request_payload = Column(JSONB(none_as_null=True))
+    commit_state = Column(Text, nullable=False)
+    delivery_state = Column(Text, nullable=False)
+    consumption_state = Column(Text, nullable=False)
+    receipt_payload = Column(JSONB(none_as_null=True))
+    error_code = Column(Text)
+    native_destination_ref = Column(Text)
+    idempotency_key = Column(Text)
+    consumed_at = Column(DateTime(timezone=True))
+    verified_at = Column(DateTime(timezone=True))
+    transfer_id = Column(Text)
+    transfer_phase = Column(Text)
+    sendable_owner = Column(Text)
+    transfer_source_kind = Column(Text)
+    transfer_source_id = Column(Text)
+    transfer_source_revision = Column(BigInteger)
+    transfer_source_claimed = Column(Boolean, nullable=False, server_default=text("false"))
+    __table_args__ = (
+        UniqueConstraint("user_scope", "command_record_id", name="agent_command_user_scope_command_record_id"),
+        UniqueConstraint("user_scope", "target_id", "client_command_id", name="agent_command_user_target_client"),
+        ForeignKeyConstraint(
+            ["user_scope", "session_id"],
+            ["agent_session.user_scope", "agent_session.session_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_command_session",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "execution_id"],
+            ["agent_execution.user_scope", "agent_execution.execution_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_command_execution",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "round_id"],
+            ["agent_round.user_scope", "agent_round.round_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_command_round",
+        ),
+        CheckConstraint(
+            "commit_state IN ('committed', 'not_committed', 'commit_unknown')",
+            name="commit_state",
+        ),
+        CheckConstraint(
+            "transfer_phase IS NULL OR transfer_phase IN ('prepared', 'target_installed', "
+            "'completed', 'conflict', 'not_committed', 'unknown')",
+            name="transfer_phase",
+        ),
+        CheckConstraint(
+            "sendable_owner IS NULL OR sendable_owner IN ('source', 'target', 'none')",
+            name="sendable_owner",
+        ),
+        CheckConstraint("input_revision IS NULL OR input_revision >= 1", name="input_revision"),
+        *_agent_common_checks(),
+        Index("idx_agent_command_delivery", "delivery_state"),
+        Index(
+            "idx_agent_command_transfer_source_claimed",
+            "user_scope",
+            "transfer_source_kind",
+            "transfer_source_id",
+            "transfer_source_revision",
+            unique=True,
+            postgresql_where=text("transfer_source_claimed"),
+        ),
+        Index(
+            "idx_agent_command_transfer_id",
+            "user_scope",
+            "transfer_id",
+            unique=True,
+            postgresql_where=text("transfer_id IS NOT NULL"),
+        ),
+    )
+
+
+class AgentOperation(Base):
+    """操作事实（§9.9）：phase/effect/io_state 三独立维度；unknown 不等于失败或成功。
+
+    模型 attempt 信息只经 invocation_id/attempt_refs 关联原账本（ADR-0014），
+    不重复写费用。文件交付完整合同在 delivery_manifest，无另建 delivery 表。
+    """
+
+    __tablename__ = "agent_operation"
+    user_scope, schema_version, created_at, updated_at, revision = _agent_common_columns()
+
+    operation_id = Column(Text, primary_key=True)
+    session_id = Column(Text)
+    execution_id = Column(Text)
+    round_id = Column(Text)
+    workflow_id = Column(Text)
+    step_id = Column(Text)
+    call_kind = Column(Text)
+    ordinal = Column(BigInteger)
+    sdk_run_id = Column(Text)
+    model_call_id = Column(Text)
+    tool_call_id = Column(Text)
+    invocation_id = Column(Text)
+    attempt_refs = Column(JSONB(none_as_null=True))
+    owner_epoch = Column(BigInteger, nullable=False)
+    run_epoch = Column(BigInteger, nullable=False)
+    phase = Column(Text, nullable=False)
+    effect_state = Column(Text, nullable=False)
+    io_state = Column(Text, nullable=False)
+    grant_id = Column(Text)
+    grant_revision = Column(BigInteger)
+    parameter_digest = Column(CHAR(64))
+    request_ref = Column(Text)
+    result_ref = Column(Text)
+    result_payload = Column(JSONB(none_as_null=True))
+    worker_refs = Column(JSONB(none_as_null=True))
+    deadline_at = Column(DateTime(timezone=True))
+    dispatched_at = Column(DateTime(timezone=True))
+    exited_at = Column(DateTime(timezone=True))
+    verified_at = Column(DateTime(timezone=True))
+    active_ms = Column(BigInteger, nullable=False, server_default=text("0"))
+    elapsed_ms = Column(BigInteger, nullable=False, server_default=text("0"))
+    error_code = Column(Text)
+    error_category = Column(Text)
+    delivery_manifest = Column(JSONB(none_as_null=True))
+    artifact_id = Column(Text)
+    artifact_version = Column(BigInteger)
+    data_consent_claims = Column(JSONB(none_as_null=True))
+    __table_args__ = (
+        UniqueConstraint("user_scope", "operation_id", name="agent_operation_user_scope_operation_id"),
+        UniqueConstraint(
+            "workflow_id",
+            "step_id",
+            "call_kind",
+            "ordinal",
+            name="agent_operation_workflow_step_call_ordinal",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "session_id"],
+            ["agent_session.user_scope", "agent_session.session_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_operation_session",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "execution_id"],
+            ["agent_execution.user_scope", "agent_execution.execution_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_operation_execution",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "round_id"],
+            ["agent_round.user_scope", "agent_round.round_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_operation_round",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "artifact_id", "artifact_version"],
+            ["agent_artifact.user_scope", "agent_artifact.artifact_id", "agent_artifact.artifact_version"],
+            ondelete="RESTRICT",
+            name="fk_agent_operation_artifact",
+        ),
+        CheckConstraint(
+            "phase IN ('prepared', 'dispatch_claimed', 'dispatched', 'result_saved', 'failed_confirmed', 'unknown')",
+            name="phase",
+        ),
+        CheckConstraint(
+            "effect_state IN ('not_dispatched', 'dispatched', 'confirmed', 'unknown')",
+            name="effect_state",
+        ),
+        CheckConstraint("active_ms >= 0 AND elapsed_ms >= 0", name="elapsed_nonneg"),
+        CheckConstraint("(artifact_id IS NULL) = (artifact_version IS NULL)", name="artifact_pair"),
+        *_agent_common_checks(),
+        Index(
+            "idx_agent_operation_open",
+            "phase",
+            postgresql_where=text("phase IN ('prepared', 'dispatch_claimed', 'dispatched', 'unknown')"),
+        ),
+        Index("idx_agent_operation_workflow_step", "workflow_id", "step_id"),
+        Index("idx_agent_operation_tool_call", "tool_call_id"),
+        Index("idx_agent_operation_artifact", "artifact_id"),
+        Index("idx_agent_operation_owner", "owner_epoch"),
+    )
+
+
+class AgentDecision(Base):
+    """待处理决定与精确许可（§9.8）：不建第二授权库。
+
+    准确工具许可经 grant_id/grant_revision/grant_state 承载；decision_kind=
+    data_consent 时 data_consent_payload 保存 DataConsentBinding 结构版本 1
+    （§9.8 R04 v1 编码），准确工具 grant 字段不挪作模型连接 grant。
+    presentation_batch_seq 为可靠新问题批次，不由状态更新重新生成。
+    """
+
+    __tablename__ = "agent_decision"
+    user_scope, schema_version, created_at, updated_at, revision = _agent_common_columns()
+
+    decision_id = Column(Text, primary_key=True)
+    session_id = Column(Text, nullable=False)
+    execution_id = Column(Text, nullable=False)
+    round_id = Column(Text, nullable=False)
+    node_id = Column(Text, nullable=False)
+    decision_kind = Column(Text, nullable=False)
+    tool_call_id = Column(Text)
+    question_payload = Column(JSONB(none_as_null=True))
+    answer_schema = Column(JSONB(none_as_null=True))
+    parameter_digest = Column(CHAR(64))
+    source_scope_digest = Column(CHAR(64))
+    service_ref = Column(Text)
+    tool_ref = Column(Text)
+    tool_schema_version = Column(Text)
+    expires_at = Column(DateTime(timezone=True))
+    answer_consumed_at = Column(DateTime(timezone=True))
+    answer_command_id = Column(Text)
+    grant_id = Column(Text)
+    grant_revision = Column(BigInteger)
+    grant_state = Column(Text)
+    dispatch_operation_id = Column(Text)
+    presentation_batch_seq = Column(BigInteger, nullable=False)
+    data_consent_payload = Column(JSONB(none_as_null=True))
+    __table_args__ = (
+        UniqueConstraint("user_scope", "decision_id", name="agent_decision_user_scope_decision_id"),
+        ForeignKeyConstraint(
+            ["user_scope", "session_id"],
+            ["agent_session.user_scope", "agent_session.session_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_decision_session",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "execution_id"],
+            ["agent_execution.user_scope", "agent_execution.execution_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_decision_execution",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "round_id"],
+            ["agent_round.user_scope", "agent_round.round_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_decision_round",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "answer_command_id"],
+            ["agent_command.user_scope", "agent_command.command_record_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_decision_answer_command",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "dispatch_operation_id"],
+            ["agent_operation.user_scope", "agent_operation.operation_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_decision_dispatch_operation",
+        ),
+        *_agent_common_checks(),
+        Index("idx_agent_decision_execution", "execution_id"),
+        Index("idx_agent_decision_round", "round_id"),
+        Index("idx_agent_decision_grant", "grant_id"),
+        Index("idx_agent_decision_expires", "expires_at"),
+    )
+
+
+class AgentBodyPayload(Base):
+    """首版同库不可变正文（§9.10.1）：一行单块 BYTEA，不采用外部 blob。
+
+    内容是对应公开/选定表示的准确 UTF-8 字节，保 Unicode/CRLF，不冒充上传原文件
+    字节。owner 三元组唯一且不可换 owner；恰有一组 owner FK 非空且 owner 三元组
+    与该 FK 列成对一致（``owner_identity`` CHECK）。owner 环引用
+    （message/artifact/asset 的 body_ref 反向 FK）为 NO ACTION DEFERRABLE 在提交
+    核定。byte_length 必须 = octet_length(payload_bytes)，SHA-256 由写入及读取核验。
+    """
+
+    __tablename__ = "agent_body_payload"
+    user_scope, schema_version, created_at, updated_at, revision = _agent_common_columns()
+
+    body_ref = Column(Text, primary_key=True)
+    owner_kind = Column(Text, nullable=False)
+    owner_id = Column(Text, nullable=False)
+    owner_version = Column(Text, nullable=False)
+    message_id = Column(Text)
+    artifact_id = Column(Text)
+    artifact_version = Column(BigInteger)
+    asset_id = Column(Text)
+    asset_version = Column(Text)
+    encoding = Column(Text, nullable=False)
+    block_ordinal = Column(SmallInteger, nullable=False, server_default=text("0"))
+    payload_bytes = Column(LargeBinary, nullable=False)
+    byte_length = Column(BigInteger, nullable=False)
+    payload_digest = Column(CHAR(64), nullable=False)
+    __table_args__ = (
+        UniqueConstraint("user_scope", "body_ref", name="agent_body_payload_user_scope_body_ref"),
+        UniqueConstraint(
+            "user_scope",
+            "owner_kind",
+            "owner_id",
+            "owner_version",
+            name="agent_body_payload_owner_tuple",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "message_id"],
+            ["agent_message.user_scope", "agent_message.message_id"],
+            deferrable=True,
+            initially="DEFERRED",
+            use_alter=True,
+            name="fk_agent_body_payload_message",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "artifact_id", "artifact_version"],
+            ["agent_artifact.user_scope", "agent_artifact.artifact_id", "agent_artifact.artifact_version"],
+            deferrable=True,
+            initially="DEFERRED",
+            use_alter=True,
+            name="fk_agent_body_payload_artifact",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "asset_id", "asset_version"],
+            ["agent_asset_version.user_scope", "agent_asset_version.asset_id", "agent_asset_version.asset_version"],
+            deferrable=True,
+            initially="DEFERRED",
+            use_alter=True,
+            name="fk_agent_body_payload_asset",
+        ),
+        CheckConstraint("owner_kind IN ('message', 'artifact', 'asset')", name="owner_kind"),
+        CheckConstraint("encoding = 'utf-8'", name="encoding"),
+        CheckConstraint("block_ordinal = 0", name="block_ordinal"),
+        CheckConstraint("byte_length >= 0", name="byte_length_nonneg"),
+        CheckConstraint("byte_length = octet_length(payload_bytes)", name="byte_length_exact"),
+        CheckConstraint(
+            "(owner_kind = 'message' AND message_id IS NOT NULL AND artifact_id IS NULL AND asset_id IS NULL) "
+            "OR (owner_kind = 'artifact' AND message_id IS NULL AND artifact_id IS NOT NULL AND asset_id IS NULL) "
+            "OR (owner_kind = 'asset' AND message_id IS NULL AND artifact_id IS NULL AND asset_id IS NOT NULL)",
+            name="owner_exclusive",
+        ),
+        CheckConstraint("(artifact_id IS NULL) = (artifact_version IS NULL)", name="artifact_pair"),
+        CheckConstraint("(asset_id IS NULL) = (asset_version IS NULL)", name="asset_pair"),
+        # R2-I32：owner 三元组必须与被选中的 owner 外键列成对一致（不能只比文字三元组）；
+        # message 版本固定 "1"，artifact 版本按 BIGINT 的规范十进制字符串，asset 版本逐字相等。
+        CheckConstraint(
+            "(owner_kind = 'message' AND message_id = owner_id AND owner_version = '1') "
+            "OR (owner_kind = 'artifact' AND artifact_id = owner_id "
+            "AND artifact_version IS NOT NULL AND owner_version = artifact_version::text) "
+            "OR (owner_kind = 'asset' AND asset_id = owner_id AND asset_version = owner_version)",
+            name="owner_identity",
+        ),
+        *_agent_common_checks(),
+    )
+
+
+class AgentSourceLink(Base):
+    """来源-消费者谱系边（§9.10）：禁用源及已知派生闭包的核边基础。
+
+    consumer ∈ draft/execution/round/message/artifact/asset；CHECK 只验证本行
+    类型/对应列 NULL 组合，目标存在性用复合 FK，跨表归属/版本匹配由服务在同事务
+    锁下核定（不写含子查询的 CHECK）。数值 revision 按规范十进制字符串绑定。
+    """
+
+    __tablename__ = "agent_source_link"
+    user_scope, schema_version, created_at, updated_at, revision = _agent_common_columns()
+
+    link_id = Column(Text, primary_key=True)
+    source_id = Column(Text, nullable=False)
+    source_version = Column(Text, nullable=False)
+    consumer_kind = Column(Text, nullable=False)
+    consumer_id = Column(Text, nullable=False)
+    consumer_version = Column(Text, nullable=False)
+    session_id = Column(Text)
+    execution_id = Column(Text)
+    round_id = Column(Text)
+    message_id = Column(Text)
+    artifact_id = Column(Text)
+    artifact_version = Column(BigInteger)
+    derived_asset_id = Column(Text)
+    derived_asset_version = Column(Text)
+    locator_payload = Column(JSONB(none_as_null=True))
+    claim_ref = Column(Text)
+    relation_kind = Column(Text, nullable=False)
+    disabled_inherited = Column(Boolean, nullable=False, server_default=text("false"))
+    __table_args__ = (
+        UniqueConstraint("user_scope", "link_id", name="agent_source_link_user_scope_link_id"),
+        UniqueConstraint(
+            "source_id",
+            "source_version",
+            "consumer_kind",
+            "consumer_id",
+            "consumer_version",
+            name="agent_source_link_source_consumer",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "source_id", "source_version"],
+            ["agent_asset_version.user_scope", "agent_asset_version.asset_id", "agent_asset_version.asset_version"],
+            ondelete="RESTRICT",
+            name="fk_agent_source_link_source",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "session_id"],
+            ["agent_session.user_scope", "agent_session.session_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_source_link_session",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "execution_id"],
+            ["agent_execution.user_scope", "agent_execution.execution_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_source_link_execution",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "round_id"],
+            ["agent_round.user_scope", "agent_round.round_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_source_link_round",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "message_id"],
+            ["agent_message.user_scope", "agent_message.message_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_source_link_message",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "artifact_id", "artifact_version"],
+            ["agent_artifact.user_scope", "agent_artifact.artifact_id", "agent_artifact.artifact_version"],
+            ondelete="RESTRICT",
+            name="fk_agent_source_link_artifact",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "derived_asset_id", "derived_asset_version"],
+            ["agent_asset_version.user_scope", "agent_asset_version.asset_id", "agent_asset_version.asset_version"],
+            ondelete="RESTRICT",
+            name="fk_agent_source_link_derived",
+        ),
+        CheckConstraint(
+            "consumer_kind IN ('draft', 'execution', 'round', 'message', 'artifact', 'asset')",
+            name="consumer_kind",
+        ),
+        # §9.10：单条组合 CHECK 验证本行类型/对应列 NULL 组合（目标存在性用复合 FK；
+        # 六个分支以 OR 组合，每行仅命中其 consumer_kind 分支）。
+        CheckConstraint(
+            "(consumer_kind = 'draft' AND session_id IS NOT NULL AND execution_id IS NULL "
+            "AND round_id IS NULL AND message_id IS NULL AND artifact_id IS NULL AND derived_asset_id IS NULL) "
+            "OR (consumer_kind = 'execution' AND session_id IS NULL AND execution_id IS NOT NULL "
+            "AND round_id IS NULL AND message_id IS NULL AND artifact_id IS NULL AND derived_asset_id IS NULL) "
+            "OR (consumer_kind = 'round' AND session_id IS NULL AND execution_id IS NULL "
+            "AND round_id IS NOT NULL AND message_id IS NULL AND artifact_id IS NULL AND derived_asset_id IS NULL) "
+            "OR (consumer_kind = 'message' AND session_id IS NULL AND execution_id IS NULL "
+            "AND round_id IS NULL AND message_id IS NOT NULL AND artifact_id IS NULL AND derived_asset_id IS NULL) "
+            "OR (consumer_kind = 'artifact' AND session_id IS NULL AND execution_id IS NULL "
+            "AND round_id IS NULL AND message_id IS NULL AND artifact_id IS NOT NULL "
+            "AND artifact_version IS NOT NULL AND derived_asset_id IS NULL) "
+            "OR (consumer_kind = 'asset' AND session_id IS NULL AND execution_id IS NULL "
+            "AND round_id IS NULL AND message_id IS NULL AND artifact_id IS NULL "
+            "AND derived_asset_id IS NOT NULL AND derived_asset_version IS NOT NULL)",
+            name="consumer_null_combination",
+        ),
+        CheckConstraint("(artifact_id IS NULL) = (artifact_version IS NULL)", name="artifact_pair"),
+        # R2-I32：派生来源必须成对声明 id/version（禁止只给 version 的孤立派生边）。
+        CheckConstraint("(derived_asset_id IS NULL) = (derived_asset_version IS NULL)", name="derived_asset_pair"),
+        *_agent_common_checks(),
+        Index("idx_agent_source_link_source", "source_id", "source_version"),
+        Index("idx_agent_source_link_consumer", "consumer_kind", "consumer_id"),
+        Index(
+            "idx_agent_source_link_disabled",
+            "disabled_inherited",
+            postgresql_where=text("disabled_inherited"),
+        ),
+    )
+
+
+class AgentResourceSlot(Base):
+    """资源票据（§9.11）：预分配全局 2 总/4 叶与一个 global_guard。
+
+    事务同时检查全局 2 总/4 叶与每会话 1 总/每总 3 叶（检视 D27），不靠数量缓存
+    准入。release_verified 表示真实退出已确认；unknown 在途不放空（开放活动区间
+    尾段未知不增剩余额度）。
+    """
+
+    __tablename__ = "agent_resource_slot"
+    user_scope, schema_version, created_at, updated_at, revision = _agent_common_columns()
+
+    slot_id = Column(Text, primary_key=True)
+    slot_kind = Column(Text, nullable=False)
+    execution_id = Column(Text)
+    node_id = Column(Text)
+    round_id = Column(Text)
+    owner_epoch = Column(BigInteger, nullable=False, server_default=text("0"))
+    run_epoch = Column(BigInteger, nullable=False, server_default=text("0"))
+    claimed_at = Column(DateTime(timezone=True))
+    released_at = Column(DateTime(timezone=True))
+    release_verified = Column(Boolean, nullable=False, server_default=text("false"))
+    operation_refs = Column(JSONB(none_as_null=True))
+    __table_args__ = (
+        UniqueConstraint("user_scope", "slot_id", name="agent_resource_slot_user_scope_slot_id"),
+        ForeignKeyConstraint(
+            ["user_scope", "execution_id"],
+            ["agent_execution.user_scope", "agent_execution.execution_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_resource_slot_execution",
+        ),
+        ForeignKeyConstraint(
+            ["user_scope", "round_id"],
+            ["agent_round.user_scope", "agent_round.round_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_resource_slot_round",
+        ),
+        CheckConstraint("slot_kind IN ('total', 'leaf', 'global_guard')", name="kind"),
+        CheckConstraint(
+            "(slot_kind = 'global_guard') = (execution_id IS NULL)",
+            name="guard_unassigned",
+        ),
+        *_agent_common_checks(),
+        Index(
+            "idx_agent_resource_slot_open",
+            "released_at",
+            postgresql_where=text("released_at IS NULL"),
+        ),
+    )
+
+
+class AgentReadMark(Base):
+    """阅读水位标记（§9.11）：last/batch/postponed 三单调水位（R22 语义）。
+
+    UNIQUE(user_scope, marker_kind, target_id)；当前待决定新批次在准确用户
+    global marker 行锁下增加 batch_seq；稍后只更新 postponed_through_seq=GREATEST
+    旧值/确认批次，同项状态变更不造新批次。read_targets 为精确已读消息/成果 ID
+    （不含正文）。全局决定批次标记允许 session_id 为 NULL。
+    """
+
+    __tablename__ = "agent_read_mark"
+    user_scope, schema_version, created_at, updated_at, revision = _agent_common_columns()
+
+    marker_id = Column(Text, primary_key=True)
+    marker_kind = Column(Text, nullable=False)
+    target_id = Column(Text, nullable=False)
+    session_id = Column(Text)
+    last_seq = Column(BigInteger, nullable=False, server_default=text("0"))
+    batch_seq = Column(BigInteger, nullable=False, server_default=text("0"))
+    postponed_through_seq = Column(BigInteger, nullable=False, server_default=text("0"))
+    read_targets = Column(JSONB(none_as_null=True))
+    __table_args__ = (
+        UniqueConstraint("user_scope", "marker_id", name="agent_read_mark_user_scope_marker_id"),
+        UniqueConstraint("user_scope", "marker_kind", "target_id", name="agent_read_mark_user_kind_target"),
+        ForeignKeyConstraint(
+            ["user_scope", "session_id"],
+            ["agent_session.user_scope", "agent_session.session_id"],
+            ondelete="RESTRICT",
+            name="fk_agent_read_mark_session",
+        ),
+        CheckConstraint(
+            "last_seq >= 0 AND batch_seq >= 0 AND postponed_through_seq >= 0",
+            name="waternarks_nonneg",
+        ),
+        *_agent_common_checks(),
+    )
+
+
+class AgentCleanupJob(Base):
+    """清理任务（§9.11）：固定集合及 fence；清理按核定集合处理，不用 LIKE 前缀。
+
+    exact_identity_set 为固定 session/round/workflow/asset/body 集合（JSONB NOT
+    NULL）；fence_committed 表示删除 fence 已提交（禁用与删除不能借恢复复活）。
+    phase 的 wire 值待冻结，暂不加值域 CHECK。
+    """
+
+    __tablename__ = "agent_cleanup_job"
+    user_scope, schema_version, created_at, updated_at, revision = _agent_common_columns()
+
+    cleanup_job_id = Column(Text, primary_key=True)
+    owner_ref = Column(Text, nullable=False)
+    preview_digest = Column(CHAR(64), nullable=False)
+    expected_revision = Column(BigInteger, nullable=False)
+    exact_identity_set = Column(JSONB, nullable=False)
+    content_manifest = Column(JSONB(none_as_null=True))
+    phase = Column(Text, nullable=False)
+    complete = Column(Boolean, nullable=False, server_default=text("false"))
+    fence_committed = Column(Boolean, nullable=False, server_default=text("false"))
+    verified_counts = Column(JSONB(none_as_null=True))
+    error_category = Column(Text)
+    sqlstate = Column(Text)
+    verified_at = Column(DateTime(timezone=True))
+    __table_args__ = (
+        UniqueConstraint("user_scope", "cleanup_job_id", name="agent_cleanup_job_user_scope_cleanup_job_id"),
+        *_agent_common_checks(),
+        Index("idx_agent_cleanup_job_phase", "phase"),
+        Index("idx_agent_cleanup_job_owner", "owner_ref"),
+    )
 
 
 def get_model_columns(model_class: type, exclude: set[str] | None = None) -> list[str]:

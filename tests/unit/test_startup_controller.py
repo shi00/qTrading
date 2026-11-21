@@ -445,6 +445,33 @@ class TestStartupReconfigure:
         assert ctrl._services_initialized is False
 
     @pytest.mark.asyncio
+    async def test_reconfigure_blocked_by_agent_close_gate_keeps_engine(self, controller):
+        """关闭门未就绪：切库被阻断，引擎/接线保持（R2-I35）。"""
+        ctrl, transitions = controller
+        ctrl._state = StartupState.INIT_FAILED
+
+        class _BlockedWiring:
+            def __init__(self) -> None:
+                self.prepared = 0
+
+            async def prepare_close(self) -> None:
+                self.prepared += 1
+
+            def close_ready(self) -> bool:
+                return False
+
+        blocked = _BlockedWiring()
+        ctrl._agent_wiring = blocked
+
+        await ctrl.reconfigure()
+
+        assert blocked.prepared == 1
+        ctrl._cache_manager.close.assert_not_awaited()
+        assert ctrl._agent_wiring is blocked  # 保留接线与依赖供重试
+        assert ctrl.state == StartupState.INIT_FAILED
+        assert transitions[-1][1].error == "agent_close_not_ready"
+
+    @pytest.mark.asyncio
     async def test_reconfigure_full_flow(self):
         """Verify reconfigure: close DB -> reset onboarding -> NEED_ONBOARDING."""
         transitions = []

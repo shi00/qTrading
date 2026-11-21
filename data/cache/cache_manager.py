@@ -15,6 +15,7 @@ from data.persistence import engine_provider
 
 # DAOs（__init__ 显式实例化以满足 R13 静态检查；注册清单见 DaoRegistry）
 from data.persistence.daos.ai_usage_dao import AIUsageDao
+from data.persistence.daos.agent_dao import AgentDao
 from data.persistence.daos.backtest_dao import BacktestDAO
 from data.persistence.daos.base_dao import (
     BaseDao,
@@ -149,6 +150,9 @@ class CacheManager:
             self.watchlist_dao = WatchlistDao(self.engine)
             # S3 统一模型计量（ADR-0014 §10）：AI 用量账本 DAO
             self.ai_usage_dao = AIUsageDao(self.engine)
+            # Agent 运行时（C-01，设计 §9.13）：Agent 应用表事务/查询 DAO
+            # （事务方法族随 C-02/C-03/C-04 分片实现，见 agent_dao.py 契约基线）
+            self.agent_dao = AgentDao(self.engine)
 
             self._schema_initialized = False
 
@@ -1193,6 +1197,10 @@ class CacheManager:
     async def is_in_watchlist(self, ts_code: str) -> bool:
         """检查是否已关注。"""
         return await self.watchlist_dao.is_in_watchlist(ts_code)
+
+    async def get_watchlist_note(self, ts_code: str) -> str | None:
+        """按 ts_code 读取已有备注（R2-I13：重复关注/改备注前的影响告知）。"""
+        return await self.watchlist_dao.get_watchlist_note(ts_code)
 
     # --- Watchlist Quotes / Stock Detail by code (UX-09 MAJOR-04) ---
 

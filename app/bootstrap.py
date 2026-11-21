@@ -4,6 +4,7 @@ import asyncio
 import atexit
 import logging
 import os
+from collections.abc import Mapping
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
@@ -17,13 +18,22 @@ from utils.error_classifier import log_classified
 from utils.sanitizers import DataSanitizer
 from utils.scheduler_service import SchedulerService
 from core.i18n import I18n
-from core.model_management_types import InferenceAdapter, ensure_inference_adapter
+from core.model_management_types import InferenceAdapter, ensure_registered_adapter
 
 # review01-A3: EmbeddedPgStartupScenario 下沉到 core.startup_types（纯类型），此处 re-export 兼容旧引用
 from core.startup_types import EmbeddedPgStartupScenario
 
 if TYPE_CHECKING:
-    from core.model_management_types import AdapterResponse, AttemptContext, InferenceRequest, ResolvedConnection
+    from core.model_management_types import (
+        AdapterResponse,
+        AttemptContext,
+        ChatStreamEventHandler,
+        ChatTurnRequest,
+        ChatTurnResponse,
+        InferenceRequest,
+        ResolvedConnection,
+    )
+    from services.ai_service.litellm_client import LiteLLMChatAdapter
     from utils.config_models import AppConfig
 
 logger = logging.getLogger(__name__)
@@ -57,7 +67,18 @@ def _ai_usage_dao_provider() -> Any:
 
 
 class _LiteLLMChatAdapter:
-    """``litellm_chat`` 适配器（D7）：薄委托 AIService 单连接入口，惰性解析单例。"""
+    """``litellm_chat`` 适配器（D7 / 检视 M01）：薄委托真实
+    :class:`services.ai_service.litellm_client.LiteLLMChatAdapter`，惰性解析单例。
+
+    同时暴露旧入口 ``invoke``（单 prompt）与聊天入口 ``invoke_chat``（完整回合）；
+    聊天入口只触达 ``invoke_chat``，零旧 ``invoke``——两协议分别校验、不混用。
+    """
+
+    def _adapter(self) -> LiteLLMChatAdapter:
+        from services.ai_service import AIService
+        from services.ai_service.litellm_client import LiteLLMChatAdapter
+
+        return LiteLLMChatAdapter(AIService()._litellm)
 
     async def invoke(
         self,
@@ -66,15 +87,38 @@ class _LiteLLMChatAdapter:
         deadline: float,
         attempt_context: AttemptContext,
     ) -> AdapterResponse:
-        from services.ai_service import AIService
+        return await self._adapter().invoke(request, resolved_connection, deadline, attempt_context)
 
-        return await AIService()._litellm.invoke_single_connection(
-            request, resolved_connection, deadline, attempt_context
+    async def invoke_chat(
+        self,
+        request: ChatTurnRequest,
+        resolved_connection: ResolvedConnection,
+        deadline: float,
+        attempt_context: AttemptContext,
+        *,
+        stream: bool = True,
+        response_format: Mapping[str, Any] | None = None,
+        on_event: ChatStreamEventHandler | None = None,
+    ) -> ChatTurnResponse:
+        return await self._adapter().invoke_chat(
+            request,
+            resolved_connection,
+            deadline,
+            attempt_context,
+            stream=stream,
+            response_format=response_format,
+            on_event=on_event,
         )
 
 
 class _GGUFAdapter:
-    """``gguf_chat`` 适配器（D7）：薄委托 LocalModelManager 单连接入口。"""
+    """``gguf_chat`` 适配器（D7）：薄委托 LocalModelManager 单连接入口。
+
+    I50：仅承接旧单 prompt 入口（``invoke``）。本地 worker 无绑定 request_id /
+    运行代次的 chunk / tool / final IPC（子进程内部 stream 后聚合最终 ok），故
+    刻意不实现 ``invoke_chat``；agent 聊天回合对 ``gguf_*`` 一律在
+    ScenarioExecutor 能力门控处显式拒绝，不虚报流式/工具准入。
+    """
 
     async def invoke(
         self,
@@ -110,11 +154,13 @@ class _GGUFSentimentAdapter:
 
 
 def _build_default_adapters() -> dict[str, InferenceAdapter]:
-    """适配器协议注入（D7）：litellm 单连接 / 本地 GGUF 统一 invoke（检视 F02）。
+    """适配器协议注入（D7 / 检视 M01）：litellm / 本地 GGUF 按入口协议组装。
 
-    统一为 :class:`InferenceAdapter` 对象协议（可调用 ``.invoke``），组装边界逐项
-    校验——不再存在「函数 / 对象」两种隐式调用规则并存，错误形状在组装期
-    TypeError 快速失败，而非执行期 AttributeError 被误判为模型故障重试。
+    组装期只校验「满足至少一个入口协议」（旧入口 ``.invoke`` / 聊天入口
+    ``.invoke_chat``，见 :func:`core.model_management_types.ensure_registered_adapter`），
+    由各执行路径派发前分别复核；两者皆缺的错误形状仍在组装期 TypeError 快速
+    失败，而非执行期 AttributeError 被误判为模型故障重试。``litellm_chat`` 同时
+    暴露两协议（聊天入口零旧 ``invoke`` 触达）。
     """
     adapters: dict[str, InferenceAdapter] = {
         "litellm_chat": _LiteLLMChatAdapter(),
@@ -122,7 +168,7 @@ def _build_default_adapters() -> dict[str, InferenceAdapter]:
         "gguf_sentiment": _GGUFSentimentAdapter(),
     }
     for kind, adapter in adapters.items():
-        ensure_inference_adapter(kind, adapter)
+        ensure_registered_adapter(kind, adapter)
     return adapters
 
 
@@ -204,6 +250,9 @@ class InitResult(TypedDict):
     # D02-F04: 本会话持有的调度组合结果（失败可重试时由调用方显式回传复用；
     # 组装前失败为 None）。
     scheduling_services: NotRequired[dict[str, Any] | None]
+    # P01（DD §7.4/§10.6）：本会话的 Agent 接线（facade + 共享桥 + 宿主/关闭前置）；
+    # 接线失败或未执行时为 None（零派发）。
+    agent_wiring: NotRequired[Any]
 
 
 async def initialize_services(
@@ -402,6 +451,30 @@ async def initialize_services(
             "[Bootstrap] AI usage owner recovery skipped (%s): %s",
         )
 
+    # P01（DD §7.4/§10.6）：Agent 生产接线——facade（共享引擎/账本）+ 共享桥 +
+    # 宿主组装/启动隔离（needs-spike 前不 launch）+ 关闭前置。放在所有关键启动步骤
+    # 成功之后，接线失败一律降级为零派发，不阻断既有业务启动；CancelledError 继续
+    # 传播（R2）。
+    agent_wiring: Any | None = None
+    try:
+        from app.agent_wiring import wire_agent_runtime
+        from config import USER_DATA_ROOT
+
+        agent_wiring = await wire_agent_runtime(
+            cache_manager,
+            skills_root=str(Path(USER_DATA_ROOT) / "agent" / "skills"),
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        log_classified(
+            logger,
+            e,
+            "general",
+            "[Bootstrap] Agent runtime wiring skipped (%s): %s",
+            exc_info=True,
+        )
+
     # review01-A9: 不再由本模块写模块级 flag；调用方（StartupController per-session 实例）
     # 根据 result["success"] 自行置位 _services_initialized。
     return {
@@ -413,6 +486,7 @@ async def initialize_services(
         "auto_probe_task": auto_probe_task,
         "partial_state": {"db_initialized": True, "task_manager_initialized": True},
         "scheduling_services": scheduling_services,
+        "agent_wiring": agent_wiring,
     }
 
 

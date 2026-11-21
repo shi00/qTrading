@@ -664,6 +664,22 @@ class TestDetailCell:
         cell.content.on_click(MagicMock())  # type: ignore[reportCallIssue, reason: Flet stub declares on_click as 0-arg, but runtime passes event]
         on_detail.assert_called_once_with(data)
 
+    def test_research_action_renders_detail_and_research_buttons(self):
+        """R2-I06: on_row_research 非空时动作列并列两个可聚焦入口。"""
+        on_detail = MagicMock()
+        on_research = MagicMock()
+        data = _make_row_data()
+        cell = _build_detail_cell(data, self._detail_col(), None, on_detail, None, on_research)
+
+        assert isinstance(cell.content, ft.Row)
+        assert len(cell.content.controls) == 2
+        detail_btn, research_btn = cell.content.controls
+        assert isinstance(detail_btn, ft.TextButton)
+        assert isinstance(research_btn, ft.TextButton)
+
+        research_btn.on_click(MagicMock())  # type: ignore[reportCallIssue, reason: Flet stub declares on_click as 0-arg, but runtime passes event]
+        on_research.assert_called_once_with(data)
+
     def test_width_follows_col_widths_override(self):
         cell = _build_detail_cell({}, self._detail_col(), {DETAIL_COL_ID: 120}, MagicMock())
         assert cell.width == 120

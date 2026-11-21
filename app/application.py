@@ -104,6 +104,8 @@ class ApplicationSession:
         self._page = page
         self.cache_manager: CacheManager | None = None
         self.coordinator: ShutdownCoordinator | None = None
+        # P01（DD §7.4/§10.6）：本会话 Agent 接线；关闭前置必须先于共享引擎释放。
+        self.agent_wiring: Any | None = None
 
     async def __aenter__(self) -> ApplicationSession:
         return self
@@ -113,8 +115,41 @@ class ApplicationSession:
             await self._rollback()
         return False
 
+    async def prepare_agent_close(self) -> bool:
+        """消费 Agent 关闭门，返回是否可继续释放共享依赖。
+
+        未接线（``agent_wiring is None``）时为 no-op 且可继续；已接线时先关闭研究
+        派发入口并核定本地/外部在途收敛。未就绪（在途 IO、残留未核定、超时、
+        异常、缺失证据）返回 False——调用方必须阻断 cleanup 与引擎/数据库释放，
+        保留进程与依赖（R2-I35）。``CancelledError`` 原样传播（R2）。
+        """
+
+        wiring = self.agent_wiring
+        if wiring is None:
+            return True
+        try:
+            await wiring.prepare_close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("[App] Agent close prelude failed: %s", type(e).__name__, exc_info=True)
+            return False
+        close_ready = getattr(wiring, "close_ready", None)
+        if close_ready is None:
+            # 无就绪证据访问器即无法证明可释放依赖：按未就绪阻断（不得默认放行）。
+            logger.error("[App] Agent wiring exposes no close readiness evidence; blocking resource release.")
+            return False
+        return bool(close_ready())
+
     async def _rollback(self) -> None:
-        """启动失败回滚：逆序释放已创建资源，回滚失败不掩盖原始异常。"""
+        """启动失败回滚：逆序释放已创建资源，回滚失败不掩盖原始异常。
+
+        关闭门未就绪时保留会话资源（不 cleanup、不 dispose 引擎），不把「未收敛」
+        当「已关闭」（R2-I35）。
+        """
+        if not await self.prepare_agent_close():
+            logger.error("[App] Startup rollback blocked: agent close gate not ready; session resources kept alive.")
+            return
         if self.coordinator is not None:
             try:
                 # 生产停机统一预算：watchdog 70s / cleanup 60s / 单步 35s，容纳 Step 8 PG 停止（CON-11）
@@ -151,7 +186,14 @@ async def _run_session(
 
     async def _perform_window_shutdown():
         try:
-            await perform_window_shutdown(coordinator, page, is_web_mode_fn=_is_web_mode)
+            # P01/R2-I35：所有退出路径统一先消费 Agent 关闭门（内部先关派发入口、
+            # 再核定在途收敛）；未就绪即阻断清理并保活依赖。
+            await perform_window_shutdown(
+                coordinator,
+                page,
+                is_web_mode_fn=_is_web_mode,
+                before_cleanup=session.prepare_agent_close,
+            )
         finally:
             dialog_manager.shutdown_requested = False
 
@@ -185,7 +227,8 @@ async def _run_session(
         page.window.on_event = _on_window_event
 
     async def _on_disconnect(e):
-        await handle_disconnect(coordinator)
+        # P01/R2-I35：断连同样先消费 Agent 关闭门；未就绪即保留依赖等待收敛。
+        await handle_disconnect(coordinator, before_cleanup=session.prepare_agent_close)
 
     # E2E web 模式下多个浏览器 session 共享一个 Flet server 进程。
     # session 断开不应触发 shutdown cleanup（会销毁不可恢复的共享资源如 ThreadPool）。
@@ -202,7 +245,13 @@ async def _run_session(
 
     async def _perform_upgrade_exit():
         """Cleanup and force exit after upgrade failure."""
-        await perform_upgrade_exit(coordinator, page, is_web_mode_fn=_is_web_mode)
+        # P01/R2-I35：升级退出同样先消费 Agent 关闭门；未就绪即保留进程与依赖。
+        await perform_upgrade_exit(
+            coordinator,
+            page,
+            is_web_mode_fn=_is_web_mode,
+            before_cleanup=session.prepare_agent_close,
+        )
 
     def _on_show_toast(message_key, toast_type="info"):
         """启动期 toast 回调：解析 i18n key 后经无状态 ``toast_show`` 呈现（显式传入 page）。"""
@@ -300,6 +349,10 @@ async def _run_session(
     if auto_probe_task is not None and auto_probe_task is not registered_auto_probe_task and not auto_probe_task.done():
         coordinator.register_task(auto_probe_task)
         registered_auto_probe_task = auto_probe_task
+
+    # P01：接线结果挂到会话，供窗口关闭/断连/升级退出/启动回滚在释放共享引擎前
+    # 完成 Agent 关闭前置。
+    session.agent_wiring = getattr(controller, "agent_wiring", None)
 
 
 async def _wait_for_user_action(retry_event: threading.Event, exit_event: threading.Event) -> str:

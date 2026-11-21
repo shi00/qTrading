@@ -43,12 +43,13 @@ class TestLoadConfig:
 
     def test_returns_layered_thresholds_sorted_by_length_desc(self):
         _, layered, _ = load_config()
-        # 四个分层路径
         prefixes = [p for p, _ in layered]
-        assert set(prefixes) == {"services/", "strategies/", "data/", "ui/"}
-        # 按长度降序：strategies/ (11) > services/ (9) > ui/ (3) == data/ (5)
-        # strategies/ 最长，应排首位
-        assert prefixes[0] == "strategies/"
+        # 目录分层 + 文件级条目（2026-11-16 Agent 特性登记平台性覆盖来源例外）
+        assert {"services/", "strategies/", "data/", "ui/"} <= set(prefixes)
+        # 目录分层按长度降序居末：strategies/ (11) > services/ (9) > data/ (5) > ui/ (3)
+        assert prefixes[-4:] == ["strategies/", "services/", "data/", "ui/"]
+        # 其余为文件级条目（精确路径匹配，长度均大于目录前缀）
+        assert all(prefix.endswith(".py") for prefix in prefixes[:-4])
 
     def test_returns_enforce_layered_flag(self):
         _, _, enforce = load_config()
@@ -308,6 +309,46 @@ class TestMainThresholds:
         captured = capsys.readouterr()
         assert "SKIP" in captured.out
         assert "::warning::[分层覆盖率]" not in captured.err
+
+
+class TestMainRelaxedFileThreshold:
+    """登记阈值低于默认的放宽例外：以登记阈值为唯一门禁，豁免默认阈值.
+
+    背景（2026-11-16 Agent 平台性覆盖例外）：per_file_minimum_by_path 支持
+    文件级条目，其阈值（如 70%）低于默认 80%。原分类逻辑假设分层阈值只会
+    高于默认，导致该类文件即使达到登记阈值仍被默认门禁误判 FAIL。
+    """
+
+    LAYERED = [("services/agent_service/attachment_worker.py", 70)]
+
+    def test_above_registered_below_default_passes(self, tmp_path, monkeypatch, capsys):
+        """71.3% < 默认 80 但 >= 登记 70：必须 PASS（修复前误判 FAIL）。"""
+        payload = {"files": {"services/agent_service/attachment_worker.py": _entry(71.3, stmts=604, missing=160)}}
+        assert _run_main(tmp_path, monkeypatch, payload=payload, layered=self.LAYERED, enforce=False) == 0
+        out = capsys.readouterr().out
+        assert "PASS" in out
+        assert "FAIL" not in out
+
+    def test_below_registered_threshold_fails_even_in_advisory_mode(self, tmp_path, monkeypatch, capsys):
+        """低于自身登记阈值必须 FAIL（放宽例外始终 enforce，不受 enforce_layered 影响）。"""
+        payload = {"files": {"services/agent_service/attachment_worker.py": _entry(69.0, stmts=604, missing=187)}}
+        assert _run_main(tmp_path, monkeypatch, payload=payload, layered=self.LAYERED, enforce=False) == 1
+        out = capsys.readouterr().out
+        assert "FAIL" in out
+        assert "below registered per-file threshold" in out
+
+    def test_relaxed_exception_does_not_leak_to_default_gate(self, tmp_path, monkeypatch, capsys):
+        """同 payload 下未登记文件仍受默认门禁约束（放宽不扩散）。"""
+        payload = {
+            "files": {
+                "services/agent_service/attachment_worker.py": _entry(71.3, stmts=604, missing=160),
+                "app/foo.py": _entry(79.0, stmts=100, missing=21),
+            }
+        }
+        assert _run_main(tmp_path, monkeypatch, payload=payload, layered=self.LAYERED, enforce=False) == 1
+        out = capsys.readouterr().out
+        assert "below 80%" in out
+        assert "app/foo.py" in out
 
 
 class TestMainReportMode:

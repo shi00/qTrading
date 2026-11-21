@@ -53,6 +53,7 @@ from ui.testing.e2e_ids import EIDS
 from ui.viewmodels import Message
 from ui.viewmodels.screener_view_model import (
     _MAX_LOG_CARDS,
+    PRESET_NAME_MAX_LENGTH,
     HistoryTreeRow,
     ScreenerState,
     ScreenerRow,
@@ -61,6 +62,11 @@ from ui.viewmodels.screener_view_model import (
     StreamCard,
 )
 from ui.viewmodels.backtest_view_model import set_pending_prefill
+from ui.viewmodels.business_research_view_model import (
+    OBJECT_KIND_CANDIDATE,
+    OBJECT_KIND_STOCK,
+    BusinessResearchRequest,
+)
 from ui.viewmodels.news_insight_view_model import NewsInsightViewModel
 from ui.viewmodels.sentiment_index_view_model import SentimentIndexViewModel
 from ui.viewmodels.watchlist_view_model import WatchlistViewModel
@@ -1475,6 +1481,10 @@ async def _execute_restore_default_prompt(
     """恢复默认 AI Prompt."""
     try:
         new_val = await vm.reset_strategy_prompt(strat)
+        if vm.state.selected_strategy != strat:
+            # R2-I11: 恢复期间用户已切换策略 —— 持久覆盖已按确认清除, 但不得把旧策略
+            # 默认值回填进新策略草稿, 也不对新策略提示「已恢复」。
+            return
         on_update_param("ai_system_prompt", new_val)
         if page is not None:
             _show_toast(page, I18n.get("ai_settings_restored"), "info")
@@ -1659,6 +1669,7 @@ def _build_screener_sections_card(
     on_section_change: typing.Callable[[ft.ControlEvent], None],
     on_load_col_widths: typing.Callable[[], dict[str, int] | None],
     on_persist_col_widths: typing.Callable[[dict[str, int]], None],
+    on_row_research: typing.Callable[[dict], None] | None = None,
 ) -> ft.Container:
     """构建 AI 三分区卡片 (D7-3 + MAJOR-06): 分组页签 + 活动分组的表格/空态.
 
@@ -1700,6 +1711,7 @@ def _build_screener_sections_card(
                     detail_anchor=lambda row: (
                         EIDS.SCREENER.detail_button(row["ts_code"]) if row.get("ts_code") else None
                     ),
+                    on_row_research=on_row_research,
                     col_widths_key=_VT_COL_WIDTHS_KEY,
                     on_load_col_widths=on_load_col_widths,
                     on_persist_col_widths=on_persist_col_widths,
@@ -1733,6 +1745,137 @@ def _build_screener_sections_card(
     )
 
 
+_PRESET_PARAM_PREVIEW_CHARS = 120
+
+
+def _format_preset_params(params: typing.Mapping[str, typing.Any]) -> str:
+    """将方案参数格式化为确认对话框正文 (R2-I12: 重名保存前列出旧参数).
+
+    超长取值截断并标注省略号，避免单条长 prompt 撑爆对话框正文（对话框本身可滚动）。
+    """
+    lines: list[str] = []
+    for key, value in params.items():
+        text = str(value)
+        if len(text) > _PRESET_PARAM_PREVIEW_CHARS:
+            text = f"{text[:_PRESET_PARAM_PREVIEW_CHARS]}…"
+        lines.append(f"{key}: {text}")
+    return "\n".join(lines)
+
+
+def _build_presets_section(
+    state: ScreenerState,
+    *,
+    name_value: str,
+    selected: str,
+    busy: bool,
+    handlers: dict[str, typing.Any],
+) -> ft.Control:
+    """构建筛选方案区 (R2-I12): 列出/保存/载入/删除入口.
+
+    VM 持有方案名列表（state.preset_names），输入与选中属纯本地交互态（由 View 传入）。
+    按钮仅调用 VM 命令，不触发选股/回测。
+    """
+    names = list(state.preset_names)
+    action_disabled = busy or not selected
+    return ft.Container(
+        content=ft.Column(
+            [
+                ft.Text(
+                    I18n.get("screener_preset_title"),
+                    size=AppStyles.FONT_SIZE_BODY,
+                    weight=ft.FontWeight.W_500,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+                ft.Row(
+                    [
+                        ft.TextField(
+                            label=I18n.get("screener_preset_name_label"),
+                            value=name_value,
+                            dense=True,
+                            max_length=PRESET_NAME_MAX_LENGTH,
+                            expand=True,
+                            text_size=AppStyles.FONT_SIZE_BODY,
+                            border={
+                                ft.ControlState.DEFAULT: ft.OutlineInputBorder(
+                                    side=ft.BorderSide(color=AppColors.DIVIDER)
+                                ),
+                                ft.ControlState.FOCUSED: ft.OutlineInputBorder(
+                                    side=ft.BorderSide(color=AppColors.PRIMARY)
+                                ),
+                            },
+                            on_change=safe_on_change(handlers.get("on_preset_name_change")),
+                        ),
+                        ft.TextButton(
+                            content=I18n.get("screener_preset_save"),
+                            icon=ft.Icons.SAVE_AS,
+                            disabled=busy,
+                            style=ft.ButtonStyle(color=AppColors.PRIMARY),
+                            on_click=safe_on_click(handlers.get("on_preset_save")),
+                        ),
+                    ],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.Dropdown(
+                    label=I18n.get("screener_preset_saved_label"),
+                    options=[ft.dropdown.Option(name, text=name) for name in names],
+                    # 选中项已被他进程删除/刷新掉时回落到空值，避免 Dropdown value 不在 options。
+                    value=selected if selected in names else None,
+                    dense=True,
+                    text_size=AppStyles.FONT_SIZE_BODY,
+                    bgcolor=AppColors.INPUT_BG,
+                    border={
+                        ft.ControlState.DEFAULT: ft.OutlineInputBorder(
+                            side=ft.BorderSide(color=AppColors.INPUT_BORDER)
+                        ),
+                        ft.ControlState.FOCUSED: ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.PRIMARY)),
+                    },
+                    color=AppColors.INPUT_TEXT,
+                    on_select=safe_on_select(handlers.get("on_preset_select")),
+                ),
+                ft.Row(
+                    [
+                        ft.TextButton(
+                            content=I18n.get("screener_preset_load"),
+                            icon=ft.Icons.FILE_OPEN,
+                            disabled=action_disabled,
+                            style=ft.ButtonStyle(color=AppColors.PRIMARY),
+                            on_click=safe_on_click(handlers.get("on_preset_load")),
+                        ),
+                        ft.TextButton(
+                            content=I18n.get("screener_preset_delete"),
+                            icon=ft.Icons.DELETE_OUTLINE,
+                            disabled=action_disabled,
+                            style=ft.ButtonStyle(color=AppColors.ERROR),
+                            on_click=safe_on_click(handlers.get("on_preset_delete")),
+                        ),
+                        ft.Container(expand=True),
+                        ft.ProgressRing(
+                            visible=busy,
+                            width=16,
+                            height=16,
+                            color=AppColors.ACCENT,
+                        ),
+                    ],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.Text(
+                    I18n.get("screener_preset_empty"),
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=AppColors.TEXT_SECONDARY,
+                    visible=not names,
+                ),
+            ],
+            spacing=6,
+        ),
+        padding=ft.Padding.all(12),
+        bgcolor=AppColors.SURFACE_VARIANT,
+        border_radius=8,
+        margin=ft.Margin.only(bottom=8),
+    )
+
+
 def _build_screener_params_sidebar(
     state: ScreenerState,
     vm: ScreenerViewModel,
@@ -1740,6 +1883,9 @@ def _build_screener_params_sidebar(
     handlers: dict[str, typing.Any],
     prompt_error: Message | None,
     param_errors: typing.Mapping[str, Message] | None = None,
+    preset_name_value: str = "",
+    preset_selected: str = "",
+    preset_busy: bool = False,
 ) -> ft.Control | None:
     """构建左侧策略参数侧栏 (MAJOR-07)。
 
@@ -1750,6 +1896,7 @@ def _build_screener_params_sidebar(
     退化为单栏布局（不渲染空侧栏）。
 
     侧栏内部用可滚动 ``Column``，小高度窗口下参数多于可视区时可滚动，不裁切。
+    顶部另置筛选方案入口（R2-I12：列出/保存/载入/删除），固定可见不被参数挤走。
     """
     panels = build_params_panel(
         state,
@@ -1777,6 +1924,18 @@ def _build_screener_params_sidebar(
                     padding=ft.Padding.only(left=12, top=10, bottom=5),
                 ),
                 ft.Divider(height=1, color=AppColors.DIVIDER),
+                # R2-I12: 筛选方案入口（列出/保存/载入/删除）置于参数滚动区之上，
+                # 参数再多也不被挤出可视区；方案操作只改参数草稿，不启动选股/回测。
+                ft.Container(
+                    content=_build_presets_section(
+                        state,
+                        name_value=preset_name_value,
+                        selected=preset_selected,
+                        busy=preset_busy,
+                        handlers=handlers,
+                    ),
+                    padding=ft.Padding.only(left=8, right=8, top=8),
+                ),
                 ft.Column(panels, scroll=ft.ScrollMode.AUTO, expand=True, spacing=0),
             ],
             spacing=0,
@@ -2018,6 +2177,7 @@ def _build_screener_table_card(
     on_persist_col_widths: typing.Callable[[dict[str, int]], None],
     is_realtime: bool,
     interaction_disabled: bool = False,
+    on_row_research: typing.Callable[[dict], None] | None = None,
 ) -> ft.Container:
     """构建表格卡片区 (D7-3: AI 三分区 + 统一分页栏/空态).
 
@@ -2115,6 +2275,7 @@ def _build_screener_table_card(
                     on_section_change=on_section_change,
                     on_load_col_widths=on_load_col_widths,
                     on_persist_col_widths=on_persist_col_widths,
+                    on_row_research=None if interaction_disabled else on_row_research,
                 )
             ]
         else:
@@ -2139,6 +2300,7 @@ def _build_screener_table_card(
                         detail_anchor=(
                             lambda row: EIDS.SCREENER.detail_button(row["ts_code"]) if row.get("ts_code") else None
                         ),
+                        on_row_research=None if interaction_disabled else on_row_research,
                         col_widths_key=_VT_COL_WIDTHS_KEY,
                         on_load_col_widths=on_load_col_widths,
                         on_persist_col_widths=on_persist_col_widths,
@@ -2371,6 +2533,7 @@ def _build_stock_detail_dialog(
     sentiment_state: typing.Any = None,
     sentiment_on_select_day: typing.Callable[..., None] | None = None,
     sentiment_on_cancel: typing.Callable[[], None] | None = None,
+    on_start_research: typing.Callable[[dict], None] | None = None,
 ) -> ft.Control | None:
     """按需构建股票详情对话框."""
     if detail_dialog_data is None:
@@ -2382,6 +2545,7 @@ def _build_stock_detail_dialog(
         open_state=True,
         on_close=on_close,
         on_add_to_watchlist=on_add_to_watchlist,
+        on_start_research=on_start_research,
         column_label_fn=column_label_fn,
         news_state=news_state,
         news_on_generate=news_on_generate,
@@ -2398,6 +2562,7 @@ def ScreenerView(
     initial_strategy: str | None = None,
     active: bool = True,
     stock_filter_request: tuple[str, int] | None = None,
+    on_start_research: typing.Callable[..., None] | None = None,
 ) -> ft.Container:
     """选股视图 (声明式)."""
     state, vm = use_viewmodel(factory=lambda: ScreenerViewModel())
@@ -2414,6 +2579,22 @@ def ScreenerView(
     # 不保存译文, 常驻页切语言后自动重译 (None 表示无错误).
     prompt_error: Message | None = None
     prompt_error, set_prompt_error = ft.use_state(prompt_error)
+    # R2-I11: 策略 Prompt 恢复默认的待确认目标 (空串=无待确认)。恢复默认会清除该策略的
+    # 持久覆盖并替换当前草稿，属破坏性操作，须先确认；取消/对话关闭不写持久配置。
+    restore_prompt_target, set_restore_prompt_target = ft.use_state("")
+    # 防确认按钮重复触发导致重复写配置与重复 toast (同一帧内多次点击)。
+    restore_prompt_inflight_ref = ft.use_ref(lambda: False)
+    # R2-I12: 筛选方案入口的纯本地交互态（方案名输入 / 选中方案 / 保存中）。
+    # 方案名列表属业务状态（state.preset_names），此处不复制。
+    preset_name_input, set_preset_name_input = ft.use_state("")
+    preset_selected, set_preset_selected = ft.use_state("")
+    preset_busy, set_preset_busy = ft.use_state(False)
+    # 待确认目标：(strategy_key, preset_name)；None 表示无待确认。重名覆盖/删除均须确认。
+    preset_overwrite_target, set_preset_overwrite_target = ft.use_state(None)
+    preset_overwrite_summary, set_preset_overwrite_summary = ft.use_state("")
+    preset_delete_target, set_preset_delete_target = ft.use_state(None)
+    # 防重复提交（保存/载入/删除共用）：同一时刻只允许一个方案操作在途。
+    preset_inflight_ref = ft.use_ref(lambda: False)
     desc_timer_ref = ft.use_ref(lambda: None)
     table_memo_ref = ft.use_ref(lambda: typing.cast(tuple | None, None))
     file_picker = ft.use_ref(lambda: ft.FilePicker()).current
@@ -2466,6 +2647,34 @@ def ScreenerView(
         await _execute_pending_strategy_run(vm, key)
 
     ft.use_effect(_execute_pending_strategy, dependencies=[state.strategies_loaded, pending_strategy, active])
+
+    # R2-I11: 切换策略即取消挂起的恢复确认 —— 既避免对旧策略写入持久配置，
+    # 也避免把旧策略默认值回填进新策略草稿。
+    ft.use_effect(
+        lambda: set_restore_prompt_target("") if restore_prompt_target != (state.selected_strategy or "") else None,
+        dependencies=[state.selected_strategy],
+    )
+
+    async def _reset_and_load_presets() -> None:
+        """R2-I12: 策略切换/加载完成后清空方案交互态并刷新方案列表.
+
+        切换策略时丢弃旧策略的选中方案与待确认目标（旧策略方案不得写入新策略草稿）。
+        """
+        set_preset_selected("")
+        set_preset_overwrite_target(None)
+        set_preset_overwrite_summary("")
+        set_preset_delete_target(None)
+        if not active or not state.selected_strategy or not state.strategies_loaded:
+            return
+        try:
+            await vm.refresh_presets(state.selected_strategy)
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            # 方案列表读取失败不阻断参数区：保留空列表，用户仍可编辑参数/运行选股。
+            logger.warning("[ScreenerView] Refresh presets failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
+
+    ft.use_effect(_reset_and_load_presets, dependencies=[state.selected_strategy, state.strategies_loaded, active])
 
     ft.use_effect(
         lambda: (
@@ -2601,6 +2810,64 @@ def ScreenerView(
             name = typing.cast(str | None, src.get("name") if isinstance(src, dict) else None)
             sent_vm.select_stock(ts_code, name)
 
+    def _make_research_request(
+        raw: dict,
+        *,
+        object_kind: str,
+        extra_summary: tuple[tuple[str, str], ...] = (),
+    ) -> BusinessResearchRequest | None:
+        """把当前展示的候选/个股行冻结为准确对象（缺失 ts_code 时不可发起）。"""
+        ts_code = raw.get("ts_code")
+        if not isinstance(ts_code, str) or not ts_code:
+            return None
+        name = raw.get("name")
+        display = f"{name} ({ts_code})" if isinstance(name, str) and name else ts_code
+        summary: list[tuple[str, str]] = [("ts_code", ts_code)]
+        if isinstance(name, str) and name:
+            summary.append(("name", name))
+        for key in ("score", "ai_score", "trade_date"):
+            value = raw.get(key)
+            if value is not None and str(value) != "":
+                summary.append((key, str(value)))
+        summary.extend(extra_summary)
+        # 可得时点取「用户看到该行」的抓取时刻（保守：不声称更早可得，R24）
+        captured_at = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        return BusinessResearchRequest(
+            source_module="screener",
+            object_kind=object_kind,
+            object_id=ts_code,
+            display_name=display,
+            summary=tuple(summary),
+            available_at=captured_at,
+        )
+
+    def _on_row_research(row_data: dict) -> None:
+        """候选列表行 → 准备研究草稿（只准备不发送；不重跑选股）。"""
+        if on_start_research is None:
+            return
+        raw = row_data.get("_raw") if isinstance(row_data, dict) else None
+        source = raw if isinstance(raw, dict) else row_data
+        extra: list[tuple[str, str]] = []
+        if state.selected_strategy:
+            extra.append(("strategy", str(state.selected_strategy)))
+        if state.mode:
+            extra.append(("screener_mode", str(state.mode)))
+        request = _make_research_request(
+            source,
+            object_kind=OBJECT_KIND_CANDIDATE,
+            extra_summary=tuple(extra),
+        )
+        if request is not None:
+            on_start_research(request)
+
+    def _on_detail_research(stock_data: dict) -> None:
+        """股票详情 → 准备研究草稿（详情现场保持打开，不自动发送）。"""
+        if on_start_research is None:
+            return
+        request = _make_research_request(stock_data, object_kind=OBJECT_KIND_STOCK)
+        if request is not None:
+            on_start_research(request)
+
     async def _do_add_to_watchlist(ts_code: str, stock_name: str) -> None:
         await _execute_add_to_watchlist(wl_vm, _get_page(), ts_code, stock_name)
 
@@ -2622,13 +2889,215 @@ def ScreenerView(
     async def _do_save_prompt_async(strat: str) -> None:
         await _execute_save_prompt(vm, _get_page(), strat, set_prompt_error)
 
-    def _on_restore_prompt(strat: str) -> None:
+    async def _do_restore_default_guarded(strat: str) -> None:
+        """R2-I11: 恢复默认的实际执行 (确认后触发), 结束时释放防重入标记。"""
+        try:
+            await _do_restore_default_async(strat)
+        finally:
+            restore_prompt_inflight_ref.current = False
+
+    def _do_confirm_restore_prompt() -> None:
+        """R2-I11: 确认后才清除该策略的持久覆盖并回填默认草稿。"""
+        target = restore_prompt_target
+        set_restore_prompt_target("")
+        # 目标策略已被切换或对话已关闭时不再写持久配置 (旧策略默认值不得灌入新策略草稿)。
+        if not target or target != (state.selected_strategy or "") or restore_prompt_inflight_ref.current:
+            return
+        restore_prompt_inflight_ref.current = True
         if page := _get_page():
-            page.run_task(_do_restore_default_async, strat)
+            page.run_task(_do_restore_default_guarded, target)
+        else:
+            restore_prompt_inflight_ref.current = False
+
+    def _do_cancel_restore_prompt() -> None:
+        """R2-I11: 取消恢复 → 仅关闭对话框, 已保存覆盖与当前草稿保持不变。"""
+        set_restore_prompt_target("")
+
+    def _on_restore_prompt(strat: str) -> None:
+        # R2-I11: 先展示将清除的覆盖项与影响, 用户确认后才执行恢复。
+        if strat:
+            set_restore_prompt_target(strat)
 
     def _on_save_prompt(strat: str) -> None:
         if page := _get_page():
             page.run_task(_do_save_prompt_async, strat)
+
+    # --- R2-I12: 筛选方案列出/保存/载入/删除（只改参数草稿，不启动选股/回测） ---
+
+    def _release_preset_busy() -> None:
+        preset_inflight_ref.current = False
+        set_preset_busy(False)
+
+    async def _do_save_preset_now(strategy: str, name: str, params: dict[str, typing.Any]) -> None:
+        """实际写盘 (新方案或用户已确认覆盖), 成功后刷新方案列表.
+
+        ``params`` 为点击保存时的草稿快照：等待期间切换策略也不会把新策略参数
+        写到旧策略的方案下。
+        """
+        try:
+            await vm.save_preset(name, strategy, params)
+            if vm.state.selected_strategy == strategy:
+                await vm.refresh_presets(strategy)
+                set_preset_selected(name)
+            if page := _get_page():
+                _show_toast(page, I18n.get("screener_preset_saved"), "success")
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            logger.error("[ScreenerView] Save preset failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
+            if page := _get_page():
+                _show_toast(page, I18n.get("sys_snack_save_err"), "error")
+
+    async def _do_prepare_preset_save(strategy: str, name: str, params: dict[str, typing.Any]) -> None:
+        """保存入口: 先校验名称并判断是否重名；重名只打开确认对话框，不静默覆盖。"""
+        try:
+            plan = await vm.prepare_preset_save(name, strategy)
+            if plan.error_key is not None:
+                if page := _get_page():
+                    _show_toast(page, I18n.get(plan.error_key, max=PRESET_NAME_MAX_LENGTH), "error")
+                return
+            # 准备期间已切换策略 → 不再为新策略弹确认或写盘。
+            if vm.state.selected_strategy != strategy:
+                return
+            if plan.exists:
+                set_preset_overwrite_target((strategy, name))
+                set_preset_overwrite_summary(_format_preset_params(plan.existing_params))
+                return
+            await _do_save_preset_now(strategy, name, params)
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            logger.error(
+                "[ScreenerView] Prepare preset save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
+            )
+            if page := _get_page():
+                _show_toast(page, I18n.get("sys_snack_save_err"), "error")
+        finally:
+            _release_preset_busy()
+
+    async def _do_confirm_overwrite_save(strategy: str, name: str, params: dict[str, typing.Any]) -> None:
+        """用户确认覆盖后写盘。"""
+        try:
+            await _do_save_preset_now(strategy, name, params)
+        finally:
+            _release_preset_busy()
+
+    async def _do_load_preset(strategy: str, name: str) -> None:
+        """载入方案到参数草稿 (不启动选股/回测)。"""
+        try:
+            loaded = await vm.apply_preset(name, strategy)
+            page = _get_page()
+            if not loaded:
+                if page is not None:
+                    _show_toast(page, I18n.get("screener_preset_missing"), "warning")
+                if vm.state.selected_strategy == strategy:
+                    await vm.refresh_presets(strategy)
+                    set_preset_selected("")
+                return
+            vm.update_strategy_desc(strategy, params=dict(vm.state.strategy_params))
+            if page is not None:
+                _show_toast(page, I18n.get("screener_preset_loaded", name=name), "info")
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            logger.error("[ScreenerView] Load preset failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
+            if page := _get_page():
+                _show_toast(page, I18n.get("sys_snack_save_err"), "error")
+        finally:
+            _release_preset_busy()
+
+    async def _do_delete_preset(strategy: str, name: str) -> None:
+        """确认后删除方案并刷新列表。"""
+        try:
+            deleted = await vm.delete_preset(name, strategy)
+            page = _get_page()
+            if vm.state.selected_strategy == strategy:
+                await vm.refresh_presets(strategy)
+                set_preset_selected("")
+            if page is not None:
+                if deleted:
+                    _show_toast(page, I18n.get("screener_preset_deleted"), "success")
+                else:
+                    _show_toast(page, I18n.get("screener_preset_missing"), "warning")
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            logger.error("[ScreenerView] Delete preset failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
+            if page := _get_page():
+                _show_toast(page, I18n.get("sys_snack_save_err"), "error")
+        finally:
+            _release_preset_busy()
+
+    def _dispatch_preset_task(task: typing.Callable[..., typing.Any], *args: typing.Any) -> None:
+        """方案异步命令统一入口: 防重复提交 + 无 page 时释放忙标记。"""
+        if preset_inflight_ref.current:
+            return
+        preset_inflight_ref.current = True
+        set_preset_busy(True)
+        if page := _get_page():
+            page.run_task(task, *args)
+        else:
+            _release_preset_busy()
+
+    def _on_preset_name_change(e: ft.ControlEvent) -> None:
+        set_preset_name_input(get_control_value(e.control, ft.TextField) or "")
+
+    def _on_preset_select(e: ft.ControlEvent) -> None:
+        set_preset_selected(get_control_value(e.control, ft.Dropdown) or "")
+
+    def _on_preset_save(_e: ft.ControlEvent) -> None:
+        strategy = state.selected_strategy
+        if not strategy:
+            return
+        UILogger.log_action("ScreenerView", "Click", "btn_preset_save")
+        _dispatch_preset_task(
+            _do_prepare_preset_save, strategy, preset_name_input.strip(), dict(vm.state.strategy_params)
+        )
+
+    def _on_preset_load(_e: ft.ControlEvent) -> None:
+        strategy = state.selected_strategy
+        if not strategy or not preset_selected:
+            return
+        UILogger.log_action("ScreenerView", "Click", "btn_preset_load")
+        _dispatch_preset_task(_do_load_preset, strategy, preset_selected)
+
+    def _on_preset_delete(_e: ft.ControlEvent) -> None:
+        strategy = state.selected_strategy
+        if not strategy or not preset_selected:
+            return
+        UILogger.log_action("ScreenerView", "Click", "btn_preset_delete")
+        set_preset_delete_target((strategy, preset_selected))
+
+    def _do_confirm_preset_overwrite() -> None:
+        target = typing.cast("tuple[str, str] | None", preset_overwrite_target)
+        set_preset_overwrite_target(None)
+        set_preset_overwrite_summary("")
+        if target is None:
+            return
+        strategy, name = target
+        # 确认前已切换策略 → 不把旧策略方案写进新策略上下文。
+        if vm.state.selected_strategy != strategy:
+            return
+        # 确认时草稿即该策略当前草稿（模态对话框阻塞其他编辑）。
+        _dispatch_preset_task(_do_confirm_overwrite_save, strategy, name, dict(vm.state.strategy_params))
+
+    def _do_cancel_preset_overwrite() -> None:
+        """取消覆盖 → 关闭对话框, 原有方案与当前草稿均不变。"""
+        set_preset_overwrite_target(None)
+        set_preset_overwrite_summary("")
+
+    def _do_confirm_preset_delete() -> None:
+        target = typing.cast("tuple[str, str] | None", preset_delete_target)
+        set_preset_delete_target(None)
+        if target is None:
+            return
+        strategy, name = target
+        if vm.state.selected_strategy != strategy:
+            return
+        _dispatch_preset_task(_do_delete_preset, strategy, name)
+
+    def _do_cancel_preset_delete() -> None:
+        set_preset_delete_target(None)
 
     status_text_value = _render_status_message(state.status_message)
     status_text_color = _resolve_status_color(state.status_color)
@@ -2680,6 +3149,11 @@ def ScreenerView(
         "on_update_param": _update_param,
         "on_save_prompt": _on_save_prompt,
         "on_restore_prompt": _on_restore_prompt,
+        "on_preset_name_change": _on_preset_name_change,
+        "on_preset_select": _on_preset_select,
+        "on_preset_save": _on_preset_save,
+        "on_preset_load": _on_preset_load,
+        "on_preset_delete": _on_preset_delete,
         "on_go_sync_click": lambda _: _handle_go_sync(_get_page()),
         "on_export_csv_click": _on_export_csv_click,
         "on_export_excel_click": _on_export_excel_click,
@@ -2700,7 +3174,14 @@ def ScreenerView(
     # MAJOR-07: 参数区从控制卡移入左侧可调宽度侧栏（复用 ResizableSplitter + 既有
     # ConfigHandler 持久化通道，键 ui_splitter_screener_params）。
     params_sidebar = _build_screener_params_sidebar(
-        state, vm, handlers=handlers, prompt_error=prompt_error, param_errors=param_errors
+        state,
+        vm,
+        handlers=handlers,
+        prompt_error=prompt_error,
+        param_errors=param_errors,
+        preset_name_value=preset_name_input,
+        preset_selected=preset_selected,
+        preset_busy=preset_busy,
     )
 
     table_card = _build_screener_table_card(
@@ -2719,6 +3200,7 @@ def ScreenerView(
         is_realtime=is_realtime,
         # ADD-UI-002: HISTORY 加载中仅锁定表格/分页交互, 仍展示上一次完整结果 (身份不预提交)。
         interaction_disabled=state.mode == "HISTORY" and state.loading,
+        on_row_research=_on_row_research if on_start_research is not None else None,
     )
 
     log_card = _build_screener_log_card(
@@ -2763,6 +3245,7 @@ def ScreenerView(
         sentiment_state=sent_state,
         sentiment_on_select_day=sent_vm.select_day,
         sentiment_on_cancel=sent_vm.cancel,
+        on_start_research=_on_detail_research if on_start_research is not None else None,
     )
 
     # SEC-01 gap3: 运行时 AI 外发确认对话框。pending_egress_ack_preview 非空时渲染，
@@ -2798,6 +3281,71 @@ def ScreenerView(
         else None
     )
 
+    # R2-I11: 恢复策略默认 Prompt 的破坏性确认 —— 先说明将清除该策略已保存的覆盖并替换
+    # 当前草稿，用户确认后才写持久配置；取消/Esc 关闭不改变任何配置与草稿。
+    restore_prompt_open = bool(restore_prompt_target) and restore_prompt_target == state.selected_strategy
+    restore_prompt_strategy_name = next(
+        (I18n.get(row.name_key) for row in state.strategies_with_dep if row.key == restore_prompt_target),
+        restore_prompt_target,
+    )
+    restore_prompt_dialog = (
+        ConfirmDialog(
+            open_state=restore_prompt_open,
+            title=I18n.get("ai_restore_default_confirm_title"),
+            body=I18n.get("ai_restore_default_confirm_body").format(strategy=restore_prompt_strategy_name),
+            on_confirm=_do_confirm_restore_prompt,
+            on_cancel=_do_cancel_restore_prompt,
+            confirm_text=I18n.get("common_confirm"),
+            cancel_text=I18n.get("common_cancel"),
+            # 清除用户自定义覆盖并丢弃未保存草稿 → 危险色 (同 P1-4 重置确认)。
+            destructive=True,
+        )
+        if restore_prompt_open
+        else None
+    )
+
+    # R2-I12: 重名保存确认 —— 先展示同名方案的原有参数与替换影响, 确认后才覆盖；
+    # 取消/Esc 关闭不写配置、不改当前草稿。
+    overwrite_target = typing.cast("tuple[str, str] | None", preset_overwrite_target)
+    preset_overwrite_open = overwrite_target is not None and overwrite_target[0] == state.selected_strategy
+    preset_overwrite_dialog = (
+        ConfirmDialog(
+            open_state=True,
+            title=I18n.get("screener_preset_overwrite_title"),
+            body=I18n.get(
+                "screener_preset_overwrite_body",
+                name=overwrite_target[1] if overwrite_target else "",
+                params=preset_overwrite_summary or I18n.get("screener_preset_overwrite_no_params"),
+            ),
+            on_confirm=_do_confirm_preset_overwrite,
+            on_cancel=_do_cancel_preset_overwrite,
+            confirm_text=I18n.get("common_confirm"),
+            cancel_text=I18n.get("common_cancel"),
+            # 覆盖写盘不可撤销 → 危险色。
+            destructive=True,
+        )
+        if preset_overwrite_open
+        else None
+    )
+
+    # R2-I12: 删除方案确认 —— 删除不可撤销, 须二次确认。
+    delete_target = typing.cast("tuple[str, str] | None", preset_delete_target)
+    preset_delete_open = delete_target is not None and delete_target[0] == state.selected_strategy
+    preset_delete_dialog = (
+        ConfirmDialog(
+            open_state=True,
+            title=I18n.get("screener_preset_delete_title"),
+            body=I18n.get("screener_preset_delete_body", name=delete_target[1] if delete_target else ""),
+            on_confirm=_do_confirm_preset_delete,
+            on_cancel=_do_cancel_preset_delete,
+            confirm_text=I18n.get("common_confirm"),
+            cancel_text=I18n.get("common_cancel"),
+            destructive=True,
+        )
+        if preset_delete_open
+        else None
+    )
+
     return ft.Container(
         content=ft.Column(
             [
@@ -2807,6 +3355,9 @@ def ScreenerView(
                 *([dialog_control] if dialog_control is not None else []),
                 *([egress_ack_dialog] if egress_ack_dialog is not None else []),
                 *([unpriced_ack_dialog] if unpriced_ack_dialog is not None else []),
+                *([restore_prompt_dialog] if restore_prompt_dialog is not None else []),
+                *([preset_overwrite_dialog] if preset_overwrite_dialog is not None else []),
+                *([preset_delete_dialog] if preset_delete_dialog is not None else []),
             ],
             expand=True,
             spacing=15,

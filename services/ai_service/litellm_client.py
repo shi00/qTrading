@@ -23,19 +23,37 @@ import json
 import logging
 import os
 import sys
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
+from inspect import isawaitable
+from typing import TYPE_CHECKING, Any, Final
+from urllib.parse import urlparse
 
 import httpx
 
-from core.errors import AIConfigError, AIContentRefusedError, AIPolicyNotAcknowledgedError
+from core.errors import (
+    AIConfigError,
+    AIContentRefusedError,
+    AIPolicyNotAcknowledgedError,
+    AIProviderParamsRejectedError,
+)
 from core.i18n import Message
 from core.model_management_types import (
     AdapterResponse,
+    AssistantToolCall,
     AttemptContext,
+    ChatMessage,
+    ChatStreamEvent,
+    ChatStreamEventHandler,
+    ChatTurnRequest,
+    ChatTurnResponse,
+    FinishReason,
     InferenceRequest,
+    ModelTurnProtocolError,
     NormalizedLLMUsage,
     ResolvedConnection,
+    TextContentPart,
+    validate_closed_tool_arguments,
 )
 from services.ai_service.pricing import estimate_cost
 from services.ai_service.token_budget import _estimate_tokens, _get_model_context_window
@@ -73,6 +91,10 @@ DEFAULT_VERIFY_TIMEOUT = 10.0
 DEFAULT_LOCAL_MAX_TOKENS = 256
 # 错误消息截断长度
 ERROR_MESSAGE_TRUNCATE_LEN = 100
+# M17：真流收尾关流的最短宽限（秒）。deadline 已耗尽时若按剩余预算（≤0）关流，
+# 关闭动作会被立即取消（真实流漏关）；无界宽限则收尾可无限挂起。该宽限只作用于
+# 关流阶段，不延长任何读取 / 背压 / on_event 预算。
+_STREAM_CLOSE_GRACE_S: Final[float] = 1.0
 
 # R16: LiteLLM 是重库（首次 import 可达 18s+），改为惰性加载，避免 import ai_service
 # 时同步阻塞 UI 主循环。模块级符号 (litellm/acompletion/LITELLM_AVAILABLE) 保留以兼容
@@ -148,6 +170,39 @@ async def _audit_egress_outcome(
         raise  # R2: 必须传播
     except Exception:
         pass  # 审计失败不阻断 AI 主流程
+
+
+async def _close_chat_stream(stream: Any, deadline: float) -> None:
+    """关闭真实流并做有界收尾（M17）：预算耗尽 / 取消 / 异常路径均不得漏关。
+
+    - 优先异步 ``aclose``（LiteLLM ``CustomStreamWrapper`` 实现且幂等），回落同步
+      ``close``；没有关闭接口时直接返回；
+    - 关闭等待受同一绝对预算的剩余量约束，预算已耗尽时取 ``_STREAM_CLOSE_GRACE_S``
+      最短宽限——零宽限会漏关，无界宽限会挂死收尾；
+    - 关闭失败只降级为 warning（R9 脱敏），不改变主流程结果；
+    - ``asyncio.CancelledError`` 始终传播（R2）。
+    """
+    if stream is None:
+        return
+
+    import services.ai_service as _ai
+
+    close_budget = max(deadline - asyncio.get_running_loop().time(), _STREAM_CLOSE_GRACE_S)
+    try:
+        closer = getattr(stream, "aclose", None) or getattr(stream, "close", None)
+        if not callable(closer):
+            return
+        outcome = closer()
+        if isawaitable(outcome):
+            await asyncio.wait_for(outcome, timeout=close_budget)
+    except asyncio.CancelledError:
+        raise  # R2: 必须传播
+    except Exception as close_err:
+        logger.warning(
+            "[AIService] ChatTurn | Failed to close provider stream within %.2fs: %s",
+            close_budget,
+            _ai.DataSanitizer.sanitize_error(close_err),
+        )
 
 
 def normalize_litellm_usage(usage: Any) -> NormalizedLLMUsage | None:
@@ -294,6 +349,196 @@ def _ensure_litellm_loaded() -> bool:
             _ai.DataSanitizer.sanitize_error(exc),
         )
         return False
+
+
+# === Agent 出口严格出站（检视 M20：禁删参 / 禁隐式重发）===
+# 锁定 LiteLLM 的 OpenAI 系处理器（llms/openai/openai.py 的 acompletion / streaming）
+# 在收到 HTTP 422 时，只要 ``litellm.drop_params is True``（本模块加载时置 True，
+# 旧链依赖该全局兜底）就会删去报错参数并在**同一 attempt 内**再发一次（``range(2)``）；
+# per-call ``drop_params=False`` 无法覆盖（条件是「全局 OR 调用」），``num_retries=0``
+# 也不作用于该分支。Agent 出口要求该策略可核（不临时切全局造成与旧链竞态），故对
+# 端点/凭据显式可镜像的 OpenAI 系连接按调用注入独立 OpenAI SDK client，并在首个
+# 422 响应处直接中止：参数原样（不删参）、出站一次（不隐重发）。
+_STRICT_422_PREFIXES: Final[frozenset[str]] = frozenset({"openai", "deepseek"})
+_LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+class _StrictParamRefusal(Exception):
+    """内部哨兵：出站首个 422 被严格策略中止（不进入 SDK 删参重发分支）。"""
+
+
+class _StrictNoDropResendGuard:
+    """单次尝试的 422 严格守卫（M20）：记录首个 422 并中止该次 httpx 请求。
+
+    httpx response 钩子抛出的异常会被 OpenAI SDK 归为连接错误（不携带状态码），
+    故由 :func:`_strict_params_policy_error` 依据 ``rejected_status`` 重新给出
+    策略异常，保证错误语义与 attempt 身份可核。
+    """
+
+    __slots__ = ("rejected_status",)
+
+    def __init__(self) -> None:
+        self.rejected_status: int | None = None
+
+    async def on_response(self, response: httpx.Response) -> None:
+        # httpx.AsyncClient 会 await 响应钩子，故必须是协程；在 SDK 解析 422 前抛错，
+        # 使 LiteLLM 的删参重发分支（except openai.UnprocessableEntityError）不可达。
+        if response.status_code == 422 and self.rejected_status is None:
+            self.rejected_status = response.status_code
+            raise _StrictParamRefusal("HTTP 422 refused before LiteLLM drop_params resend")
+
+
+def _build_strict_guard_client(
+    *,
+    provider: str,
+    litellm_model: str,
+    api_base: str | None,
+    api_key: str | None,
+    api_version: str | None,
+    timeout: httpx.Timeout,
+    guard: _StrictNoDropResendGuard,
+) -> Any | None:
+    """按连接构造带 422 拒绝钩子的 per-call OpenAI SDK client（Agent 出口专用）。
+
+    返回 ``None`` 时保持既有调用形态（不注入 client）：
+    - 原生 SDK 实现（anthropic / gemini / mistral）无 422 删参分支，422 直接上抛；
+    - 端点或凭据未显式给出（依赖 LiteLLM 自身默认值/环境变量解析）时无法等价镜像，
+      注入会改变既有端点解析行为，故不注入（不伪装已覆盖该形态）。
+    """
+    prefix = litellm_model.split("/", 1)[0]
+    if provider != "azure" and prefix not in _STRICT_422_PREFIXES:
+        return None
+    if not (api_base and api_key):
+        return None
+    # 端点/代理语义与既有链路一致：本机端点强制直连，其余按 NO_PROXY 白名单决策
+    # （httpx client 在此显式构造，不能依赖 litellm_env_context 写入后的 env 默认值）。
+    from utils.proxy_manager import ProxyManager
+
+    host = (urlparse(api_base).hostname or "").lower()
+    proxy_kwargs = {"trust_env": False} if host in _LOOPBACK_HOSTS else ProxyManager.get_httpx_proxy_kwargs(host)
+    http_client = httpx.AsyncClient(event_hooks={"response": [guard.on_response]}, timeout=timeout, **proxy_kwargs)
+    if provider == "azure":
+        from openai import AsyncAzureOpenAI
+
+        return AsyncAzureOpenAI(
+            azure_endpoint=api_base,
+            api_version=api_version,
+            api_key=api_key,
+            timeout=timeout,
+            max_retries=0,  # 与 per-call num_retries=0 同义：无 SDK 隐藏重试
+            http_client=http_client,
+        )
+    from openai import AsyncOpenAI
+
+    return AsyncOpenAI(
+        base_url=api_base,
+        api_key=api_key,
+        timeout=timeout,
+        max_retries=0,
+        http_client=http_client,
+    )
+
+
+@asynccontextmanager
+async def _strict_egress_dispatch(
+    request_params: dict,
+    *,
+    provider: str,
+    litellm_model: str,
+    api_version: str | None,
+) -> AsyncIterator[_StrictNoDropResendGuard]:
+    """在一次尝试内注入严格守卫 client，并在尝试结束时关闭其连接。
+
+    注入的 ``client`` 键覆盖 LiteLLM 的默认客户端，端点/凭据与本次连接声明一致；
+    代理按目标 host 显式决策（不依赖 ``ProxyManager.litellm_env_context()`` 写入的
+    env 默认值，避免本机端点被环境代理劫持）。
+    """
+    guard = _StrictNoDropResendGuard()
+    client = _build_strict_guard_client(
+        provider=provider,
+        litellm_model=litellm_model,
+        api_base=request_params.get("api_base"),
+        api_key=request_params.get("api_key"),
+        api_version=api_version,
+        timeout=request_params["timeout"],
+        guard=guard,
+    )
+    if client is not None:
+        request_params["client"] = client
+    try:
+        yield guard
+    finally:
+        if client is not None:
+            await client.close()
+
+
+def _strict_params_policy_error(
+    guard: _StrictNoDropResendGuard | None,
+    attempt_context: AttemptContext,
+) -> AIProviderParamsRejectedError | None:
+    """首个 422 被严格中止时给出带 attempt 身份的策略异常（否则 ``None``）。
+
+    消息只含状态码与 attempt / invocation 身份（R9：不含凭据与请求正文）。
+    """
+    if guard is None or guard.rejected_status is None:
+        return None
+    return AIProviderParamsRejectedError(
+        detail=(
+            f"Provider rejected request parameters with HTTP {guard.rejected_status}; "
+            "strict Agent egress stopped before LiteLLM drop_params resend "
+            f"(attempt_id={getattr(attempt_context, 'attempt_id', None)}, "
+            f"invocation_id={getattr(attempt_context, 'invocation_id', None)})"
+        )
+    )
+
+
+# === Agent 出口单候选钉定（检视 M17：禁跨部署 fallback / 禁部署级 auto_router）===
+# ``litellm.acompletion`` 在请求未显式传 fallbacks 时读取模块级全局
+# ``litellm.model_fallbacks``（litellm.main：``fallbacks = fallbacks or litellm.model_fallbacks``），
+# 非空即会在失败时静默改发别的部署/模型：本次连接的固定候选、授权目标与审计
+# destination 全部失效，且 Router 式 fallback 可能以非流式重发截断已产出的流式
+# 内容。部署级 ``auto_router/...`` 模型同理（部署内部再路由）。Agent 出口要求每
+# 请求候选可核，故两者命中即零出站拒绝；不改全局配置（避免与旧链竞态），旧链
+# （``_router_failover`` 的部署级 fallback）行为保持不变。
+_AUTO_ROUTER_MODEL_PREFIX: Final[str] = "auto_router/"
+
+
+def _effective_cross_deployment_fallbacks() -> list[Any]:
+    """当前生效的 LiteLLM 全局跨部署 fallback 列表（生产为真实 litellm 模块）。
+
+    litellm 声明该全局为 ``Optional[list]``；测试替身（MagicMock/SimpleNamespace）
+    等其它形态不构成「已配置的 fallback 列表」，按未配置处理（不伪装已核验）。
+    """
+    import services.ai_service as _ai
+
+    raw = getattr(_ai.litellm, "model_fallbacks", None)
+    if isinstance(raw, (list, tuple)):
+        return [item for item in raw if item]
+    return []
+
+
+def _assert_fixed_candidate_egress(litellm_model: str, bare_model: str, attempt_context: AttemptContext) -> None:
+    """Agent 出口单候选钉定（M17）：跨部署 fallback / 部署级 auto_router 零出站拒绝。
+
+    判据（任一命中即拒绝，均在凭据解析与网络之前）：
+    - 全局跨部署 fallback 非空——失败时 LiteLLM 会静默改发其它部署，候选不可核、
+      连接/目标与本次授权不一致，且可能非流式重发截断流式输出；
+    - 模型为部署级 auto_router（``auto_router/...``）——部署内部自行再路由，同样
+      绕过本次固定候选。
+
+    消息只含 attempt 身份与模型名（R9：不含凭据、不含请求正文）。
+    """
+    if _effective_cross_deployment_fallbacks():
+        raise ValueError(
+            "Agent egress forbids cross-deployment fallbacks: litellm.model_fallbacks is configured, "
+            f"candidate is not fixed (attempt_id={attempt_context.attempt_id}, model={litellm_model}); "
+            "refusing outbound dispatch"
+        )
+    if bare_model.startswith(_AUTO_ROUTER_MODEL_PREFIX) or litellm_model.startswith(_AUTO_ROUTER_MODEL_PREFIX):
+        raise ValueError(
+            "Agent egress forbids deployment-level auto_router models "
+            f"(attempt_id={attempt_context.attempt_id}, model={litellm_model}); refusing outbound dispatch"
+        )
 
 
 def _check_reasoning_support(model: str) -> bool:
@@ -850,7 +1095,11 @@ class LiteLLMClient:
         """统一单连接云端推理（S2，ADR-0014 §6.1/§6.2）：只执行当前目标。
 
         - 不读全局配置、不走 Router、不做候选切换/重试（``num_retries=0``）；
-          Tenacity 重试与冷却归 S3 ScenarioExecutor；
+          Tenacity 重试与冷却归 S3 ScenarioExecutor；provider 以 HTTP 422 拒绝参数时
+          严格出站直接失败（M20：禁删参 / 禁隐式重发，见 :func:`_strict_egress_dispatch`）；
+          M17：本次连接的 provider/model/api_base 即唯一候选——全局跨部署 fallback
+          （``litellm.model_fallbacks``）或部署级 ``auto_router/`` 命中即零出站拒绝
+          （见 :func:`_assert_fixed_candidate_egress`）；
         - model 前缀按 provider 的 ``litellm_prefix`` 拼接（azure 走
           ``azure/<deployment>``），api_base 取连接定义；
         - 凭据经 ``resolve_credential`` 三形态解析（keyring 读取为同步 IO，
@@ -872,8 +1121,11 @@ class LiteLLMClient:
             AIContentRefusedError: F27 云响应内容安全拒绝（``message.refusal`` /
                 ``finish_reason == "content_filter"``）提炼为策略终态——Executor
                 据此终止整个候选遍历，禁止重试与换候选绕过（覆盖边界见提取点注释）。
+            AIProviderParamsRejectedError: provider 以 HTTP 422 拒绝请求参数（M20：
+                严格出站中止，未删参、未重发；detail 含 attempt 身份）。
             ValueError: adapter_kind 非 litellm_chat / credential_ref 形态非法 /
-                版本化凭据 ref 与 credential_version 租约不同源（F06，零出站拒绝）。
+                版本化凭据 ref 与 credential_version 租约不同源（F06，零出站拒绝）/
+                跨部署 fallback 或部署级 auto_router 命中（M17，零出站拒绝）。
             TimeoutError: dispatch 前 deadline 已耗尽。
             RuntimeError: litellm 不可用 / keyring 读取失败。
         """
@@ -930,6 +1182,10 @@ class LiteLLMClient:
             litellm_model = f"{prefix}/{model}"
             api_version = None
 
+        # M17：单候选钉定（零 keyring 读、零网络的最早可核点）——全局跨部署 fallback
+        # 或部署级 auto_router 命中即拒绝，禁止「按部署顺手开」的隐式改发。
+        _assert_fixed_candidate_egress(litellm_model, model, attempt_context)
+
         # R16：keyring 为同步 IO，凭据解析 offload 线程池（None 亦走同路径，
         # 语义为「解析即得无凭据」而非跳过解析）。
         # F06：解析租约一致性——版本化凭据的 ref 必须由 credential_version 派生
@@ -966,6 +1222,7 @@ class LiteLLMClient:
             "messages": messages,
             "model": litellm_model,
             "num_retries": 0,  # §6.2：单连接无 SDK 隐藏重试，重试/冷却归 Executor
+            "drop_params": False,  # M20：声明禁静默丢参（真正阻断见 _strict_egress_dispatch）
             "timeout": httpx.Timeout(timeout_val, connect=CONNECT_TIMEOUT),
         }
         if api_version is not None:
@@ -1004,9 +1261,16 @@ class LiteLLMClient:
         # 记录范围覆盖 dispatch + 响应解释全段：任一环节失败都回写 failed，避免
         # 「已出站但无审计」或「失败被记成 sent」。异常解释与结果记录都在同一
         # try/except 内完成，保证每次尝试恰一条记录（无意图+结果双记）。
+        strict_guard: _StrictNoDropResendGuard | None = None
         try:
             with ProxyManager.litellm_env_context():
-                response = await _ai.acompletion(**request_params)
+                async with _strict_egress_dispatch(
+                    request_params,
+                    provider=provider,
+                    litellm_model=litellm_model,
+                    api_version=api_version,
+                ) as strict_guard:
+                    response = await _ai.acompletion(**request_params)
 
             # F27 内容安全拒绝提取（云响应 → 策略终态信号）：只读 content 会把 refusal /
             # content_filter 伪装成「无输出」，Executor 将按输出非法类切换候选绕过安全
@@ -1041,13 +1305,18 @@ class LiteLLMClient:
             await _audit_egress_outcome(status="cancelled", error_category="cancelled", **audit_kwargs)
             raise  # R2: 必须传播
         except Exception as exc:
+            # M20：首个 422 被严格中止 → 以携带 attempt 身份的策略异常失败
+            # （不重试同一连接、参数原样未删）。审计记账随策略异常分类码。
+            policy_exc = _strict_params_policy_error(strict_guard, attempt_context)
             # 内容拒绝经 AppError.to_error_info 直接给出 content_policy 分类码；
             # 其余按 llm 语境分类（timeout / network / auth_failed / server_error ...）。
             await _audit_egress_outcome(
                 status="failed",
-                error_category=classify_error(exc, context="llm").get("code"),
+                error_category=classify_error(policy_exc or exc, context="llm").get("code"),
                 **audit_kwargs,
             )
+            if policy_exc is not None:
+                raise policy_exc from exc
             raise
 
         await _audit_egress_outcome(status="sent", **audit_kwargs)
@@ -1057,6 +1326,399 @@ class LiteLLMClient:
             actual_model=getattr(response, "model", None),
             metadata={},
         )
+
+    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE, log_args=False)
+    async def invoke_chat_connection(
+        self,
+        request: ChatTurnRequest,
+        resolved_connection: ResolvedConnection,
+        deadline: float,
+        attempt_context: AttemptContext,
+        *,
+        stream: bool = True,
+        response_format: Mapping[str, Any] | None = None,
+        tool_choice: str | None = None,
+        on_event: ChatStreamEventHandler | None = None,
+    ) -> ChatTurnResponse:
+        """单连接完整聊天回合 SDK 出口（B-02-1，HANDOFF §6.1/§6.3/§6.4）。
+
+        与 :meth:`invoke_single_connection`（旧链单 prompt 出口）并列：接受完整
+        ``messages`` / ``tools`` / ``response_format`` / ``stream``，``num_retries=0``
+        且 per-call ``drop_params=False``；``response_format`` 必须是调用方已生成的
+        供应商完整形态——native 结构化输出的 ``json_schema`` 封装由 Executor 按
+        ``ChatTurnRequest.output_mode`` 生成（LiteLLM 锁定版对 dict 原样透传，不会
+        补封装，裸 schema 直传无效，M18）；SDK 全局 ``drop_params=True`` 下的 422 删参
+        重发由 :func:`_strict_egress_dispatch` 在首个 422 处中止（M20：出站一次、
+        参数不删、错误含 attempt 身份）；**不做路由和业务 final 校验**（候选
+        策略与结算归 Executor / Recorder）；M17：全局跨部署 fallback 或部署级
+        ``auto_router/`` 命中即零出站拒绝（本次连接即唯一候选，禁止静默换模型
+        重发导致流式内容截断）。
+
+        - 门控与预算复用旧链同源语义：SEC-01 知情确认（零出站）、惰性加载、
+          deadline 单调预算（dispatch 前与凭据解析后双查，F29）、model 前缀
+          （azure / LLM_PROVIDERS）、凭据租约一致性（F06，零出站零 keyring 读）；
+        - 出口映射（§6.3）：``instructions`` 前置为 system 消息，``ChatMessage``
+          保序映射，tool-only ``content=None``；图片分型在桥层无二进制解析
+          （连接 image_input 能力表未落地）→ 显式拒绝零出站；
+          # NOTE(lazy): image 出口按 binary_ref 直映射。 ceiling: 当前设计正本未定义
+          # binary_ref 落桥形态，能力按连接 revision 证据映射（unknown 不置 True）。
+          # upgrade: 连接能力表 + 资产二进制解析落地（E-02）时按已核能力接 data URL 出站。
+        - 真流（§6.4）：真实 delta 逐事件经 ``on_event`` 可等待回调产出（不把完整
+          文本切块充真流）；按 choice/tool index 与稳定 call_id 聚合，参数闭合且
+          校验通过才派发 ``tool_call_closed``；缺结束标记（断流）不得因迭代耗尽
+          而成功（``ModelTurnProtocolError``）；finish 与 usage 分步确认
+          （``stream_options={"include_usage": True}``，usage 缺失保 None 不倒灌）；
+        - 拒绝信号（``message.refusal`` / ``finish_reason=content_filter`` / 流式
+          ``delta.refusal``）映射 ``finish_reason="refused"`` + ``refusal`` 文本
+          （F27 同源语义，以类型契约承载，拒绝不换候选规避由 Executor 承载）；
+        - ``asyncio.CancelledError`` 始终传播（R2），不包装。
+
+        Raises:
+            AIPolicyNotAcknowledgedError: SEC-01 外发知情确认未通过（零出站）。
+            ModelTurnProtocolError: 入站消息/工具协议非法、闭合参数非法 JSON、
+                图片分型不可解析、finish 缺失 / 未知、拒绝缺 refusal 文本。
+            ValueError: adapter_kind 非 litellm_chat / credential 租约失配（F06）/
+                frozen_params 键非法或占用保留键 / 跨部署 fallback 或部署级
+                auto_router 命中（M17，零出站拒绝）。
+            TimeoutError: dispatch 前 deadline 已耗尽（含凭据解析后复查）；或流消费
+                期间同一绝对预算耗尽（读取 / on_event 背压 / 关流任一阶段）——真实
+                流已关闭，usage 不伪造、由上层按 unknown 结算（M17，R21）。
+            RuntimeError: litellm 不可用。
+        """
+        request.ensure_valid()
+        if resolved_connection.adapter_kind != "litellm_chat":
+            raise ValueError(
+                f"invoke_chat_connection requires adapter_kind='litellm_chat', got {resolved_connection.adapter_kind!r}"
+            )
+
+        # SEC-01（R06-D3）：与旧链出口同源门控，置于凭据解析 / litellm 加载 / 网络
+        # 之前（零 keyring 读、零 import、零出站的最早 fail-closed 点）。
+        if not is_egress_acknowledged():
+            logger.warning(
+                "[AIService] ChatTurn | Egress policy not acknowledged — refusing cloud chat turn "
+                "for model_call '%s' (no external requests initiated)",
+                request.model_call_id,
+            )
+            raise AIPolicyNotAcknowledgedError(
+                Message("ai_external_acknowledgment_prompt"),
+                detail="Unified chain cloud egress requires user acknowledgment (SEC-01); "
+                "no external request was initiated.",
+            )
+
+        import services.ai_service as _ai
+
+        if not _ai._ensure_litellm_loaded():
+            raise RuntimeError("LiteLLM not installed, cloud LLM features disabled")
+
+        loop = asyncio.get_running_loop()
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise TimeoutError("Deadline exhausted before chat turn dispatch.")
+
+        # model 前缀拼接（与 invoke_single_connection 同源口径）。
+        # NOTE(lazy): 门控与前缀/凭据准备段与 invoke_single_connection 双份。
+        # ceiling: 两出口各自内联 ~45 行同语义准备段。
+        # upgrade: B-02-3 抽共享执行段（HANDOFF §6.1）时统一为私有 _prepare_dispatch。
+        model = resolved_connection.model
+        provider = resolved_connection.provider
+        if provider == "azure":
+            litellm_model = f"azure/{model}"
+            from utils.llm_providers import AZURE_DEFAULT_API_VERSION
+
+            api_version = resolved_connection.adapter_options.get("api_version", AZURE_DEFAULT_API_VERSION)
+        else:
+            from utils.llm_providers import LLM_PROVIDERS
+
+            prefix = LLM_PROVIDERS.get(provider, {}).get("litellm_prefix", "openai")
+            litellm_model = f"{prefix}/{model}"
+            api_version = None
+
+        # M17：单候选钉定——同 invoke_single_connection（全局跨部署 fallback /
+        # 部署级 auto_router 即零出站拒绝；聊天回合不得静默换模型重发）。
+        _assert_fixed_candidate_egress(litellm_model, model, attempt_context)
+
+        # F06：解析租约一致性（语义与 invoke_single_connection 同源）——版本化凭据的
+        # ref 必须由 credential_version 派生，否则 fail-closed 拒绝出站。
+        if resolved_connection.credential_version is not None:
+            expected_ref = f"keyring:model-connection-{resolved_connection.credential_version}"
+            if resolved_connection.credential_ref != expected_ref:
+                raise ValueError(
+                    "Credential ref does not match versioned lease "
+                    f"(version={resolved_connection.credential_version}), refusing outbound dispatch"
+                )
+        api_key = await ThreadPoolManager().run_async(
+            TaskType.IO, resolve_credential, resolved_connection.credential_ref
+        )
+
+        # F29：凭据解析耗时不受 deadline 预算约束——出站前重核剩余预算。
+        adapter_timeout = float(
+            resolved_connection.adapter_options.get("timeout", DEFAULT_CLOUD_TIMEOUT) or DEFAULT_CLOUD_TIMEOUT
+        )
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise TimeoutError("Deadline exhausted after credential resolution, refusing outbound dispatch.")
+        timeout_val = min(adapter_timeout, remaining)
+
+        # 出口映射（§6.3）：instructions 前置 system，messages 保序。
+        litellm_messages: list[dict] = [
+            {"role": "system", "content": instruction} for instruction in request.instructions
+        ]
+        for index, message in enumerate(request.messages):
+            litellm_messages.append(_chat_message_to_litellm(message, f"$.messages[{index}]"))
+
+        request_params: dict = {
+            "messages": litellm_messages,
+            "model": litellm_model,
+            "num_retries": 0,  # §6.1：单连接无 SDK 隐藏重试
+            "drop_params": False,  # M20：声明禁静默丢参（真正阻断见 _strict_egress_dispatch）
+            "timeout": httpx.Timeout(timeout_val, connect=CONNECT_TIMEOUT),
+        }
+        if api_version is not None:
+            request_params["api_version"] = api_version
+        if resolved_connection.api_base:
+            request_params["api_base"] = resolved_connection.api_base
+        if api_key is not None:
+            request_params["api_key"] = api_key
+        chat_tools = _chat_tools_to_litellm((*request.tools, *request.output_tools))
+        if chat_tools:
+            request_params["tools"] = chat_tools
+        for key, value in request.frozen_params.items():
+            if not isinstance(key, str) or not key:
+                raise ValueError(f"ChatTurnRequest.frozen_params contains invalid key: {key!r}")
+            if key in _CHAT_RESERVED_PARAM_KEYS:
+                raise ValueError(f"ChatTurnRequest.frozen_params key collides with dispatch parameter: {key!r}")
+            request_params[key] = value
+        if request.max_output_tokens is not None:
+            request_params["max_tokens"] = int(request.max_output_tokens)
+        if response_format is not None:
+            request_params["response_format"] = dict(response_format)
+        if tool_choice is not None:
+            request_params["tool_choice"] = tool_choice
+        if stream:
+            request_params["stream"] = True
+            request_params["stream_options"] = {"include_usage": True}
+
+        # SEC-03：与旧链出口同源 EgressAudit（一次尝试一条最终结果记录）。
+        # 聊天回合不属于四类旧场景，category 用 "agent_chat"；不记录消息正文
+        # （防二次泄露），payload 体积按文本内容估算。
+        audit_kwargs: dict = {
+            "destination": f"llm:{litellm_model}",
+            "category": "agent_chat",
+            "item_count": len(litellm_messages),
+            "payload_size_bytes": _chat_payload_size_bytes(litellm_messages),
+            "destination_host": destination_host_from_url(resolved_connection.api_base),
+        }
+
+        from utils.proxy_manager import ProxyManager
+
+        strict_guard: _StrictNoDropResendGuard | None = None
+        try:
+            with ProxyManager.litellm_env_context():
+                async with _strict_egress_dispatch(
+                    request_params,
+                    provider=provider,
+                    litellm_model=litellm_model,
+                    api_version=api_version,
+                ) as strict_guard:
+                    if stream:
+                        chat_response = await self._consume_chat_stream(request_params, on_event, deadline)
+                    else:
+                        chat_response = _interpret_chat_response(await _ai.acompletion(**request_params))
+        except asyncio.CancelledError:
+            await _audit_egress_outcome(status="cancelled", error_category="cancelled", **audit_kwargs)
+            raise  # R2: 必须传播
+        except Exception as exc:
+            # M20：首个 422 被严格中止 → 以携带 attempt 身份的策略异常失败。
+            policy_exc = _strict_params_policy_error(strict_guard, attempt_context)
+            await _audit_egress_outcome(
+                status="failed",
+                error_category=classify_error(policy_exc or exc, context="llm").get("code"),
+                **audit_kwargs,
+            )
+            if policy_exc is not None:
+                raise policy_exc from exc
+            raise
+
+        await _audit_egress_outcome(status="sent", **audit_kwargs)
+        return chat_response
+
+    async def _consume_chat_stream(
+        self,
+        request_params: dict,
+        on_event: ChatStreamEventHandler | None,
+        deadline: float,
+    ) -> ChatTurnResponse:
+        """消费真流 chunk（§6.4）：真实 delta 逐事件产出，finish/usage 分步确认。
+
+        聚合状态按 choice/tool index 与稳定 call_id 承载；``tool_call_closed`` 仅在
+        累积分片闭合且校验通过后产出；流耗尽而无结束标记即协议失败。本方法只在
+        ``invoke_chat_connection`` 的审计 try 块内被调用（取消/失败审计由其承载）。
+
+        M17（同一绝对预算）：``deadline``（loop.time() 口径的单调截止值）环绕本次
+        流的全部阶段——建立流、逐 chunk 读取、``on_event`` 等待（有界通道背压）与
+        收尾关流；任一阶段耗尽即关闭真实流并抛 ``TimeoutError``，不无限挂起、不
+        漏关。费用不伪造：超时不产出 usage，由上层按 unknown 结算（R21）。LiteLLM
+        的可选最大流时长（``LITELLM_MAX_STREAMING_DURATION_SECONDS``，默认 None）
+        仅在 chunk 到达时检查，不消费本应用单调 deadline，不能替代本预算。
+        """
+
+        import services.ai_service as _ai
+
+        loop = asyncio.get_running_loop()
+        sequence = 0
+        calls: dict[int, dict] = {}
+        text_parts: list[str] = []
+        refusal_parts: list[str] = []
+        finish_buffered: str | None = None
+        usage: NormalizedLLMUsage | None = None
+
+        async def _emit(event: ChatStreamEvent) -> None:
+            event.ensure_valid()
+            if on_event is not None:
+                outcome = on_event(event)
+                if isawaitable(outcome):
+                    await outcome
+
+        stream_response: Any = None
+        deadline_guard = asyncio.timeout_at(deadline)
+        try:
+            async with deadline_guard:
+                stream_response = await _ai.acompletion(**request_params)
+                iterator = stream_response.__aiter__()
+                while True:
+                    # 持续小片下迭代可能长时间不产生等待点（事件循环得不到空转机会），
+                    # 逐分片显式核对同一绝对预算，避免超时回调永远得不到执行。
+                    if loop.time() >= deadline:
+                        raise TimeoutError("Chat stream deadline exhausted.")
+                    try:
+                        chunk = await iterator.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    usage_raw = getattr(chunk, "usage", None)
+                    if usage_raw is not None:
+                        usage = normalize_litellm_usage(usage_raw) or usage
+                    choices = getattr(chunk, "choices", None) or []
+                    if not choices:
+                        continue  # usage 终块（choices 为空）仅承载 usage
+                    choice = choices[0]  # 本链恒 n=1；多 choice 非聊天回合出口契约
+                    delta = getattr(choice, "delta", None)
+                    if delta is not None:
+                        content = getattr(delta, "content", None)
+                        if isinstance(content, str) and content:
+                            text_parts.append(content)
+                            sequence += 1
+                            await _emit(ChatStreamEvent(sequence=sequence, kind="text", text_delta=content))
+                        refusal_delta = getattr(delta, "refusal", None)
+                        if isinstance(refusal_delta, str) and refusal_delta:
+                            refusal_parts.append(refusal_delta)
+                        for tc in getattr(delta, "tool_calls", None) or []:
+                            index = int(tc.index)
+                            state = calls.setdefault(
+                                index, {"call_id": None, "name": "", "fragments": [], "emitted": 0}
+                            )
+                            tc_id = getattr(tc, "id", None)
+                            if tc_id:
+                                # M04：SDK 语义 tool_call_id 非增量（ToolCallPartDelta
+                                # docstring：只能替换 None，非匹配值即错误）——同 index
+                                # 出现不同 id 即身份漂移，fail-closed 不猜。
+                                if state["call_id"] is not None and tc_id != state["call_id"]:
+                                    raise ModelTurnProtocolError("invalid_field", f"$.stream.tool_calls[{index}].id")
+                                state["call_id"] = tc_id
+                            function = getattr(tc, "function", None)
+                            name_part = getattr(function, "name", None) if function is not None else None
+                            if name_part:
+                                state["name"] += name_part
+                            fragment = getattr(function, "arguments", None) if function is not None else None
+                            if fragment:
+                                state["fragments"].append(fragment)
+                            # M04：id/name 齐备后一次性补发此前缓冲的全部分片（含身份
+                            # 未齐时的 leading 分片），保证「增量拼接 == 闭合事实」；
+                            # 此后逐片续发，闭合事件与增量的累积内容逐字节一致。
+                            if state["call_id"] and state["name"] and len(state["fragments"]) > state["emitted"]:
+                                pending = "".join(state["fragments"][state["emitted"] :])
+                                state["emitted"] = len(state["fragments"])
+                                sequence += 1
+                                await _emit(
+                                    ChatStreamEvent(
+                                        sequence=sequence,
+                                        kind="tool_call_delta",
+                                        call_index=index,
+                                        call_id=state["call_id"],
+                                        name=state["name"],
+                                        arguments_fragment=pending,
+                                    )
+                                )
+                    finish_raw = getattr(choice, "finish_reason", None)
+                    if finish_raw is not None and finish_buffered is None:
+                        finish_buffered = finish_raw
+                        # 闭合事件：按 index 序派发，参数闭合且校验通过才产出（§6.4-2）
+                        for call_index in sorted(calls):
+                            state = calls[call_index]
+                            if not state["call_id"] or not state["name"]:
+                                raise ModelTurnProtocolError("invalid_field", f"$.stream.tool_calls[{call_index}]")
+                            closed_json = "".join(state["fragments"])
+                            validate_closed_tool_arguments(closed_json)
+                            sequence += 1
+                            await _emit(
+                                ChatStreamEvent(
+                                    sequence=sequence,
+                                    kind="tool_call_closed",
+                                    call_index=call_index,
+                                    call_id=state["call_id"],
+                                    name=state["name"],
+                                    closed_arguments_json=closed_json,
+                                )
+                            )
+
+                # 断流：缺结束标记不得因迭代耗尽而成功（§6.4-4）
+                if finish_buffered is None:
+                    raise ModelTurnProtocolError("missing_finish", "$.stream")
+                # M05：拒绝优先与非流式 :func:`_interpret_chat_response` 同序——观测到
+                # refusal 文本即终态 ``refused``，先于 finish 原值解释。纯拒绝、混文本+
+                # 拒绝、以 ``stop`` 结束的拒绝都不得被映射成 ``final``（否则 Executor
+                # 记 succeeded 并可按输出非法类换候选绕过拒绝）。
+                refusal_text = "".join(refusal_parts)
+                has_refusal = bool(refusal_text.strip())
+                if not has_refusal:
+                    refusal_text = ""
+                finish_reason = "refused" if has_refusal else _map_chat_finish_reason(finish_buffered)
+                if finish_reason == "refused" and not refusal_text:
+                    refusal_text = "content_filter"  # provider 信号原文，ensure_valid 要求非空
+
+                tool_calls = tuple(
+                    AssistantToolCall(
+                        call_id=calls[index]["call_id"],
+                        name=calls[index]["name"],
+                        arguments_json="".join(calls[index]["fragments"]),
+                    )
+                    for index in sorted(calls)
+                )
+                sequence += 1
+                await _emit(ChatStreamEvent(sequence=sequence, kind="finish", finish_reason=finish_reason, usage=usage))
+        except TimeoutError:
+            # 仅本预算耗尽才改写成流收尾语义；provider 自身 TimeoutError 原样传播
+            # （两条路径都会经 finally 关闭真实流，不得漏关）。
+            if not deadline_guard.expired() and loop.time() < deadline:
+                raise
+            raise TimeoutError(
+                f"Chat stream deadline exhausted after {sequence} event(s); "
+                "stream closed and usage left unknown (no usage fabricated)."
+            ) from None
+        finally:
+            await _close_chat_stream(stream_response, deadline)
+
+        chat_response = ChatTurnResponse(
+            text="".join(text_parts) if text_parts else None,
+            finish_reason=finish_reason,
+            actual_model=getattr(stream_response, "model", None),
+            usage_observed=usage is not None,
+            usage=usage,
+            transport_state="ok",
+            tool_calls=tool_calls,
+            refusal=refusal_text or None,
+        )
+        chat_response.ensure_valid()
+        return chat_response
 
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE, log_args=False)
     async def _chat_completion(
@@ -1719,3 +2381,199 @@ class LiteLLMClient:
                 "message": error_info["message_key"],
                 "error_code": error_info["code"],
             }
+
+
+# ---------------------------------------------------------------------------
+# 聊天回合出口映射（B-02-1，HANDOFF §6.3）
+# ---------------------------------------------------------------------------
+
+#: frozen_params 禁止占用的派发保留键（冲突即配置损坏，显式拒绝零出站）。
+_CHAT_RESERVED_PARAM_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "model",
+        "messages",
+        "tools",
+        "num_retries",
+        "drop_params",
+        "client",
+        "timeout",
+        "stream",
+        "stream_options",
+        "api_key",
+        "api_base",
+        "api_version",
+        "response_format",
+        "tool_choice",
+    }
+)
+
+
+def _chat_message_to_litellm(message: ChatMessage, path_prefix: str) -> dict:
+    """ChatMessage → OpenAI chat completions 出口字典（§6.3 出口规则）。
+
+    - 保序：多 text 分型按原顺序映射（user 单 text 退化为纯 str 内容）；
+    - assistant tool-only ``content=None`` 有效；tool 严格携带 ``tool_call_id``；
+    - 图片分型在桥层无二进制解析（能力表未落地）→ 显式拒绝零出站，不静默丢弃。
+    """
+
+    text_parts: list[str] = []
+    segments: list[dict] = []
+    for index, part in enumerate(message.content_parts):
+        path = f"{path_prefix}.content_parts[{index}]"
+        if isinstance(part, TextContentPart):
+            text_parts.append(part.text)
+            segments.append({"type": "text", "text": part.text})
+        else:
+            raise ModelTurnProtocolError("image_not_resolvable", path)
+
+    if message.role == "system":
+        return {"role": "system", "content": "\n".join(text_parts)}
+    if message.role == "user":
+        if len(segments) == 1:
+            return {"role": "user", "content": segments[0]["text"]}
+        return {"role": "user", "content": segments}
+    if message.role == "assistant":
+        entry: dict = {"role": "assistant", "content": "\n".join(text_parts) if text_parts else None}
+        if message.assistant_tool_calls:
+            entry["tool_calls"] = [
+                {
+                    "id": call.call_id,
+                    "type": "function",
+                    "function": {"name": call.name, "arguments": call.arguments_json},
+                }
+                for call in message.assistant_tool_calls
+            ]
+        return entry
+    # tool：出口 content 必须为字符串（无分型时为空串，不伪装成业务内容）
+    return {"role": "tool", "tool_call_id": message.tool_call_id, "content": "\n".join(text_parts)}
+
+
+def _chat_tools_to_litellm(specs: Any) -> list[dict]:
+    """FunctionToolSpec → OpenAI function tool 出口字典（research 与 output 工具同形）。"""
+
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": spec.name,
+                "description": spec.description,
+                "parameters": dict(spec.json_schema),
+            },
+        }
+        for spec in specs
+    ]
+
+
+def _chat_payload_size_bytes(litellm_messages: list[dict]) -> int:
+    """出站 payload 体积估算（审计用）：文本内容长度合计，不含工具参数。"""
+
+    total = 0
+    for message in litellm_messages:
+        content = message.get("content")
+        if isinstance(content, str):
+            total += len(content)
+        elif isinstance(content, list):
+            total += sum(len(segment.get("text", "")) for segment in content if isinstance(segment, dict))
+    return total
+
+
+def _map_chat_finish_reason(raw: str | None) -> FinishReason:
+    """provider finish_reason → 协议 FinishReason（未知值显式拒绝，不伪装 error）。"""
+
+    if raw == "stop":
+        return "final"
+    if raw in ("tool_calls", "function_call"):
+        return "tool_calls"
+    if raw == "length":
+        return "length"
+    if raw == "content_filter":
+        return "refused"
+    raise ModelTurnProtocolError("invalid_finish", "$.finish_reason")
+
+
+def _interpret_chat_response(response: Any) -> ChatTurnResponse:
+    """非流式响应 → ChatTurnResponse 组装（拒绝信号提炼，闭合参数校验）。"""
+
+    choice = response.choices[0]
+    message = choice.message
+    finish_raw = getattr(choice, "finish_reason", None)
+    refusal_raw = getattr(message, "refusal", None)
+    refusal_text = refusal_raw if isinstance(refusal_raw, str) and refusal_raw.strip() else None
+    if finish_raw == "content_filter" or refusal_text:
+        # F27 同源语义：拒绝信号（refusal 文本 / content_filter）优先于 finish 原值
+        finish_reason: FinishReason = "refused"
+        refusal_text = refusal_text or "content_filter"
+    else:
+        finish_reason = _map_chat_finish_reason(finish_raw)
+
+    tool_calls = tuple(
+        AssistantToolCall(call_id=tc.id, name=tc.function.name, arguments_json=tc.function.arguments)
+        for tc in (getattr(message, "tool_calls", None) or [])
+    )
+    for call in tool_calls:
+        call.ensure_valid()
+    usage = normalize_litellm_usage(getattr(response, "usage", None))
+
+    chat_response = ChatTurnResponse(
+        text=message.content if isinstance(message.content, str) else None,
+        finish_reason=finish_reason,
+        actual_model=getattr(response, "model", None),
+        usage_observed=usage is not None,
+        usage=usage,
+        transport_state="ok",
+        tool_calls=tool_calls,
+        refusal=refusal_text,
+    )
+    chat_response.ensure_valid()
+    return chat_response
+
+
+class LiteLLMChatAdapter:
+    """``litellm_chat`` 适配器（B-02-1 / 检视 M01，HANDOFF §6.1）。
+
+    同时满足两个入口协议（新旧入口分别校验、不混协议）：
+    ``invoke_chat`` 薄委托 :meth:`LiteLLMClient.invoke_chat_connection`（聊天回合
+    新入口，:class:`core.model_management_types.ChatInferenceAdapter`）；
+    ``invoke`` 薄委托 :meth:`LiteLLMClient.invoke_single_connection`（旧链单 prompt
+    入口，:class:`core.model_management_types.InferenceAdapter`）。聊天入口只调用
+    ``invoke_chat``，零旧 ``invoke`` 触达。组装能力核验（FinBERT 等非聊天适配器
+    不接聊天协议）由组装方按 adapter_kind 装配承载。真流默认开启（§6.4）。
+    """
+
+    def __init__(self, client: LiteLLMClient) -> None:
+        self._client = client
+
+    async def invoke(
+        self,
+        request: InferenceRequest,
+        resolved_connection: ResolvedConnection,
+        deadline: float,
+        attempt_context: AttemptContext,
+    ) -> AdapterResponse:
+        return await self._client.invoke_single_connection(
+            request,
+            resolved_connection,
+            deadline,
+            attempt_context,
+        )
+
+    async def invoke_chat(
+        self,
+        request: ChatTurnRequest,
+        resolved_connection: ResolvedConnection,
+        deadline: float,
+        attempt_context: AttemptContext,
+        *,
+        stream: bool = True,
+        response_format: Mapping[str, Any] | None = None,
+        on_event: ChatStreamEventHandler | None = None,
+    ) -> ChatTurnResponse:
+        return await self._client.invoke_chat_connection(
+            request,
+            resolved_connection,
+            deadline,
+            attempt_context,
+            stream=stream,
+            response_format=response_format,
+            on_event=on_event,
+        )

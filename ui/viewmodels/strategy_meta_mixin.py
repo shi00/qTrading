@@ -3,7 +3,8 @@
 从 ``screener_view_model.py`` 按职责拆出：策略查询（``get_strategies``/``get_strategy_desc``/
 ``get_strategy_params``/``get_base_prompt``）、参数草稿（``init_strategy_params``/
 ``set_strategy_param``/``reset_strategy_params``/``reset_strategy_prompt``/``save_strategy_prompt``）、
-预设保存复用（``get_preset_names``/``save_preset``/``load_preset``/``delete_preset``）、
+预设保存复用（``get_preset_names``/``prepare_preset_save``/``refresh_presets``/``apply_preset``/
+``save_preset``/``load_preset``/``delete_preset``/``validate_preset_name``）、
 策略选择与描述（``select_strategy``/``load_strategies``/``_build_strategy_dep_rows``/
 ``update_strategy_desc``/``_compute_tier_hint``）、列别名（``get_column_alias``）。
 
@@ -21,7 +22,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from ui.viewmodels import Message
-from ui.viewmodels.screener_types import ScreenerState, StrategyDepRow
+from ui.viewmodels.screener_types import PRESET_NAME_MAX_LENGTH, PresetSavePlan, ScreenerState, StrategyDepRow
 from utils.config_handler import ConfigHandler
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -151,6 +152,68 @@ class StrategyMetaMixin:
 
     # --- Task 4.1: 筛选方案保存/复用 (FR-UX-003) ---
 
+    @staticmethod
+    def validate_preset_name(name: str) -> str | None:
+        """校验筛选方案名，合法返回 None，否则返回 i18n error key (R2-I12).
+
+        规则：去首尾空白后非空、长度不超过 ``PRESET_NAME_MAX_LENGTH``、不含控制字符。
+        不做静默修正（大小写/空格保留），由调用方使用 ``name.strip()`` 落库。
+        """
+        trimmed = name.strip()
+        if not trimmed:
+            return "screener_preset_err_empty"
+        if len(trimmed) > PRESET_NAME_MAX_LENGTH:
+            return "screener_preset_err_too_long"
+        if any(ord(ch) < 32 for ch in trimmed):
+            return "screener_preset_err_invalid"
+        return None
+
+    async def prepare_preset_save(self, name: str, strategy_key: str) -> PresetSavePlan:
+        """保存前的处置计划 (R2-I12): 名称校验 + 是否需要重名确认/旧参数摘要.
+
+        重名不得静默覆盖：``exists=True`` 时调用方须先展示 ``existing_params`` 与替换
+        影响并经用户确认，确认后才调用 ``save_preset``。
+        """
+        trimmed = name.strip()
+        error_key = self.validate_preset_name(trimmed)
+        if error_key:
+            return PresetSavePlan(error_key=error_key)
+        presets = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.get_strategy_presets, strategy_key)
+        stored = presets.get(trimmed)
+        if not isinstance(stored, dict):
+            return PresetSavePlan()
+        return PresetSavePlan(exists=True, existing_params=MappingProxyType(dict(stored)))
+
+    async def refresh_presets(self, strategy_key: str | None) -> None:
+        """刷新当前策略的已保存方案名列表到 state (R2-I12, 排序稳定).
+
+        ``strategy_key`` 为空时清空列表；读配置经 IO 线程池提交 (R16)。
+        """
+        if not strategy_key:
+            self._set_state(preset_names=())
+            return
+        presets = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.get_strategy_presets, strategy_key)
+        self._set_state(preset_names=tuple(sorted(presets.keys())))
+
+    async def apply_preset(self, name: str, strategy_key: str) -> bool:
+        """载入方案到当前参数草稿 (R2-I12).
+
+        仅覆盖当前策略**已知参数名**的取值：方案保存后策略新增的参数保持当前草稿，
+        不臆造历史值（未持久化的参数不填业务合法值，R21）。策略已切换或方案不存在
+        时返回 False 且不改草稿。载入只改参数草稿，不触发选股/回测。
+        """
+        presets = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.get_strategy_presets, strategy_key)
+        stored = presets.get(name)
+        if not isinstance(stored, dict) or self._state.selected_strategy != strategy_key:
+            return False
+        allowed = {p["name"] for p in self.get_strategy_params(strategy_key) if p.get("name")}
+        merged = dict(self._state.strategy_params)
+        for param_name, value in stored.items():
+            if param_name in allowed:
+                merged[param_name] = value
+        self._set_state(strategy_params=MappingProxyType(merged))
+        return True
+
     def get_preset_names(self, strategy_key: str) -> list[str]:
         """获取策略已保存的预设名称列表 (Task 4.1).
 
@@ -161,7 +224,10 @@ class StrategyMetaMixin:
         return list(presets.keys())
 
     async def save_preset(self, name: str, strategy_key: str, params: dict) -> None:
-        """保存命名参数预设 (Task 4.1). 重名覆盖.
+        """保存命名参数预设 (Task 4.1). 同名最后写者胜出.
+
+        R2-I12: 重名不得静默覆盖 —— 调用方须先经 ``prepare_preset_save`` 获知同名
+        方案并取得用户确认后才调用本方法。
 
         Raises:
             Exception: ConfigHandler 失败时抛出 (View 负责展示错误)

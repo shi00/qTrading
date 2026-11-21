@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 
 from core.prompt_base import (
@@ -166,6 +167,13 @@ def _sanitize_free_text(value: str, max_len: int | None = None) -> str:
 
 
 def validate_ai_analysis_response(response: dict) -> dict:
+    """股票 final 输出归一化的**唯一入口**（DD-F34），可就地规范化后返回同一 dict。
+
+    调用约束：**只可对模型原始响应调用一次**。归一化非幂等——``confidence`` 的
+    ``0.5 → 50`` 换算无法在二次调用时区分「模型给的 0.5 比例」与「已归一化的 50
+    分置信度」（数值信息已丢失），二次调用会把 0.5 再次放大为 50.0。重试/重放路径
+    不得复用同一响应对象二次调用本函数；接链约束登记于 F-01-6。
+    """
     if not isinstance(response, dict):
         # R21：非 dict 响应无任何可解析字段，score 必须为 None（未知），不得以 0
         # 伪装成"明确否决"这一业务上合法的评分值。
@@ -173,30 +181,45 @@ def validate_ai_analysis_response(response: dict) -> dict:
 
     score = response.get("score")
     if score is not None:
-        try:
-            score = float(score)
-            if not (0 <= score <= 100):
-                # R21：越界评分是模型失控信号，不是"极端看好/看空"。钳位会把违规输出
-                # 变成最强买入/否决信号，与不可解析分支同样置 None 交由下游按"未打分"处理。
-                logger.warning("[AIService] Output validation: score out of range [0,100]: %s", score)
+        # DD-F34：bool 是 int 的子类，float(True)=1.0 会让「模型输出 true」伪装成 1 分
+        # 这一业务上合法的评分值（R21）。非有限数（NaN/±Inf，含 "nan"/"inf" 字符串）
+        # 同样不是评分，必须显式置 None 而非依赖区间比较的偶然结果。
+        if isinstance(score, bool):
+            logger.warning("[AIService] Output validation: bool score is not a number: %s", score)
+            response["score"] = None
+        else:
+            try:
+                score = float(score)
+            except (ValueError, TypeError):
+                # R21：不可解析的分数不是"0 分否决"，置 None 让下游按"未打分"处理。
+                logger.warning("[AIService] Output validation: invalid score type: %s", _sanitize_logged_value(score))
                 response["score"] = None
             else:
-                response["score"] = score
-        except (ValueError, TypeError):
-            # R21：不可解析的分数不是"0 分否决"，置 None 让下游按"未打分"处理。
-            logger.warning("[AIService] Output validation: invalid score type: %s", _sanitize_logged_value(score))
-            response["score"] = None
+                if not math.isfinite(score) or not (0 <= score <= 100):
+                    # R21：越界/非有限评分是模型失控信号，不是"极端看好/看空"。钳位会把违规
+                    # 输出变成最强买入/否决信号，与不可解析分支同样置 None 交由下游按"未打分"。
+                    logger.warning(
+                        "[AIService] Output validation: score not finite/in range [0,100]: %s",
+                        _sanitize_logged_value(score),
+                    )
+                    response["score"] = None
+                else:
+                    response["score"] = score
 
     # AI-02: 模型能力信息——缺失 confidence 记 debug 日志，供排查某模型是否持续不返回置信度。
-    if response.get("confidence") is None:
+    raw_confidence = response.get("confidence")
+    if raw_confidence is None:
         logger.debug("[AIService] Output validation: response missing 'confidence' field (%s)", response.get("score"))
+    elif isinstance(raw_confidence, bool):
+        # DD-F34：bool 不是置信度（True 不是 1%、False 不是 0%），置 None 不参与换算。
+        logger.warning("[AIService] Output validation: bool confidence is not a number")
+        response["confidence"] = None
     else:
         # AI-02 / MINOR-01（R21）：置信度归一化的唯一事实源。提示词约定为 1-100 百分数，但模型
         # 可能按 0~1 概率口径返回；对严格小于 1 的小数按比例换算为百分数（0.85 → 85）。边界值
         # 1 不换算：它在提示词契约下是"最小置信度"，换算成 100 会把合规的最小值放大为满置信度，
         # 与 R21"不把违规输出变成最强信号"的取向相悖。越界（<0 或 >100，或换算后越界）或不可解析
         # 视为模型失控信号，置 None 交由下游按"未给出置信度"处理，**不钳位**（与 score 同语义）。
-        raw_confidence = response.get("confidence")
         try:
             confidence = float(raw_confidence)
         except (ValueError, TypeError):
@@ -205,13 +228,19 @@ def validate_ai_analysis_response(response: dict) -> dict:
             )
             response["confidence"] = None
         else:
-            if 0 <= confidence < 1:
-                confidence *= 100
-            if 0 <= confidence <= 100:
-                response["confidence"] = round(confidence, 1)
-            else:
-                logger.warning("[AIService] Output validation: confidence out of range: %s", raw_confidence)
+            if not math.isfinite(confidence):
+                # DD-F34：NaN/±Inf 不是置信度；区间比较对 NaN 恒假，不能依赖其偶然落入
+                # else 分支，显式拒绝（R21）。
+                logger.warning("[AIService] Output validation: confidence not finite: %s", raw_confidence)
                 response["confidence"] = None
+            else:
+                if 0 <= confidence < 1:
+                    confidence *= 100
+                if 0 <= confidence <= 100:
+                    response["confidence"] = round(confidence, 1)
+                else:
+                    logger.warning("[AIService] Output validation: confidence out of range: %s", raw_confidence)
+                    response["confidence"] = None
 
     recommendation = response.get("recommendation")
     if recommendation is not None:

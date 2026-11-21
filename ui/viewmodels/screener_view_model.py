@@ -23,9 +23,11 @@ from ui.viewmodels.history_mode_mixin import HistoryModeMixin
 from ui.viewmodels.pagination_sorting_mixin import PaginationSortingMixin
 from ui.viewmodels.screener_types import (
     MAX_LOG_CARDS,  # re-export
+    PRESET_NAME_MAX_LENGTH,  # re-export
     HistoryTreeRow,  # re-export
     HistoryTreeState,  # re-export
     LogEntry,  # re-export
+    PresetSavePlan,  # re-export
     RealtimeSnapshot,  # re-export
     ScreenerRow,  # re-export
     ScreenerState,  # re-export
@@ -46,11 +48,13 @@ TASK_NAME_PREFIX = "strategy_screening"
 
 __all__ = [
     "MAX_LOG_CARDS",
+    "PRESET_NAME_MAX_LENGTH",
     "TASK_NAME_PREFIX",
     "_MAX_LOG_CARDS",
     "HistoryTreeRow",
     "HistoryTreeState",
     "LogEntry",
+    "PresetSavePlan",
     "RealtimeSnapshot",
     "ScreenerRow",
     "ScreenerState",
@@ -213,6 +217,8 @@ class ScreenerViewModel(
         # Task 4.2: 先标记 disposed, 使后续延迟完成的任务 _set_state/_notify 不再
         # 更新 state/subscriber (取消是协作式的, 任务可能仍执行到下一个 await)
         self._disposed = True
+        # R2-I04: 释放旧运行期确认占用的统一仲裁许可（取消/销毁不遗留人工许可槽位）。
+        self._release_runtime_ack_permits()
         self.unsubscribe_task_manager()
         self._stream_buffers.clear()
 

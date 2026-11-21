@@ -52,10 +52,17 @@ class StartupController:
         # StartupController 每次 run(page) 新建实例，此状态天然 per-session 隔离，
         # 避免 Flet Web 多 session 共享进程时模块级 flag 导致"引擎就绪、服务未启动"。
         self._services_initialized = False
+        # P01：本会话的 Agent 接线（facade + 共享桥 + 宿主/关闭前置）；未接线/失败为 None。
+        self._agent_wiring: Any | None = None
 
     @property
     def state(self) -> StartupState:
         return self._state
+
+    @property
+    def agent_wiring(self) -> Any | None:
+        """暴露给应用入口，以便在释放共享引擎前完成 Agent 关闭前置。"""
+        return self._agent_wiring
 
     @property
     def context(self) -> StartupContext:
@@ -121,6 +128,10 @@ class StartupController:
         # D02-F04：持有本会话的调度组合结果；失败重试时原样回传复用（组装前失败为 None）
         if "scheduling_services" in result:
             self._scheduling_services = result["scheduling_services"]
+        # P01：接线结果由 initialize_services 返回；重试路径未重建时保留既有接线。
+        agent_wiring = result.get("agent_wiring")
+        if agent_wiring is not None:
+            self._agent_wiring = agent_wiring
 
         if result["success"]:
             # review01-A9: per-session 置位初始化状态（替代 bootstrap 模块级 flag）
@@ -198,6 +209,37 @@ class StartupController:
             )
             return
         self._transition(StartupState.LOADING)
+        # P01/R2-I35：旧配置替换/引擎关闭前必须先消费 Agent 关闭门（先关派发入口、
+        # 再核定在途收敛）。未就绪即阻断切库并保留引擎/账本，不把「未收敛」当「已关闭」。
+        if self._agent_wiring is not None:
+            try:
+                await self._agent_wiring.prepare_close()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # 关闭前置失败：按未就绪阻断，保留依赖供重试
+                logger.warning(
+                    "[Startup] Agent close prelude failed during reconfigure: %s",
+                    type(e).__name__,
+                    exc_info=True,
+                )
+                self._transition(
+                    StartupState.INIT_FAILED,
+                    error="agent_close_not_ready",
+                    detail="Agent close prelude failed; database switch aborted to keep resources alive.",
+                )
+                return
+            close_ready = getattr(self._agent_wiring, "close_ready", None)
+            if close_ready is None or not close_ready():
+                logger.error(
+                    "[Startup] Agent close gate not ready during reconfigure; database switch aborted, resources kept alive."
+                )
+                self._transition(
+                    StartupState.INIT_FAILED,
+                    error="agent_close_not_ready",
+                    detail="Agent runtime close gate is not ready; database switch aborted to keep resources alive.",
+                )
+                return
+            self._agent_wiring = None
         # D02-R03: close 抛异常时不得让状态机停在 LOADING，转入 INIT_FAILED 供用户重试。
         try:
             await self._cache_manager.close()

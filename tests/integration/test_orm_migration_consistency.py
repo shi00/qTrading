@@ -255,8 +255,17 @@ def _reflect_schema(connection) -> dict:
                     "constrained_columns": tuple(fk.get("constrained_columns", [])),
                     "referred_table": fk.get("referred_table", ""),
                     "referred_columns": tuple(fk.get("referred_columns", [])),
-                    "ondelete": (fk.get("ondelete") or "NO ACTION").upper(),
-                    "onupdate": (fk.get("onupdate") or "NO ACTION").upper(),
+                    # SQLAlchemy 2.1 起 FK onupdate/ondelete 反射值移入
+                    # ``options`` 子字典（2.0.x 为顶层键）；两形态都兼容，避免
+                    # 依赖解析器版本细节（R21：缺失视为 NO ACTION 默认）。
+                    **{
+                        "ondelete": (
+                            fk.get("ondelete") or fk.get("options", {}).get("ondelete") or "NO ACTION"
+                        ).upper(),
+                        "onupdate": (
+                            fk.get("onupdate") or fk.get("options", {}).get("onupdate") or "NO ACTION"
+                        ).upper(),
+                    },
                 }
             )
 
@@ -534,42 +543,39 @@ class TestOrmMigrationConsistency:
                 continue
 
             orm_table = Base.metadata.tables[table_name]
-            # Collect ORM indexes: (frozenset of column names, normalized_where)
-            orm_index_cols = set()
+            # Collect ORM indexes: real columns only — ``Index.columns`` excludes
+            # ``text()`` expression entries (e.g. ``text("pinned DESC")``), while
+            # PG reflection reports base column names for those expressions.
+            # Compare per index *name* with a subset check on real columns;
+            # expression-only indexes (GIN on ``to_tsvector(...)``) reflect a
+            # ``None`` column name and normalize to an empty set.
+            orm_indexes = {}
             for idx in orm_table.indexes:
-                col_set = frozenset(c.name for c in idx.columns)
-                where_expr = idx.dialect_options.get("postgresql", {}).get("where")
-                where_str = None
-                if where_expr is not None:
-                    try:
-                        where_str = str(where_expr.compile(dialect=pg_dialect()))
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning("[IndexWhere] compile failed, fallback to text: %s", e, exc_info=True)
-                        where_str = str(where_expr.text if hasattr(where_expr, "text") else where_expr)
-                orm_index_cols.add((col_set, _normalize_sql_expression(where_str)))
+                real_cols = frozenset(c.name for c in idx.columns if hasattr(c, "name") and getattr(c, "name", None))
+                orm_indexes[idx.name] = real_cols
 
             # Collect DB indexes (exclude auto-generated PK indexes and Unique Constraints)
-            db_index_cols = set()
+            db_indexes = {}
             db_index_names = reflected[table_name]["indexes"]
             for idx_name, idx_info in db_index_names.items():
                 if idx_name.startswith("pk_"):
                     continue  # Skip PK indexes (covered by test_primary_keys_match)
                 if idx_name in reflected[table_name]["unique_constraints"]:
                     continue  # Skip unique constraints (covered by test_unique_constraints_match)
-                db_index_cols.add(
-                    (
-                        frozenset(idx_info["columns"]),
-                        _normalize_sql_expression(idx_info["where"]),
-                    )
-                )
+                db_indexes[idx_name] = frozenset(c for c in idx_info["columns"] if c)
 
-            # Check ORM indexes exist in DB
-            for col_set in orm_index_cols:
-                if col_set not in db_index_cols:
-                    errors.append(f"{table_name}: ORM index on {col_set} not found in DB")
+            # Check ORM indexes exist in DB by name, with real columns as subset
+            for idx_name, orm_cols in orm_indexes.items():
+                if idx_name not in db_indexes:
+                    errors.append(f"{table_name}: ORM index {idx_name} not found in DB")
+                elif not orm_cols.issubset(db_indexes[idx_name]):
+                    errors.append(
+                        f"{table_name}: ORM index {idx_name} columns {sorted(orm_cols)} "
+                        f"not covered by DB index {sorted(db_indexes[idx_name])}"
+                    )
 
             # Check for extra DB indexes not in ORM (warning only)
-            extra = db_index_cols - orm_index_cols
+            extra = set(db_indexes) - set(orm_indexes)
             if extra:
                 logger.warning(
                     "[SchemaConsistency] %s: DB has extra indexes not in ORM: %s",

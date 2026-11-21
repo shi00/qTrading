@@ -66,6 +66,14 @@ dependencies = [
     "soupsieve>=3.0.4",  # Security: CVE-2026-85999/86000 (ReDoS) fixed in 2.9.0; transitive via beautifulsoup4 (akshare/bs4)
     "oauthlib>=4.0.1",  # Security: CVE-2026-49272 fixed in 4.0.1（另 CVE-2026-49265 PKCE timing side-channel 已在 4.0.0 修复）; transitive via flet (flet requires oauthlib>=3.2.2)
     "tenacity>=9.2.1,<10",  # S2 统一模型管理（ADR-0014）：S3 ScenarioExecutor 单连接重试策略消费
+    "dbos==3.4.0",  # Agent 运行栈（设计 §10.6）：DBOS 持久化执行运行库（双迁移宿主）；破坏性演进与内部迁移版本强耦合 → == 精确固定（版本守卫 dbos_migrations=125 精确相等）
+    "psycopg[binary]==3.3.8",  # Agent 运行栈：DBOS SQLAlchemyDatasource/DBOSClient 的 psycopg3 驱动（与既有 psycopg2-binary 模块名不同可并存）；DBOS 内部强耦合 → == 精确固定（Q3 裁决）
+    "pydantic-ai-slim==2.66.0",  # Agent 模型桥（设计 §10.1/HANDOFF §6）：GatewayModel 固定框架；slim 发行不含未用可选集成；SDK 内部结构（StreamedResponse/_parts_manager）强耦合 → == 精确固定（Q3 裁决）
+    "pydantic-ai-harness[skills]==0.66.0",  # Agent 计划/压缩能力（设计 §10.1、HANDOFF §6）：PlanStore/Planning/SummarizingCompaction 宿主，须与 pydantic-ai-slim 2.66.0 锁步 → == 精确固定（Q5 裁决）
+    "pypdf==6.21.4",  # Agent 附件 PDF 文本抽取（E-01）：纯 Python 实现、无系统依赖，输出文本边界可测 → == 精确固定（Q5 裁决）；6.19.0→6.21.4 修复 CVE-2026-113789/119208 等（pip-audit CI 门禁）
+    "jsonschema>=4.26.0",  # Agent MCP 工具参数闭合校验（E-02-5）：MCP 目录 schema → 参数全量校验的正式适配器
+    "fastmcp>=4.1.4",  # Agent MCP 真实传输正式客户端（E-02-5，services/agent_service/mcp_fastmcp.py）：运行期硬依赖，缺失将导致包导入与附件 worker 子进程入口失败；Security: GHSA-7xgj-8392-5q4r (transform 后组件授权绕过，直呼路径跳过 AuthCheck) / GHSA-vqqp-x5qm-5qp4 (OAuth client credentials 缺 issuer 绑定致 client secret 泄漏) fixed in 4.1.2
+    "httpx2==2.16.0",  # Agent MCP 传输层（I07 复核）：mcp_fastmcp.py 直接 import httpx2，此前仅由 fastmcp-slim/genai-prices/mcp 等传递引入 → 显式声明防上游变更；与 Agent 栈一致精确固定
 ]
 
 [project.optional-dependencies]
@@ -91,7 +99,6 @@ dev = [
     "joserfc>=1.7.6",  # Security: CVE-2026-119284 (compact JWS 在校验长度前调用 bytes.split()，复制攻击者可控 payload 致内存放大/DoS) fixed in 1.7.6; 传递依赖 authlib / fastmcp-slim
     "dnspython>=2.9.0",  # Security: GHSA-45c3-73f7-pv4m / CVE-2026-114605 (dns.name.from_wire_parser() 过度 CPU 消耗) fixed in 2.9.0; 传递依赖 email-validator
     "import-linter>=2.15",  # Architecture guard: enforce R1 layered dependencies (CLAUDE.md §4.1)
-    "fastmcp>=4.1.4",  # Security: GHSA-7xgj-8392-5q4r (transform 后组件授权绕过，直呼路径跳过 AuthCheck) / GHSA-vqqp-x5qm-5qp4 (OAuth client credentials 缺 issuer 绑定致 client secret 泄漏) fixed in 4.1.2; 传递依赖 flet-mcp -> fastmcp -> fastmcp-slim
     "flet-mcp==1.1.0",  # AI dev-time Flet API verification (CLAUDE.md §1.10); run via `python -c "from flet_mcp import mcp; mcp.run()"`; pinned == to align with flet main package (api.json is version-specific)
 ]
 optional = [
@@ -227,6 +234,20 @@ enforce_layered = false
 "strategies/" = 90
 "data/" = 90
 "ui/" = 85
+# Agent 服务层平台性覆盖来源例外（2026-11-16，Agent 特性登记，文件级条目）：
+# 覆盖率报告来自 Linux CI（unit + integration + embedded_real 合并），下列文件
+# 核心行为含 Windows 专属分支（msvcrt 管道句柄 skill_workspace、subprocess
+# CREATE_NO_WINDOW 隐藏窗口 attachment_worker、DBOS Windows 行为差异 workflows、
+# Windows 专属文件编排 attachments/mcp_fastmcp 传输细节），Linux runner 无法
+# 执行对应分支；测试在 Windows 全量通过（交付台账 21926 passed）。此处为机制内
+# 阈值登记（check_per_file_coverage.py 支持文件级精确匹配），非绕过门禁；分层
+# 90% 对这些文件仍为 advisory（D37 enforce_layered=false）。升级触发：相应模块
+# 在 Linux 引入平台中性等价行为测试或分层门禁翻转 enforce_layered=true 时复核。
+"services/agent_service/attachment_worker.py" = 70
+"services/agent_service/attachments.py" = 70
+"services/agent_service/mcp_fastmcp.py" = 70
+"services/agent_service/skill_workspace.py" = 70
+"services/agent_service/workflows.py" = 70
 
 [tool.importlinter]
 # R1 架构越界守护 (CLAUDE.md §3.1 R1 / §4.1)

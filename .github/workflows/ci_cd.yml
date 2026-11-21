@@ -343,6 +343,9 @@ jobs:
   ci-checks:
     name: Unit & Integration Tests (Linux, Python ${{ matrix.python-version }})
     needs: [lint-fast, changes]
+    # 锁定 Ubuntu 24.04（同 embedded-tests L1067）：ubuntu-latest 已迁至 26.04，其 libxml2
+    # 为 2.15（soname libxml2.so.16），而 sidecar 下载的 PostgreSQL 二进制动态链接
+    # libxml2.so.2——agent embedded_real 集成阶段的 initdb 直接失败（exit=11）。
     # Dependabot 发起的 PR 与普通 fork PR 均不被注入仓库 secrets（GitHub Actions 平台安全限制，仅提供只读 GITHUB_TOKEN）。
     # 本 job 依赖 CI_PG_PASSWORD（postgres 服务容器 + integration 测试）与 CODECOV_TOKEN，
     # secret 为空会导致 postgres 容器在 service 初始化阶段启动失败（见 run 31780083379）；service 先于步骤启动，
@@ -352,7 +355,7 @@ jobs:
     # 非 PR 事件（push / tag / merge_group / workflow_dispatch）pull_request 上下文为空，条件按事件名放行。
     # changes.outputs.code：非代码类 PR（仅文档等）跳过重型套件；非 PR 事件由 changes job 输出 true。
     if: needs.changes.outputs.code == 'true' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: read
@@ -471,6 +474,56 @@ jobs:
             -v --tb=long --capture=no \
             --cov --cov-report=term-missing --cov-report=xml --cov-report=json \
             --cov-append --junitxml=junit-integration.xml
+
+      - name: Install Rust toolchain (1.97.1, for agent embedded-integration sidecar)
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # stable
+        with:
+          toolchain: 1.97.1
+
+      - name: Cache Cargo registry & target (agent embedded-integration)
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+        with:
+          workspaces: sidecars/qtrading-pg-sidecar
+          key: ci-checks-agent-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
+          # 同 embedded-tests：只允许 main 保存，避免 PR 各存一份 target 副本挤占 10 GB 预算
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build sidecar binary (agent embedded_real integration coverage)
+        shell: bash
+        env:
+          # build script 通过 GitHub API 下载 PostgreSQL binaries 清单，传 token 提升限流
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd sidecars/qtrading-pg-sidecar
+          cargo build --release
+          BINARY_PATH="target/release/qtrading-pg-sidecar"
+          if [ ! -f "$BINARY_PATH" ]; then
+            echo "ERROR: sidecar binary not found at $BINARY_PATH after cargo build"
+            exit 1
+          fi
+          ABSOLUTE_PATH="$(pwd)/$BINARY_PATH"
+          echo "SIDECAR_BINARY_PATH=$ABSOLUTE_PATH" >> $GITHUB_ENV
+          HASH=$(sha256sum "$BINARY_PATH" | awk '{print $1}')
+          echo "SIDECAR_SHA256=$HASH" >> $GITHUB_ENV
+          echo "Sidecar binary built: $ABSOLUTE_PATH (sha256: $HASH)"
+
+      - name: Run agent embedded integration tests (serial, sidecar)
+        timeout-minutes: 25
+        env:
+          SIDECAR_BINARY_PATH: ${{ env.SIDECAR_BINARY_PATH }}
+          SIDECAR_SHA256: ${{ env.SIDECAR_SHA256 }}
+        run: |
+          set -e
+          # Agent DAO/迁移/恢复/资源/交付等 embedded_real 集成用例此前仅在本地执行
+          # （ci-checks 无 sidecar 注入，-m embedded_real 全部 skip），其覆盖来源缺失
+          # 导致 per-file 覆盖率误报（如 agent_dao.py 4.9%）。以真实 sidecar 串行执行
+          # （-n 1 避免 sidecar 并发，同 embedded-tests）并 --cov-append 合入报告，
+          # 再生同名 xml/json 保证下游 per-file / diff coverage / Codecov 消费合并
+          # 后的真实覆盖率（CI-F03 同因）。
+          python -m pytest tests/integration/ -m embedded_real -n 1 -p no:randomly \
+            --timeout=600 --timeout-method=thread -q \
+            --cov --cov-append --cov-report=term-missing --cov-report=xml --cov-report=json \
+            --junitxml=junit-agent-embedded.xml
 
       - name: Check Per-File Coverage >= 80%
         run: python scripts/check_per_file_coverage.py

@@ -13,10 +13,14 @@ stdlib，符合 CLAUDE.md §4.2「多层引用的基础设施提升到 core」�
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import hashlib
+import uuid
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal, Protocol
 from urllib.parse import urlsplit
+
+from core.agent_types import AgentValidationError, decode_json_doc
 
 # ---------------------------------------------------------------------------
 # 异常契约
@@ -275,11 +279,13 @@ class AdapterResponse:
 
 
 class InferenceAdapter(Protocol):
-    """统一推理适配器协议（§6.1，检视 F02）：ScenarioExecutor 消费的唯一适配器形状。
+    """统一推理适配器协议（§6.1，检视 F02）：旧入口（单 prompt）适配器形状。
 
     结构化协议（无需显式继承）：组装方（app 组合根 / 测试替身）只需提供带
-    ``invoke`` 方法的对象即可；注册裸函数为适配器即违反本协议，由
-    :func:`ensure_inference_adapter` 在组装期拒绝（而非执行期 AttributeError）。
+    ``invoke`` 方法的对象即可；聊天入口使用并列的 :class:`ChatInferenceAdapter`
+    （``invoke_chat``），两协议分别校验（检视 M01）。组装期由
+    :func:`ensure_registered_adapter` 只拒绝两者皆缺的对象，旧入口派发前由
+    :func:`ensure_inference_adapter` 复核（而非执行期 AttributeError）。
     """
 
     async def invoke(
@@ -292,10 +298,10 @@ class InferenceAdapter(Protocol):
 
 
 def ensure_inference_adapter(kind: str, adapter: object) -> None:
-    """组装期协议校验（检视 F02）：``adapter`` 缺可调用 ``.invoke`` 即 TypeError。
+    """旧入口协议校验（检视 F02）：``adapter`` 缺可调用 ``.invoke`` 即 TypeError。
 
-    供适配器工厂（bootstrap 组合根）与 ScenarioExecutor 注入点共用同一校验语义，
-    杜绝「函数 / 对象」两种隐式调用规则并存。
+    供旧入口（单 prompt 推理）在派发前校验；聊天入口使用 ``.invoke_chat``，
+    两入口协议分别校验、不互相混用（检视 M01）。
 
     Raises:
         TypeError: 适配器不满足 :class:`InferenceAdapter` 协议。
@@ -304,6 +310,28 @@ def ensure_inference_adapter(kind: str, adapter: object) -> None:
         raise TypeError(
             f"adapter for kind {kind!r} violates InferenceAdapter protocol "
             f"(missing callable .invoke): {type(adapter).__name__}"
+        )
+
+
+def ensure_registered_adapter(kind: str, adapter: object) -> None:
+    """组装期注册校验（检视 M01）：满足任一入口协议即可注册，两协议皆缺即 TypeError。
+
+    新旧入口协议分别校验：旧入口（:class:`InferenceAdapter`，``.invoke``）与新
+    入口（:class:`ChatInferenceAdapter`，``.invoke_chat``）由各自执行路径在派发前
+    复核（零预留副作用淘汰不具备该入口协议的适配器）。组装期只拒绝两种协议都
+    不满足的对象，避免「聊天适配器只有 invoke_chat」被旧协议校验误杀，也避免
+    错误形状对象流入执行期 AttributeError。
+
+    Raises:
+        TypeError: 适配器既不满足 :class:`InferenceAdapter` 也不满足
+            :class:`ChatInferenceAdapter` 协议。
+    """
+    has_legacy_invoke = callable(getattr(adapter, "invoke", None))
+    has_chat_invoke = callable(getattr(adapter, "invoke_chat", None))
+    if not (has_legacy_invoke or has_chat_invoke):
+        raise TypeError(
+            f"adapter for kind {kind!r} violates adapter protocol "
+            f"(missing callable .invoke / .invoke_chat): {type(adapter).__name__}"
         )
 
 
@@ -506,3 +534,575 @@ class SyntheticTestConsent:
     scope_version: int
     deadline: float
     purpose: Literal["synthetic_test"] = "synthetic_test"
+
+
+# ---------------------------------------------------------------------------
+# Agent 聊天 turn / stream 公共协议（设计正本 §10.1，B-01）
+# ---------------------------------------------------------------------------
+
+FINISH_REASONS: Final[tuple[str, ...]] = ("final", "tool_calls", "refused", "length", "error")
+FinishReason = Literal["final", "tool_calls", "refused", "length", "error"]
+
+#: 结构化输出模式（固定 SDK ``ModelRequestParameters.output_mode`` 的受支持子集，
+#: SDK 源码 ``pydantic_ai.models.ModelRequestParameters``）：``tool`` 经 output
+#: tool 承载、``native`` 经供应商原生 json_schema 响应格式承载、``prompted`` 经
+#: 提示指令承载、``text`` 无结构化约束。其余 SDK 模式（``auto`` / ``image`` /
+#: 遗留 ``tool_or_text``）不进入公开桥——桥层不支持即明确拒绝，不静默降级。
+CHAT_OUTPUT_MODES: Final[tuple[str, ...]] = ("text", "tool", "native", "prompted")
+ChatOutputMode = Literal["text", "tool", "native", "prompted"]
+CHAT_ROLES: Final[tuple[str, ...]] = ("system", "user", "assistant", "tool")
+#: 已选图片分型白名单：仅 PNG/JPEG（§10.1 ContentPart）。
+IMAGE_MIME_TYPES: Final[tuple[str, ...]] = ("image/png", "image/jpeg")
+#: 流事件封闭分型集合。
+STREAM_EVENT_KINDS: Final[tuple[str, ...]] = ("text", "tool_call_delta", "tool_call_closed", "finish")
+
+
+class ModelTurnProtocolError(ValueError):
+    """完整 turn/stream 协议失败（§10.1）：分片未闭合 / 工具配对非法 / 非法 JSON / 未知 part。
+
+    服务边界不把该异常当作可切换候选的质量失败——它是协议事实，调用方须停止
+    派发或交由既有错误分类处理；SDK 映射层的 Thinking/Compaction/未知协议
+    字段不得静默丢失，一律显式拒绝。
+    """
+
+    def __init__(self, code: str, field_path: str) -> None:
+        super().__init__(f"{code}: {field_path}")
+        self.code = code
+        self.field_path = field_path
+
+
+def _invalid(code: str, field_path: str) -> ModelTurnProtocolError:
+    return ModelTurnProtocolError(code, field_path)
+
+
+@dataclass(frozen=True, slots=True)
+class TextContentPart:
+    """文本分型：str 与 TextContent 均按文本处理（§10.1），不 trim。"""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class ImageContentPart:
+    """已选 PNG/JPEG binary 引用分型：mime 白名单见 IMAGE_MIME_TYPES（§10.1）。"""
+
+    mime: str
+    binary_ref: str
+
+
+#: ContentPart 封闭联合：未知类型明确拒绝，Thinking 不进入公开（无该分型）。
+ContentPart = TextContentPart | ImageContentPart
+
+
+@dataclass(frozen=True, slots=True)
+class AssistantToolCall:
+    """assistant 发起的工具调用：参数须为闭合 JSON 对象（§10.1）。"""
+
+    call_id: str
+    name: str
+    arguments_json: str
+
+    def ensure_valid(self) -> None:
+        if not self.call_id or not self.name:
+            raise _invalid("invalid_field", "$.assistant_tool_calls")
+        validate_closed_tool_arguments(self.arguments_json)
+
+
+def validate_closed_tool_arguments(arguments_json: object) -> dict[str, Any]:
+    """完整工具参数校验：闭合 JSON 对象，禁重复键 / 非有限数（§10.1）。
+
+    浮点按 Decimal 精确承载（复用 core.agent_types.decode_json_doc）；
+    分片未闭合（非法 JSON）即拒绝——工具参数闭合前不派发。
+    """
+
+    if not isinstance(arguments_json, str):
+        raise _invalid("invalid_arguments_json", "$")
+    try:
+        parsed = decode_json_doc(arguments_json)
+    except AgentValidationError as exc:
+        if exc.code in ("duplicate_key", "non_finite_number"):
+            raise _invalid(exc.code, "$") from exc
+        raise _invalid("invalid_arguments_json", "$") from exc
+    if not isinstance(parsed, dict):
+        raise _invalid("invalid_arguments_json", "$")
+    return parsed
+
+
+@dataclass(frozen=True, slots=True)
+class ChatMessage:
+    """完整聊天消息：role、content_parts、assistant_tool_calls、tool_call_id、来源引用。
+
+    tool-only content=None 合法：assistant 消息 ``content_parts`` 为空且仅含
+    ``assistant_tool_calls``；tool 消息必须携带 ``tool_call_id`` 严格配对。
+    tool 消息 ``content_parts`` 为空表示工具无返回，空文本分型表示返回空文本。
+    """
+
+    role: Literal["system", "user", "assistant", "tool"]
+    content_parts: tuple[ContentPart, ...]
+    assistant_tool_calls: tuple[AssistantToolCall, ...] = ()
+    tool_call_id: str | None = None
+    metadata: Mapping[str, str] = field(default_factory=dict)
+
+    def ensure_valid(self) -> None:
+        validate_chat_message(self)
+
+
+def validate_chat_message(message: ChatMessage) -> None:
+    """消息级配对与分型校验（§10.1）；未知 part 类型在封闭联合外即拒绝。"""
+
+    if message.role not in CHAT_ROLES:
+        raise _invalid("invalid_field", "$.role")
+    if message.role != "assistant" and message.assistant_tool_calls:
+        raise _invalid("invalid_pairing", "$.assistant_tool_calls")
+    if message.role == "tool" and not message.tool_call_id:
+        raise _invalid("invalid_pairing", "$.tool_call_id")
+    if message.role != "tool" and message.tool_call_id is not None:
+        raise _invalid("invalid_pairing", "$.tool_call_id")
+    for index, part in enumerate(message.content_parts):
+        path = f"$.content_parts[{index}]"
+        if isinstance(part, TextContentPart):
+            # 空文本仅工具结果合法（「返回空文本」；「无返回」用空 parts 表达），
+            # 用户/系统/助手空正文仍拒绝
+            if not part.text and message.role != "tool":
+                raise _invalid("invalid_part", path)
+        elif isinstance(part, ImageContentPart):
+            if part.mime not in IMAGE_MIME_TYPES or not part.binary_ref:
+                raise _invalid("invalid_part", path)
+        else:
+            raise _invalid("invalid_part", path)
+    for key in message.metadata:
+        if not key:
+            raise _invalid("invalid_field", "$.metadata")
+    for call in message.assistant_tool_calls:
+        call.ensure_valid()
+
+
+def validate_chat_message_sequence(messages: tuple[ChatMessage, ...]) -> None:
+    """跨消息工具配对校验（§10.1）：工具调用必须闭合且顺序合规。
+
+    单条消息的 role / part / 字段配对由 :func:`validate_chat_message` 承载；
+    本函数只校验跨消息关系，不修改消息（请求体保持不变）：
+
+    - 每条携带 ``assistant_tool_calls`` 的 assistant 消息，声明的每个
+      ``call_id`` 必须在紧随其后的连续 tool 消息块中恰好被回应一次——
+      缺返回、重复返回、返回未声明的 call（含跨轮残留）、孤立 tool 均拒绝；
+    - ``call_id`` 在整段消息内唯一（并行同 ID / 跨轮重复 ID 拒绝）；
+    - tool 消息只能作为其所属 assistant 消息的紧邻返回块出现（乱序拒绝）。
+
+    Raises:
+        ModelTurnProtocolError: 跨消息配对不闭合（``invalid_pairing``）。
+    """
+    seen_call_ids: set[str] = set()
+    index = 0
+    total = len(messages)
+    while index < total:
+        message = messages[index]
+        if message.role == "tool":
+            # 不在任何 assistant 返回块内的 tool 消息：孤立 / 乱序 / 跨轮残留
+            raise _invalid("invalid_pairing", f"$.messages[{index}].tool_call_id")
+        calls = message.assistant_tool_calls
+        if message.role != "assistant" and calls:
+            raise _invalid("invalid_pairing", f"$.messages[{index}].assistant_tool_calls")
+        if not calls:
+            index += 1
+            continue
+        declared: list[str] = []
+        for call in calls:
+            if call.call_id in seen_call_ids:
+                # 并行同 ID 或跨轮重复 ID
+                raise _invalid("invalid_pairing", f"$.messages[{index}].assistant_tool_calls")
+            seen_call_ids.add(call.call_id)
+            declared.append(call.call_id)
+        answered: set[str] = set()
+        lookahead = index + 1
+        while lookahead < total and messages[lookahead].role == "tool":
+            tool_call_id = messages[lookahead].tool_call_id
+            if tool_call_id is None or tool_call_id in answered or tool_call_id not in declared:
+                # 未声明的 call / 同一 call 多返回（含跨轮残留）
+                raise _invalid("invalid_pairing", f"$.messages[{lookahead}].tool_call_id")
+            answered.add(tool_call_id)
+            lookahead += 1
+        if len(answered) != len(declared):
+            # 声明的 call 缺返回
+            raise _invalid("invalid_pairing", f"$.messages[{index}].assistant_tool_calls")
+        index = lookahead
+
+
+@dataclass(frozen=True, slots=True)
+class FunctionToolSpec:
+    """工具规范：完整 json_schema、准确 schema 版本、output_tool（结构 final）标记。
+
+    ``output_tool=True`` 表示结构化输出 final 工具，不是 MCP 权限工具（§10.1）；
+    schema 完整性程序校验由装白名单入口负责，本类型不代校验。
+    """
+
+    name: str
+    description: str
+    json_schema: Mapping[str, Any]
+    schema_version: str
+    output_tool: bool = False
+
+    def ensure_valid(self) -> None:
+        if not self.name or not self.description or not self.schema_version:
+            raise _invalid("invalid_field", "$")
+        if not isinstance(self.json_schema, Mapping):
+            raise _invalid("invalid_field", "$.json_schema")
+
+
+@dataclass(frozen=True, slots=True)
+class ChatTurnRequest:
+    """完整聊天回合请求：原 model_call 身份、完整 messages/system/instructions/tools。
+
+    ``instructions`` 为 SystemPromptPart/instructions 保序序列；``output_tools``
+    为结构 final；``frozen_params`` 为受理冻结的采样参数；``deadline`` 为单调
+    时钟截止值（沿 InferenceRequest 语义）；``output_mode`` 为结构化输出的出站
+    承载模式（见 :data:`CHAT_OUTPUT_MODES`）——模式与 schema 必须自洽，桥层据此
+    生成供应商真实封装（native 不得把裸 schema 当 response_format 透传）。
+    """
+
+    model_call_id: str
+    messages: tuple[ChatMessage, ...]
+    instructions: tuple[str, ...]
+    tools: tuple[FunctionToolSpec, ...]
+    output_schema: Mapping[str, Any] | None
+    frozen_params: Mapping[str, Any]
+
+    max_output_tokens: int | None
+    deadline: float
+    output_tools: tuple[FunctionToolSpec, ...] = ()
+    output_mode: ChatOutputMode = "text"
+
+    def ensure_valid(self) -> None:
+        if not self.model_call_id:
+            raise _invalid("invalid_field", "$.model_call_id")
+        if self.output_mode not in CHAT_OUTPUT_MODES:
+            raise _invalid("invalid_field", "$.output_mode")
+        if self.output_mode in ("native", "prompted") and self.output_schema is None:
+            # native/prompted 都必须有结构化对象；缺失即请求自相矛盾（fail-closed，
+            # 不以无约束文本冒充结构化回合，R21）
+            raise _invalid("invalid_field", "$.output_schema")
+        if self.output_mode == "tool" and not any(spec.output_tool for spec in (*self.tools, *self.output_tools)):
+            # tool 模式的结构 final 只能经 output tool 承载；无结构工具即无出站约束
+            raise _invalid("invalid_field", "$.output_tools")
+        if self.output_mode == "text" and self.output_schema is not None:
+            # text 模式无结构化约束——携带 schema 会被静默丢弃，必须显式声明模式
+            raise _invalid("invalid_field", "$.output_schema")
+        if not self.messages:
+            raise _invalid("invalid_field", "$.messages")
+        for index, message in enumerate(self.messages):
+            try:
+                validate_chat_message(message)
+            except ModelTurnProtocolError as exc:
+                raise ModelTurnProtocolError(exc.code, f"$.messages[{index}]{exc.field_path[1:]}") from exc
+        # 逐消息校验通过后再核跨消息工具配对（缺返回 / 多返回 / 重复 ID /
+        # 乱序 / 孤立 tool），错误请求在派发前 fail-closed（零外发）
+        validate_chat_message_sequence(self.messages)
+        for spec in (*self.tools, *self.output_tools):
+            spec.ensure_valid()
+
+
+@dataclass(frozen=True, slots=True)
+class ChatTurnResponse:
+    """完整聊天回合响应：text/tool_calls/structured_output、finish/refusal、实际模型。
+
+    ``usage_observed`` 标记是否真实观测到用量；``usage`` 缺失保 None——
+    不能把 SDK 默认 usage=0 倒灌账本（§10.1）。``transport_state`` 与结束
+    状态分离：ok / failed / unknown（INV-07）。
+    """
+
+    text: str | None
+    finish_reason: FinishReason
+    actual_model: str | None
+    usage_observed: bool
+    usage: NormalizedLLMUsage | None
+    transport_state: Literal["ok", "failed", "unknown"] = "unknown"
+    tool_calls: tuple[AssistantToolCall, ...] = ()
+    structured_output: Mapping[str, Any] | None = None
+    refusal: str | None = None
+
+    def ensure_valid(self) -> None:
+        if self.finish_reason not in FINISH_REASONS:
+            raise _invalid("invalid_finish", "$.finish_reason")
+        if self.usage_observed and self.usage is None:
+            raise _invalid("invalid_field", "$.usage")
+        if self.finish_reason == "refused" and not self.refusal:
+            raise _invalid("invalid_field", "$.refusal")
+        if self.finish_reason == "tool_calls" and not self.tool_calls:
+            raise _invalid("invalid_field", "$.tool_calls")
+        if self.actual_model is not None and not self.actual_model:
+            raise _invalid("invalid_field", "$.actual_model")
+        for call in self.tool_calls:
+            call.ensure_valid()
+
+
+@dataclass(frozen=True, slots=True)
+class ChatStreamEvent:
+    """真实流事件：choice/tool index、稳定 call_id、text/tool delta、finish/usage。
+
+    ``tool_call_delta`` 仅承载累积分片（``closed_arguments_json`` 恒为 None）；
+    参数闭合以 ``tool_call_closed`` 事件承载并校验——工具参数闭合前不派发
+    （§10.1）。finish 事件的 ``usage`` 缺失保 None。
+    """
+
+    sequence: int
+    kind: Literal["text", "tool_call_delta", "tool_call_closed", "finish"]
+    call_index: int | None = None
+    call_id: str | None = None
+    name: str | None = None
+    text_delta: str | None = None
+    arguments_fragment: str | None = None
+    closed_arguments_json: str | None = None
+    finish_reason: FinishReason | None = None
+    usage: NormalizedLLMUsage | None = None
+
+    def ensure_valid(self) -> None:
+        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int) or self.sequence < 1:
+            raise _invalid("invalid_field", "$.sequence")
+        if self.kind == "text":
+            if not isinstance(self.text_delta, str):
+                raise _invalid("invalid_field", "$.text_delta")
+            return
+        if self.kind == "tool_call_delta":
+            if self.call_index is None or not self.call_id or not self.name:
+                raise _invalid("invalid_field", "$.call_id")
+            if not isinstance(self.arguments_fragment, str) or self.closed_arguments_json is not None:
+                raise _invalid("invalid_field", "$.arguments_fragment")
+            return
+        if self.kind == "tool_call_closed":
+            if self.call_index is None or not self.call_id or not self.name:
+                raise _invalid("invalid_field", "$.call_id")
+            if self.closed_arguments_json is None:
+                raise _invalid("invalid_field", "$.closed_arguments_json")
+            validate_closed_tool_arguments(self.closed_arguments_json)
+            return
+        if self.kind == "finish":
+            if self.finish_reason is None or self.finish_reason not in FINISH_REASONS:
+                raise _invalid("invalid_field", "$.finish_reason")
+            return
+        raise _invalid("invalid_field", "$.kind")
+
+
+# ---------------------------------------------------------------------------
+# 聊天回合适配器协议（HANDOFF §6.1）
+# ---------------------------------------------------------------------------
+
+
+#: 流事件回调（HANDOFF §6.1/§6.4）：可等待；有界通道背压经 await 语义透传。
+#: 允许返回 None 或 Awaitable，消费方以 isawaitable 判定后等待。
+ChatStreamEventHandler = Callable[[ChatStreamEvent], object]
+
+
+class ChatInferenceAdapter(Protocol):
+    """完整聊天回合适配器协议（HANDOFF §6.1）：云/本地聊天实现；FinBERT 等非聊天
+    适配器不接该协议。
+
+    与 :class:`InferenceAdapter`（单 prompt 推理）并列：组装方（app 组合根 /
+    测试替身）提供带 ``invoke_chat`` 方法的对象即可，结构化协议无需显式继承。
+    ``execute_chat_turn`` 消费本协议形状（B-02-3 接线）。
+    """
+
+    async def invoke_chat(
+        self,
+        request: ChatTurnRequest,
+        resolved_connection: ResolvedConnection,
+        deadline: float,
+        attempt_context: AttemptContext,
+        *,
+        stream: bool = True,
+        response_format: Mapping[str, Any] | None = None,
+        on_event: ChatStreamEventHandler | None = None,
+    ) -> ChatTurnResponse: ...
+
+
+# ---------------------------------------------------------------------------
+# 完整聊天回合应用终态（HANDOFF §6.1 / DD §10.1，B-02-3）
+# ---------------------------------------------------------------------------
+
+
+#: 回合传输事实状态（INV-07，不把未知折叠为确定失败）：``ok`` = 协议 finish 与
+#: 流关闭确认且响应完整；``failed`` = 确认失败（零出站门控拒绝、协议断流等
+#: 确认错误）；``unknown`` = 外发已开始但效果无法证明（取消传播口径，F19）。
+ChatTurnTransportState = Literal["ok", "failed", "unknown"]
+
+
+#: 回合结算事实状态：``settled`` = 终态落账确认持久化；``deferred`` = 终态已
+#: 提交但持久化未确认（F20 重放队列承接，落账稍后推进）；``unknown`` = 收费
+#: 无法证明（外发后取消，预留 held_unconfirmed，F19）；``None`` = 无在途账目
+#: 事实（未建 attempt 的零出站失败，无结算维度）。
+ChatTurnSettlementState = Literal["settled", "deferred", "unknown"]
+
+
+@dataclass(frozen=True, slots=True)
+class ChatTurnOutcome:
+    """完整聊天回合的应用终态（``execute_chat_turn`` 唯一返回契约）。
+
+    - **transport 与 settlement 两维分离**（DD §10.1「transport、settlement、
+      unknown 分开」）：传输事实与结算事实互不折叠，各自可表达 unknown
+      （INV-07——不把未知伪装成确定终态，R21）。
+    - **已公开分片后失败**（§6.4-5）：``partial_text`` 非 None 表示调用方已收到
+      的真实分片原样保留、回合尾部内容未知以 ``response=None`` 承载——不换模型
+      拼接、不重试换 attempt（``attempt_id`` 绑定原 attempt）。
+    - **拒绝回合**（finish_reason=refused）：``status="failed"`` +
+      ``transport_state="ok"`` + 完整 ``response`` 承载——拒绝是完成的模型回合
+      （传输事实成立），拒绝事实不伪装、不换候选规避（DD §10.1），调用方经
+      ``response.refusal`` 读取原文。
+    - **身份关联**（HANDOFF：model_call_id → invocation_id → 实际 attempt 稳定
+      关联）：``attempt_id=None`` 表示零出站失败（未建任何 attempt）。
+    """
+
+    model_call_id: str
+    invocation_id: str
+    status: Literal["succeeded", "failed"]
+    transport_state: ChatTurnTransportState
+    settlement_state: ChatTurnSettlementState | None
+    attempt_id: str | None
+    response: ChatTurnResponse | None
+    partial_text: str | None
+    error_code: str | None
+
+    def ensure_valid(self) -> None:
+        if not self.model_call_id or not self.invocation_id:
+            raise _invalid("invalid_field", "$")
+        if self.status == "succeeded":
+            if self.response is None or self.transport_state != "ok" or self.error_code is not None:
+                raise _invalid("invalid_field", "$")
+            if self.partial_text is not None:
+                raise _invalid("invalid_field", "$.partial_text")
+            return
+        if self.response is not None and self.partial_text is not None:
+            # 拒绝回合（完整 response）与分片后失败（partial_text）互斥——两者
+            # 不得同时伪装「既完整又部分」的矛盾终态
+            raise _invalid("invalid_field", "$.response")
+
+
+# ---------------------------------------------------------------------------
+# 股票分析调用身份（设计正本 F34 / AC23 / AC38，DD-F34）
+# ---------------------------------------------------------------------------
+
+
+def _require_identity_text(value: object, path: str) -> str:
+    """身份字段口径：非空文本（去首尾空白后），空/非文本显式拒绝（不伪造身份，R21）。"""
+
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{path} must be non-empty text")
+    return value.strip()
+
+
+def _stock_research_request_id(operation_id: str, session_id: str | None, turn_id: str | None, ts_code: str) -> str:
+    """每股研究请求身份：主会话 + 执行轮次 + 批次操作 + 股票代码的顺序化 sha256。
+
+    研究请求是「一次可重放的单股分析意图」的稳定身份，同一（主会话、轮次、
+    批次、股票）重复提交得到同一身份（不得二次计费）；重试显式换新轮次
+    （:meth:`StockAgentBatchIdentity.for_stock` 的 ``new_turn=True``）即新请求，
+    仍挂原 ``operation_id``，原请求事实保留（R21）。会话未知以空串参与摘要，
+    不伪造会话身份——批次操作 ``operation_id`` 已由调用方一次性分配，不会因此
+    让两次不同批次相撞。
+    """
+
+    payload = "\x1f".join([operation_id, session_id or "", turn_id or "", ts_code])
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"stock_research_{digest[:32]}"
+
+
+@dataclass(frozen=True, slots=True)
+class StockAgentBatchIdentity:
+    """一次股票分析批次预存的稳定身份（F34/AC23）。
+
+    批次入口（``AIStrategyMixin.run_ai_analysis`` / 夜间任务）在首次派发前分配
+    一次并整批复用，保证「原批次预存稳定身份」：同一批次内同股重试沿用同一
+    ``operation_id``（费用/研究链可回查），每股经 :meth:`for_stock` 派生唯一研究
+    请求身份（会话 + 轮次 + 批次 + 股票）。``session_id`` / ``turn_id`` 为主会话
+    与轮次引用：调用方已知 Agent 会话时透传，未知保持 ``None``（不伪造，R21）。
+    """
+
+    operation_id: str
+    strategy_key: str | None = None
+    session_id: str | None = None
+    turn_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "operation_id", _require_identity_text(self.operation_id, "$.operation_id"))
+
+    def for_stock(self, ts_code: str, *, new_turn: bool = False) -> StockAgentCall:
+        """派生单股调用身份；``new_turn=True`` 表示重试等新轮次（仍关联原操作）。"""
+
+        code = _require_identity_text(ts_code, "$.ts_code")
+        turn_id = uuid.uuid4().hex if new_turn else self.turn_id
+        return StockAgentCall(
+            operation_id=self.operation_id,
+            call_id=_stock_research_request_id(self.operation_id, self.session_id, turn_id, code),
+            ts_code=code,
+            strategy_key=self.strategy_key,
+            session_id=self.session_id,
+            turn_id=turn_id,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class StockAgentCall:
+    """单股研究请求身份（F34）：两层 ``analyze_stock`` 以 keyword-only ``agent_call`` 透传。
+
+    ``call_id`` 即研究请求身份（会话 + 轮次 + 批次 + 股票），同时作为统一调度链的
+    ``invocation_id``（研究/费用/治理账目同源），``operation_id`` 作为请求
+    ``run_id``（批次级关联，落库到 ``ai_invocation.run_id``）；``as_metadata()``
+    为落库投影（写入 ``execution_metadata`` 程序字段），失败路径同样保留身份（R21）。
+    """
+
+    operation_id: str
+    call_id: str
+    ts_code: str
+    strategy_key: str | None = None
+    session_id: str | None = None
+    turn_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "operation_id", _require_identity_text(self.operation_id, "$.operation_id"))
+        object.__setattr__(self, "call_id", _require_identity_text(self.call_id, "$.call_id"))
+        object.__setattr__(self, "ts_code", _require_identity_text(self.ts_code, "$.ts_code"))
+
+    @property
+    def request_id(self) -> str:
+        """研究请求身份（与模型调度账本 ``invocation_id`` 同值，供费用投影直接引用）。"""
+
+        return self.call_id
+
+    @property
+    def ledger_refs(self) -> tuple[str, ...]:
+        """本请求费用事实的账本引用（``AgentService.read_cost_projection`` 直接可用）。"""
+
+        return (self.call_id,)
+
+    def as_metadata(self) -> dict[str, str | None]:
+        """只读投影（落库/结果行共用）：键名稳定，值缺失保持 ``None``（不伪装）。"""
+
+        return {
+            "operation_id": self.operation_id,
+            "call_id": self.call_id,
+            "request_id": self.request_id,
+            "ts_code": self.ts_code,
+            "strategy_key": self.strategy_key,
+            "session_id": self.session_id,
+            "turn_id": self.turn_id,
+        }
+
+
+def new_stock_agent_batch(
+    *,
+    strategy_key: str | None = None,
+    session_id: str | None = None,
+    turn_id: str | None = None,
+    operation_id: str | None = None,
+) -> StockAgentBatchIdentity:
+    """批次入口分配稳定身份：``operation_id`` 沿用调用方已存身份或新分配一次。"""
+
+    resolved_operation = (
+        _require_identity_text(operation_id, "$.operation_id")
+        if operation_id is not None
+        else f"stock_batch_{uuid.uuid4().hex}"
+    )
+    return StockAgentBatchIdentity(
+        operation_id=resolved_operation,
+        strategy_key=strategy_key,
+        session_id=session_id,
+        turn_id=turn_id if turn_id is not None else uuid.uuid4().hex,
+    )

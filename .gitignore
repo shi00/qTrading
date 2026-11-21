@@ -171,6 +171,7 @@ PLAN-*.md
 .claude/
 .harness/
 /spec.md
+/tasks.md
 .pgtest/
 
 # 8. 验收证据（G4-202 截图含本机 GPU/路径等环境信息，按需附着到验收记录，不入库）

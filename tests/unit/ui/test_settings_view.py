@@ -302,15 +302,16 @@ class TestShowSnack:
 
 
 class TestBuildTabs:
-    """_build_tabs：实例化 6 个 tabs（patch 命令式 tabs 避免真实实例化）。"""
+    """_build_tabs：实例化 7 个 tabs（patch 各 tab 避免真实实例化）。"""
 
     @pytest.fixture(autouse=True)
     def _patch_all_tabs(self):
-        """Patch 5 个命令式 tabs + 1 个声明式 DatabaseTab，避免真实实例化。"""
+        """Patch 全部 tabs，避免真实实例化。"""
         with (
             patch("ui.views.settings_view.DataSourceTab") as self.mock_data,
             patch("ui.views.settings_view.DatabaseTab") as self.mock_db,
             patch("ui.views.settings_view.AIBrainTab") as self.mock_ai,
+            patch("ui.views.settings_view.MCPServicesTab") as self.mock_mcp,
             patch("ui.views.settings_view.AutomationTab") as self.mock_auto,
             patch("ui.views.settings_view.NotificationsTab") as self.mock_notify,
             patch("ui.views.settings_view.SystemTab") as self.mock_system,
@@ -318,16 +319,17 @@ class TestBuildTabs:
             self.mock_data.return_value = MagicMock(name="DataSourceTab")
             self.mock_db.return_value = MagicMock(name="DatabaseTab")
             self.mock_ai.return_value = MagicMock(name="AIBrainTab")
+            self.mock_mcp.return_value = MagicMock(name="MCPServicesTab")
             self.mock_auto.return_value = MagicMock(name="AutomationTab")
             self.mock_notify.return_value = MagicMock(name="NotificationsTab")
             self.mock_system.return_value = MagicMock(name="SystemTab")
             yield
 
-    def test_build_tabs_returns_6_tabs(self):
+    def test_build_tabs_returns_7_tabs(self):
         from ui.views.settings_view import _build_tabs
 
         tabs = _build_tabs(MagicMock())
-        assert len(tabs) == 6
+        assert len(tabs) == 7
 
     def test_build_tabs_calls_each_tab_constructor(self):
         """Task 7.2: 惰性构造 — 只构造 current_tab 对应的 tab, 其他为空 Container。"""
@@ -340,6 +342,7 @@ class TestBuildTabs:
         # 其他 tab 工厂不应被调用 (惰性构造)
         self.mock_db.assert_not_called()
         self.mock_ai.assert_not_called()
+        self.mock_mcp.assert_not_called()
         self.mock_auto.assert_not_called()
         self.mock_notify.assert_not_called()
         self.mock_system.assert_not_called()
@@ -347,11 +350,11 @@ class TestBuildTabs:
     def test_build_tabs_notifications_tab_receives_only_show_snack(self):
         """NotificationsTab 声明式重写后只接收 show_snack (Phase D.4, 无 page_ref)。
 
-        Task 7.2: current_tab=4 (NotificationsTab) 时才构造。
+        Task 7.2: current_tab=5 (NotificationsTab) 时才构造。
         """
         from ui.views.settings_view import _build_tabs
 
-        _build_tabs(MagicMock(), current_tab=4)
+        _build_tabs(MagicMock(), current_tab=5)
 
         self.mock_notify.assert_called_once()
         args = self.mock_notify.call_args[0]
@@ -369,12 +372,13 @@ class TestBuildTabs:
         # current_tab=2 (AIBrainTab)
         tabs = _build_tabs(show_snack, current_tab=2)
 
-        assert len(tabs) == 6
+        assert len(tabs) == 7
         # 只有 AIBrainTab 被构造
         self.mock_ai.assert_called_once_with(show_snack)
         # 其他 tab 工厂不应被调用
         self.mock_data.assert_not_called()
         self.mock_db.assert_not_called()
+        self.mock_mcp.assert_not_called()
         self.mock_auto.assert_not_called()
         self.mock_notify.assert_not_called()
         self.mock_system.assert_not_called()
@@ -393,6 +397,7 @@ class TestBuildTabs:
         self.mock_data.assert_called_once_with(show_snack)
         self.mock_db.assert_not_called()
         self.mock_ai.assert_not_called()
+        self.mock_mcp.assert_not_called()
         self.mock_auto.assert_not_called()
         self.mock_notify.assert_not_called()
         self.mock_system.assert_not_called()
@@ -404,11 +409,12 @@ class TestBuildTabs:
         show_snack = MagicMock()
         tabs = _build_tabs(show_snack, current_tab=2, visited_tabs={0, 2})
 
-        assert len(tabs) == 6
+        assert len(tabs) == 7
         self.mock_data.assert_called_once_with(show_snack)  # tab 0 visited
         self.mock_ai.assert_called_once_with(show_snack)  # tab 2 visited
         # 未访问 Tab 不构造
         self.mock_db.assert_not_called()
+        self.mock_mcp.assert_not_called()
         self.mock_auto.assert_not_called()
         self.mock_notify.assert_not_called()
         self.mock_system.assert_not_called()
@@ -418,7 +424,7 @@ class TestBuildTabs:
         from ui.views.settings_view import _build_tabs
 
         tabs = _build_tabs(MagicMock(), current_tab=1, visited_tabs={0, 1})
-        assert len(tabs) == 6
+        assert len(tabs) == 7
         # current_tab=1 → tabs[1].visible=True
         assert tabs[1].visible is True
         # tab 0 visited 但非 current → visible=False, content 非 None
@@ -446,10 +452,10 @@ class TestBuildTabs:
 class TestTabConfig:
     """_TAB_CONFIG 顺序与 _build_tabs 返回顺序一致。"""
 
-    def test_tab_config_has_6_entries(self):
+    def test_tab_config_has_7_entries(self):
         from ui.views.settings_view import _TAB_CONFIG
 
-        assert len(_TAB_CONFIG) == 6
+        assert len(_TAB_CONFIG) == 7
 
     def test_tab_config_entries_are_tuples(self):
         from ui.views.settings_view import _TAB_CONFIG
@@ -506,11 +512,12 @@ class TestSettingsViewComponentBody:
 
     @pytest.fixture(autouse=True)
     def _patch_all_tabs(self):
-        """Patch 6 个 tabs 避免真实实例化。"""
+        """Patch 7 个 tabs 避免真实实例化。"""
         with (
             patch("ui.views.settings_view.DataSourceTab") as self.mock_data,
             patch("ui.views.settings_view.DatabaseTab") as self.mock_db,
             patch("ui.views.settings_view.AIBrainTab") as self.mock_ai,
+            patch("ui.views.settings_view.MCPServicesTab") as self.mock_mcp,
             patch("ui.views.settings_view.AutomationTab") as self.mock_auto,
             patch("ui.views.settings_view.NotificationsTab") as self.mock_notify,
             patch("ui.views.settings_view.SystemTab") as self.mock_system,
@@ -518,6 +525,7 @@ class TestSettingsViewComponentBody:
             self.mock_data.return_value = MagicMock(name="DataSourceTab")
             self.mock_db.return_value = MagicMock(name="DatabaseTab")
             self.mock_ai.return_value = MagicMock(name="AIBrainTab")
+            self.mock_mcp.return_value = MagicMock(name="MCPServicesTab")
             self.mock_auto.return_value = MagicMock(name="AutomationTab")
             self.mock_notify.return_value = MagicMock(name="NotificationsTab")
             self.mock_system.return_value = MagicMock(name="SystemTab")
@@ -544,15 +552,15 @@ class TestSettingsViewComponentBody:
         _, result = self._mount(mock_i18n_state, mock_app_colors_state)
         assert isinstance(result, ft.Container)
 
-    def test_mount_renders_six_tab_buttons(
+    def test_mount_renders_seven_tab_buttons(
         self,
         mock_i18n_state,
         mock_app_colors_state,
     ):
-        """挂载后 tab_bar 包含 6 个 ft.Button (每个 tab 一个)。"""
+        """挂载后 tab_bar 包含 7 个 ft.Button (每个 tab 一个)。"""
         _, result = self._mount(mock_i18n_state, mock_app_colors_state)
         buttons = _find_buttons(result)
-        assert len(buttons) == 6
+        assert len(buttons) == 7
 
     def test_mount_first_tab_selected_by_default(
         self,
@@ -767,7 +775,7 @@ class TestSettingsViewComponentBody:
 def _selected_tab_index(result: object) -> int:
     """返回当前 selected 状态的 tab button 索引 (bgcolor=PRIMARY)."""
     buttons = _find_buttons(result)
-    assert len(buttons) == 6, f"应有 6 个 tab button, 实际 {len(buttons)}"
+    assert len(buttons) == 7, f"应有 7 个 tab button, 实际 {len(buttons)}"
     for i, btn in enumerate(buttons):
         bgcolor = getattr(btn.style, "bgcolor", None)
         if bgcolor is None and isinstance(btn.style, dict):
@@ -794,11 +802,12 @@ class TestSettingsViewTargetSubtab:
 
     @pytest.fixture(autouse=True)
     def _patch_all_tabs(self):
-        """Patch 6 个 tabs 避免真实实例化。"""
+        """Patch 7 个 tabs 避免真实实例化。"""
         with (
             patch("ui.views.settings_view.DataSourceTab") as self.mock_data,
             patch("ui.views.settings_view.DatabaseTab") as self.mock_db,
             patch("ui.views.settings_view.AIBrainTab") as self.mock_ai,
+            patch("ui.views.settings_view.MCPServicesTab") as self.mock_mcp,
             patch("ui.views.settings_view.AutomationTab") as self.mock_auto,
             patch("ui.views.settings_view.NotificationsTab") as self.mock_notify,
             patch("ui.views.settings_view.SystemTab") as self.mock_system,
@@ -806,6 +815,7 @@ class TestSettingsViewTargetSubtab:
             self.mock_data.return_value = MagicMock(name="DataSourceTab")
             self.mock_db.return_value = MagicMock(name="DatabaseTab")
             self.mock_ai.return_value = MagicMock(name="AIBrainTab")
+            self.mock_mcp.return_value = MagicMock(name="MCPServicesTab")
             self.mock_auto.return_value = MagicMock(name="AutomationTab")
             self.mock_notify.return_value = MagicMock(name="NotificationsTab")
             self.mock_system.return_value = MagicMock(name="SystemTab")
@@ -851,10 +861,10 @@ class TestSettingsViewTargetSubtab:
         mock_i18n_state,
         mock_app_colors_state,
     ):
-        """target_subtab ("data",1) → ("system",2) 变更 → 切到 system 子页 (index 5)."""
+        """target_subtab ("data",1) → ("system",2) 变更 → 切到 system 子页 (index 6)."""
         component, _ = self._mount(("data", 1))
         result = self._rerender(component, ("system", 2))
-        assert _selected_tab_index(result) == 5, "深链变更应切到 system 子页"
+        assert _selected_tab_index(result) == 6, "深链变更应切到 system 子页"
 
     def test_repeated_deep_link_same_key_retriggers(
         self,
@@ -867,11 +877,11 @@ class TestSettingsViewTargetSubtab:
         component, result = self._mount(("ai", 1))
         assert _selected_tab_index(result) == 2
 
-        # 模拟用户手动切到 system 子页 (index 5)
+        # 模拟用户手动切到 system 子页 (index 6)
         buttons = _find_buttons(result)
-        _trigger_callback(buttons[5].on_click, _make_tab_event("5"))
+        _trigger_callback(buttons[6].on_click, _make_tab_event("6"))
         result = render_once(component)
-        assert _selected_tab_index(result) == 5
+        assert _selected_tab_index(result) == 6
 
         # 同 key 深链再次到达 (seq 2) → 重新切回 ai 子页
         result = self._rerender(component, ("ai", 2))
@@ -909,12 +919,12 @@ class TestSettingsViewTargetSubtab:
         # 深链目标子页可见
         stacks = [c for c in _collect_controls(result) if isinstance(c, ft.Stack)]
         assert len(stacks) >= 1
-        # 未深链的 system tab (index 5) 未被构造
+        # 未深链的 system tab (index 6) 未被构造
         self.mock_system.assert_not_called()
         # 渲染树: visited 的 tab content 非 None (ai), 未访问 tab content None (system)
         tab_body_stack = stacks[-1]
         assert tab_body_stack.controls[2].content is not None, "深链 ai 子页应被构造"
-        assert tab_body_stack.controls[5].content is None, "未访问 system 子页不应被构造"
+        assert tab_body_stack.controls[6].content is None, "未访问 system 子页不应被构造"
 
 
 class TestSettingsSubtabIndex:
@@ -928,7 +938,8 @@ class TestSettingsSubtabIndex:
             "data": 0,
             "database": 1,
             "ai": 2,
-            "tasks": 3,
-            "notify": 4,
-            "system": 5,
+            "mcp": 3,
+            "tasks": 4,
+            "notify": 5,
+            "system": 6,
         }

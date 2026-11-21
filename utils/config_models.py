@@ -88,6 +88,41 @@ User: 某明星去旅游了
 Assistant: {{"category_L1": "other", "category_L2": "entertainment", "sentiment": "Neutral", "emoji": "🍉"}}"""
 
 
+# ---------------------------------------------------------------------------
+# 研究角色默认正文（F35 / J26：主/子研究角色默认只读，用户自定义区为默认之后的追加）
+# 版本字面量用于「来源/版本可查」与「升级保旧请求绑定」，默认正文变更时必须递增。
+# ---------------------------------------------------------------------------
+DEFAULT_MAIN_ROLE_PROMPT = """你是本应用的研究主角色（Main Research Role）。
+
+职责：
+1. 理解用户的 A 股研究问题，必要时拆解为可独立执行的研究子任务。
+2. 直接回答不需要工具或外部资料的问题；需要时仅在已授权范围内使用 Skill / MCP 工具。
+3. 汇总子任务成果时保留来源、单位、时点与不确定性，不把未知结果伪装为成功。
+
+约束：
+- 不递归派发子任务给自身，不绕过用户授权使用未获批的工具或数据。
+- 输出必须区分事实、推断与未知，禁止编造数据或来源。
+- 固定安全规则与程序输出契约始终优先于本角色追加内容。
+"""
+
+DEFAULT_SUB_ROLE_PROMPT = """你是研究子角色（Research Sub-role）。
+
+职责：
+1. 只执行主角色分配的单个研究任务，按给定范围读取资料并给出可核对的结论。
+2. 明确列出已用来源、未读/不可用部分与关键不确定性。
+
+约束：
+- 不接受自由用户输入，不再委派下级任务，不继承主角色的工具许可。
+- 不编造数据或来源；固定安全规则与程序输出契约优先于本角色追加内容。
+"""
+
+#: role_key -> (默认正文, 默认版本)
+ROLE_PROMPT_DEFAULTS: dict[str, tuple[str, str]] = {
+    "main": (DEFAULT_MAIN_ROLE_PROMPT, "default-v1"),
+    "sub": (DEFAULT_SUB_ROLE_PROMPT, "default-v1"),
+}
+
+
 class SyncIntegrityConfig(BaseModel):
     max_retry_days_per_sync: int = Field(default=30, ge=1)
     max_retry_stocks_per_sync: int = Field(default=100, ge=1)
@@ -118,7 +153,9 @@ class ProviderCredential(BaseModel):
 # 存储与 AppConfig 不导入 services 类型；schema_version=1。
 # ==========================================================================
 
-SCENARIO_IDS = ("news_annotation", "stock_analysis", "news_risk")
+# §10.2「配置和授权归属」：场景注册面新增 agent_research（智能体研究用途）。
+# 旧三场景与 synthetic_test 保持原归属不变（旧链拒绝语义由 scenario_dispatch 承载）。
+SCENARIO_IDS = ("news_annotation", "stock_analysis", "news_risk", "agent_research")
 EGRESS_PURPOSES = (*SCENARIO_IDS, "synthetic_test")
 ADAPTER_KINDS = ("litellm_chat", "gguf_chat", "gguf_sentiment")
 BILLING_MODES = ("usage_only", "estimate_cost")
@@ -254,7 +291,7 @@ class ScenarioRouteConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    scenario_id: Literal["news_annotation", "stock_analysis", "news_risk"]
+    scenario_id: Literal["news_annotation", "stock_analysis", "news_risk", "agent_research"]
     enabled: bool = False
     candidates: list[str] = []
     execution_options: dict[str, Any] = {}
@@ -296,7 +333,7 @@ class EgressGrantConfig(BaseModel):
     grant_id: str = Field(min_length=1)
     connection_id: str = Field(min_length=1)
     target_fingerprint: str = Field(min_length=1)
-    purpose: Literal["news_annotation", "stock_analysis", "news_risk", "synthetic_test"]
+    purpose: Literal["news_annotation", "stock_analysis", "news_risk", "agent_research", "synthetic_test"]
     scope_version: int = Field(ge=1)
     confirmed_at: str
     revoked_at: str | None = None
@@ -388,7 +425,12 @@ class MigrationTransitionConfig(BaseModel):
 
 
 def _default_scenario_routes() -> list[ScenarioRouteConfig]:
-    """三场景默认行：enabled=False、空候选；总时限为产品默认（§6.2）。"""
+    """四场景默认行：enabled=False、空候选；总时限为产品默认（§6.2 / REQ D05）。
+
+    agent_research（智能体研究，§10.2）：默认行禁用空候选（「旧配置补禁用空候选」
+    同口径）、显式禁备用（REQ RR01/D08：显式连接不暗备；备用 attempt 仅显式登记）；
+    总时限取 REQ D05 总执行活跃时限（60 分钟，等待/主动中断不计）。
+    """
     return [
         ScenarioRouteConfig(
             scenario_id="news_annotation",
@@ -397,6 +439,13 @@ def _default_scenario_routes() -> list[ScenarioRouteConfig]:
         ),
         ScenarioRouteConfig(scenario_id="stock_analysis", total_timeout_seconds=180),
         ScenarioRouteConfig(scenario_id="news_risk", total_timeout_seconds=90),
+        ScenarioRouteConfig(
+            scenario_id="agent_research",
+            enabled=False,
+            candidates=[],
+            fallback_enabled=False,
+            total_timeout_seconds=3600,
+        ),
     ]
 
 
@@ -432,6 +481,25 @@ class ModelManagementConfig(BaseModel):
                 raise ValueError(
                     f"migration_state=active 时屏障须已封存（phase=sealed），当前 {self.migration_transition.phase!r}"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _ensure_agent_research_row(self) -> ModelManagementConfig:
+        """场景注册面补齐（§10.2）：旧配置缺 ``agent_research`` 行时追加
+        「禁用空候选」默认行（enabled=False、candidates=[]）。
+
+        只补缺不改已有行：旧三场景行与旧 grant 往返不变（A-01 DoD），用户已
+        显式配置的 agent_research 行不被默认值覆盖；重复场景行拒绝（防止补行
+        后出现同名双行，让「启用哪个」变得不可判定）。
+        """
+        seen: set[str] = set()
+        for route in self.scenario_routes:
+            if route.scenario_id in seen:
+                raise ValueError(f"scenario_routes 中场景行重复: {route.scenario_id}")
+            seen.add(route.scenario_id)
+        if "agent_research" not in seen:
+            default_row = next(r for r in _default_scenario_routes() if r.scenario_id == "agent_research")
+            self.scenario_routes.append(default_row)
         return self
 
     @model_validator(mode="after")

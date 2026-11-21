@@ -106,6 +106,12 @@ def build_route_snapshot(
     :class:`RoutePolicyIncompleteError`（显式失败，不静默回退默认）。
     bool 是 int 子类，重试预算显式排除，避免 True 被当作 1 重试。
     白名单外的配置键（草稿态 / 展示字段 / 未知新键）不进入执行快照。
+
+    M16：返回条目与输入同等深冻结——外层 ``ExecutionSnapshot`` 为 frozen
+    dataclass 只封禁属性重绑定，条目若为普通 dict，消费方可经
+    ``route["candidates"][0]["budget_policy_snapshot"][...] = ...`` 改写已受理
+    候选 / 预算（同一快照贯穿整次请求），故此处逐层冻结（见
+    :func:`_freeze_route_entry`）。
     """
 
     retries = route.get("transient_retries")
@@ -133,14 +139,36 @@ def build_route_snapshot(
             f"route {scenario_id!r}: total_timeout_seconds missing or invalid "
             f"({total_timeout_seconds!r}); expected positive number"
         )
-    return {
-        "scenario_id": scenario_id,
-        "route_revision": int(route.get("route_revision", 1)),
-        "candidates": candidates,
-        "transient_retries": retries,
-        "fallback_enabled": fallback_enabled,
-        "total_timeout_seconds": float(total_timeout_seconds),
-    }
+    return _freeze_route_entry(
+        {
+            "scenario_id": scenario_id,
+            "route_revision": int(route.get("route_revision", 1)),
+            "candidates": candidates,
+            "transient_retries": retries,
+            "fallback_enabled": fallback_enabled,
+            "total_timeout_seconds": float(total_timeout_seconds),
+        }
+    )
+
+
+def _freeze_route_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """深冻结路由条目（M16）：与配置快照同一冻结契约，嵌套 dict / list 均不可变。
+
+    复用 ``services.model_configuration_service`` 的冻结原语（F38 契约：dict →
+    只读 dict 子类、list → tuple），保证同一 ``ExecutionSnapshot`` 内层语义一致：
+    ``route["candidates"][i][...] = ...`` / ``route["candidates"][i]
+    ["budget_policy_snapshot"][...] = ...`` 一律 ``TypeError``；且冻结是深拷贝，
+    输入候选 / 预算对象与快照脱钩——写入被拒后旧受理对象保持原值（无部分修改）。
+
+    返回类型刻意保持 dict 子类（而非 MappingProxyType）：Executor 的 ``dict()``
+    投影、``copy.deepcopy`` 与预算政策快照的 ``json.dumps`` 原生兼容
+    （mappingproxy 两者均不支持）。该 import 保持函数内延迟加载，与
+    :func:`_new_config_service` 同策略，避免 services 内重链提前加载。
+    """
+
+    from services.model_configuration_service import _freeze_value
+
+    return _freeze_value(entry)
 
 
 def _new_config_service() -> Any:

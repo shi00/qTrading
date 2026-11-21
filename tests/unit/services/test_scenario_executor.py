@@ -22,6 +22,9 @@
 - F16 父请求与预算预留：invocation 先于候选遍历建立；逐候选 try_reserve →
   mark_dispatched → authorize → begin_attempt 顺序；费用型预留被拒 / 账本
   不可用零出站；usage_only 降级；预留 ID 贯穿 attempt_row / 终态。
+- 必需登记失败 0 出站（DD SQ-02/F27）：begin_attempt persisted=False →
+  adapter 零调用 + failed 终态（活跃预留 F23 背书收敛）+ halt 候选遍历，
+  usage_only 同样零出站（NULL 金额预留已登记时同样背书补记）。
 """
 
 import asyncio
@@ -39,11 +42,17 @@ from core.errors import AIContentRefusedError
 from core.i18n import Message
 from core.model_management_types import (
     AdapterResponse,
+    AssistantToolCall,
     AttemptContext,
+    ChatMessage,
+    ChatTurnRequest,
     ExecutionSnapshot,
+    FunctionToolSpec,
+    ImageContentPart,
     InferenceRequest,
     NormalizedLLMUsage,
     ResolvedConnection,
+    TextContentPart,
     ValidatedBusinessOutput,
 )
 from core.model_management_types import PersistenceOutcome
@@ -55,6 +64,7 @@ from services.ai_service.scenario_executor import (
     _CANCEL_CLEANUP_TIMEOUT_S,
     _LOOP_STATE_KEY,
     _LoopState,
+    _chat_estimation_payload,
     _classify_adapter_failure,
     _estimate_reservation_amount,
 )
@@ -848,16 +858,21 @@ class TestGuards:
         assert "budget dispatch forbidden" in decision.reason
 
     @pytest.mark.asyncio
-    async def test_usage_only_persistence_lost_still_dispatches(self):
-        """D5：usage_only（无预留金额）在 persisted=False 时允许进程内一次性派发。"""
+    async def test_usage_only_persistence_lost_zero_egress(self):
+        """必需登记失败 0 出站（DD SQ-02/F27，取代旧 D5 进程内降级派发）：
+        usage_only 在 begin_attempt persisted=False 时零出站明确失败，
+        出站无账本事实背书不得继续。"""
         adapter = _adapter_ok()
         recorder = _recorder_mock(persisted=False)
         executor = _executor(adapter, recorder, validate=_validator_ok)
         result = await executor.execute(
             _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
         )
-        adapter.invoke.assert_awaited_once()
-        assert result.status == "succeeded"
+        adapter.invoke.assert_not_awaited()
+        assert result.status == "failed"
+        decision = result.candidate_decisions[0]
+        assert decision.decision == "rejected"
+        assert "attempt registration unavailable" in decision.reason
 
     @pytest.mark.asyncio
     async def test_concurrency_limit_serializes_same_connection(self):
@@ -1137,6 +1152,19 @@ class TestInvocationAndReservation:
         assert calls.index("ensure_invocation") < calls.index("try_reserve")
 
     @pytest.mark.asyncio
+    async def test_invocation_carries_business_run_id(self):
+        """R2-I05：业务批次身份（股票研究请求 operation_id）随父请求落库。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        await executor.execute(
+            replace(_request(), run_id="stock_batch_abc"),
+            _snapshot((_fee_candidate(0, "conn-remote"),), (_priced_conn(),)),
+            _validator_ok,
+        )
+        assert recorder.ensure_invocation.await_args.kwargs["run_id"] == "stock_batch_abc"
+
+    @pytest.mark.asyncio
     async def test_invocation_established_with_empty_candidates(self):
         """零候选请求同样建立父请求（失败也有记录，R21），无预留发生。"""
         adapter = _adapter_ok()
@@ -1219,6 +1247,36 @@ class TestInvocationAndReservation:
         recorder.mark_dispatched.assert_not_awaited()
         assert result.status == "failed"
         assert "budget reserve rejected: DB_UNAVAILABLE" in result.candidate_decisions[0].reason
+
+    @pytest.mark.asyncio
+    async def test_begin_attempt_registration_failure_fee_zero_egress_halts(self):
+        """必需登记失败（DD SQ-02/F27）：begin_attempt persisted=False → 费用型
+        零出站 + failed 终态（活跃预留 F23 背书收敛 settled）+ halt 候选遍历。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        recorder.begin_attempt = AsyncMock(
+            return_value=PersistenceOutcome(persisted=False, error_code="DB_UNAVAILABLE")
+        )
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot(
+                (_fee_candidate(0, "conn-remote"), _candidate(1, "conn-b")), (_priced_conn(), _remote_conn("conn-b"))
+            ),
+            _validator_ok,
+        )
+        adapter.invoke.assert_not_awaited()
+        # 失败终态提交一次（活跃预留背书补记 + 转换 settled，不留悬挂占用）
+        recorder.submit_terminal.assert_awaited_once()
+        terminal = recorder.submit_terminal.await_args.args[0]
+        assert terminal.status == "failed"
+        assert terminal.reservation_id is not None
+        # invocation 级事实：第二候选不再尝试（halt）
+        recorder.begin_attempt.assert_awaited_once()
+        assert result.status == "failed"
+        decision = result.candidate_decisions[0]
+        assert decision.decision == "rejected"
+        assert "attempt registration unavailable: DB_UNAVAILABLE" in decision.reason
 
     @pytest.mark.asyncio
     async def test_fee_candidate_unknown_price_zero_egress_fail_closed(self):
@@ -1306,6 +1364,30 @@ class TestInvocationAndReservation:
         assert "budget reserve rejected" in result.candidate_decisions[0].reason
 
     @pytest.mark.asyncio
+    async def test_begin_attempt_registration_failure_usage_only_zero_egress(self):
+        """必需登记失败：usage_only 同样零出站——不得降级进程内继续执行；
+        NULL 金额预留已登记时经活跃预留 F23 背书补记失败终态收敛。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        recorder.begin_attempt = AsyncMock(
+            return_value=PersistenceOutcome(persisted=False, error_code="DB_UNAVAILABLE")
+        )
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+        adapter.invoke.assert_not_awaited()
+        # NULL 金额预留已登记 → 失败终态经活跃预留背书补记（F23）
+        recorder.submit_terminal.assert_awaited_once()
+        terminal = recorder.submit_terminal.await_args.args[0]
+        assert terminal.status == "failed"
+        assert terminal.reservation_id is not None
+        assert result.status == "failed"
+        decision = result.candidate_decisions[0]
+        assert decision.decision == "rejected"
+        assert "attempt registration unavailable: DB_UNAVAILABLE" in decision.reason
+
+    @pytest.mark.asyncio
     async def test_usage_only_degrades_when_reserve_unavailable(self):
         """usage_only 预留不可用 → 降级进程内派发身份（reservation_id=None）执行成功。"""
         adapter = _adapter_ok()
@@ -1323,6 +1405,22 @@ class TestInvocationAndReservation:
         dispatch_kwargs = recorder.mark_dispatched.await_args.kwargs
         assert dispatch_kwargs["reservation_id"] is None
         assert dispatch_kwargs["owner_session_id"]
+
+    @pytest.mark.asyncio
+    async def test_usage_only_dispatch_unknown_legacy_degrades(self):
+        """M08：旧直推链 usage_only 派发绑定未确认仍维持既有降级（不套用 Agent 严格策略）。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        recorder.mark_dispatched = AsyncMock(
+            return_value=PersistenceOutcome(persisted=False, error_code="DB_UNAVAILABLE")
+        )
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+        assert result.status == "succeeded"
+        adapter.invoke.assert_awaited_once()
+        recorder.begin_attempt.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_reservation_id_flows_through_attempt_row_and_terminal(self):
@@ -2411,6 +2509,101 @@ class TestReservationAmountEstimation:
         encoder = self._pricing(pricing_unit="encoder_input_tokens", encoder_price_per_m=Decimal("1.00"))
         assert _estimate_reservation_amount(encoder, {"prompt": "x"}, model="m") is None
 
+    def test_llm_tokens_counts_schema_and_tool_call_arguments(self, monkeypatch):
+        """M09：正文不变仅扩大 tools schema / 历史工具参数 → 估算随之增大。"""
+        monkeypatch.setattr(
+            "services.ai_service.scenario_executor._estimate_tokens",
+            lambda text, model=None: len(text or ""),
+        )
+        body = {"system_prompt": "系统提示", "prompt": "研究问题", "max_tokens": 100}
+        tight = {
+            **body,
+            "tool_calls_text": "search:{}",
+            "tools_schema": '{"name": "search"}',
+            "output_schema": '{"type": "object"}',
+        }
+        wide = {
+            **body,
+            "tool_calls_text": 'search:{"query": "' + "q" * 400 + '"}',
+            "tools_schema": '{"name": "search", "description": "' + "d" * 400 + '"}',
+            "output_schema": '{"type": "object", "properties": {"score": {"type": "number"}}}',
+        }
+        tight_amount = _estimate_reservation_amount(self._pricing(), tight, model="m")
+        wide_amount = _estimate_reservation_amount(self._pricing(), wide, model="m")
+        assert tight_amount is not None and wide_amount is not None
+        assert Decimal(wide_amount) > Decimal(tight_amount)
+
+    def test_unestimable_projection_returns_none(self, monkeypatch):
+        """M09 / R21：投影标记不可估（图片等无计费语义输入）→ 不产生数值。"""
+        monkeypatch.setattr(
+            "services.ai_service.scenario_executor._estimate_tokens",
+            lambda text, model=None: len(text or ""),
+        )
+        payload = {"system_prompt": "系统提示", "prompt": "研究问题", "unestimable_input": True}
+        assert _estimate_reservation_amount(self._pricing(), payload, model="m") is None
+
+    def test_chat_estimation_payload_covers_full_projection(self):
+        """M09：chat 投影字段齐全——正文 + 历史工具参数 + tools/output_tools
+        schema + output schema + max_output_tokens。"""
+        request = ChatTurnRequest(
+            model_call_id="mc-m09",
+            messages=(
+                ChatMessage(role="user", content_parts=(TextContentPart(text="研究问题"),)),
+                ChatMessage(
+                    role="assistant",
+                    content_parts=(),
+                    assistant_tool_calls=(AssistantToolCall(call_id="c1", name="search", arguments_json='{"q": "x"}'),),
+                ),
+                ChatMessage(role="tool", content_parts=(TextContentPart(text="工具结果"),), tool_call_id="c1"),
+            ),
+            instructions=("系统提示",),
+            tools=(
+                FunctionToolSpec(
+                    name="search", description="检索", json_schema={"type": "object"}, schema_version="v1"
+                ),
+            ),
+            output_schema={"type": "object", "properties": {"score": {"type": "number"}}},
+            frozen_params={},
+            max_output_tokens=256,
+            deadline=0.0,
+            output_tools=(
+                FunctionToolSpec(
+                    name="final",
+                    description="结构 final",
+                    json_schema={"type": "object"},
+                    schema_version="v1",
+                    output_tool=True,
+                ),
+            ),
+        )
+        payload = _chat_estimation_payload(request)
+        assert payload["system_prompt"] == "系统提示"
+        assert payload["prompt"] == "研究问题\n工具结果"
+        assert "search" in payload["tool_calls_text"] and '{"q": "x"}' in payload["tool_calls_text"]
+        assert "检索" in payload["tools_schema"]
+        assert "final" in payload["output_tools_schema"]
+        assert "score" in payload["output_schema"]
+        assert payload["max_tokens"] == 256
+        assert "unestimable_input" not in payload
+
+    def test_chat_estimation_payload_marks_image_unestimable(self):
+        """M09 / R21：图片 part 无桥层计费语义 → 投影显式标记不可估。"""
+        request = ChatTurnRequest(
+            model_call_id="mc-m09-img",
+            messages=(
+                ChatMessage(role="user", content_parts=(ImageContentPart(mime="image/png", binary_ref="bin-1"),)),
+            ),
+            instructions=(),
+            tools=(),
+            output_schema=None,
+            frozen_params={},
+            max_output_tokens=None,
+            deadline=0.0,
+        )
+        payload = _chat_estimation_payload(request)
+        assert payload["unestimable_input"] is True
+        assert _estimate_reservation_amount(self._pricing(), payload, model="m") is None
+
 
 class TestC12TenacityRetryContract:
     """C12（ADR-0018 承接 / ADR-0014 §1 重试路线）：同候选瞬态重试由 Tenacity
@@ -2588,3 +2781,35 @@ class TestC12TenacityRetryContract:
         terminal = recorder.submit_terminal.await_args.args[0]
         assert terminal.status == "failed"
         assert terminal.error_code == "CONTENT_REFUSED"
+
+
+class TestEntryProtocolSeparation:
+    """检视 M01：新旧入口协议分别校验——聊天适配器只实现 ``invoke_chat`` 也可注册，
+    旧入口派发前淘汰（零预留），不出现执行期 AttributeError。"""
+
+    def test_chat_only_adapter_registers_without_legacy_invoke(self):
+        class _ChatOnlyAdapter:
+            async def invoke_chat(self, *args: Any, **kwargs: Any) -> Any:  # pragma: no cover - 形状对象
+                raise NotImplementedError
+
+        _executor(_ChatOnlyAdapter(), _recorder_mock())  # 不抛 TypeError
+
+    @pytest.mark.asyncio
+    async def test_chat_only_adapter_rejected_by_legacy_entry_before_reserve(self):
+        class _ChatOnlyAdapter:
+            invoked_chat = False
+
+            async def invoke_chat(self, *args: Any, **kwargs: Any) -> Any:  # pragma: no cover - 旧入口不触达
+                type(self).invoked_chat = True
+                raise AssertionError("chat adapter must not be invoked by legacy entry")
+
+        recorder = _recorder_mock()
+        executor = _executor(_ChatOnlyAdapter(), recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+        assert result.status == "failed"
+        assert len(result.candidate_decisions) == 1
+        assert "no legacy invoke adapter" in result.candidate_decisions[0].reason
+        assert _ChatOnlyAdapter.invoked_chat is False
+        recorder.try_reserve.assert_not_awaited()  # 零预留副作用

@@ -206,6 +206,44 @@ class TestGetWatchlist:
         dao._read_db_select.assert_awaited_once()
 
 
+class TestGetWatchlistNote:
+    """R2-I13: 按股票身份读取已有备注（重复关注/改备注前的影响告知读取源）。"""
+
+    @pytest.mark.asyncio
+    async def test_returns_note_when_watched(self):
+        """已关注：返回原备注原文，且读取不得吞错（suppress_errors=False）。"""
+        dao = _make_dao()
+        dao._read_db_select.return_value = pd.DataFrame({"note": ["旧备注"]})
+        assert await dao.get_watchlist_note("000001.SZ") == "旧备注"
+        dao._read_db_select.assert_awaited_once()
+        assert dao._read_db_select.call_args.kwargs["suppress_errors"] is False
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_not_watched(self):
+        """未关注：返回 None（区别于「已关注但备注为空」）。"""
+        dao = _make_dao()
+        dao._read_db_select.return_value = pd.DataFrame()
+        assert await dao.get_watchlist_note("000001.SZ") is None
+
+    @pytest.mark.parametrize("note", [None, float("nan")])
+    @pytest.mark.asyncio
+    async def test_returns_empty_string_when_note_missing(self, note):
+        """已关注但备注为 NULL/NaN：返回空串（存在行 ≠ 未关注）。"""
+        dao = _make_dao()
+        dao._read_db_select.return_value = pd.DataFrame({"note": [note]})
+        assert await dao.get_watchlist_note("000001.SZ") == ""
+
+    @pytest.mark.asyncio
+    async def test_read_failure_propagates(self):
+        """读取失败必须传播，不得伪装成「无旧备注」（R21：否则会静默覆盖原备注）。"""
+        from data.persistence.daos.base_dao import DatabaseQueryError
+
+        dao = _make_dao()
+        dao._read_db_select = AsyncMock(side_effect=DatabaseQueryError("read boom"))
+        with pytest.raises(DatabaseQueryError, match="read boom"):
+            await dao.get_watchlist_note("000001.SZ")
+
+
 class TestIsInWatchlist:
     @pytest.mark.asyncio
     async def test_is_in_watchlist_true_when_exists(self):

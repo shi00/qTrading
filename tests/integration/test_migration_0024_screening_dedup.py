@@ -20,7 +20,7 @@ sidecar binary 时由 fixture skip。
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import date, datetime
 
 import pytest
 from alembic import command
@@ -63,7 +63,7 @@ async def _insert_history(
     conn: AsyncConnection,
     *,
     run_id: str,
-    trade_date: str,
+    trade_date: date,
     strategy_name: str,
     ts_code: str,
     created_at: datetime | None,
@@ -97,7 +97,7 @@ async def test_upgrade_0024_dedups_null_and_tied_created_at(real_embedded_pg: Co
                 "a1": await _insert_history(
                     conn,
                     run_id="run-a1",
-                    trade_date="2026-01-02",
+                    trade_date=date(2026, 1, 2),
                     strategy_name="s",
                     ts_code="000001.SZ",
                     created_at=None,
@@ -105,7 +105,7 @@ async def test_upgrade_0024_dedups_null_and_tied_created_at(real_embedded_pg: Co
                 "a2": await _insert_history(
                     conn,
                     run_id="run-a2",
-                    trade_date="2026-01-02",
+                    trade_date=date(2026, 1, 2),
                     strategy_name="s",
                     ts_code="000001.SZ",
                     created_at=None,
@@ -113,7 +113,7 @@ async def test_upgrade_0024_dedups_null_and_tied_created_at(real_embedded_pg: Co
                 "a3": await _insert_history(
                     conn,
                     run_id="run-a3",
-                    trade_date="2026-01-02",
+                    trade_date=date(2026, 1, 2),
                     strategy_name="s",
                     ts_code="000001.SZ",
                     created_at=None,
@@ -122,7 +122,7 @@ async def test_upgrade_0024_dedups_null_and_tied_created_at(real_embedded_pg: Co
                 "b_null": await _insert_history(
                     conn,
                     run_id="run-b-null",
-                    trade_date="2026-01-01",
+                    trade_date=date(2026, 1, 1),
                     strategy_name="s",
                     ts_code="000001.SZ",
                     created_at=None,
@@ -130,7 +130,7 @@ async def test_upgrade_0024_dedups_null_and_tied_created_at(real_embedded_pg: Co
                 "b_old": await _insert_history(
                     conn,
                     run_id="run-b-old",
-                    trade_date="2026-01-01",
+                    trade_date=date(2026, 1, 1),
                     strategy_name="s",
                     ts_code="000001.SZ",
                     created_at=datetime(2026, 1, 1),
@@ -138,7 +138,7 @@ async def test_upgrade_0024_dedups_null_and_tied_created_at(real_embedded_pg: Co
                 "b_new": await _insert_history(
                     conn,
                     run_id="run-b-new",
-                    trade_date="2026-01-01",
+                    trade_date=date(2026, 1, 1),
                     strategy_name="s",
                     ts_code="000001.SZ",
                     created_at=datetime(2026, 1, 2),
@@ -147,7 +147,7 @@ async def test_upgrade_0024_dedups_null_and_tied_created_at(real_embedded_pg: Co
                 "c1": await _insert_history(
                     conn,
                     run_id="run-c1",
-                    trade_date="2026-01-03",
+                    trade_date=date(2026, 1, 3),
                     strategy_name="s",
                     ts_code="000001.SZ",
                     created_at=datetime(2026, 1, 3),
@@ -155,7 +155,7 @@ async def test_upgrade_0024_dedups_null_and_tied_created_at(real_embedded_pg: Co
                 "c2": await _insert_history(
                     conn,
                     run_id="run-c2",
-                    trade_date="2026-01-03",
+                    trade_date=date(2026, 1, 3),
                     strategy_name="s",
                     ts_code="000001.SZ",
                     created_at=datetime(2026, 1, 3),
@@ -164,7 +164,7 @@ async def test_upgrade_0024_dedups_null_and_tied_created_at(real_embedded_pg: Co
                 "d1": await _insert_history(
                     conn,
                     run_id="run-d1",
-                    trade_date="2026-01-04",
+                    trade_date=date(2026, 1, 4),
                     strategy_name="s",
                     ts_code="600000.SH",
                     created_at=None,
@@ -172,7 +172,7 @@ async def test_upgrade_0024_dedups_null_and_tied_created_at(real_embedded_pg: Co
                 "e1": await _insert_history(
                     conn,
                     run_id="run-e1",
-                    trade_date="2026-01-02",
+                    trade_date=date(2026, 1, 2),
                     strategy_name="s",
                     ts_code="600000.SH",
                     created_at=None,
@@ -180,7 +180,7 @@ async def test_upgrade_0024_dedups_null_and_tied_created_at(real_embedded_pg: Co
                 "e2": await _insert_history(
                     conn,
                     run_id="run-e2",
-                    trade_date="2026-01-02",
+                    trade_date=date(2026, 1, 2),
                     strategy_name="s2",
                     ts_code="000001.SZ",
                     created_at=None,

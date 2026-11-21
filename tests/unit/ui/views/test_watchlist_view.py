@@ -107,6 +107,10 @@ class _FakeWatchlistViewModel:
     async def search_stocks(self, keyword: str) -> None:
         self.method_calls.append(("search_stocks", {"keyword": keyword}))
 
+    async def load_existing_note(self, ts_code: str) -> None:
+        """R2-I13：按 ts_code 读取已有备注（对话框打开期间的影响告知）。"""
+        self.method_calls.append(("load_existing_note", {"ts_code": ts_code}))
+
     async def clear_search(self) -> None:
         self.method_calls.append(("clear_search", {}))
 
@@ -459,6 +463,7 @@ def mock_watchlist_vm(monkeypatch):
             captured_add_callbacks["on_add"] = kwargs.get("on_add")
             captured_add_callbacks["on_search"] = kwargs.get("on_search")
             captured_add_callbacks["on_close"] = kwargs.get("on_close")
+            captured_add_callbacks["on_load_existing_note"] = kwargs.get("on_load_existing_note")
         return MagicMock(name="WatchlistAddDialog")
 
     monkeypatch.setattr(watchlist_view_module, "WatchlistAddDialog", _fake_add_dialog)
@@ -1283,11 +1288,12 @@ class TestWatchlistViewAddCallback:
         mock_i18n_for_view,
         mock_i18n_state,
         mock_app_colors_state,
+        state: WatchlistState | None = None,
     ) -> tuple[Any, Any]:
         """渲染组件并点击「添加关注」按钮, 返回 (page, component)."""
         from tests.unit.ui.component_renderer import FakePage, make_component, render_once, run_mount_effects
 
-        mock_watchlist_vm._state = WatchlistState(watchlist_rows=(), is_loading=False)
+        mock_watchlist_vm._state = state or WatchlistState(watchlist_rows=(), is_loading=False)
         component = make_component(WatchlistView, active=True)
         page = FakePage()
         page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
@@ -1337,6 +1343,37 @@ class TestWatchlistViewAddCallback:
         assert page.run_task.call_args is not None
         assert page.run_task.call_args.args[0] == mock_watchlist_vm.search_stocks
         assert page.run_task.call_args.args[1] == "平安"
+
+    def test_on_load_existing_note_schedules_vm_command(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """R2-I13: on_load_existing_note(ts_code) → page.run_task(vm.load_existing_note, ts_code)."""
+        page, _ = self._render_with_add_dialog(
+            mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+        )
+        callbacks = mock_watchlist_vm.captured_add_callbacks
+        assert "on_load_existing_note" in callbacks
+        callbacks["on_load_existing_note"]("000001.SZ")
+        assert page.run_task.call_args is not None
+        assert page.run_task.call_args.args[0] == mock_watchlist_vm.load_existing_note
+        assert page.run_task.call_args.args[1] == "000001.SZ"
+
+    def test_add_dialog_receives_existing_note_state(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """R2-I13: 对话框的 existing_note prop 来自 VM state（单一事实源）。"""
+        from ui.viewmodels.watchlist_view_model import ExistingNoteState
+
+        existing = ExistingNoteState(ts_code="000001.SZ", status="loaded", note="旧备注")
+        self._render_with_add_dialog(
+            mock_watchlist_vm,
+            mock_i18n_for_view,
+            mock_i18n_state,
+            mock_app_colors_state,
+            state=WatchlistState(existing_note=existing),
+        )
+        last_call = mock_watchlist_vm.add_dialog_calls[-1]
+        assert last_call["existing_note"] == existing
 
     def test_on_close_schedules_vm_clear_search(
         self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state

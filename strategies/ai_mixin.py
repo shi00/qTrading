@@ -29,6 +29,7 @@ from cachetools import TTLCache
 import pandas as pd
 
 from core.i18n import I18n, Message
+from core.model_management_types import StockAgentBatchIdentity, StockAgentCall, new_stock_agent_batch
 from data.constants import SAFE_BACKTEST_LEARNING_OFFSET_DAYS, SAFE_LIVE_LEARNING_OFFSET_DAYS
 from data.external.news_fetcher import NewsFetcher
 from services.ai_service import AIService
@@ -187,6 +188,8 @@ class AIStrategyMixin:
         self._last_candidates_df: pd.DataFrame | None = None
         self._last_prefetched: PreFetchedContext | None = None
         self._last_dp = None
+        # F34/AC23：本批次预存的稳定调用身份（重试经 new_turn 关联原批次/原股）
+        self._last_stock_agent_batch: StockAgentBatchIdentity | None = None
 
     def register_context_builder(self, name: str, builder: ContextBuilder) -> None:
         """
@@ -356,6 +359,34 @@ class AIStrategyMixin:
             as_of = as_of - datetime.timedelta(days=SAFE_BACKTEST_LEARNING_OFFSET_DAYS)
         return as_of
 
+    def _begin_stock_agent_batch(self, context: dict) -> StockAgentBatchIdentity:
+        """批次入口预存稳定调用身份（F34/AC23）：一次分配，整批与重试关联复用。
+
+        ``context`` 可选 ``agent_session_id`` / ``agent_turn_id`` 为主会话与轮次
+        引用（调用方已知 Agent 会话时透传；未知保持 ``None``，不伪造）；可选
+        ``_ai_operation_id`` 复用调用方已存批次身份（夜间任务等），否则新分配。
+        返回身份同时写回 ``context["_ai_operation_id"]``，供结果落库方以同一
+        ``run_id`` 关联账本费用链。
+        """
+
+        batch = new_stock_agent_batch(
+            strategy_key=getattr(self, "name_key", None) or getattr(self, "key", None),
+            session_id=context.get("agent_session_id"),
+            turn_id=context.get("agent_turn_id"),
+            operation_id=context.get("_ai_operation_id"),
+        )
+        self._last_stock_agent_batch = batch
+        context["_ai_operation_id"] = batch.operation_id
+        return batch
+
+    @staticmethod
+    def _attach_stock_agent_call(row: dict, agent_call: StockAgentCall | None) -> dict:
+        """结果行附加调用身份（F34）：失败/异常行同样保留（R21，不丢「已发起」事实）。"""
+
+        if agent_call is not None:
+            row["stock_agent_call"] = agent_call.as_metadata()
+        return row
+
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
     async def run_ai_analysis(
         self,
@@ -413,6 +444,7 @@ class AIStrategyMixin:
         self._last_candidates_df = None
         self._last_prefetched = None
         self._last_dp = None
+        self._last_stock_agent_batch = None
 
         # AI-01（review09-24 维度04 MINOR-02）：每次批量运行开启新的「不可计价调用」
         # 确认范围，重置确认标记，使确认有效期止于本次运行而非整个进程（否则一次确认后
@@ -434,6 +466,12 @@ class AIStrategyMixin:
             # SC-02: 回测关闭 AI 属"AI 有效不运行"，向 warnings 声明风险检查缺失。
             self._note_ai_risk_check_skipped(context)
             return candidates_df
+
+        # --- F34/AC23：批次入口预存稳定调用身份（首次派发前一次分配，整批复用）---
+        # 每股经 for_stock 派生唯一 call_id（研究/费用链同源）；已知 Agent 主会话/轮次
+        # 由调用方经 context 透传，未知保持 None（不伪造，R21）。批次身份写入
+        # context["_ai_operation_id"]，由结果落库方以同一 run_id 关联回查。
+        stock_agent_batch = self._begin_stock_agent_batch(context)
 
         # --- F04: 批次入口先定执行轨道并冻结 run 快照（同请求单轨，模型统一.md §14.2-6）---
         # 旧云端可用性与旧链准入 guard 仅对旧轨（None）应用：统一调度链 active 且场景
@@ -967,6 +1005,15 @@ class AIStrategyMixin:
 
         on_card_error = context.get("on_card_error")  # UX-2.3: 单股失败回调
 
+        all_records = candidates_df.to_dict("records")
+        # F34/AC23：每股调用身份在派发前一次性预存（同批同股稳定，重试复用同一
+        # operation_id 并用新轮次关联原股）；缺 ts_code 的异常行不伪造身份。
+        stock_calls: dict[str, StockAgentCall] = {}
+        for _record in all_records:
+            _code = str(_record.get("ts_code") or "")
+            if _code:
+                stock_calls[_code] = stock_agent_batch.for_stock(_code)
+
         async def analyze_one(row_data: dict) -> dict | None:
             nonlocal completed
             async with screening_sem:
@@ -1004,6 +1051,7 @@ class AIStrategyMixin:
                         )
                         return None
                 stock_name = row_data.get("name", row_data.get("ts_code", "?"))
+                agent_call = stock_calls.get(str(row_data.get("ts_code") or ""))
                 on_chunk = on_stream_start(stock_name) if on_stream_start else None
                 if on_card_start:
                     on_card_start(stock_name)
@@ -1040,6 +1088,8 @@ class AIStrategyMixin:
                         # F04: 传递批次冻结快照（新轨整批复用；旧轨为 None 时
                         # analyze_stock 自行新鲜分派），批次中途配置变化不混版。
                         scenario_dispatch=batch_dispatch,
+                        # F34/AC23：单股调用身份透传（两层 analyze_stock 同源）。
+                        agent_call=agent_call,
                     )
                     if res is None:
                         # UX-2.3: 软失败（_mixin_analyze_single 内部已日志）
@@ -1048,12 +1098,15 @@ class AIStrategyMixin:
                         # D3-6/D3-7: 失败也保留候选行（ai_status="failed"），
                         # 使下游能区分"AI 跑过但失败" 与 "AI 未跑"。UI 错误呈现仍由
                         # on_card_error 承载（失败行 UI 化属 D7-3 范围，本层不重复 on_result）。
-                        return self._build_result_row(
-                            row_data,
-                            None,
-                            error_reason=I18n.get("ai_card_analysis_failed"),
+                        return self._attach_stock_agent_call(
+                            self._build_result_row(
+                                row_data,
+                                None,
+                                error_reason=I18n.get("ai_card_analysis_failed"),
+                            ),
+                            agent_call,
                         )
-                    row = self._build_result_row(row_data, res)
+                    row = self._attach_stock_agent_call(self._build_result_row(row_data, res), agent_call)
                     # AI-03(完整版): 累计本次消耗。仅统计成功分析（res 为 dict、
                     # 非失败且携带 usage），避免把失败调用计入用户可见的消耗量。
                     if isinstance(res, dict) and res.get("ai_status") != "failed":
@@ -1069,10 +1122,13 @@ class AIStrategyMixin:
                         on_card_error(stock_name, DataSanitizer.sanitize_error(e))
                     # D3-6/D3-7: 异常不吞没（R2），但构造 failed 行保留候选，
                     # 避免下游将"分析失败"静默当作"被否决/未入选"。异常信息经脱敏。
-                    return self._build_result_row(
-                        row_data,
-                        None,
-                        error_reason=DataSanitizer.sanitize_error(e),
+                    return self._attach_stock_agent_call(
+                        self._build_result_row(
+                            row_data,
+                            None,
+                            error_reason=DataSanitizer.sanitize_error(e),
+                        ),
+                        agent_call,
                     )
                 finally:
                     if on_chunk and hasattr(on_chunk, "final_flush"):
@@ -1091,7 +1147,6 @@ class AIStrategyMixin:
         # AI-05: 批内周期性预算复查 + 增量落账节奏（与批次粒度一致，20 股一次）。
         # 预算复查必须在每批累计落账之后进行——落账使累计成本单调更新，复查读到最新值。
         # 增量落账将「崩溃丢账」损失从整批收敛到至多一批（20 股）成本。
-        all_records = candidates_df.to_dict("records")
         results: list = []
 
         # F4-ST-001: try/finally 确保任何路径（含 CancelledError）下 news_tasks 被清理，
@@ -1282,6 +1337,14 @@ class AIStrategyMixin:
         prefetched = self._last_prefetched
         ai_client = AIService()
         dp = context.get("data_processor") or self._last_dp
+        # F34/AC23：重试 = 原批次下的新轮次调用（同一 operation_id 关联原股，
+        # 新 turn/call_id 形成独立费用链；无缓存批次身份时不伪造身份）。
+        _retry_code = str(row_data.get("ts_code") or "")
+        retry_agent_call = (
+            self._last_stock_agent_batch.for_stock(_retry_code, new_turn=True)
+            if self._last_stock_agent_batch is not None and _retry_code
+            else None
+        )
         # D4-M2: 重试同样必须通过云端/政策/预算 guard——若跳过预算检查，预算上限可被
         # 点击次数无限突破；跳过 provider 确认则数据可能外发至未授权对象。
         block_reason = await self._preflight_cloud_call(context)
@@ -1367,12 +1430,13 @@ class AIStrategyMixin:
                 # 同一批次内 AI 结论口径漂移）。
                 ui_prompt_override=self._resolve_ui_prompt_override(context),
                 vol_ratio_threshold=context.get("params", {}).get("vol_ratio_threshold", 1.7),
+                agent_call=retry_agent_call,
             )
             if res is None:
                 if on_card_error:
                     on_card_error(name_str, I18n.get("ai_card_analysis_failed"))
                 return
-            result_row = self._build_result_row(row_data, res)
+            result_row = self._attach_stock_agent_call(self._build_result_row(row_data, res), retry_agent_call)
             # D4-M2: 重试成功同样计入月度成本与不可计价量
             # （与 run_ai_analysis 收尾 _track_cost 同口径）。failed 路径不产生有效调用，不计费。
             if isinstance(res, dict) and res.get("ai_status") != "failed":
@@ -1539,7 +1603,13 @@ class AIStrategyMixin:
         - ``cost`` 为 None（不可计量，R21）→ 计入 ``unpriced_calls``/``unpriced_tokens``，
           避免「不可计量」被呈现为「零成本」；同时经 ``res["model"]``（litellm_client 携带）
           聚合 ``unpriced_by_model`` 明细（Mi2，供诊断"哪些模型无法计价"）。
+
+        R2-I05：``duplicate_submission`` 结果来自同一研究请求（会话/轮次/批次/股票
+        相同）的重复提交，费用事实已由原请求的账本与月账承载——此处不得再次累加，
+        否则同一请求被双计费。
         """
+        if res.get("duplicate_submission") is True:
+            return
         usage = res.get("usage")
         if not usage or not isinstance(usage, dict):
             return
@@ -1744,6 +1814,7 @@ class AIStrategyMixin:
         ui_prompt_override: str | None = None,
         vol_ratio_threshold: float = 1.7,
         scenario_dispatch: "ScenarioDispatch | None" = None,
+        agent_call: StockAgentCall | None = None,
     ):
         """
         Analyze a single stock. Fetches history, tech indicators, news,
@@ -1761,6 +1832,8 @@ class AIStrategyMixin:
             scenario_dispatch: Optional batch-frozen scenario dispatch snapshot
                 (F04: passed through to ``analyze_stock`` so the whole batch shares
                 one ExecutionSnapshot; ``None`` lets analyze_stock self-dispatch).
+            agent_call: F34/AC23 单股调用身份（批次入口预存，keyword 透传两层
+                ``analyze_stock``）；``None`` 表示旧兼容调用（一次调用一个新意图）。
         """
         try:
             ts_code = row["ts_code"]
@@ -1949,6 +2022,7 @@ class AIStrategyMixin:
                 history_labels=history_labels,
                 learning_strategy_name=getattr(self, "name_key", None),
                 scenario_dispatch=scenario_dispatch,
+                agent_call=agent_call,
             )
             return ai_result
 

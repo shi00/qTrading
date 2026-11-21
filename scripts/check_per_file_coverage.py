@@ -2,8 +2,10 @@
 
 读取 pyproject.toml [tool.custom_coverage] 配置:
 - per_file_minimum: 默认阈值（未匹配分层路径的文件），始终 enforce
-- per_file_minimum_by_path: 按目录分层阈值（最长前缀匹配）
-- enforce_layered: True=分层阈值阻断, False=advisory 仅警告
+- per_file_minimum_by_path: 按目录/文件分层阈值（最长前缀匹配）；条目阈值高于默认时
+  为收紧分层（enforce_layered 控制），低于默认时为放宽例外（以登记阈值为唯一门禁，
+  始终 enforce）
+- enforce_layered: True=收紧分层阈值阻断, False=advisory 仅警告
 
 用法::
 
@@ -14,7 +16,8 @@
 
 退出码:
     0: 通过（advisory 模式下分层警告不阻断）；或所有文件均无可执行语句（SKIP，不代表达标）
-    1: 有文件低于默认阈值，或 enforce_layered=true 时低于分层阈值
+    1: 有文件低于默认阈值、低于登记放宽例外阈值（始终 enforce），或
+       enforce_layered=true 时低于收紧分层阈值
     2: coverage.json 未找到 / 不可读取 / 结构非法 / 配置错误
 """
 
@@ -53,12 +56,14 @@ def load_config() -> tuple[int, list[tuple[str, int]], bool]:
 def match_threshold(file_path: str, default_threshold: int, layered: list[tuple[str, int]]) -> tuple[int, str | None]:
     """按最长前缀匹配返回文件应适用的阈值.
 
-    路径归一化为 / 分隔后匹配，前缀去掉尾部 / 后做 startswith 判断。
+    路径归一化为 / 分隔后匹配：目录前缀做 ``startswith(prefix + "/")`` 判断；
+    同时支持文件级条目（prefix 与归一化路径完全相等，2026-11-16 Agent 特性登记
+    平台性覆盖来源例外时引入，见 pyproject 注释）。
     """
     normalized = PurePath(file_path.replace("\\", "/")).as_posix().lstrip("./")
     for prefix, threshold in layered:
         prefix_clean = prefix.rstrip("/")
-        if prefix_clean and normalized.startswith(prefix_clean + "/"):
+        if prefix_clean and (normalized == prefix_clean or normalized.startswith(prefix_clean + "/")):
             return threshold, prefix
     return default_threshold, None
 
@@ -181,6 +186,7 @@ def main() -> int:
 
     below_default: list[tuple[str, float, int, int, int, str | None]] = []
     below_layered: list[tuple[str, float, int, int, int, str | None]] = []
+    below_relaxed: list[tuple[str, float, int, int, int, str | None]] = []
 
     for fp, d in sorted(files.items()):
         summary = d.get("summary", {})
@@ -190,11 +196,25 @@ def main() -> int:
             continue
         threshold, matched_prefix = match_threshold(fp, default_threshold, layered)
         miss = summary.get("missing_lines", 0)
-        if pct < default_threshold:
+        if matched_prefix is not None and threshold < default_threshold:
+            # 登记阈值低于默认（放宽例外，如文件级平台性覆盖登记）：以登记阈值为
+            # 唯一门禁，豁免默认阈值；低于自身登记阈值仍始终 enforce
+            if pct < threshold:
+                below_relaxed.append((fp, pct, stmts, miss, threshold, matched_prefix))
+        elif pct < default_threshold:
             below_default.append((fp, pct, stmts, miss, threshold, matched_prefix))
         elif pct < threshold:
             # 仅当分层阈值 > 默认阈值时才会进入此分支
             below_layered.append((fp, pct, stmts, miss, threshold, matched_prefix))
+
+    # 登记放宽例外低于自身阈值：始终 enforce（登记不等于豁免判定本身）
+    if below_relaxed:
+        print(f"FAIL: {len(below_relaxed)} file(s) below registered per-file threshold:\n")
+        print(f"{'File':<70} {'Cov%':>6} {'Thresh':>7} {'Stmts':>6} {'Miss':>6}")
+        print("-" * 98)
+        for fp, pct, s, m, t, _ in below_relaxed:
+            print(f"{fp:<70} {pct:>5.1f}% {t:>6}% {s:>6} {m:>6}")
+        return 1
 
     # 默认阈值始终 enforce
     if below_default:

@@ -1190,6 +1190,60 @@ class TestRunAiAnalysis:
             assert len(result) <= 2
 
     @pytest.mark.asyncio
+    async def test_stop_screening_terminates_without_resumable_pause(self):
+        """DD-F34：停止选股终止关联未完成分析，且不落「可恢复暂停」状态。
+
+        语义：用户在批量中途停止 → 在途/后续候选不再派发模型调用；未处理候选
+        **不出现在返回集**（不伪造 analyzed/score 行，也不补空行凑数）；不写任何
+        可续跑的暂停/进度状态（终止而非暂停，重跑须是新的一轮）。
+        """
+        s = ConcreteStrategy()
+        dp = _make_mock_dp(is_cancelled=False)
+        counter = {"checks": 0}
+
+        def _cancelled() -> bool:
+            counter["checks"] += 1
+            # 串行语义下：批入口(1) + 前两股的派发前/后检查(2..5) 放行，第三股起停止派发。
+            return counter["checks"] > 5
+
+        dp.is_cancelled = MagicMock(side_effect=_cancelled)
+        codes = [f"{i:06d}.SZ" for i in range(1, 46)]  # 3 个批（20/20/5），验证批间不续跑
+        candidates = pd.DataFrame({"ts_code": codes, "name": codes, "close": [10.0] * len(codes)})
+        context = {"data_processor": dp}
+        analyze_calls: list[str] = []
+
+        async def mock_analyze(stock_info, *args, **kwargs):
+            analyze_calls.append(stock_info.get("ts_code"))
+            return {"score": 80, "summary": "ok", "confidence": 0.6}
+
+        with (
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+            patch("strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis", return_value=1),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("services.ai_service.usage_tracker.AIUsageTracker"),
+            patch(
+                "strategies.ai_mixin.NewsFetcher.get_us_major_moves",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = mock_analyze
+            mock_ai.return_value = mock_ai_instance
+
+            result = await s.run_ai_analysis(candidates, context)
+
+        # 仅停止前的两只股票真实派发；批内其余候选与后续批次零派发。
+        assert analyze_calls == ["000001.SZ", "000002.SZ"]
+        # 返回行只来自真实派发的两只股票，不冒认 analyzed / 不伪造评分。
+        assert len(result) == 2
+        assert set(result["ts_code"]) == {"000001.SZ", "000002.SZ"}
+        assert set(result["ai_score"]) == {80}
+        assert set(result["ai_status"]) == {"analyzed"}
+        # 不落可恢复暂停/进度状态（停止是终止，不是暂停）。
+        assert not ({"resume_state", "resume_cursor", "paused_state", "pause_progress"} & set(context))
+
+    @pytest.mark.asyncio
     async def test_with_candidates_cap(self):
         from core.i18n import Message
 
@@ -1801,6 +1855,95 @@ class TestRunAiAnalysisUsageSummary:
 
         # AI 未配置, 未发起任何调用 -> 不回写 key (让 "本次无 AI 消耗" 与 "未跑 AI" 不可区分取 None)
         assert "_ai_usage_summary" not in context
+
+    @pytest.mark.asyncio
+    async def test_scenario_chain_result_not_double_charged(self):
+        """DD-F34 一账：新链结果（Recorder 已入账）不带 usage/cost，不得二次落账。
+
+        S4 统一场景链的 attempt/用量由 UsageRecorder 在出站前登记并结算；返回给
+        策略行的是模型输出 + 程序 execution_metadata，不含 ``usage``/``cost``。
+        若 ai_mixin 把「无 usage」当成「未计价调用」再经 ``_track_cost`` 落账，
+        同一次模型调用会记两笔。本用例固化「Recorder 已入账 → 0 二次落账」。
+        """
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        candidates = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "name": ["平安银行", "万科A"],
+                "close": [10.0, 15.0],
+            }
+        )
+        context = {"data_processor": dp}
+        analyze_calls: list[str] = []
+
+        async def mock_analyze(stock_info, *args, **kwargs):
+            analyze_calls.append(stock_info.get("ts_code"))
+            return {
+                "score": 88,
+                "summary": "ok",
+                "confidence": 0.5,
+                # 新链程序字段：Recorder 已按该 invocation 记账
+                "execution_metadata": {
+                    "invocation_id": f"inv-{stock_info.get('ts_code')}",
+                    "usage_status": "reported",
+                    "ai_status": "succeeded",
+                },
+            }
+
+        with (
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("services.ai_service.usage_tracker.AIUsageTracker") as mock_tracker_cls,
+            patch(
+                "strategies.ai_mixin.NewsFetcher.get_us_major_moves",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = mock_analyze
+            mock_ai.return_value = mock_ai_instance
+            mock_tracker = MagicMock()
+            mock_tracker.add_cost_cents = AsyncMock()
+            mock_tracker.add_unpriced = AsyncMock()
+            mock_tracker_cls.return_value = mock_tracker
+
+            result = await s.run_ai_analysis(candidates, context)
+
+            # 结果仍正常落行，且不把「无 usage」伪装成「未计价消耗」
+            assert analyze_calls == ["000001.SZ", "000002.SZ"]
+            assert set(result["ai_status"]) == {"analyzed"}
+            assert set(result["ai_score"]) == {88}
+            # 新链行必须携带程序 execution_metadata（本用例前提：Recorder 已记账）。
+            assert all(
+                isinstance(meta, dict) and meta["usage_status"] == "reported" for meta in result["execution_metadata"]
+            )
+            assert "_ai_usage_summary" not in context
+            mock_tracker.add_cost_cents.assert_not_awaited()
+            mock_tracker.add_unpriced.assert_not_awaited()
+
+            # 对照：旧链响应（带 usage/cost、无 execution_metadata）必须真实落账一次，
+            # 证明上面的「零二次落账」不是记账路径整体失效。
+            mock_tracker.add_cost_cents.reset_mock()
+            mock_tracker.add_unpriced.reset_mock()
+
+            async def legacy_analyze(stock_info, *args, **kwargs):
+                return {
+                    "score": 70,
+                    "summary": "ok",
+                    "confidence": 0.5,
+                    "usage": {"total_tokens": 100},
+                    "cost": 0.02,
+                }
+
+            mock_ai_instance.analyze_stock = legacy_analyze
+            legacy_result = await s.run_ai_analysis(candidates, {"data_processor": dp})
+
+        assert len(legacy_result) == 2
+        # 0.02 元/股 × 2 股 = 0.04 元 → 批末差量落账 4 分（恰一次，不重复计费）。
+        mock_tracker.add_cost_cents.assert_awaited_once_with(4)
+        mock_tracker.add_unpriced.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_budget_exhausted_soft_stops_no_llm_call(self):
@@ -5193,6 +5336,17 @@ class TestUnpricedUsageGuards:
         cluster = {"calls": 0, "tokens": 0, "cost_cny": 0.0, "unpriced_calls": 0, "unpriced_tokens": 0}
         ConcreteStrategy._accumulate_usage(cluster, {"cost": 0.05})
         assert cluster["calls"] == 0
+
+    def test_accumulate_usage_skips_duplicate_submission(self):
+        """同一研究请求的重复提交结果不再累加（费用已由原请求承载，不双计费）。"""
+        cluster = {"calls": 0, "tokens": 0, "cost_cny": 0.0, "unpriced_calls": 0, "unpriced_tokens": 0}
+        ConcreteStrategy._accumulate_usage(
+            cluster,
+            {"usage": {"total_tokens": 30}, "cost": 0.01, "duplicate_submission": True},
+        )
+        assert cluster["calls"] == 0
+        assert cluster["tokens"] == 0
+        assert cluster["cost_cny"] == 0.0
         assert cluster["unpriced_calls"] == 0
 
     def test_accumulate_usage_non_numeric_cost_is_unpriced(self):
@@ -5432,3 +5586,54 @@ class TestUnpricedUsageGuards:
             mock_cls.return_value = mock_tracker
             await s._track_cost(None)
         mock_tracker.add_unpriced.assert_not_awaited()
+
+
+class TestStockAgentCallIdentity:
+    """F34/AC23：批次入口预存稳定身份，逐股唯一透传两层 analyze_stock。"""
+
+    @pytest.mark.asyncio
+    async def test_batch_identity_allocated_before_dispatch_and_threaded_per_stock(self):
+        s = ConcreteStrategy()
+        dp = _make_mock_dp(is_cancelled=False)
+        codes = ["000001.SZ", "000002.SZ"]
+        candidates = pd.DataFrame({"ts_code": codes, "name": codes, "close": [10.0, 20.0]})
+        context = {"data_processor": dp, "agent_session_id": "sess-1", "agent_turn_id": "turn-1"}
+        calls: list = []
+
+        async def mock_analyze(stock_info, *args, **kwargs):
+            calls.append((stock_info.get("ts_code"), kwargs.get("agent_call")))
+            return {"score": 80, "summary": "ok", "confidence": 0.6}
+
+        with (
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+            patch("strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis", return_value=1),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("services.ai_service.usage_tracker.AIUsageTracker"),
+            patch("strategies.ai_mixin.NewsFetcher.get_us_major_moves", new=AsyncMock(return_value="")),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = mock_analyze
+            mock_ai.return_value = mock_ai_instance
+
+            result = await s.run_ai_analysis(candidates, context)
+
+        # 批次身份一次分配并写回 context（落库方以同一 run_id 关联费用链）
+        operation_id = context["_ai_operation_id"]
+        assert operation_id
+        assert s._last_stock_agent_batch is not None
+        assert s._last_stock_agent_batch.operation_id == operation_id
+        # 每股唯一调用身份，且共享批次操作身份与主会话/轮次
+        assert [code for code, _ in calls] == codes
+        call_by_code = {code: call for code, call in calls}
+        assert all(call is not None for call in call_by_code.values())
+        assert call_by_code["000001.SZ"].operation_id == operation_id  # type: ignore[union-attr]
+        assert call_by_code["000002.SZ"].operation_id == operation_id  # type: ignore[union-attr]
+        assert call_by_code["000001.SZ"].call_id != call_by_code["000002.SZ"].call_id  # type: ignore[union-attr]
+        assert call_by_code["000001.SZ"].session_id == "sess-1"  # type: ignore[union-attr]
+        assert call_by_code["000001.SZ"].turn_id == "turn-1"  # type: ignore[union-attr]
+        # 结果行携带同一身份投影（失败/成功行均保留，R21）
+        assert set(result["stock_agent_call"].apply(lambda m: m["call_id"])) == {
+            call_by_code[code].call_id
+            for code in codes  # type: ignore[union-attr]
+        }
