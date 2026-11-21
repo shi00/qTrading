@@ -122,15 +122,18 @@ class TestDaoToolGrantPort:
         dao = _Dao(
             _scope(), claim_error=AgentServiceError(AgentErrorCode.PERSISTENCE_UNAVAILABLE, "db down", "u1/dec-1")
         )
-        with pytest.raises(AgentServiceError):
+        with pytest.raises(AgentServiceError) as exc:
             await _claim(dao)
+        assert exc.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
 
     async def test_disposed_engine_propagates(self) -> None:
         dao = _Dao(_scope(), claim_error=EngineDisposedError("disposed"))
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError) as exc:
             await _claim(dao)
+        assert "disposed" in str(exc.value)
 
     async def test_cancellation_propagates(self) -> None:
         dao = _Dao(_scope(), claim_error=asyncio.CancelledError())
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc:
             await _claim(dao)
+        assert type(exc.value) is asyncio.CancelledError

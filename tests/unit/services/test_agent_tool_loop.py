@@ -96,6 +96,7 @@ class TestRunAgentToolLoop:
         result = await run_agent_tool_loop(agent, "prompt", deps=None, ports=ToolLoopPorts(executor=executor))
 
         assert len(executor.calls) == 1
+        assert executor.calls[0]["tool_name"] == "search"
         assert result.unknown_operation_refs == ("op-unknown",)
 
     async def test_denied_is_reported(self) -> None:
@@ -128,5 +129,6 @@ class TestRunAgentToolLoop:
         agent = _Agent([_Result(_deferred())])
         executor = _Executor(asyncio.CancelledError())
 
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc:
             await run_agent_tool_loop(agent, "prompt", deps=None, ports=ToolLoopPorts(executor=executor))
+        assert type(exc.value) is asyncio.CancelledError

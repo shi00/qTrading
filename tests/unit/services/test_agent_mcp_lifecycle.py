@@ -137,8 +137,9 @@ class TestConnect:
             grants=AppStateMCPGrantStore(read=memory.read, write=_fail),
         )
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError) as exc:
             await lifecycle.connect(_IDENTITY, approved_tools=["search"])
+        assert "write failed" in str(exc.value)
         assert manager.disconnect_calls == 1
         assert lifecycle.active_identity() is None
 
@@ -173,8 +174,9 @@ class TestDisconnect:
         await lifecycle.connect(_IDENTITY, approved_tools=["search"])
         manager.disconnect_error = AgentServiceError(AgentErrorCode.POLICY_DENIED, "in flight", "id")
 
-        with pytest.raises(AgentServiceError):
+        with pytest.raises(AgentServiceError) as exc:
             await lifecycle.disconnect(_IDENTITY)
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
 
         assert lifecycle.active_identity() == _IDENTITY
 
@@ -196,5 +198,6 @@ class TestCancellation:
                 raise asyncio.CancelledError
 
         lifecycle, _, _ = _lifecycle(_Cancelling())
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc:
             await lifecycle.connect(_IDENTITY, approved_tools=["search"])
+        assert type(exc.value) is asyncio.CancelledError

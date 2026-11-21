@@ -47,14 +47,17 @@ class TestValidateToolSchema:
         ],
     )
     def test_incomplete_or_invalid_schema_rejected(self, schema: dict) -> None:
-        with pytest.raises(AgentValidationError):
+        with pytest.raises(AgentValidationError) as exc:
             validate_tool_schema(_spec(schema=schema))
+        assert exc.value.code == "invalid_schema"
 
     def test_empty_name_or_description_rejected(self) -> None:
-        with pytest.raises(AgentValidationError):
+        with pytest.raises(AgentValidationError) as exc:
             validate_tool_schema(ToolSpec(name="", description="d", json_schema=dict(_VALID_SCHEMA)))
-        with pytest.raises(AgentValidationError):
+        assert exc.value.code == "invalid_tool_field"
+        with pytest.raises(AgentValidationError) as exc:
             validate_tool_schema(ToolSpec(name="t", description=" ", json_schema=dict(_VALID_SCHEMA)))
+        assert exc.value.code == "invalid_tool_field"
 
 
 class TestValidateToolSet:
@@ -69,12 +72,14 @@ class TestValidateToolSet:
         assert validate_tool_set((_spec("a"),), allowed_names=()) == ()
 
     def test_duplicate_name_rejected(self) -> None:
-        with pytest.raises(AgentValidationError):
+        with pytest.raises(AgentValidationError) as exc:
             validate_tool_set((_spec("a"), _spec("a")), allowed_names=["a"])
+        assert exc.value.code == "duplicate_tool_name"
 
     def test_non_spec_rejected(self) -> None:
-        with pytest.raises(AgentValidationError):
+        with pytest.raises(AgentValidationError) as exc:
             validate_tool_set((object(),), allowed_names=["a"])  # type: ignore[arg-type]
+        assert exc.value.code == "invalid_tool"
 
 
 class TestBuildDeferredTools:
@@ -88,5 +93,6 @@ class TestBuildDeferredTools:
     async def test_stub_only_defers(self) -> None:
         tool = build_deferred_tools((_spec("a"),))[0]
 
-        with pytest.raises(CallDeferred):
+        with pytest.raises(CallDeferred) as exc:
             await tool.function(None, query="x")
+        assert exc.value.metadata == {"deferred_by": "qtrading.tools"}

@@ -296,8 +296,9 @@ class TestRunLeafAgentFailures:
         _fake_agent.error = asyncio.CancelledError()
         dao = _Dao()
 
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc:
             await run_leaf_agent(_model(), _context(), _binding(), dao=dao)
+        assert type(exc.value) is asyncio.CancelledError
 
 
 class TestBuildLeafAgentRunner:

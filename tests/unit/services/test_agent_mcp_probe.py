@@ -96,7 +96,7 @@ class TestStdioImplementationProbe:
         config = _stdio_config(command=sys.executable, cwd=str(tmp_path), args=("server.py",))
         first = await probe.probe(config)
         script.write_text("print('v2')", encoding="utf-8")
-        assert first is not None
+        assert isinstance(first, str) and first
         assert await probe.probe(config) != first
 
     async def test_cwd_change_changes_fingerprint(self, tmp_path) -> None:

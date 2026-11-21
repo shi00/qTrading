@@ -210,8 +210,9 @@ class TestLoad:
         fake.fail_with = asyncio.CancelledError()
         vm = _vm(fake)
 
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc:
             await vm.load()
+        assert type(exc.value) is asyncio.CancelledError
         assert vm.state.busy is False
 
 
@@ -366,6 +367,7 @@ class TestOperations:
         vm.select_service(_identity().stable_key())
         fake.fail_with = asyncio.CancelledError()
 
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc:
             await vm.connection_test()
+        assert type(exc.value) is asyncio.CancelledError
         assert vm.state.busy is False

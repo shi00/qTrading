@@ -54,8 +54,9 @@ class TestReceiveBytes:
         """被拒的块不计数也不进缓冲区：同样超限的块再次喂入仍在同一族被拒。"""
 
         reader, _guard = _reader(receive_bytes=10)
-        with pytest.raises(MCPBudgetExceeded):
+        with pytest.raises(MCPBudgetExceeded) as first_exc:
             reader.feed(_ECHO_RESPONSE)
+        assert first_exc.value.family == "receive_bytes"
         with pytest.raises(MCPBudgetExceeded) as exc:
             reader.feed(_ECHO_RESPONSE)
         assert exc.value.family == "receive_bytes"

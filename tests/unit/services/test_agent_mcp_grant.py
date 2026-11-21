@@ -38,26 +38,29 @@ class TestMCPConnectGrant:
         assert _grant().tools == ()
 
     def test_invalid_digest_rejected(self) -> None:
-        with pytest.raises(AgentValidationError):
+        with pytest.raises(AgentValidationError) as exc:
             MCPConnectGrant(
                 identity=_IDENTITY,
                 tools=(),
                 catalog_digest="not-a-digest",
                 approved_at="2026-11-20T00:00:00.000000Z",
             )
+        assert "catalog_digest" in str(exc.value)
 
     def test_invalid_tool_name_rejected(self) -> None:
-        with pytest.raises(AgentValidationError):
+        with pytest.raises(AgentValidationError) as exc:
             _grant("")
+        assert "tools" in str(exc.value)
 
     def test_invalid_timestamp_rejected(self) -> None:
-        with pytest.raises(AgentValidationError):
+        with pytest.raises(AgentValidationError) as exc:
             MCPConnectGrant(
                 identity=_IDENTITY,
                 tools=(),
                 catalog_digest=_DIGEST,
                 approved_at="2026-11-20T00:00:00Z",
             )
+        assert "approved_at" in str(exc.value)
 
     def test_codec_round_trip(self) -> None:
         grant = _grant("search")

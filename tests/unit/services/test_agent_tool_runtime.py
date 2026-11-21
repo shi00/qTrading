@@ -287,7 +287,8 @@ class TestToolRuntimeExecute:
         dao = _Dao()
         runtime = _runtime(dispatcher, dao)
 
-        with pytest.raises(MCPBudgetExceeded):
+        with pytest.raises(MCPBudgetExceeded) as exc:
             await runtime.execute(tool_name="search", arguments={"query": "x"}, tool_call_id="call-1")
+        assert exc.value.family == "single_result_bytes"
 
         assert dao.results[-1].outcome_state == "unknown"

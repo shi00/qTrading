@@ -128,5 +128,4 @@ class TestBuildToolRuntimeFactory:
 
         runtime = factory(_SCOPE)
 
-        assert runtime is not None
-        assert runtime.tools == ()
+        assert runtime is not None and runtime.tools == ()

@@ -86,8 +86,9 @@ class TestAppStateMCPConfigStore:
     async def test_write_failure_propagates(self) -> None:
         memory = _Memory()
         memory.write_error = RuntimeError("db down")
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError) as exc:
             await _store(memory).save(_config())
+        assert "db down" in str(exc.value)
 
     async def test_corrupt_payload_is_explicit_failure(self) -> None:
         memory = _Memory()

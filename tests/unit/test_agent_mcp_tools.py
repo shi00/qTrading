@@ -664,6 +664,7 @@ class TestResearchBoundaryDispatchGate:
             await dispatcher.call(_request(operation_id="op-1"))
         assert exc.value.code is AgentErrorCode.SOURCE_DISABLED
         assert len(session.calls) == 1
+        assert session.calls[0][0] == "read_file"
 
     @pytest.mark.asyncio
     async def test_duplicate_in_flight_operation_blocks_before_claim(self) -> None:

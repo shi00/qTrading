@@ -35,5 +35,6 @@ class TestDaoMCPFrozenUsage:
 
     async def test_dao_failure_propagates(self) -> None:
         dao = _Dao(error=RuntimeError("db down"))
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError) as exc:
             await DaoMCPFrozenUsage(dao).frozen_users(_IDENTITY)
+        assert "db down" in str(exc.value)

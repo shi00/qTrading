@@ -107,20 +107,23 @@ class TestCodecRejection:
     def test_missing_top_key_rejected(self) -> None:
         wire = encode_mcp_server_config(_config(_http_transport()))
         del wire["budget"]
-        with pytest.raises(AgentValidationError):
+        with pytest.raises(AgentValidationError) as exc:
             decode_mcp_server_config(wire)
+        assert exc.value.code == "invalid_mcp_config"
 
     def test_unknown_transport_kind_rejected(self) -> None:
         wire = encode_mcp_server_config(_config(_http_transport()))
         wire["transport"]["kind"] = "websocket"
-        with pytest.raises(AgentValidationError):
+        with pytest.raises(AgentValidationError) as exc:
             decode_mcp_server_config(wire)
+        assert exc.value.code == "invalid_mcp_config"
 
     def test_bool_budget_rejected(self) -> None:
         wire = encode_mcp_server_config(_config(_http_transport()))
         wire["budget"]["receive_bytes"] = True
-        with pytest.raises(AgentValidationError):
+        with pytest.raises(AgentValidationError) as exc:
             decode_mcp_server_config(wire)
+        assert exc.value.code == "invalid_budget"
 
     def test_http_requires_risk_approval(self) -> None:
         wire = encode_mcp_server_config(_config(_http_transport()))

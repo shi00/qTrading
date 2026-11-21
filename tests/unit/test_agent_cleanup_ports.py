@@ -103,14 +103,16 @@ class TestDaoCleanupAdmissionFacts:
         assert precondition is not None and precondition.new_reference_conflict
 
     async def test_engine_disposed_and_cancellation_propagate(self) -> None:
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError) as exc:
             await DaoCleanupAdmissionFacts(_Dao(_record("wf-1"), error=EngineDisposedError("x"))).derive_precondition(
                 "u1", "job-1"
             )
-        with pytest.raises(asyncio.CancelledError):
+        assert "x" in str(exc.value)
+        with pytest.raises(asyncio.CancelledError) as exc:
             await DaoCleanupAdmissionFacts(_Dao(_record("wf-1"), error=asyncio.CancelledError())).derive_precondition(
                 "u1", "job-1"
             )
+        assert type(exc.value) is asyncio.CancelledError
 
 
 class TestDaoNativeVerification:
@@ -154,5 +156,6 @@ class TestDbosDeletionClient:
         assert client.calls == [(["wf-1"], True)]
 
     def test_missing_api_fails_closed(self) -> None:
-        with pytest.raises(TypeError):
+        with pytest.raises(TypeError) as exc:
             DbosDeletionClient(object())  # type: ignore[arg-type]  # [reason: 显式验证缺 API 时 fail-closed]
+        assert "delete_workflows" in str(exc.value)
