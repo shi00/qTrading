@@ -168,12 +168,15 @@ class TestBacktestSnapshotRead:
 
     @pytest.mark.asyncio
     async def test_naive_executed_at_is_zone_unknown_not_utc(self) -> None:
-        """I64：无时区时间不得猜成 UTC；时区不可证时 fail-closed 并给独立原因。"""
+        """I64：无时区时间不得猜成 UTC；时区不可证时保留「未知」并给独立原因。"""
         row = _row()
         row["executed_at"] = datetime(2026, 1, 2, 3, 4, 5)
         without_cutoff = await read_backtest_snapshot(FakeReader(row=row), user_scope="u1", result_id="run-1")
-        assert without_cutoff.source is None
-        assert without_cutoff.read_state is ReadState.UNAVAILABLE
+        # P1-04：内容仍可读（受限读），但绝对时点保持 None，不补成 UTC。
+        assert without_cutoff.source is not None
+        assert without_cutoff.source.source.available_at is None
+        assert without_cutoff.source.source.read_state is ReadState.UNKNOWN
+        assert without_cutoff.read_state is ReadState.UNKNOWN
         assert without_cutoff.missing_reason == "available_at_zone_unknown"
         with_cutoff = await read_backtest_snapshot(
             FakeReader(row=row),
@@ -181,7 +184,9 @@ class TestBacktestSnapshotRead:
             result_id="run-1",
             cutoff="2026-02-01T00:00:00.000000Z",
         )
-        # 不得误报为「晚于截止」：那是另一种可审计原因。
+        # 给定截止界时时点未知不可放行；不得误报为「晚于截止」。
+        assert with_cutoff.source is None
+        assert with_cutoff.read_state is ReadState.UNAVAILABLE
         assert with_cutoff.missing_reason == "available_at_zone_unknown"
 
     @pytest.mark.asyncio
@@ -190,8 +195,43 @@ class TestBacktestSnapshotRead:
         row = _row()
         row["executed_at"] = pd.Timestamp("2026-01-02 03:04:05")
         result = await read_backtest_snapshot(FakeReader(row=row), user_scope="u1", result_id="run-1")
-        assert result.source is None
+        assert result.source is not None
+        assert result.source.source.available_at is None
         assert result.missing_reason == "available_at_zone_unknown"
+
+    @pytest.mark.asyncio
+    async def test_absolute_executed_at_utc_wins_over_legacy_naive_column(self) -> None:
+        """P1-04：新列 executed_at_utc（timestamptz）优先于遗留 naive executed_at。"""
+        row = _row()
+        row["executed_at"] = datetime(2026, 1, 2, 3, 4, 5)
+        row["executed_at_utc"] = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+        result = await read_backtest_snapshot(FakeReader(row=row), user_scope="u1", result_id="run-1")
+        assert result.read_state is ReadState.READY
+        assert result.source is not None
+        assert result.source.source.available_at == "2026-01-02T03:04:05.000000Z"
+        assert result.source.source.read_state is ReadState.READY
+
+    @pytest.mark.asyncio
+    async def test_null_absolute_column_falls_back_to_legacy_naive_column(self) -> None:
+        """存量行 executed_at_utc 为 NULL：仍按遗留列判定，不得当成「有绝对时点」。"""
+        row = _row()
+        row["executed_at_utc"] = None
+        row["executed_at"] = datetime(2026, 1, 2, 3, 4, 5)
+        result = await read_backtest_snapshot(FakeReader(row=row), user_scope="u1", result_id="run-1")
+        assert result.missing_reason == "available_at_zone_unknown"
+        assert result.source is not None
+        assert result.source.source.available_at is None
+
+    @pytest.mark.asyncio
+    async def test_absolute_timestamp_column_does_not_change_content_version(self) -> None:
+        """新增绝对时点列不得改变内容版本摘要（否则升级后同一报告会重复建稿）。"""
+        legacy_row = _row()
+        with_absolute = dict(legacy_row)
+        with_absolute["executed_at_utc"] = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+        legacy = await read_backtest_snapshot(FakeReader(row=legacy_row), user_scope="u1", result_id="run-1")
+        modern = await read_backtest_snapshot(FakeReader(row=with_absolute), user_scope="u1", result_id="run-1")
+        assert legacy.source is not None and modern.source is not None
+        assert legacy.source.source.digest == modern.source.source.digest
 
     @pytest.mark.asyncio
     async def test_date_only_value_is_not_padded_to_midnight(self) -> None:

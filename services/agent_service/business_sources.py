@@ -5,8 +5,10 @@
   并按结果版本准备**完整受管正文**（参数/指标/质量告警/失败日期/已知限制；
   缺失项显式标注「未提供/未知」，不填 0，R21）；
 - 成功且无行 → ``unavailable`` + ``result_not_found``；
-- 行内时间无时区（来源时区约定不可验证）→ ``unavailable`` + ``available_at_zone_unknown``，
-  不按 UTC 猜测、不补午夜（R21/R24）；
+- 行内时间无时区（存量记录/时区未声明的写入方）→ ``read_state=unknown`` +
+  ``available_at_zone_unknown``：内容仍可读、绝对时点保留「未知」（``available_at=NULL``），
+  不按 UTC 猜测、不补午夜（R21/R24）。草稿期可建「受限」稿，发送/受理期由 PIT 准入拒绝；
+- 给定截止界但时点未知 → ``unavailable`` + ``available_at_unknown``（不得放行）；
 - 数据库失败 → ``PERSISTENCE_UNAVAILABLE``（不构造来源）；
 - disposed → ``EngineDisposedError`` 原样传播；取消 → ``CancelledError`` 必须 raise（R2）。
 
@@ -42,8 +44,15 @@ from core.agent_types import (
 )
 from data.persistence.daos.base_dao import DatabaseQueryError, EngineDisposedError
 
-#: 可用的回测时间列：``executed_at`` 是 ``backtest_results`` 的真实列（无 ``created_at``）。
-_TIMESTAMP_KEYS = ("executed_at", "created_at", "timestamp", "run_time", "created_time")
+#: 可用的回测时间列：优先 ``executed_at_utc``（P1-04 新增的 timestamptz 绝对时点）；
+#: 存量行该列为 NULL，回退 ``executed_at``（timestamp without time zone，读取为 naive）。
+_TIMESTAMP_KEYS = ("executed_at_utc", "executed_at", "created_at", "timestamp", "run_time", "created_time")
+
+#: 绝对执行时点列（timestamptz）；只作来源时点属性，不并入内容版本摘要。
+_ABSOLUTE_TIMESTAMP_KEY = "executed_at_utc"
+
+#: 行内时点未带时区、绝对时刻不可证的可审计原因（存量行 / 时区未声明的写入方）。
+_AVAILABILITY_ZONE_UNKNOWN = "available_at_zone_unknown"
 
 
 class BacktestResultReader(Protocol):
@@ -89,24 +98,26 @@ async def read_backtest_snapshot(
     if not isinstance(row, Mapping):
         raise AgentServiceError(AgentErrorCode.PERSISTENCE_UNAVAILABLE, "backtest row shape invalid", identity)
 
-    safe_row = _json_safe(dict(row))
+    # 内容版本不把新增的 ``executed_at_utc`` 计入摘要：绝对时点属于来源属性
+    # （``available_at``），计入会让升级后同一份报告被当成新版本、重复建稿。
+    safe_row = _json_safe({key: value for key, value in row.items() if key != _ABSOLUTE_TIMESTAMP_KEY})
     digest = sha256_hex(
         json.dumps(safe_row, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     )
     raw_timestamp = _first_timestamp(row)
     available_at = _wire_timestamp(raw_timestamp)
-    if raw_timestamp is not None and available_at is None:
-        # 行内时间未带时区（``backtest_results.executed_at`` 为 timestamp without time
-        # zone，由会话时区的 ``now()`` 写入），绝对时刻不可证：不得按 UTC 猜测放行。
-        return BusinessSnapshotRead(
-            source=None, read_state=ReadState.UNAVAILABLE, missing_reason="available_at_zone_unknown"
-        )
+    # 行内时间未带时区（存量 ``executed_at`` 为 timestamp without time zone，由会话时区的
+    # ``now()`` 写入），绝对时刻不可证：不得按 UTC 猜测放行（R21/R24）。
+    zone_unknown = raw_timestamp is not None and available_at is None
     cutoff_dt = _parse_timestamp(cutoff, identity)
     if cutoff_dt is not None:
         if available_at is None:
-            # 时点未知不能伪装成「晚于截止」（R21）：单独给出可审计原因。
+            # 时点未知不能伪装成「晚于截止」（R21）：单独给出可审计原因；
+            # 时区不可证与「完全无时点」分列，便于诊断。
             return BusinessSnapshotRead(
-                source=None, read_state=ReadState.UNAVAILABLE, missing_reason="available_at_unknown"
+                source=None,
+                read_state=ReadState.UNAVAILABLE,
+                missing_reason=_AVAILABILITY_ZONE_UNKNOWN if zone_unknown else "available_at_unknown",
             )
         available_dt = _parse_timestamp(available_at, identity)
         if available_dt is None or available_dt > cutoff_dt:
@@ -116,6 +127,11 @@ async def read_backtest_snapshot(
 
     source_id = f"backtest:{result_id}"
     body_text = _render_backtest_body(row, digest=digest, available_at=available_at)
+    # 受限读（时点未知）：内容已程序读取，但绝对时点保留「未知」（read_state=UNKNOWN，
+    # available_at=NULL）。草稿期不判断 PIT 准入，故仍可建稿；发送/受理期按截止界重判时
+    # 会以 ``source availability time unknown`` 拒绝，零派发。
+    read_state = ReadState.UNKNOWN if zone_unknown else ReadState.READY
+    missing_reason = _AVAILABILITY_ZONE_UNKNOWN if zone_unknown else None
     source = SourceRef(
         user_scope=user_scope,
         source_id=source_id,
@@ -137,8 +153,8 @@ async def read_backtest_snapshot(
         available_at=available_at,
         period=_period_of(row),
         unit_note=None,
-        read_state=ReadState.READY,
-        missing_reason=None,
+        read_state=read_state,
+        missing_reason=missing_reason,
         provenance_refs=(),
     )
     return BusinessSnapshotRead(
@@ -147,8 +163,8 @@ async def read_backtest_snapshot(
             verification=VerificationState.PROGRAM_VERIFIED,
             body_text=body_text,
         ),
-        read_state=ReadState.READY,
-        missing_reason=None,
+        read_state=read_state,
+        missing_reason=missing_reason,
     )
 
 
