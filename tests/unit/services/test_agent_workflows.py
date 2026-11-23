@@ -959,6 +959,22 @@ def test_retry_payload_carries_scope_and_preserved() -> None:
     assert preserved == (_outcome("a", artifact_ref="artifact_a_1"),)
 
 
+def test_retry_payload_reuses_original_binding_identity() -> None:
+    """重试轮沿用原绑定：重试载荷与首轮携带同一冻结身份（不新造轮次身份）。"""
+    plan = _plan(_node("a"), _node("b", ("a",)))
+    identity = _binding_identity()
+    payload, _scope = build_retry_payload(
+        plan,
+        execution_id="exec-2",
+        round_id="round-2",
+        plan_digest="d" * 64,
+        targets=("b",),
+        preserved_outcomes=(_outcome("a", artifact_ref="artifact_a_1"),),
+        binding_identity=identity,
+    )
+    assert decode_research_payload_full(payload).binding_identity == identity
+
+
 def test_retry_payload_rejects_invalid_preserved_before_dispatch() -> None:
     """B2 回归：非法保留事实（非成功/落在范围内）在派发前拒绝，不留给 workflow ERROR。"""
     plan = _plan(_node("a"), _node("b", ("a",)))

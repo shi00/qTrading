@@ -72,6 +72,7 @@ from services.agent_service.dispatch import (
     PlanSpecProvider,
     RootWorkflowResultReader,
     RootWorkflowSubmitter,
+    build_binding_identity_provider,
 )
 from services.agent_service.leaf_runtime import default_leaf_runtime
 from services.agent_service.loop import AgentTurn, ResearchResultProducer
@@ -922,6 +923,10 @@ async def wire_agent_runtime(
         read_result=_tracked_read,
         # 生产角色能力来源：只取本次请求冻结的 Skill/MCP 显式手选集（未选择即零派发）。
         capability_provider=build_role_capability_provider(dao),
+        # 生产应用轮次绑定来源：冻结会话/输入版/执行代次，父 workflow 据此建轮次。
+        binding_identity_provider=build_binding_identity_provider(
+            dao, application_version=settings.application_version
+        ),
     )
     fact_sink = (
         _LaunchedCloseFactSink(ledger=ledger, dao=dao, user_scope=user_scope)
