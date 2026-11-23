@@ -522,6 +522,22 @@ class DataConsentAuthority:
     binding: DataConsentBinding
 
 
+@dataclass(frozen=True, slots=True)
+class ExecutionTerminalFact:
+    """父流程叶事实 → 应用执行终态的落库结果（P1-08）。
+
+    ``projected=True`` 表示本次把已核叶事实投影为执行终态；``replayed=True`` 且
+    ``projected=False`` 表示已是非恢复终态、不覆写；``reason`` 保留未投影原因
+    （不把「未核」写成终态，R21）。
+    """
+
+    execution_id: str
+    display_state: str
+    projected: bool
+    replayed: bool
+    reason: str | None = None
+
+
 # E-06 九类原生目标位于**运行库**（dbos / agent_ds，独立逻辑库），不属业务库；
 # 计数/Datasource 删除见 ``data.persistence.agent_runtime_store``，系统表删除走
 # DBOS 公开 API（``services.agent_service.cleanup_native``）。本 DAO 只承载应用域
@@ -13414,6 +13430,10 @@ class AgentDao(BaseDao):
         - 内容不同则追加不可变新版本（``artifact_version`` 单调 +1，不原位覆盖）；
         - 执行/轮不存在或轮不属于执行 → ``INPUT_INVALID``；
         - 会话已清理 fence → ``POLICY_DENIED``（不复活已清理会话）；
+        - 只有 ``draft.round_final``（本轮主结果）才写 ``agent_round.final_saved``：
+          同执行不同节点的叶/子成果各自保存，不能互相冒充本轮最终成果（P1-08 / R21）；
+        - 可靠事件身份含 ``artifact_id`` 与版本：同执行不同节点的首版各有独立
+          ``message_id``，不以 ``(execution, version)`` 撞 ``agent_message`` 主键（P1-08）；
         - 成果与事件同事务提交；事务失败不返回已保存成果（R21）。
         """
 
@@ -13502,14 +13522,15 @@ class AgentDao(BaseDao):
                 )
             ).first()
             if head is not None and head.result_digest == digest:
-                await conn.execute(
-                    sa.update(AgentRound)
-                    .where(
-                        AgentRound.user_scope == draft.user_scope,
-                        AgentRound.round_id == draft.round_id,
+                if draft.round_final:
+                    await conn.execute(
+                        sa.update(AgentRound)
+                        .where(
+                            AgentRound.user_scope == draft.user_scope,
+                            AgentRound.round_id == draft.round_id,
+                        )
+                        .values(final_saved=True, updated_at=now)
                     )
-                    .values(final_saved=True, updated_at=now)
-                )
                 return ResearchResult.from_draft(
                     draft,
                     artifact_id=artifact_id,
@@ -13537,22 +13558,24 @@ class AgentDao(BaseDao):
                     published_at=now,
                 )
             )
-            await conn.execute(
-                sa.update(AgentRound)
-                .where(
-                    AgentRound.user_scope == draft.user_scope,
-                    AgentRound.round_id == draft.round_id,
+            if draft.round_final:
+                await conn.execute(
+                    sa.update(AgentRound)
+                    .where(
+                        AgentRound.user_scope == draft.user_scope,
+                        AgentRound.round_id == draft.round_id,
+                    )
+                    .values(final_saved=True, updated_at=now)
                 )
-                .values(final_saved=True, updated_at=now)
-            )
             # 5. 同事务可靠事件（观察侧按 after_seq 追平；同身份重放不重复）。
+            #    消息身份含 artifact_id：同执行不同节点/轮次的首版各有独立行（P1-08）。
             await self._append_session_event(
                 conn,
                 user_scope=draft.user_scope,
                 session_id=draft.session_id,
                 message_id=stable_id(
                     "event_message",
-                    [draft.user_scope, draft.execution_id, "research_result_saved", str(version)],
+                    [draft.user_scope, draft.execution_id, "research_result_saved", artifact_id, str(version)],
                 ),
                 event_id=derive_event_identity(
                     execution_id=None,
@@ -13578,6 +13601,162 @@ class AgentDao(BaseDao):
                 session_event_seq=int(session_row.event_seq),
             )
         return ResearchResult.from_draft(draft, artifact_id=artifact_id, artifact_version=version)
+
+    async def record_execution_terminal_state(
+        self,
+        *,
+        execution_id: str,
+        round_id: str,
+        display_state: str,
+        evidence: dict[str, Any] | None = None,
+    ) -> ExecutionTerminalFact:
+        """父流程已核叶事实 → 应用执行终态（P1-08；原生汇总不是唯一出口）。
+
+        语义：
+
+        - 只接受非恢复终态（``NON_RECOVERABLE_DISPLAY_STATES``）；其他值
+          ``INPUT_INVALID``——未知/在途不落终态（R21）；
+        - 执行已是非恢复终态 → 不覆写（``replayed=True``、``projected=False``），
+          迟到的旧轮汇总不翻回终态；
+        - 轮不属于该执行 → ``INPUT_INVALID``；执行已推进到其他有效轮 → 不投影旧轮
+          （``not_current_round``，不覆写当前轮）；
+        - 会话已清理 fence → 不写（``cleanup_fenced``），不复活已清理会话；
+        - 执行行/会话行按既有锁序（execution → session）加锁，终态与
+          ``execution_changed`` 可靠事件同事务提交；观察侧被唤醒后仍以库为准。
+        """
+
+        self._check_engine()
+        identity = f"{execution_id}/{round_id}"
+        _require_text_field(execution_id, "execution_id", identity)
+        _require_text_field(round_id, "round_id", identity)
+        if display_state not in NON_RECOVERABLE_DISPLAY_STATES:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                "display_state must be a non-recoverable terminal state",
+                identity,
+            )
+        payload_evidence = dict(evidence) if evidence is not None else {}
+        now = datetime.now(UTC)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            # 1. execution 行锁（锁序 execution → session，与成果/事件路径一致）。
+            execution_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentExecution.user_scope,
+                        AgentExecution.session_id,
+                        AgentExecution.display_state,
+                        AgentExecution.current_round_id,
+                    )
+                    .where(AgentExecution.execution_id == execution_id)
+                    .with_for_update()
+                )
+            ).first()
+            if execution_row is None:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "execution not found", identity)
+            user_scope = execution_row.user_scope
+            if execution_row.display_state in NON_RECOVERABLE_DISPLAY_STATES:
+                return ExecutionTerminalFact(
+                    execution_id=execution_id,
+                    display_state=execution_row.display_state,
+                    projected=False,
+                    replayed=True,
+                    reason="already_terminal",
+                )
+            if execution_row.current_round_id is not None and execution_row.current_round_id != round_id:
+                return ExecutionTerminalFact(
+                    execution_id=execution_id,
+                    display_state=execution_row.display_state,
+                    projected=False,
+                    replayed=False,
+                    reason="not_current_round",
+                )
+            # 2. 轮归属核定（§9.7：父汇总必须属于原执行轮）。
+            round_row = (
+                await conn.execute(
+                    sa.select(AgentRound.round_id).where(
+                        AgentRound.user_scope == user_scope,
+                        AgentRound.round_id == round_id,
+                        AgentRound.execution_id == execution_id,
+                    )
+                )
+            ).first()
+            if round_row is None:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "round does not belong to execution", identity)
+            # 3. session 行锁（事件水位单调，R22）与删除 fence 门（D08）。
+            session_row = (
+                await conn.execute(
+                    sa.select(AgentSession.event_seq)
+                    .where(
+                        AgentSession.user_scope == user_scope,
+                        AgentSession.session_id == execution_row.session_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if session_row is None:
+                raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "session of execution not found", identity)
+            try:
+                await self._assert_session_not_cleanup_fenced(
+                    conn,
+                    user_scope=user_scope,
+                    session_id=execution_row.session_id,
+                    identity=identity,
+                )
+            except AgentServiceError as exc:
+                if exc.code is not AgentErrorCode.POLICY_DENIED:
+                    raise
+                return ExecutionTerminalFact(
+                    execution_id=execution_id,
+                    display_state=execution_row.display_state,
+                    projected=False,
+                    replayed=False,
+                    reason="cleanup_fenced",
+                )
+            await conn.execute(
+                sa.update(AgentExecution)
+                .where(
+                    AgentExecution.user_scope == user_scope,
+                    AgentExecution.execution_id == execution_id,
+                )
+                .values(display_state=display_state, ended_at=now, last_verified_at=now, updated_at=now)
+            )
+            await self._append_session_event(
+                conn,
+                user_scope=user_scope,
+                session_id=execution_row.session_id,
+                message_id=stable_id(
+                    "event_message",
+                    [user_scope, execution_id, round_id, "execution_terminal", display_state],
+                ),
+                event_id=derive_event_identity(
+                    execution_id=None,
+                    round_id=None,
+                    node_id=None,
+                    native_event_id=f"execution_terminal:{execution_id}:{round_id}:{display_state}",
+                ),
+                event_kind=EventKind.EXECUTION_CHANGED,
+                payload_kind="execution_state",
+                subject_id=execution_id,
+                subject_revision=1,
+                payload={
+                    "schema_version": 1,
+                    "execution_id": execution_id,
+                    "round_id": round_id,
+                    "display_state": display_state,
+                    "source": "research_workflow_summary",
+                    "evidence": payload_evidence,
+                },
+                occurred_at=now,
+                session_event_seq=int(session_row.event_seq),
+            )
+        return ExecutionTerminalFact(
+            execution_id=execution_id,
+            display_state=display_state,
+            projected=True,
+            replayed=False,
+        )
 
 
 def _validate_skill_asset_request(request: SkillAssetRegistration, identity: str) -> None:

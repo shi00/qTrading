@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -49,6 +50,7 @@ from services.agent_service.workflows import (
     ParentBindIdentity,
     PlanAdmission,
     PlanRunSummary,
+    TerminalStateDaoRegistry,
     _leaf_step_evidence,
     _terminal_outcome,
     admit_research_plan,
@@ -69,12 +71,15 @@ from services.agent_service.workflows import (
     decode_research_payload,
     decode_research_payload_full,
     drive_leaf_dag,
+    install_terminal_state_dao,
     leaf_ticket_slot_id,
     leaf_workflow_id,
     observe_leaf_children,
     receive_pending_answers,
     record_plan_admission,
+    record_research_terminal_state,
     release_leaf_ticket,
+    terminal_display_state_from_summary,
     validate_actual_input_binding,
     wait_next_observation_window,
 )
@@ -1772,3 +1777,93 @@ def test_drive_invokes_answer_drain_before_progress() -> None:
     assert hits[0] == "drain"
     assert hits[1] == "start:a"
     assert summary.succeeded == ("a",)
+
+
+# ---------------------------------------------------------------------------
+# 应用执行终态投影（P1-08：已核叶事实 → 应用状态，未核保持未知）
+# ---------------------------------------------------------------------------
+
+
+def _summary(**overrides: Any) -> PlanRunSummary:
+    values: dict[str, Any] = {
+        "succeeded": (),
+        "failed": (),
+        "withdrawn": (),
+        "ended": (),
+        "partial": (),
+        "closed_unknown": (),
+        "blocked": (),
+        "pending": (),
+        "block_reasons": (),
+        "outcomes": (),
+        "leaves_all_succeeded": False,
+        "converged": True,
+    }
+    values.update(overrides)
+    return PlanRunSummary(**values)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"pending": ("c",)}, None),
+        ({"succeeded": ("a", "b"), "leaves_all_succeeded": True}, "complete"),
+        ({"succeeded": ("a",), "failed": ("b",)}, "partial"),
+        ({"failed": ("a",)}, "failed"),
+        ({"blocked": ("b",), "block_reasons": (("b", "upstream_failed:a"),)}, None),
+        ({"succeeded": ("a",), "blocked": ("b",)}, "partial"),
+        ({"failed": ("a",), "closed_unknown": ("b",)}, "failed"),
+        ({"partial": ("a",)}, "partial"),
+        ({"closed_unknown": ("a",)}, "closed_unknown"),
+        ({"withdrawn": ("a",)}, "withdrawn"),
+        ({"ended": ("a",)}, "ended"),
+        ({"ended": ("a",), "blocked": ("b",)}, "ended"),
+        ({}, None),
+    ],
+)
+def test_terminal_display_state_maps_verified_facts(overrides: dict[str, Any], expected: str | None) -> None:
+    """终态只按已核叶事实映射；非终态叶不投影（未知保持未知，R21）。"""
+    assert terminal_display_state_from_summary(_summary(**overrides)) == expected
+
+
+class _TerminalDao:
+    def __init__(self, *, projected: bool = True, display_state: str = "complete", reason: str | None = None) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.fact = SimpleNamespace(projected=projected, display_state=display_state, reason=reason)
+
+    async def record_execution_terminal_state(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        return self.fact
+
+
+def test_terminal_step_does_not_write_without_verified_facts() -> None:
+    """未核定（display_state=None）不写任何终态、不调用 DAO。"""
+    dao = _TerminalDao()
+    install_terminal_state_dao(dao)
+    try:
+        result = asyncio.run(record_research_terminal_state("exec-1", "round-1", None, {"pending": ["c"]}))
+    finally:
+        TerminalStateDaoRegistry._reset_singleton()
+
+    assert result == {"projected": False, "display_state": None, "reason": "unverified_facts"}
+    assert dao.calls == []
+
+
+def test_terminal_step_records_verified_state_in_application_dao() -> None:
+    """可核定时经共享账本写应用执行终态（父不只回原生汇总）。"""
+    dao = _TerminalDao()
+    install_terminal_state_dao(dao)
+    try:
+        result = asyncio.run(record_research_terminal_state("exec-1", "round-1", "complete", {"succeeded": ["a"]}))
+    finally:
+        TerminalStateDaoRegistry._reset_singleton()
+
+    assert dao.calls == [
+        {
+            "execution_id": "exec-1",
+            "round_id": "round-1",
+            "display_state": "complete",
+            "evidence": {"succeeded": ["a"]},
+        }
+    ]
+    assert result == {"projected": True, "display_state": "complete", "reason": None}

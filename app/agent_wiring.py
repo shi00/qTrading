@@ -116,6 +116,7 @@ from services.agent_service.units import UnitConversion
 from services.agent_service.workflows import (
     ANSWER_MESSAGE_TOPIC,
     AnswerConsumerRegistry,
+    install_terminal_state_dao,
     submit_research_workflow,
 )
 from utils.config.db import (
@@ -927,6 +928,8 @@ async def wire_agent_runtime(
         leaf_runtime = default_leaf_runtime(dao, tool_runtime_factory=tool_factory)
     try:
         install_leaf_runtime(leaf_runtime)
+        # 父流程收敛后落应用执行终态（P1-08）：同一共享账本写入，不新建引擎。
+        install_terminal_state_dao(dao)
     except Exception as e:  # 叶运行链未装好即零派发（launch/派发都不进行）
         logger.warning("[AgentWiring] leaf runtime install failed: %s (zero dispatch)", type(e).__name__)
         return AgentWiring(

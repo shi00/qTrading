@@ -787,6 +787,10 @@ class ResearchResultDraft:
     source_refs: tuple[SourceVersionRef, ...]
     #: 对象级缺口（可选，关键字传入；不占位置参数序，保存子类仍可追加身份字段）。
     object_gaps: tuple[ResearchObjectGap, ...] = dataclass_field(default=(), kw_only=True)
+    #: 本成果是否为本轮「主结果」（可选，关键字传入；由主回合生产者显式声明）。
+    #: DAO 只据此写 ``agent_round.final_saved``：叶/子结果缺省 False，不得以任一
+    #: 子成果保存冒充本轮最终成果已保存（P1-08 / R21）。
+    round_final: bool = dataclass_field(default=False, kw_only=True)
 
     def __post_init__(self) -> None:
         for name in ("user_scope", "session_id", "execution_id", "round_id", "node_id", "actual_model_ref"):
@@ -850,6 +854,8 @@ class ResearchResultDraft:
             if key in seen_gaps:
                 _fail("duplicate_object_gap", f"$.object_gaps[{index}]")
             seen_gaps.add(key)
+        if not isinstance(self.round_final, bool):
+            _fail("invalid_type", "$.round_final")
         if not (self.summary or self.key_points or self.body_text or self.structured_fields or self.object_rows):
             _fail("empty_result", "$")
 
@@ -911,6 +917,7 @@ class ResearchResult(ResearchResultDraft):
             parent_artifact_refs=draft.parent_artifact_refs,
             source_refs=draft.source_refs,
             object_gaps=draft.object_gaps,
+            round_final=draft.round_final,
             artifact_id=artifact_id,
             artifact_version=artifact_version,
             final_output_saved=True,

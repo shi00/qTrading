@@ -75,6 +75,8 @@ LEAF_EXECUTE_STEP_NAME: Final[str] = "agent_leaf_execute"
 LEAF_OBSERVE_STEP_NAME: Final[str] = "agent_leaf_observe"
 #: 计划准入 step 稳定名（父 workflow 的首个检查点：校验并记录计划版 + 实际输入清单）。
 PLAN_ADMIT_STEP_NAME: Final[str] = "agent_plan_admit"
+#: 执行终态投影 step 稳定名（父 workflow 收敛后把已核叶事实写成应用执行终态）。
+RESEARCH_TERMINAL_STEP_NAME: Final[str] = "agent_research_terminal"
 #: 实际输入绑定 step 稳定名（父 workflow 在派发任何叶之前建立应用轮次并冻结输入版）。
 ACTUAL_INPUT_BIND_STEP_NAME: Final[str] = "agent_actual_input_bind"
 #: 叶资源票据认领/释放 step 稳定名（树级额度闭环：认领容量后才启动叶）。
@@ -902,6 +904,37 @@ async def record_plan_admission(admission: dict[str, Any]) -> dict[str, Any]:
     return decode_plan_admission(admission).to_wire()
 
 
+@DBOS.step(name=RESEARCH_TERMINAL_STEP_NAME)
+async def record_research_terminal_state(
+    execution_id: str,
+    round_id: str,
+    display_state: str | None,
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """父 workflow 收敛后落应用执行终态（单个持久 step；重放按记录还原）。
+
+    ``display_state=None`` 表示叶事实未可核定（仍有非终态叶）：本 step 不写任何
+    终态并回报原因（未知保持未知，R21）。可核定时经共享账本写执行终态与
+    ``execution_changed`` 可靠事件；已终态/非当前轮/已清理 fence 时不覆写，
+    由 DAO 事实如实分列。
+    """
+
+    if display_state is None:
+        return {"projected": False, "display_state": None, "reason": "unverified_facts"}
+    dao = TerminalStateDaoRegistry.require()
+    fact = await dao.record_execution_terminal_state(
+        execution_id=execution_id,
+        round_id=round_id,
+        display_state=display_state,
+        evidence=evidence,
+    )
+    return {
+        "projected": bool(fact.projected),
+        "display_state": fact.display_state,
+        "reason": fact.reason,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 实际输入绑定（应用轮次 + 准确前置身身份；父派发任何叶之前的强制检查点）
 # ---------------------------------------------------------------------------
@@ -1320,6 +1353,93 @@ class PlanRunSummary:
             "adopted_inputs": [[node_id, digest] for node_id, digest in self.adopted_inputs],
             "stale_preserved": list(self.stale_preserved),
         }
+
+
+# ---------------------------------------------------------------------------
+# 应用执行终态投影（P1-08：父不只回原生汇总，已核叶事实落应用状态）
+# ---------------------------------------------------------------------------
+
+
+class TerminalStateDaoRegistry:
+    """应用执行终态写入端口登记（组合根安装；进程内单例，测试显式复位）。
+
+    未安装时惰性取共享 ``CacheManager().agent_dao``；仍不可得则明确拒绝——
+    不静默跳过终态落库（R21）。
+    """
+
+    _instance: Any | None = None
+
+    @classmethod
+    def install(cls, dao: Any | None) -> None:
+        cls._instance = dao
+
+    @classmethod
+    def require(cls) -> Any:
+        dao = cls._instance
+        if dao is not None:
+            return dao
+        from data.cache.cache_manager import CacheManager
+
+        shared = getattr(CacheManager(), "agent_dao", None)
+        if shared is None:
+            raise RuntimeError("agent dao unavailable for execution terminal projection")
+        return shared
+
+    @classmethod
+    def _reset_singleton(cls) -> None:
+        cls._instance = None
+
+
+def install_terminal_state_dao(dao: Any | None) -> None:
+    """注入应用执行终态写入端口（组装期一次；与叶执行器登记同契约）。"""
+
+    TerminalStateDaoRegistry.install(dao)
+
+
+def terminal_display_state_from_summary(summary: PlanRunSummary) -> str | None:
+    """叶事实汇总 → 应用执行终态；不可核定时返回 ``None``（不伪造结论，R21）。
+
+    只依据已核叶事实（不含墙钟/原生状态）：
+
+    - 仍有非终态叶（``pending``）→ ``None``：本批推进结束不等于研究结束；
+    - 全部叶 ``complete`` 且无阻断 → ``complete``；
+    - 有失败：已有成果性事实（成功/部分）→ ``partial``；否则 → ``failed``；
+    - 无失败：有成功叶但并非全部 → ``partial``；仅部分 → ``partial``；
+      仅结案未知 → ``closed_unknown``；仅撤回 → ``withdrawn``；仅终止 → ``ended``；
+    - 其余（如只有阻断、无可解释的终态来源）→ ``None``，不臆断终态。
+    """
+
+    if summary.pending:
+        return None
+    if summary.leaves_all_succeeded and not summary.blocked:
+        return "complete"
+    if summary.failed:
+        has_any_result = bool(summary.succeeded or summary.partial)
+        return "partial" if has_any_result else "failed"
+    if summary.succeeded or summary.partial:
+        return "partial"
+    if summary.closed_unknown:
+        return "closed_unknown"
+    if summary.withdrawn:
+        return "withdrawn"
+    if summary.ended:
+        return "ended"
+    return None
+
+
+def _summary_evidence(summary: PlanRunSummary) -> dict[str, Any]:
+    """终态投影的核对证据（只含叶身份与状态，不复制成果正文）。"""
+
+    return {
+        "succeeded": list(summary.succeeded),
+        "failed": list(summary.failed),
+        "withdrawn": list(summary.withdrawn),
+        "ended": list(summary.ended),
+        "partial": list(summary.partial),
+        "closed_unknown": list(summary.closed_unknown),
+        "blocked": list(summary.blocked),
+        "leaves_all_succeeded": summary.leaves_all_succeeded,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2042,7 +2162,8 @@ async def run_research_workflow(payload: dict[str, Any]) -> dict[str, Any]:
 
     语义边界：
     - 返回 ``converged=False`` 的汇总（暂停/等待/决定/未知）**不等于研究结束**，
-      父 workflow 结束只表示本推进批次结束；终态事实由服务层投影，不由本层升级。
+      父 workflow 结束只表示本推进批次结束；收敛后由 :func:`record_research_terminal_state`
+      step 把已核叶事实写成应用执行终态（非终态叶不写终态，未知保持未知，R21）。
     - 叶事实在叶执行内部保存（应用侧），父观察被取消/失败不丢失已完成叶成果。
     - 观察预算耗尽转入 DBOS 持久等待（:func:`wait_next_observation_window`）后
       继续观察；父不因超预算正常结束，超预算完成的长叶仍推进其后继（R02）。
@@ -2173,6 +2294,14 @@ async def run_research_workflow(payload: dict[str, Any]) -> dict[str, Any]:
         claim_leaf=claim_leaf,
         release_leaf=release_leaf,
         drain_answers=drain_answers,
+    )
+    # 已核叶事实 → 应用执行终态（P1-08）：父不只回原生汇总；``wait_result`` 只认
+    # 应用状态。未核定（pending）由 step 如实不写，未知保持未知（R21）。
+    await record_research_terminal_state(
+        execution_id,
+        round_id,
+        terminal_display_state_from_summary(summary),
+        _summary_evidence(summary),
     )
     return summary.to_wire()
 
@@ -2403,6 +2532,7 @@ __all__ = [
     "LEAF_WORKFLOW_NAME",
     "PAYLOAD_VERSION",
     "PLAN_ADMIT_STEP_NAME",
+    "RESEARCH_TERMINAL_STEP_NAME",
     "RESEARCH_WORKFLOW_NAME",
     "ActualInputBinder",
     "ActualInputBinderRegistry",
@@ -2428,6 +2558,7 @@ __all__ = [
     "PlanRunSummary",
     "ResearchPayload",
     "RetryScope",
+    "TerminalStateDaoRegistry",
     "admit_research_plan",
     "build_leaf_payload",
     "build_parent_bind_request",
@@ -2445,15 +2576,18 @@ __all__ = [
     "decode_research_payload_full",
     "drive_leaf_dag",
     "execute_leaf_step",
+    "install_terminal_state_dao",
     "leaf_ticket_slot_id",
     "leaf_workflow_id",
     "observe_leaf_children",
     "record_actual_input_binding",
     "record_plan_admission",
+    "record_research_terminal_state",
     "release_leaf_ticket",
     "run_leaf_workflow",
     "run_research_workflow",
     "submit_research_workflow",
+    "terminal_display_state_from_summary",
     "validate_actual_input_binding",
     "wait_next_observation_window",
 ]

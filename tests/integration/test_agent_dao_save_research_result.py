@@ -88,13 +88,19 @@ async def _seed_chain(dao: AgentDao, *, execution_id: str = "exec-1", round_id: 
         )
 
 
-def _draft(*, body_text: str | None = "研究成果正文", result_kind: str = "explanation") -> ResearchResultDraft:
+def _draft(
+    *,
+    body_text: str | None = "研究成果正文",
+    result_kind: str = "explanation",
+    node_id: str = "root",
+    round_final: bool = False,
+) -> ResearchResultDraft:
     return ResearchResultDraft(
         user_scope=_USER,
         session_id="s1",
         execution_id="exec-1",
         round_id="round-1",
-        node_id="root",
+        node_id=node_id,
         input_revision=1,
         actual_input_digest="b" * 64,
         actual_model_ref="model/main",
@@ -120,6 +126,7 @@ def _draft(*, body_text: str | None = "研究成果正文", result_kind: str = "
         plan_version=None,
         parent_artifact_refs=(),
         source_refs=(),
+        round_final=round_final,
     )
 
 
@@ -131,7 +138,7 @@ class TestSaveResearchResult:
         dao = await _setup(real_embedded_pg.url)
         await _seed_chain(dao)
 
-        saved = await dao.save_research_result(_draft())
+        saved = await dao.save_research_result(_draft(round_final=True))
 
         assert saved.final_output_saved is True
         assert saved.artifact_version == 1
@@ -144,7 +151,7 @@ class TestSaveResearchResult:
             events = (
                 await conn.execute(sa.select(AgentMessage).where(AgentMessage.event_kind == "artifact_saved"))
             ).all()
-        assert artifact.result_digest == research_result_digest(_draft())
+        assert artifact.result_digest == research_result_digest(_draft(round_final=True))
         assert artifact.body_text == "研究成果正文"
         assert artifact.result_payload["output"]["body_saved"] is True
         assert artifact.result_payload["completion"]["final_output_saved"] is True
@@ -211,4 +218,150 @@ class TestSaveResearchResult:
             await dao.save_research_result(replace(_draft(), round_id="round-2"))
 
         assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_two_nodes_first_versions_get_independent_reliable_events(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        """同执行不同节点各存 v1：消息身份含 artifact_id，不撞 ``agent_message`` 主键。
+
+        叶/子成果不置 ``agent_round.final_saved``（只有本轮主结果可置，P1-08）。
+        """
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+
+        first = await dao.save_research_result(_draft(node_id="node-a"))
+        second = await dao.save_research_result(_draft(node_id="node-b"))
+        replay = await dao.save_research_result(_draft(node_id="node-a"))
+
+        assert first.artifact_id != second.artifact_id
+        assert (first.artifact_version, second.artifact_version) == (1, 1)
+        assert (replay.artifact_id, replay.artifact_version) == (first.artifact_id, 1)
+        async with dao.engine.connect() as conn:  # type: ignore[union-attr]
+            events = (
+                await conn.execute(
+                    sa.select(AgentMessage.message_id, AgentMessage.subject_id).where(
+                        AgentMessage.event_kind == "artifact_saved"
+                    )
+                )
+            ).all()
+            round_row = (await conn.execute(sa.select(AgentRound).where(AgentRound.round_id == "round-1"))).one()
+        assert len(events) == 2
+        assert len({row.message_id for row in events}) == 2
+        assert {row.subject_id for row in events} == {first.artifact_id, second.artifact_id}
+        assert round_row.final_saved is False
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+        # 重开（新引擎）后两叶成果仍各为 v1，未被彼此覆写。
+        reopened = create_test_engine(real_embedded_pg.url)
+        try:
+            async with reopened.connect() as conn:
+                replayed_rows = (
+                    await conn.execute(
+                        sa.select(AgentArtifact.artifact_id, AgentArtifact.artifact_version).where(
+                            AgentArtifact.execution_id == "exec-1"
+                        )
+                    )
+                ).all()
+        finally:
+            await reopened.dispose()
+        assert {row.artifact_id for row in replayed_rows} == {first.artifact_id, second.artifact_id}
+        assert {int(row.artifact_version) for row in replayed_rows} == {1}
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_terminal_projection_writes_application_state_and_is_not_overwritten(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        """父汇总 → 应用执行终态；重复/异态投影不覆写，同事务写可靠事件。"""
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+
+        fact = await dao.record_execution_terminal_state(
+            execution_id="exec-1",
+            round_id="round-1",
+            display_state="complete",
+            evidence={"succeeded": ["root"]},
+        )
+        assert fact.projected is True
+        assert fact.replayed is False
+        replay = await dao.record_execution_terminal_state(
+            execution_id="exec-1",
+            round_id="round-1",
+            display_state="failed",
+            evidence={"failed": ["root"]},
+        )
+        assert (replay.projected, replay.replayed) == (False, True)
+        assert replay.reason == "already_terminal"
+        async with dao.engine.connect() as conn:  # type: ignore[union-attr]
+            execution = (
+                await conn.execute(sa.select(AgentExecution).where(AgentExecution.execution_id == "exec-1"))
+            ).one()
+            events = (
+                await conn.execute(sa.select(AgentMessage).where(AgentMessage.event_kind == "execution_changed"))
+            ).all()
+        assert execution.display_state == "complete"
+        assert execution.ended_at is not None
+        assert len(events) == 1
+        assert events[0].subject_id == "exec-1"
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_terminal_projection_rejects_non_terminal_state(self, real_embedded_pg: ConnectionInfo) -> None:
+        """非恢复终态以外的状态不落库（未知/在途不伪装终态，R21）。"""
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.record_execution_terminal_state(
+                execution_id="exec-1",
+                round_id="round-1",
+                display_state="running",
+            )
+
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_terminal_projection_skips_stale_round(self, real_embedded_pg: ConnectionInfo) -> None:
+        """执行已推进到其他有效轮时，旧轮汇总不覆写当前执行状态。"""
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+        async with dao.engine.begin() as conn:  # type: ignore[union-attr]
+            await conn.execute(sa.update(AgentRound).where(AgentRound.round_id == "round-1").values(active_round=False))
+            await conn.execute(
+                sa.insert(AgentRound).values(
+                    user_scope=_USER,
+                    round_id="round-2",
+                    execution_id="exec-1",
+                    round_number=2,
+                    workflow_id="wf-round-2",
+                    workflow_code_version="wcv-1",
+                    run_epoch=2,
+                    input_revision=1,
+                    plan_revision=2,
+                    goal_coverage="unknown",
+                    final_saved=False,
+                    convergence_confirmed=False,
+                    active_round=True,
+                )
+            )
+            await conn.execute(
+                sa.update(AgentExecution)
+                .where(AgentExecution.execution_id == "exec-1")
+                .values(current_round_id="round-2")
+            )
+
+        fact = await dao.record_execution_terminal_state(
+            execution_id="exec-1",
+            round_id="round-1",
+            display_state="failed",
+        )
+
+        assert (fact.projected, fact.reason) == (False, "not_current_round")
+        async with dao.engine.connect() as conn:  # type: ignore[union-attr]
+            execution = (
+                await conn.execute(sa.select(AgentExecution).where(AgentExecution.execution_id == "exec-1"))
+            ).one()
+        assert execution.display_state == "queued"
         await dao.engine.dispose()  # type: ignore[union-attr]
