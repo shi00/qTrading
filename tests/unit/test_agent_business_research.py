@@ -18,7 +18,7 @@ from services.agent_service.business_research import (
     backtest_preparation,
     snapshot_source,
 )
-from services.agent_service.business_sources import BusinessSnapshotRead
+from services.agent_service.business_sources import BusinessSnapshotRead, read_backtest_snapshot
 from ui.viewmodels.business_research_view_model import (
     NOTICE_DRAFT_EXISTS,
     NOTICE_DRAFT_PREPARED,
@@ -162,6 +162,37 @@ async def test_prepare_backtest_uses_strict_snapshot_read():
     assert facade.saved_payload.purpose is Purpose.POST_HOC_EXPLANATION
     assert facade.registered_items[0].source.source_id == "backtest:bt-1"
     assert '"object_kind":"backtest_result"' in facade.saved_payload.object_context
+    assert '"availability_state":"known"' in facade.saved_payload.object_context
+
+
+@pytest.mark.asyncio
+async def test_restricted_preparation_keeps_unknown_availability_without_faking_utc():
+    """P1-04：存量 naive executed_at → 受限稿（时点未知），不按 UTC 贴成已知。"""
+    facade = _FakeFacade()
+    preparer = BusinessResearchPreparer(facade)
+    legacy_row = {
+        "run_id": "bt-legacy",
+        "strategy_name": "momentum",
+        "start_date": "2026-01-01",
+        "end_date": "2026-03-01",
+        # timestamp without time zone：绝对时刻不可证。
+        "executed_at": datetime(2026, 3, 2, 8, 0, 0),
+    }
+
+    read = await read_backtest_snapshot(_FakeReader(legacy_row), user_scope="local-desktop", result_id="bt-legacy")
+    preparation = backtest_preparation(read, result_id="bt-legacy")
+
+    source = preparation.item.source
+    assert source.available_at is None
+    assert source.read_state is ReadState.UNKNOWN
+    assert preparation.object_context["availability_state"] == "unknown"
+    assert preparation.object_context["available_at"] is None
+    # 受限稿正文用户可见地标注未知与发送期后果，不伪装成可证时点。
+    receipt = await preparer.prepare(preparation, user_scope="local-desktop")
+    assert receipt.sent is False
+    assert facade.saved_payload.cutoff is None
+    assert facade.saved_payload.purpose is Purpose.POST_HOC_EXPLANATION
+    assert "未知" in facade.saved_payload.text
 
 
 def test_backtest_preparation_fails_closed_when_unavailable():

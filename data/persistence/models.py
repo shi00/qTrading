@@ -1037,7 +1037,12 @@ class BacktestResultModel(Base):
     quality_json = Column(JSONB)
     config_json = Column(JSONB)
 
+    # 历史 ``executed_at`` 为 timestamp without time zone（会话时区的墙钟，绝对时刻不可证）。
+    # P1-04：新增 ``executed_at_utc`` 持久化可验证的绝对执行时点（timestamptz）；
+    # 存量行保持 NULL = 时区不可证（未知，不回填、不按 UTC 猜测，R21/R24），
+    # 新行由 DB ``now()`` 写入绝对时刻（不受客户端会话时区影响）。
     executed_at = Column(DateTime(timezone=False), server_default=text("now()"))
+    executed_at_utc = Column(DateTime(timezone=True), server_default=text("now()"))
     duration_ms = Column(Integer)
 
     __table_args__ = (

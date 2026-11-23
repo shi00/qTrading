@@ -8,8 +8,11 @@
   准入在发送/受理时按用户确认的截止界重判；
 - 本模块**不发送**：不调用 ``submit``、不派发 workflow、不产生费用；用户必须
   在自己的发送路径上明确确认后才开始研究；
-- 来源不可用（对象已删除 / 回测结果读不到 / 可得时点未知）时如实抛
+- 来源不可用（对象已删除 / 回测结果读不到 / 给定截止界而时点未知）时如实抛
   :class:`BusinessSourceUnavailable`，不生成「看起来可用」的空草稿（R21）；
+- 回测结果的执行时点未带时区（存量记录，绝对时刻不可证）时走**受限准备**：
+  草稿可建，但 ``available_at`` 保持 ``None``、上下文显式标注时点未知，发送/受理期
+  由 PIT 准入拒绝；禁止把 naive 时间按 UTC 贴成已知（R21/R24）；
 - 已存在的草稿不被覆盖：同一对象已有非空稿时抛 :class:`BusinessDraftAlreadyPrepared`，
   保留原稿（来源失效也保稿）。
 """
@@ -59,6 +62,16 @@ _DRAFT_TEXT_TEMPLATE = "请研究以下业务对象并说明结论与依据：{d
 #: 研究发起草稿的稳定用途：回测解释按事后解释，其余业务对象按日终研究。
 _BACKTEST_PURPOSE = Purpose.POST_HOC_EXPLANATION
 _OBJECT_PURPOSE = Purpose.END_OF_DAY_RESEARCH
+
+#: 来源时点在草稿上下文中的显式状态（``known`` / ``unknown``；未知不填具体时刻，R21）。
+_AVAILABILITY_KNOWN = "known"
+_AVAILABILITY_UNKNOWN = "unknown"
+#: 严格读给出的「时区不可证」原因（与 ``business_sources`` 同值域）。
+_AVAILABILITY_ZONE_UNKNOWN = "available_at_zone_unknown"
+#: 受限稿正文提示：草稿期可用，发送期会被 PIT 准入拒绝（用户可见、不误导）。
+_RESTRICTED_AVAILABILITY_NOTE = (
+    "\n注意：该回测结果的执行时点未带时区（未知），未按 UTC 猜测；发送前须补齐可证时点，否则 PIT 准入会拒绝。"
+)
 
 _LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -222,6 +235,7 @@ def snapshot_preparation(snapshot: BusinessObjectSnapshot, *, user_scope: str) -
         "display_name": snapshot.display_name,
         "available_at": snapshot.available_at,
         "period": snapshot.period,
+        "availability_state": _AVAILABILITY_KNOWN,
         "summary": json.loads(json_doc(dict(snapshot.summary))),
     }
     return BusinessDraftPreparation(
@@ -233,13 +247,24 @@ def snapshot_preparation(snapshot: BusinessObjectSnapshot, *, user_scope: str) -
 
 
 def backtest_preparation(read: BusinessSnapshotRead, *, result_id: str) -> BusinessDraftPreparation:
-    """回测严格读结果 → 草稿准备载荷；不可用/时点未知时 fail-closed（不造空草稿）。"""
+    """回测严格读结果 → 草稿准备载荷；不可用时 fail-closed（不造空草稿）。
 
-    if read.read_state is not ReadState.READY or read.source is None:
+    - ``ready``：内容与绝对时点均可证，正常准备；
+    - ``unknown`` + ``available_at_zone_unknown``：内容可读但时点未知 → **受限准备**
+      （``available_at=None``、上下文标注 ``availability_state=unknown``）；草稿期
+      不判断 PIT 准入，故仍可建稿；发送/受理期按截止界重判会拒绝（R21/R24）；
+    - 其余（未找到 / DB 失败 / 给定截止界而时点未知）：抛 ``BusinessSourceUnavailable``。
+    """
+
+    if read.source is None:
         raise BusinessSourceUnavailable(read.missing_reason or "source_unavailable")
     item = read.source
-    if not item.source.available_at:
-        raise BusinessSourceUnavailable("available_at_unknown")
+    if read.read_state is ReadState.READY and item.source.available_at:
+        availability_state = _AVAILABILITY_KNOWN
+    elif read.read_state is ReadState.UNKNOWN and read.missing_reason == _AVAILABILITY_ZONE_UNKNOWN:
+        availability_state = _AVAILABILITY_UNKNOWN
+    else:
+        raise BusinessSourceUnavailable(read.missing_reason or "source_unavailable")
     context = {
         "source_module": "backtest",
         "object_kind": "backtest_result",
@@ -249,6 +274,7 @@ def backtest_preparation(read: BusinessSnapshotRead, *, result_id: str) -> Busin
         "display_name": item.source.display_name,
         "available_at": item.source.available_at,
         "period": item.source.period,
+        "availability_state": availability_state,
     }
     return BusinessDraftPreparation(
         item=item,
@@ -396,14 +422,18 @@ def _draft_payload(
     """草稿载荷：来源引用 + 冻结对象上下文；截止界留空（发送前由用户确认）。"""
 
     version = source.version
+    text = _DRAFT_TEXT_TEMPLATE.format(
+        display_name=preparation.display_name,
+        kind=context.get("object_kind"),
+        object_id=context.get("object_id"),
+        version=version[:12],
+    )
+    if context.get("availability_state") == _AVAILABILITY_UNKNOWN:
+        # 受限稿：用户可见地标注时点未知与发送期后果，不把未知伪装成已可证。
+        text += _RESTRICTED_AVAILABILITY_NOTE
     return DraftPayload(
         schema_version=DRAFT_PAYLOAD_SCHEMA_VERSION,
-        text=_DRAFT_TEXT_TEMPLATE.format(
-            display_name=preparation.display_name,
-            kind=context.get("object_kind"),
-            object_id=context.get("object_id"),
-            version=version[:12],
-        ),
+        text=text,
         mode=Mode.DISCUSS,
         model_selection=None,
         source_refs=(
