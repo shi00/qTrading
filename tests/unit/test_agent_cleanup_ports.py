@@ -8,10 +8,12 @@ import pytest
 
 from core.agent_types import CleanupJobRecord, CleanupNativeFacts, CleanupPhase, CleanupPrecondition
 from data.persistence.daos.base_dao import DatabaseQueryError, EngineDisposedError
+from services.agent_service.cleanup import preview_digest
 from services.agent_service.cleanup_ports import (
     DaoCleanupAdmissionFacts,
     DaoNativeVerification,
     DbosDeletionClient,
+    preview_is_valid,
 )
 
 
@@ -20,7 +22,7 @@ def _record(*ids: str) -> CleanupJobRecord:
         user_scope="u1",
         cleanup_job_id="job-1",
         owner_ref="u1",
-        preview_digest="a" * 64,
+        preview_digest=preview_digest(("u1",), tuple(ids)),
         expected_revision=1,
         exact_ids=tuple(ids),
         phase=CleanupPhase.PREPARED,
@@ -36,6 +38,8 @@ def _facts(**overrides: object) -> CleanupNativeFacts:
         "externally_referenced_ids": (),
         "writers_running_ids": (),
         "unknown_delivery_ids": (),
+        "closure_complete": True,
+        "new_reference_conflict": False,
     }
     values.update(overrides)
     return CleanupNativeFacts(**values)  # type: ignore[arg-type]  # [reason: 用例以 kwargs 覆盖事实字段，取值在用例内约束]
@@ -48,20 +52,34 @@ class _Dao:
         facts: CleanupNativeFacts | None = None,
         *,
         error: Exception | None = None,
+        manifest: dict[str, object] | None = None,
     ) -> None:
         self.record = record
         self.facts = facts or _facts()
         self.error = error
+        self.manifest: dict[str, object] | None = {"preview_fields": ["u1"]} if manifest is None else manifest
 
     async def load_cleanup_job(self, user_scope: str, cleanup_job_id: str) -> CleanupJobRecord | None:
         if self.error is not None:
             raise self.error
         return self.record
 
-    async def read_cleanup_native_facts(self, *, user_scope: str, ids: tuple[str, ...]) -> CleanupNativeFacts:
+    async def read_cleanup_native_facts(
+        self,
+        *,
+        user_scope: str,
+        ids: tuple[str, ...],
+        session_ids: tuple[str, ...] = (),
+        asset_keys: tuple[tuple[str, str], ...] = (),
+    ) -> CleanupNativeFacts:
         if self.error is not None:
             raise self.error
         return self.facts
+
+    async def read_cleanup_content_manifest(self, user_scope: str, cleanup_job_id: str) -> dict[str, object] | None:
+        if self.error is not None:
+            raise self.error
+        return self.manifest
 
 
 class TestDaoCleanupAdmissionFacts:
@@ -101,6 +119,39 @@ class TestDaoCleanupAdmissionFacts:
         dao = _Dao(_record("wf-1"), _facts(externally_referenced_ids=("wf-1",)))
         precondition = await DaoCleanupAdmissionFacts(dao).derive_precondition("u1", "job-1")
         assert precondition is not None and precondition.new_reference_conflict
+
+    async def test_closure_not_verified_denies(self) -> None:
+        """P1-11：会话/资产闭包未完整核查时 closure_known 不得硬编码为真。"""
+
+        dao = _Dao(_record("wf-1"), _facts(closure_complete=False))
+        precondition = await DaoCleanupAdmissionFacts(dao).derive_precondition("u1", "job-1")
+        assert precondition is not None and not precondition.closure_known
+
+    async def test_cross_session_reference_is_conflict(self) -> None:
+        """P1-11：集合外会话的新引用由事实派生，不依赖原生 ID 的派生引用。"""
+
+        dao = _Dao(_record("wf-1"), _facts(new_reference_conflict=True))
+        precondition = await DaoCleanupAdmissionFacts(dao).derive_precondition("u1", "job-1")
+        assert precondition is not None and precondition.new_reference_conflict
+
+    async def test_missing_preview_manifest_invalidates_preview(self) -> None:
+        """P1-11：预览绑定字段不可得时 preview_valid=False（不把无从核对当作有效）。"""
+
+        dao = _Dao(_record("wf-1"), manifest={})
+        precondition = await DaoCleanupAdmissionFacts(dao).derive_precondition("u1", "job-1")
+        assert precondition is not None and not precondition.preview_valid
+
+    async def test_preview_digest_mismatch_invalidates_preview(self) -> None:
+        record = _record("wf-1")
+        dao = _Dao(record, manifest={"preview_fields": ["other-owner"]})
+        precondition = await DaoCleanupAdmissionFacts(dao).derive_precondition("u1", "job-1")
+        assert precondition is not None and not precondition.preview_valid
+
+    def test_preview_is_valid_matches_recomputed_digest(self) -> None:
+        record = _record("wf-1")
+        assert preview_is_valid(record, {"preview_fields": ["u1"]}) is True
+        assert preview_is_valid(record, {"preview_fields": []}) is False
+        assert preview_is_valid(record, None) is False
 
     async def test_engine_disposed_and_cancellation_propagate(self) -> None:
         with pytest.raises(EngineDisposedError) as exc:

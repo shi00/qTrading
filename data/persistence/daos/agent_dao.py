@@ -3132,6 +3132,15 @@ class AgentDao(BaseDao):
                     "workflow already bound with different input identity",
                     identity,
                 )
+            # 3b. 删除 fence 门（D08 / P1-11）：已清理保留会话不得再建首派发轮
+            #     （新 round 即新正文/执行）。旧 workflow 的身份重放已在步骤 3 返回
+            #     原事实，不受此门影响。
+            await self._assert_session_not_cleanup_fenced(
+                conn,
+                user_scope=request.user_scope,
+                session_id=request.session_id,
+                identity=identity,
+            )
             # 4. 单有效轮（§9.5：同 execution 仅一有效运行轮）。
             active_round = (
                 await conn.execute(
@@ -10883,22 +10892,105 @@ class AgentDao(BaseDao):
                     disabled.add((source_id, source_version))
         return active, frozenset(disabled)
 
-    async def read_cleanup_native_facts(self, *, user_scope: str, ids: Sequence[str]) -> CleanupNativeFacts:
-        """读取清理准入/核验所需的逐 ID 权威事实（I81）。
+    async def read_cleanup_native_facts(
+        self,
+        *,
+        user_scope: str,
+        ids: Sequence[str],
+        session_ids: Sequence[str] = (),
+        asset_keys: Sequence[tuple[str, str]] = (),
+    ) -> CleanupNativeFacts:
+        """读取清理准入/核验所需的逐 ID 权威事实（I81 / P1-11）。
 
         ID 为 DBOS workflow id；本方法只读应用域事实（轮次/操作/执行状态/命令
         交付/派生引用），不触达 DBOS 系统表。无法在本用户域定位的 ID 不出现在
         ``resolvable_ids`` 中——调用方必须按「事实不可得」拒绝，而非视作已清理。
+
+        除调用者所列原生 ID 外，还按**实际闭包**核查：作业冻结的会话集合必须全部
+        可定位、其全部执行必须终态；资产集合必须全部可定位；集合外会话对集合内
+        资产的新引用计入 ``new_reference_conflict``。闭包未能完整核查时
+        ``closure_complete=False``（fail-closed，不当作已知）；在途 writer /
+        未知交付由 ``writers_running_ids`` / ``unknown_delivery_ids`` 单独裁决。
         """
 
         self._check_engine("cleanup facts")
         _require_text_field(user_scope, "user_scope", "cleanup_facts")
         requested = tuple(dict.fromkeys(str(item) for item in ids if item))
-        if not requested:
-            return CleanupNativeFacts((), (), (), (), (), ())
+        sessions = self._normalize_cleanup_values(session_ids)
+        assets = self._normalize_asset_keys(asset_keys)
+        if not requested and not sessions and not assets:
+            # 仅「未启动计划」允许空集合：空闭包本身可核（不改库）。
+            return CleanupNativeFacts((), (), (), (), (), (), closure_complete=True)
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
+        scope_executions: set[str] = set()
+        closure_complete = True
+        new_reference_conflict = False
         async with engine.connect() as conn:
+            if sessions:
+                session_rows = (
+                    (
+                        await conn.execute(
+                            sa.select(AgentSession.session_id).where(
+                                AgentSession.user_scope == user_scope,
+                                AgentSession.session_id.in_(list(sessions)),
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                if {str(row) for row in session_rows} != set(sessions):
+                    closure_complete = False
+                if session_rows:
+                    scope_executions.update(
+                        str(row)
+                        for row in (
+                            await conn.execute(
+                                sa.select(AgentExecution.execution_id).where(
+                                    AgentExecution.user_scope == user_scope,
+                                    AgentExecution.session_id.in_(list(sessions)),
+                                )
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+            if assets:
+                asset_scope = list(assets)
+                asset_rows = (
+                    await conn.execute(
+                        sa.select(AgentAssetVersion.asset_id, AgentAssetVersion.asset_version).where(
+                            AgentAssetVersion.user_scope == user_scope,
+                            sa.tuple_(AgentAssetVersion.asset_id, AgentAssetVersion.asset_version).in_(asset_scope),
+                        )
+                    )
+                ).all()
+                if {(str(row.asset_id), str(row.asset_version)) for row in asset_rows} != set(assets):
+                    closure_complete = False
+                reference_sessions = (
+                    (
+                        await conn.execute(
+                            sa.select(AgentSourceLink.session_id).where(
+                                AgentSourceLink.user_scope == user_scope,
+                                sa.or_(
+                                    sa.tuple_(AgentSourceLink.source_id, AgentSourceLink.source_version).in_(
+                                        asset_scope
+                                    ),
+                                    sa.tuple_(
+                                        AgentSourceLink.derived_asset_id, AgentSourceLink.derived_asset_version
+                                    ).in_(asset_scope),
+                                ),
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                fenced_sessions = set(sessions)
+                if any(row is not None and str(row) not in fenced_sessions for row in reference_sessions):
+                    # 集合外会话引用集合内资产：新引用竞争，按原 fence 仲裁。
+                    new_reference_conflict = True
             operation_rows = (
                 await conn.execute(
                     sa.select(
@@ -10916,6 +11008,9 @@ class AgentDao(BaseDao):
                     )
                 )
             ).fetchall()
+        if not requested:
+            operation_rows = []
+            round_rows = []
 
         scopes: dict[str, set[str]] = {}
         execution_by_id: dict[str, str | None] = {}
@@ -10928,9 +11023,11 @@ class AgentDao(BaseDao):
                 execution_by_id.setdefault(workflow_id, None)
         resolvable = tuple(sorted(item for item, execution_id in execution_by_id.items() if execution_id))
         foreign = tuple(sorted(item for item in requested if scopes.get(item) and user_scope not in scopes[item]))
-        execution_ids = sorted({execution_id for execution_id in execution_by_id.values() if execution_id})
+        execution_ids = sorted(
+            set(scope_executions) | {execution_id for execution_id in execution_by_id.values() if execution_id}
+        )
         if not execution_ids:
-            return CleanupNativeFacts(resolvable, foreign, (), (), (), ())
+            return CleanupNativeFacts(resolvable, foreign, (), (), (), (), closure_complete=closure_complete)
 
         async with engine.connect() as conn:
             state_rows = (
@@ -10963,6 +11060,19 @@ class AgentDao(BaseDao):
                     )
                 )
             ).fetchall()
+            scoped_open_rows = (
+                []
+                if not scope_executions
+                else (
+                    await conn.execute(
+                        sa.select(AgentOperation.execution_id).where(
+                            AgentOperation.user_scope == user_scope,
+                            AgentOperation.execution_id.in_(sorted(scope_executions)),
+                            AgentOperation.phase.in_(("prepared", "dispatch_claimed", "dispatched")),
+                        )
+                    )
+                ).fetchall()
+            )
 
         states = {str(row.execution_id): str(row.display_state) for row in state_rows}
         non_terminal_executions = {
@@ -10986,6 +11096,10 @@ class AgentDao(BaseDao):
             for row in operation_rows
             if row.execution_id is not None and str(row.phase) in {"prepared", "dispatch_claimed", "dispatched"}
         }
+        running_executions.update(str(row.execution_id) for row in scoped_open_rows)
+        if non_terminal_executions & scope_executions:
+            # 会话闭包内仍有非终态执行：闭包未核清（不因未列举而放行）。
+            closure_complete = False
 
         ids_by_execution: dict[str, list[str]] = {}
         for workflow_id, execution_id in execution_by_id.items():
@@ -11006,6 +11120,8 @@ class AgentDao(BaseDao):
             externally_referenced_ids=_ids_of(derived_executions),
             writers_running_ids=_ids_of(running_executions),
             unknown_delivery_ids=_ids_of(ambiguous_executions),
+            closure_complete=closure_complete,
+            new_reference_conflict=new_reference_conflict,
         )
 
     async def tombstone_cleanup_text(
@@ -11035,6 +11151,11 @@ class AgentDao(BaseDao):
         交付回执清空后由 ``read_delivery`` 报 ``manifest_cleaned=True``（会话
         ``cleaned_at`` 非空且 artifact 身份仍在，即确曾交付），不把「已交付但已清理」
         读成「从未交付」。
+
+        锁序（P1-11）：先锁集合内会话行，再锁已提交 fence 的作业行（``FOR UPDATE``）
+        ——与 ``save_draft`` 等新引用写路径的 ``FOR SHARE`` fence 读共享同一稳定锁，
+        删除与新引用只能一方先提交；持锁后再核集合外会话对集合内资产的新引用，存在
+        即拒绝（``POLICY_DENIED``，零副作用），不让「分别检查后都提交」成立。
         """
 
         self._check_engine()
@@ -11061,6 +11182,25 @@ class AgentDao(BaseDao):
         assert isinstance(engine, AsyncEngine)
         body_refs: set[str] = set()
         async with engine.begin() as conn:
+            # 0. 稳定锁（P1-11）：会话 → fence 作业行，与 save_draft 的
+            #    「会话行 → fence FOR SHARE」保持同一锁序，避免成环。
+            if sessions:
+                await conn.execute(
+                    sa.select(AgentSession.session_id)
+                    .where(
+                        AgentSession.user_scope == user_scope,
+                        AgentSession.session_id.in_(list(sessions)),
+                    )
+                    .with_for_update()
+                )
+            await self._lock_cleanup_fence_rows(conn, user_scope=user_scope)
+            await self._assert_no_cross_session_new_references(
+                conn,
+                user_scope=user_scope,
+                session_ids=sessions,
+                asset_keys=assets,
+                identity=f"{user_scope}/cleanup-tombstone",
+            )
             if sessions:
                 session_scope = list(sessions)
                 session_result = await conn.execute(
@@ -11118,7 +11258,7 @@ class AgentDao(BaseDao):
                         AgentMessage.user_scope == user_scope,
                         AgentMessage.session_id.in_(session_scope),
                     )
-                    .values(body_text=None, body_ref=None, payload=None, search_text=None)
+                    .values(body_text=None, model_text=None, body_ref=None, payload=None, search_text=None)
                 )
                 touched["agent_message"] = int(message_result.rowcount or 0)
 
@@ -11307,6 +11447,366 @@ class AgentDao(BaseDao):
                 AgentErrorCode.INPUT_INVALID, f"invalid cleanup asset keys: {exc.code}", "cleanup"
             ) from exc
 
+    async def _lock_cleanup_fence_rows(self, conn: AsyncConnection, *, user_scope: str) -> None:
+        """锁已提交 fence 的清理作业行（P1-11 稳定锁）。
+
+        新引用写路径经 ``_cleanup_fenced_identities`` 对同一批行取 ``FOR SHARE``；
+        删除侧在此取 ``FOR UPDATE``，两侧只能一方先提交，避免「读时未见 fence、
+        写后 fence 才落」与新引用竞争各写一半。无 fence 作业时零行（不阻塞）。
+        """
+
+        await conn.execute(
+            sa.select(AgentCleanupJob.cleanup_job_id)
+            .where(
+                AgentCleanupJob.user_scope == user_scope,
+                AgentCleanupJob.fence_committed.is_(True),
+            )
+            .with_for_update()
+        )
+
+    async def _assert_no_cross_session_new_references(
+        self,
+        conn: AsyncConnection,
+        *,
+        user_scope: str,
+        session_ids: Sequence[str],
+        asset_keys: Sequence[tuple[str, str]],
+        identity: str,
+    ) -> None:
+        """集合外会话对集合内资产的新引用即拒绝（P1-11，按原 fence 仲裁）。
+
+        只把「集合外会话」视为新引用：集合内会话/执行自身的来源边属于同一清理闭包，
+        资产域单独清理（无会话集合）时不据此阻断。
+        """
+
+        if not asset_keys or not session_ids:
+            return
+        asset_scope = list(asset_keys)
+        reference_sessions = (
+            (
+                await conn.execute(
+                    sa.select(AgentSourceLink.session_id).where(
+                        AgentSourceLink.user_scope == user_scope,
+                        sa.or_(
+                            sa.tuple_(AgentSourceLink.source_id, AgentSourceLink.source_version).in_(asset_scope),
+                            sa.tuple_(AgentSourceLink.derived_asset_id, AgentSourceLink.derived_asset_version).in_(
+                                asset_scope
+                            ),
+                        ),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        scoped = set(session_ids)
+        if any(row is not None and str(row) not in scoped for row in reference_sessions):
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                "cleanup refused: new_reference_conflict",
+                identity,
+            )
+
+    async def count_cleanup_residual_text(
+        self,
+        user_scope: str,
+        *,
+        session_ids: Sequence[str] = (),
+        asset_keys: Sequence[tuple[str, str]] = (),
+    ) -> int:
+        """统计集合内仍残留的应用域正文行数（P1-11 / R21 完成前证据）。
+
+        只数清理实际改写的正文/载荷列（三种表示 ``body_text``/``model_text``/
+        ``search_text`` 及成果/轮次/操作/决定/命令/会话/资产载荷）；清理事件行
+        （``cleanup_changed``）不计入。返回 0 才允许写 ``verified/complete``。
+        """
+
+        self._check_engine()
+        if not user_scope:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "user_scope is required", "cleanup")
+        sessions = self._normalize_cleanup_values(session_ids)
+        assets = self._normalize_asset_keys(asset_keys)
+        if not sessions and not assets:
+            return 0
+        engine = self._require_async_engine()
+        residual = 0
+        async with engine.connect() as conn:
+            if sessions:
+                session_scope = list(sessions)
+                execution_scope = sa.select(AgentExecution.execution_id).where(
+                    AgentExecution.user_scope == user_scope,
+                    AgentExecution.session_id.in_(session_scope),
+                )
+                by_session: tuple[tuple[Any, Any], ...] = (
+                    (
+                        AgentSession,
+                        sa.and_(
+                            AgentSession.user_scope == user_scope,
+                            AgentSession.session_id.in_(session_scope),
+                        ),
+                    ),
+                    (
+                        AgentMessage,
+                        sa.and_(
+                            AgentMessage.user_scope == user_scope,
+                            AgentMessage.session_id.in_(session_scope),
+                            AgentMessage.event_kind != EventKind.CLEANUP_CHANGED.value,
+                        ),
+                    ),
+                    (
+                        AgentArtifact,
+                        sa.and_(
+                            AgentArtifact.user_scope == user_scope,
+                            AgentArtifact.session_id.in_(session_scope),
+                        ),
+                    ),
+                    (
+                        AgentRound,
+                        sa.and_(
+                            AgentRound.user_scope == user_scope,
+                            AgentRound.execution_id.in_(execution_scope),
+                        ),
+                    ),
+                    (
+                        AgentOperation,
+                        sa.and_(
+                            AgentOperation.user_scope == user_scope,
+                            sa.or_(
+                                AgentOperation.session_id.in_(session_scope),
+                                AgentOperation.execution_id.in_(execution_scope),
+                            ),
+                        ),
+                    ),
+                    (
+                        AgentExecution,
+                        sa.and_(
+                            AgentExecution.user_scope == user_scope,
+                            AgentExecution.session_id.in_(session_scope),
+                        ),
+                    ),
+                    (
+                        AgentDecision,
+                        sa.and_(
+                            AgentDecision.user_scope == user_scope,
+                            AgentDecision.session_id.in_(session_scope),
+                        ),
+                    ),
+                    (
+                        AgentCommand,
+                        sa.and_(
+                            AgentCommand.user_scope == user_scope,
+                            sa.or_(
+                                AgentCommand.session_id.in_(session_scope),
+                                AgentCommand.execution_id.in_(execution_scope),
+                            ),
+                        ),
+                    ),
+                )
+                residual_columns: dict[Any, tuple[Any, ...]] = {
+                    AgentSession: (
+                        AgentSession.draft_payload,
+                        AgentSession.origin_ref,
+                        AgentSession.branch_metadata,
+                    ),
+                    AgentMessage: (
+                        AgentMessage.body_text,
+                        AgentMessage.model_text,
+                        AgentMessage.body_ref,
+                        AgentMessage.payload,
+                        AgentMessage.search_text,
+                    ),
+                    AgentArtifact: (
+                        AgentArtifact.summary,
+                        AgentArtifact.body_text,
+                        AgentArtifact.body_ref,
+                        AgentArtifact.result_payload,
+                    ),
+                    AgentRound: (
+                        AgentRound.frozen_manifest,
+                        AgentRound.actual_input,
+                        AgentRound.model_binding,
+                        AgentRound.sdk_history_ref,
+                    ),
+                    AgentOperation: (
+                        AgentOperation.result_payload,
+                        AgentOperation.request_ref,
+                        AgentOperation.result_ref,
+                        AgentOperation.worker_refs,
+                        AgentOperation.delivery_manifest,
+                        AgentOperation.data_consent_claims,
+                        AgentOperation.parameter_digest,
+                    ),
+                    AgentExecution: (AgentExecution.intent_digest,),
+                    AgentDecision: (
+                        AgentDecision.question_payload,
+                        AgentDecision.answer_schema,
+                        AgentDecision.parameter_digest,
+                        AgentDecision.source_scope_digest,
+                        AgentDecision.data_consent_payload,
+                    ),
+                    AgentCommand: (
+                        AgentCommand.request_payload,
+                        AgentCommand.receipt_payload,
+                    ),
+                }
+                for model, scope in by_session:
+                    columns = residual_columns[model]
+                    residual += int(
+                        (
+                            await conn.execute(
+                                sa.select(sa.func.count())
+                                .select_from(model)
+                                .where(scope, sa.or_(*[column.is_not(None) for column in columns]))
+                            )
+                        ).scalar_one()
+                        or 0
+                    )
+                # 会话 title 与命令 input_digest 为 NOT NULL：非固定 tombstone 即残留。
+                residual += int(
+                    (
+                        await conn.execute(
+                            sa.select(sa.func.count())
+                            .select_from(AgentSession)
+                            .where(
+                                AgentSession.user_scope == user_scope,
+                                AgentSession.session_id.in_(session_scope),
+                                AgentSession.title != CLEANUP_TOMBSTONE,
+                            )
+                        )
+                    ).scalar_one()
+                    or 0
+                )
+                residual += int(
+                    (
+                        await conn.execute(
+                            sa.select(sa.func.count())
+                            .select_from(AgentCommand)
+                            .where(
+                                AgentCommand.user_scope == user_scope,
+                                sa.or_(
+                                    AgentCommand.session_id.in_(session_scope),
+                                    AgentCommand.execution_id.in_(execution_scope),
+                                ),
+                                AgentCommand.input_digest != CLEANUP_TOMBSTONE_DIGEST,
+                            )
+                        )
+                    ).scalar_one()
+                    or 0
+                )
+                residual += int(
+                    (
+                        await conn.execute(
+                            sa.select(sa.func.count())
+                            .select_from(AgentArtifact)
+                            .where(
+                                AgentArtifact.user_scope == user_scope,
+                                AgentArtifact.session_id.in_(session_scope),
+                                sa.or_(
+                                    AgentArtifact.actual_input_digest != CLEANUP_TOMBSTONE_DIGEST,
+                                    AgentArtifact.result_digest != CLEANUP_TOMBSTONE_DIGEST,
+                                ),
+                            )
+                        )
+                    ).scalar_one()
+                    or 0
+                )
+                residual += int(
+                    (
+                        await conn.execute(
+                            sa.select(sa.func.count())
+                            .select_from(AgentSourceLink)
+                            .where(
+                                AgentSourceLink.user_scope == user_scope,
+                                AgentSourceLink.session_id.in_(session_scope),
+                                AgentSourceLink.locator_payload.is_not(None),
+                            )
+                        )
+                    ).scalar_one()
+                    or 0
+                )
+                residual += int(
+                    (
+                        await conn.execute(
+                            sa.select(sa.func.count())
+                            .select_from(AgentBodyPayload)
+                            .where(
+                                AgentBodyPayload.user_scope == user_scope,
+                                sa.or_(
+                                    AgentBodyPayload.message_id.in_(
+                                        sa.select(AgentMessage.message_id).where(
+                                            AgentMessage.user_scope == user_scope,
+                                            AgentMessage.session_id.in_(session_scope),
+                                        )
+                                    ),
+                                    AgentBodyPayload.artifact_id.in_(
+                                        sa.select(AgentArtifact.artifact_id).where(
+                                            AgentArtifact.user_scope == user_scope,
+                                            AgentArtifact.session_id.in_(session_scope),
+                                        )
+                                    ),
+                                ),
+                            )
+                        )
+                    ).scalar_one()
+                    or 0
+                )
+            if assets:
+                asset_scope = list(assets)
+                residual += int(
+                    (
+                        await conn.execute(
+                            sa.select(sa.func.count())
+                            .select_from(AgentBodyPayload)
+                            .where(
+                                AgentBodyPayload.user_scope == user_scope,
+                                sa.tuple_(AgentBodyPayload.asset_id, AgentBodyPayload.asset_version).in_(asset_scope),
+                            )
+                        )
+                    ).scalar_one()
+                    or 0
+                )
+                residual += int(
+                    (
+                        await conn.execute(
+                            sa.select(sa.func.count())
+                            .select_from(AgentSourceLink)
+                            .where(
+                                AgentSourceLink.user_scope == user_scope,
+                                sa.or_(
+                                    sa.tuple_(AgentSourceLink.source_id, AgentSourceLink.source_version).in_(
+                                        asset_scope
+                                    ),
+                                    sa.tuple_(
+                                        AgentSourceLink.derived_asset_id, AgentSourceLink.derived_asset_version
+                                    ).in_(asset_scope),
+                                ),
+                                AgentSourceLink.locator_payload.is_not(None),
+                            )
+                        )
+                    ).scalar_one()
+                    or 0
+                )
+                residual += int(
+                    (
+                        await conn.execute(
+                            sa.select(sa.func.count())
+                            .select_from(AgentAssetVersion)
+                            .where(
+                                AgentAssetVersion.user_scope == user_scope,
+                                sa.tuple_(AgentAssetVersion.asset_id, AgentAssetVersion.asset_version).in_(asset_scope),
+                                sa.or_(
+                                    AgentAssetVersion.metadata_payload.is_not(None),
+                                    AgentAssetVersion.origin_ref.is_not(None),
+                                    AgentAssetVersion.body_text.is_not(None),
+                                    AgentAssetVersion.body_ref.is_not(None),
+                                ),
+                            )
+                        )
+                    ).scalar_one()
+                    or 0
+                )
+        return residual
+
     # ------------------------------------------------------------------
     # E-06-3 清理作业持久化（§9.11/§10.7）：固定集合 + fence + 阶段推进。
     # 集合一经写入不可改写；fence 只在原预览摘要/修订匹配时提交一次。
@@ -11323,7 +11823,10 @@ class AgentDao(BaseDao):
         身份是因为 ``commit_cleanup_fence`` 按库内版本匹配：登记若接受新版，
         fence 将永久拒绝该作业。
         ``content_manifest`` 同属 §9.11 固定集合，同身份重放时须逐值一致，否则
-        拒绝（避免首个值被静默保留、后续调用方误以为自己的集合已生效）。
+        拒绝（避免首个值被静默保留、后续调用方误以为自己的集合已生效）。为让准入
+        能重算「原预览版有效」（P1-11），清单须含 ``preview_fields``（预览绑定字段
+        列表，与 ``preview_digest`` 的生成参数一致）；缺失时准入按 ``preview_invalid``
+        拒绝，不把「无从核对」当作预览有效（R21）。
         首次登记同事务为集合内会话追加 ``cleanup_changed`` 可靠事件（R2-I21）；
         同身份重放返回 False 且不重复写。
         """
@@ -11389,7 +11892,7 @@ class AgentDao(BaseDao):
         if replay_conflict is not None:
             existing = await self.load_cleanup_job(record.user_scope, record.cleanup_job_id)
             self._require_same_cleanup_identity(existing, record, replay_conflict)
-            existing_manifest = await self._load_cleanup_content_manifest(record.user_scope, record.cleanup_job_id)
+            existing_manifest = await self.read_cleanup_content_manifest(record.user_scope, record.cleanup_job_id)
             # 规范 JSON 比较：tuple/list、键序与 JSONB 反序列化差异不得误判为异输入。
             if json_doc(existing_manifest) != canonical_manifest:
                 raise AgentServiceError(
@@ -11400,8 +11903,12 @@ class AgentDao(BaseDao):
             return False
         return True
 
-    async def _load_cleanup_content_manifest(self, user_scope: str, cleanup_job_id: str) -> dict[str, object] | None:
-        """读取固定集合中的 ``content_manifest``（仅用于同身份重放核对）。"""
+    async def read_cleanup_content_manifest(self, user_scope: str, cleanup_job_id: str) -> dict[str, object] | None:
+        """读取固定集合中的 ``content_manifest``（同身份重放核对 + 预览有效性派生）。
+
+        预览有效性（P1-11）必须由存储的预览绑定字段重算，不接受调用方自述；
+        清单缺失或不可解释时返回 ``None``，由准入端口按 fail-closed 处理。
+        """
 
         engine = self._require_async_engine()
         async with engine.connect() as conn:
@@ -11485,6 +11992,16 @@ class AgentDao(BaseDao):
                 raise AgentServiceError(
                     AgentErrorCode.INPUT_INVALID, "cleanup fence target missing, drifted, or already verified", label
                 )
+            # P1-11：持 fence 行锁后再核集合外会话的新引用（与 save_draft 的
+            # fence FOR SHARE 互斥）。存在即回滚本次 fence，不让「旧确认 + 新引用」
+            # 同时成立；调用方按原集合重核后可重试。
+            await self._assert_no_cross_session_new_references(
+                conn,
+                user_scope=record.user_scope,
+                session_ids=record.session_ids,
+                asset_keys=record.asset_keys,
+                identity=label,
+            )
             # 同事务可靠事件（R2-I21）：fence 提交与事件同成功/失败；重复提交同一
             # 作业按事件身份去重（不写第二条）。
             if scope is not None:

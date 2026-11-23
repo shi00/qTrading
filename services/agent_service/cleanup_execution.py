@@ -2,7 +2,8 @@
 
 流程冻结：确认（原预览/修订 + 准入 + fence）→ 首次预检（查不到不是已清）→
 落删除尝试阶段 → 公开系统删除 + Datasource DML 与九域查零（同一事务，非零回滚）
-→ 落 tombstone 待办阶段 → 应用域 NOT NULL tombstone → 九域全 0 才 ``verified``；
+→ 落 tombstone 待办阶段 → 应用域 NOT NULL tombstone → 应用域正文逐域查零（P1-11：
+三种表示任一残留即 ``retry_pending``）→ 九域全 0 才 ``verified``；
 任一步失败保留原集合转 ``retry_pending``。
 
 尝试阶段在副作用前落库（M14）：删除完成到 ``tombstone/verified`` 之间取消、
@@ -40,6 +41,7 @@ _RETRY_AFTER_DELETION_CATEGORIES: frozenset[str] = frozenset(
     {
         "cleanup_execution_failed",
         "native_rows_remaining",
+        "cleanup_residual_content",
         _DELETE_STARTED_STAGE,
         _TOMBSTONE_PENDING_STAGE,
     }
@@ -85,6 +87,14 @@ class CleanupExecutionDaoPort(Protocol):
         session_ids: tuple[str, ...] = (),
         asset_keys: tuple[tuple[str, str], ...] = (),
     ) -> dict[str, int]: ...
+
+    async def count_cleanup_residual_text(
+        self,
+        user_scope: str,
+        *,
+        session_ids: tuple[str, ...] = (),
+        asset_keys: tuple[tuple[str, str], ...] = (),
+    ) -> int: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +197,29 @@ class CleanupExecutionService:
                 session_ids=record.session_ids,
                 asset_keys=record.asset_keys,
             )
+            # P1-11 / R21：应用域正文未逐域查零前不得写 verified/complete。
+            # 三种表示（body_text/model_text/search_text）任一残留即视为未完成，
+            # 保留原集合与 fence 转 retry_pending，不把「已知有残留」报成已清除。
+            residual = await self._dao.count_cleanup_residual_text(
+                record.user_scope,
+                session_ids=record.session_ids,
+                asset_keys=record.asset_keys,
+            )
+            if residual:
+                await self._dao.save_cleanup_phase(
+                    record.user_scope,
+                    record.cleanup_job_id,
+                    phase=CleanupPhase.RETRY_PENDING,
+                    verified_counts=deletion.verified_counts,
+                    error_category="cleanup_residual_content",
+                )
+                return CleanupExecutionReceipt(
+                    command.cleanup_job_id,
+                    CleanupPhase.RETRY_PENDING,
+                    confirmation.replayed,
+                    deletion.verified_counts,
+                    tombstoned,
+                )
             await self._dao.save_cleanup_phase(
                 record.user_scope,
                 record.cleanup_job_id,
