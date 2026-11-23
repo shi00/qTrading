@@ -336,7 +336,7 @@ async def test_typed_service_error_propagates_unchanged() -> None:
 
 @pytest.mark.asyncio
 async def test_unexpected_model_error_is_wrapped_and_sanitized() -> None:
-    original = ValueError("token=SECRET-123 must not leak")
+    original = ValueError("token=abc123secret must not leak")
     invoker = _RaisingInvoker(original)
 
     with pytest.raises(AgentServiceError) as excinfo:
@@ -351,7 +351,7 @@ async def test_unexpected_model_error_is_wrapped_and_sanitized() -> None:
     assert excinfo.value.code is AgentErrorCode.OPERATION_UNKNOWN
     assert excinfo.value.identity == "execution-1"
     assert excinfo.value.sanitized_message == "main turn model failed: ValueError"
-    assert "SECRET-123" not in str(excinfo.value)
+    assert "abc123secret" not in str(excinfo.value)
     assert excinfo.value.__cause__ is original
     assert invoker.calls == 1
 
