@@ -10,7 +10,7 @@
 import pytest
 
 from tests.e2e.helpers.anchor_label import LABEL_INDEPENDENCE_JS, assert_label_independent
-from tests.e2e.helpers.anchor_page import AnchorPage
+from tests.e2e.helpers.anchor_page import AnchorPage, retry_until_triggered
 from tests.e2e.helpers.flet_page import FletPage
 from tests.e2e.pages import ScreenerPage
 from ui.i18n import I18n
@@ -74,9 +74,15 @@ async def test_screener_anchor_click_run_button_triggers_callback(e2e_page: Flet
     方案 §9 Task 1.4②/1.5 DoD：E2E 模式下 AnchorPage.click(EIDS.SCREENER.RUN_BUTTON)
     触发 Button.on_click。回归 PoC A3 假设在生产 screener_view 场景。
 
-    前置：选择策略以启用 run_button（run_disabled = not state.selected_strategy，
-    disabled 状态下 CanvasKit 不生成内层 [flt-tappable]，click 无法定位）。
+    前置：选择策略以启用 run_button（run_disabled = not state.selected_strategy）。
     验证方式：click 后按钮文案应从"执行选股"变为"停止选股"（state.loading=True）。
+
+    抗吞点击：CI 高负载 headless CanvasKit 下物理鼠标点击偶发落在渲染中间帧被吞
+    （nightly run 44894723667 实证：单发 click 未触发 on_click，最终撞满 60s marker）。
+    对齐 ``ScreenerPage.run`` 的 retry_until_triggered 模式，但 confirm 用**正信号**
+    （「停止选股」文案出现），而非「RUN_BUTTON anchor 消失」：后者是负信号，渲染帧
+    间隙的瞬时不可见会被误判为已触发（且无法区分「重试把运行取消」）。interact 内
+    先判未运行态，否则重试点击会命中替换后的取消按钮，取消刚刚启动的运行。
     """
     from tests.e2e.labels import strategy_label
 
@@ -84,13 +90,30 @@ async def test_screener_anchor_click_run_button_triggers_callback(e2e_page: Flet
     screener = ScreenerPage(e2e_page)
     await screener.open()
 
-    # 前置：选择策略以启用 run_button（未选策略时 disabled → 无 flt-tappable）
+    # 前置：选择策略以启用 run_button（未选策略时 disabled，点击不触发回调）
     await ap.expect_visible(EIDS.SCREENER.STRATEGY_DROPDOWN, timeout_ms=15000)
     await ap.select_option(EIDS.SCREENER.STRATEGY_DROPDOWN, strategy_label("volume_breakout"))
 
-    # 验证 run_button 可点击（enabled 后生成 flt-tappable）
+    # 验证 run_button 可点击（state.selected_strategy 已回填，按钮启用）
     await ap.expect_visible(EIDS.SCREENER.RUN_BUTTON, timeout_ms=15000)
-    await ap.click(EIDS.SCREENER.RUN_BUTTON)
+
+    async def _interact() -> None:
+        # 已进入运行态（RUN_BUTTON 被替换为「停止选股」）时不得再点：此刻点击会
+        # 命中取消按钮，取消刚刚启动的运行。
+        if not await ap.is_visible(EIDS.SCREENER.RUN_BUTTON):
+            return
+        await ap.click(EIDS.SCREENER.RUN_BUTTON)
+
+    async def _confirm() -> bool:
+        # 正信号：state.loading=True → 按钮文案变为「停止选股」（同时 RUN_BUTTON 被替换）。
+        # 只凭 RUN_BUTTON 消失会在渲染帧间隙误判为已触发；正信号即 DoD 本身。
+        try:
+            await e2e_page.expect_text(I18n.get("stop_screening"), timeout_ms=2000)
+            return True
+        except AssertionError:
+            return False
+
+    await retry_until_triggered(_interact, _confirm)
 
     # on_click 触发后 state.loading=True，按钮文案变为"停止选股"
     # timeout_ms 传原始值，expect_text 内部 self._tm() 会乘以 multiplier

@@ -117,7 +117,17 @@ jobs:
           echo "SIDECAR_SHA256=$HASH" >> $GITHUB_ENV
           echo "Sidecar binary built: $ABSOLUTE_PATH (sha256: $HASH)"
 
-      - name: Run contract tests (anchor unit + screener anchor smoke)
+      # 单测与 E2E 必须拆成两条命令：单测可并行（沿用 pyproject addopts
+      # -n auto --dist=loadgroup），E2E 必须串行。混在一条命令时 3 个 E2E 用例被分到
+      # 3 个 xdist worker，各自拉起一套 Flet app + embedded PG sidecar + Chromium，
+      # CI 高负载下 setup 与交互互相挤占（nightly run 44894723667 job 136817824920
+      # 实证：唯一失败用例 setup 35s + call 25s 撞满 60s marker，RUN_BUTTON 点击被吞）。
+      # E2E 串行参数对齐 ci_cd.yml embedded-tests 步骤的既有策略与注释理由。
+      - name: Run anchor unit tests
+        run: |
+          python -m pytest tests/unit/ui/test_anchor.py -v --tb=short
+
+      - name: Run screener anchor smoke E2E (serial)
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:${{ env.CI_PG_PASSWORD }}@localhost:5432/test_astock
           E2E_BROWSER_CHANNEL: chromium
@@ -125,8 +135,14 @@ jobs:
           SIDECAR_BINARY_PATH: ${{ env.SIDECAR_BINARY_PATH }}
           SIDECAR_SHA256: ${{ env.SIDECAR_SHA256 }}
           E2E_TIMEOUT_MULTIPLIER: "2.0"
+        # 不传 --timeout/--timeout-method：本文件模块级 pytest.mark.timeout(60) 优先于
+        # 命令行与 ini（pytest-timeout 语义），命令行值不生效，传了只会留下假的预算预期；
+        # 保持默认 signal 方法以保留单用例失败语义（thread 方法首个超时会终止整条命令）。
         run: |
-          python -m pytest tests/unit/ui/test_anchor.py tests/e2e/test_screener_anchor_smoke.py -v --tb=short
+          python -m pytest \
+            -o addopts="" -p no:xdist -p no:randomly \
+            tests/e2e/test_screener_anchor_smoke.py \
+            -v --tb=short
 
       - name: Run anchor E2E (navigation)
         env:
