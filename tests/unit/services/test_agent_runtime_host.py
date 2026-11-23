@@ -111,7 +111,7 @@ def host(monkeypatch: pytest.MonkeyPatch) -> _RecordingHost:
 
 
 _RUNTIME_URL = "postgresql+psycopg://agent_runtime@host/qtrading_agent_runtime"
-_MIGRATION_URL = "postgresql+psycopg://agent_migrator@migrator-host/qtrading_agent_runtime"
+_MIGRATION_URL = "postgresql+psycopg://agent_migrator@host/qtrading_agent_runtime"
 
 
 def _settings() -> AgentRuntimeSettings:
@@ -202,7 +202,7 @@ class TestAssemblyContract:
     def test_explicit_executor_id_and_url_wired(self, host: _RecordingHost) -> None:
         settings = AgentRuntimeSettings(
             system_database_url="postgresql+psycopg://agent_runtime@host/db",
-            migration_database_url="postgresql+psycopg://agent_migrator@migrator-host/db",
+            migration_database_url="postgresql+psycopg://agent_migrator@host/db",
             application_version="1.2.3",
             executor_id="epoch-42",
         )
@@ -293,6 +293,82 @@ class TestCredentialSeparation:
         assert "share one connection" in caplog.text
         # 日志不得输出连接串（R9）
         assert "migrator-host" not in caplog.text
+
+
+class TestMigrationTargetIdentity:
+    """②：迁移连接必须与运行连接同实例同逻辑库（URL 规范化后比较）。"""
+
+    def test_url_variants_accepted(self, host: _RecordingHost) -> None:
+        """驱动名/角色/主机大小写/显式默认端口不改变实例与库身份。"""
+
+        settings = AgentRuntimeSettings(
+            system_database_url="postgresql+psycopg://agent_runtime@HOST/qtrading_agent_runtime",
+            migration_database_url="postgresql://agent_migrator@host:5432/qtrading_agent_runtime",
+            application_version="0.11.7",
+        )
+        assemble_agent_runtime(settings)
+
+        assert host.migration_url == settings.migration_database_url
+
+    @pytest.mark.parametrize(
+        "migration_url",
+        [
+            "postgresql+psycopg://agent_migrator@other-host/qtrading_agent_runtime",
+            "postgresql+psycopg://agent_migrator@host:5433/qtrading_agent_runtime",
+            "postgresql+psycopg://agent_migrator@host/other_database",
+        ],
+    )
+    def test_different_instance_or_database_refused(self, host: _RecordingHost, migration_url: str) -> None:
+        """迁移落到别的实例/别的逻辑库：拒绝启动，不建引擎、不记迁移。"""
+
+        settings = AgentRuntimeSettings(
+            system_database_url=_RUNTIME_URL,
+            migration_database_url=migration_url,
+            application_version="0.11.7",
+        )
+        with pytest.raises(runtime_mod.AgentRuntimeMigrationError, match="同一 PostgreSQL 实例"):
+            assemble_agent_runtime(settings)
+
+        assert host.calls == []
+        assert host.migration_url is None
+
+    def test_unix_socket_dir_is_part_of_instance_identity(self, host: _RecordingHost) -> None:
+        """Unix socket 目录（query 参数 host）参与实例比较：不同目录即不同实例。"""
+
+        socket_runtime = "postgresql+psycopg://agent_runtime@/qtrading_agent_runtime?host=/var/run/postgresql"
+        same_socket = "postgresql+psycopg://agent_migrator@/qtrading_agent_runtime?host=/var/run/postgresql"
+        other_socket = "postgresql+psycopg://agent_migrator@/qtrading_agent_runtime?host=/tmp/pg"
+        assemble_agent_runtime(
+            AgentRuntimeSettings(
+                system_database_url=socket_runtime,
+                migration_database_url=same_socket,
+                application_version="0.11.7",
+            )
+        )
+        assert host.migration_url == same_socket
+
+        with pytest.raises(runtime_mod.AgentRuntimeMigrationError, match="同一 PostgreSQL 实例"):
+            assemble_agent_runtime(
+                AgentRuntimeSettings(
+                    system_database_url=socket_runtime,
+                    migration_database_url=other_socket,
+                    application_version="0.11.7",
+                )
+            )
+
+    def test_unparsable_migration_url_refused_without_echo(self, host: _RecordingHost) -> None:
+        """URL 无法解析：拒绝启动且消息不回显连接串（R9）。"""
+
+        settings = AgentRuntimeSettings(
+            system_database_url=_RUNTIME_URL,
+            migration_database_url="not-a-valid-url",
+            application_version="0.11.7",
+        )
+        with pytest.raises(runtime_mod.AgentRuntimeMigrationError) as excinfo:
+            assemble_agent_runtime(settings)
+
+        assert "not-a-valid-url" not in str(excinfo.value)
+        assert host.calls == []
 
 
 class _FailureSeams:

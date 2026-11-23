@@ -588,13 +588,18 @@ def _gated_launcher(*, launch_allowed: bool) -> Callable[[AgentRuntimeHandle], N
     return _launch
 
 
-def _application_version() -> str:
-    """工作流代码版本（ADR-0017：pyproject version 唯一正本）。"""
+def _application_version() -> str | None:
+    """工作流代码版本（ADR-0017：pyproject version 唯一正本）。
+
+    元数据不可得时返回 ``None``（调用方 fail-closed）：共享的 ``"dev"`` 无法区分
+    不同源码/制品版本，会让版本谓词隔离失效，不得用作代码版本。
+    """
 
     try:
-        return version("astock-screener")
-    except Exception:  # 未安装发行版元数据（源码直跑）：保持真实代码版本不可得时显式落 "dev"
-        return "dev"
+        found = version("astock-screener")
+    except Exception:  # 未安装发行版元数据（源码直跑/打包缺 dist-info）：真实代码版本不可得
+        return None
+    return found.strip() or None
 
 
 BlockingRunner = Callable[[Callable[[], Any]], Awaitable[Any]]
@@ -817,6 +822,18 @@ async def wire_agent_runtime(
         )
 
     allow_launch = agent_runtime_launch_allowed() if launch_allowed is None else launch_allowed
+    application_version = _application_version()
+    if application_version is None:
+        logger.warning(
+            "[AgentWiring] application version unavailable (distribution metadata missing): "
+            "agent runtime not wired (zero dispatch)"
+        )
+        return AgentWiring(
+            service=service,
+            bridge=bridge,
+            failure="application_version_unavailable",
+            mcp_lifecycle=lifecycle,
+        )
     migration_url, share_migration_credentials = _migration_credentials(get_agent_migration_db_url())
     if migration_url is None and not share_migration_credentials:
         return AgentWiring(
@@ -829,7 +846,7 @@ async def wire_agent_runtime(
         system_database_url=runtime_url,
         migration_database_url=migration_url,
         allow_shared_migration_credentials=share_migration_credentials,
-        application_version=_application_version(),
+        application_version=application_version,
     )
     try:
         outcome = await start_agent_runtime(
