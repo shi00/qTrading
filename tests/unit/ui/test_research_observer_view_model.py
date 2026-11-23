@@ -387,6 +387,36 @@ class TestRefresh:
         assert vm.state.loading is False, "取消后不得永久停在加载态（否则后续刷新被拦截）"
 
 
+class TestPreciseSessionNavigation:
+    """T-09: 建稿回执驱动精确会话导航，壳层不得以「历史首条」代替。"""
+
+    @pytest.mark.asyncio
+    async def test_open_session_reads_exact_receipt_session_even_if_history_is_newer(self) -> None:
+        service = _FakeService(hits=(SimpleNamespace(session_id="s-newer"),))
+        vm = ResearchObserverViewModel(service)
+        await vm.open_session("s-receipt")
+        assert vm.state.session_id == "s-receipt"
+        assert [call[0].session_id for call in service.read_calls] == ["s-receipt"]
+
+    @pytest.mark.asyncio
+    async def test_refresh_keeps_current_session_instead_of_jumping_to_history_first(self) -> None:
+        service = _FakeService(hits=(SimpleNamespace(session_id="s-1"),))
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+        assert vm.state.session_id == "s-1"
+        # 历史首条变为更新的会话后，只读刷新仍停留在当前观察会话
+        service.hits = (SimpleNamespace(session_id="s-2"),)
+        await vm.refresh()
+        assert vm.state.session_id == "s-1"
+        assert [call[0].session_id for call in service.read_calls] == ["s-1", "s-1"]
+
+    @pytest.mark.asyncio
+    async def test_open_session_without_service_reports_unavailable(self) -> None:
+        vm = ResearchObserverViewModel(None)
+        await vm.open_session("s-1")
+        assert vm.state.error_key == UNAVAILABLE_NOT_WIRED
+
+
 class TestDraftAndSubmit:
     @pytest.mark.asyncio
     async def test_draft_survives_refresh_and_state_updates(self) -> None:
@@ -434,8 +464,9 @@ class TestDraftAndSubmit:
         assert '"选择第一家"' in request.answer_payload
         assert vm.state.submitting is False
         assert vm.state.last_answer_delivery_state == "not_delivered"
-        # 提交成功后刷新；草稿按已提交决定清理
-        assert len(service.search_calls) == 2
+        # 提交成功后刷新当前会话（不再重查历史首条）；草稿按已提交决定清理
+        assert len(service.search_calls) == 1
+        assert len(service.read_calls) == 2
         assert vm.state.draft_for("d-1") == ""
 
     @pytest.mark.asyncio
@@ -724,7 +755,7 @@ class TestArtifactBodyRead:
         )
 
         service.hits = (SimpleNamespace(session_id="s-2"),)
-        await vm.refresh()
+        await vm.open_session("s-2")
         assert vm.state.artifact_bodies == (), "换会话不得复用上一会话正文缓存"
 
     @pytest.mark.asyncio
@@ -810,7 +841,7 @@ class TestSessionDraftRead:
 
         service.hits = (SimpleNamespace(session_id="s-2"),)
         service.read = _session_read(draft_revision=2)
-        await vm.refresh()
+        await vm.open_session("s-2")
 
         assert vm.state.session_draft is None
 

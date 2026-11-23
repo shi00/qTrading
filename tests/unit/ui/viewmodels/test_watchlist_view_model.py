@@ -44,6 +44,7 @@ def mock_cache():
     cache = MagicMock()
     cache.get_watchlist = AsyncMock(return_value=pd.DataFrame())
     cache.add_to_watchlist = AsyncMock(return_value=1)
+    cache.add_to_watchlist_checked = AsyncMock(return_value=1)
     cache.remove_from_watchlist = AsyncMock(return_value=1)
     cache.is_in_watchlist = AsyncMock(return_value=False)
     cache.search_stocks = AsyncMock(return_value=pd.DataFrame())
@@ -194,6 +195,36 @@ class TestAddToWatchlist:
         mock_cache.add_to_watchlist.side_effect = asyncio.CancelledError()
         with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion CancelledError 传播契约：raises 即验证，VM 不得吞没取消信号
             await vm.add_to_watchlist("000001.SZ", "平安银行")
+
+
+class TestAddToWatchlistChecked:
+    """R2-I13 / R21: 写路径按原备注 CAS，并发变化返回 conflict 且不刷新。"""
+
+    @pytest.mark.asyncio
+    async def test_checked_add_passes_expected_note_and_refreshes(self, vm, mock_cache):
+        mock_cache.get_watchlist.return_value = _make_watchlist_df()
+        result = await vm.add_to_watchlist_checked("000001.SZ", "平安银行", "新备注", expected_note="旧备注")
+        assert result.status == "applied"
+        mock_cache.add_to_watchlist_checked.assert_awaited_once_with(
+            "000001.SZ", "平安银行", "新备注", expected_note="旧备注"
+        )
+        mock_cache.get_watchlist.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_checked_add_conflict_does_not_refresh_or_claim_success(self, vm, mock_cache):
+        from data.persistence.daos.watchlist_dao import WatchlistNoteConflictError
+
+        mock_cache.add_to_watchlist_checked.side_effect = WatchlistNoteConflictError("000001.SZ")
+        result = await vm.add_to_watchlist_checked("000001.SZ", "平安银行", "新备注", expected_note="旧备注")
+        assert result.status == "conflict"
+        assert result.message is not None and result.message.key == "watchlist_note_conflict"
+        mock_cache.get_watchlist.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_checked_add_propagates_cancelled_error(self, vm, mock_cache):
+        mock_cache.add_to_watchlist_checked.side_effect = asyncio.CancelledError()
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion CancelledError 传播契约：raises 即验证
+            await vm.add_to_watchlist_checked("000001.SZ", "平安银行", "备注", expected_note="")
 
 
 # --- remove_from_watchlist ---

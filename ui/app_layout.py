@@ -38,6 +38,7 @@ from ui.testing.anchor import anchored
 from ui.testing.e2e_ids import EIDS, Eid
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.business_research_view_model import (
+    NOTICE_DRAFT_EXISTS,
     NOTICE_DRAFT_PREPARED,
     BusinessResearchRequest,
     resolve_business_research_service,
@@ -496,11 +497,12 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         if notice_key is None:
             return
         set_decision_notice(I18n.get(notice_key))
-        if business_vm.state.last_session_id is not None and notice_key == NOTICE_DRAFT_PREPARED:
-            # 草稿已可见：展开观察层并只读刷新（观察层不控制执行）
+        prepared_session_id = business_vm.state.last_session_id
+        if prepared_session_id is not None and notice_key in (NOTICE_DRAFT_PREPARED, NOTICE_DRAFT_EXISTS):
+            # 草稿已可见：展开观察层并导航到回执给出的精确会话（不以历史首条代替）
             set_research_open(True)
             research_open_ref.current = True
-            _refresh_research()
+            await research_vm.open_session(prepared_session_id)
 
     def _toggle_execution(execution_id: str) -> None:
         """只改子任务树展开态（共享 VM 持久化，切页不丢；不控制执行）。"""
@@ -962,6 +964,35 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         expand=True,
     )
 
+    # 观察层收起时提示不得留在关着的面板内：失败/来源失效等结果在壳层可见。
+    shell_notice = (
+        ft.Container(
+            content=ft.Row(
+                [
+                    ft.Text(
+                        decision_notice,
+                        size=AppStyles.FONT_SIZE_BODY_SM,
+                        color=AppColors.TEXT_PRIMARY,
+                        expand=True,
+                    ),
+                    ft.IconButton(
+                        icon=ft.Icons.CLOSE,
+                        icon_size=AppStyles.FONT_SIZE_BODY_SM,
+                        tooltip=I18n.get("common_close"),
+                        on_click=safe_on_click(lambda _e: set_decision_notice(None)),
+                    ),
+                ],
+                spacing=AppStyles.SPACING_SM,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            padding=ft.Padding.symmetric(horizontal=AppStyles.SPACING_MD, vertical=AppStyles.SPACING_XS),
+            bgcolor=AppColors.SURFACE,
+            border=ft.Border(top=ft.BorderSide(1, AppColors.BORDER)),
+        )
+        if decision_notice and not research_open
+        else None
+    )
+
     # MINOR-10: 状态栏由 Stack overlay 改为 Column 真实布局行 —— 状态栏占据自身
     # 高度, body 区域自动让出底部空间, 任意视口 (含 1280x672) 下分页栏 / 结果表底部
     # 均不会被状态栏遮挡 (原 overlay 方案会覆盖 body 底部约 29px)。
@@ -969,6 +1000,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         content=ft.Column(
             [
                 body_region,
+                *([shell_notice] if shell_notice is not None else []),
                 status_bar_egress,
             ],
             spacing=0,

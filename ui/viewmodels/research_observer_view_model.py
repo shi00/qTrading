@@ -59,6 +59,8 @@ UNAVAILABLE_NOT_READY = "agent_research_not_ready"
 COMPOSER_MODES: Final[tuple[str, ...]] = ("discuss", "plan", "execute")
 #: 缺省模式：执行（F21 默认执行）。
 DEFAULT_COMPOSER_MODE: Final[str] = "execute"
+#: 精确导航目标在读取期间被更新的最大重读次数（超过则如实报码，不落过期会话）。
+_REFRESH_TARGET_ATTEMPTS: Final[int] = 3
 
 
 class MainTurnIntakePort(Protocol):
@@ -548,6 +550,9 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         self._user_scope = user_scope
         self._intake = intake
         self._session_key: int | None = id(service) if service is not None else None
+        # 精确会话导航目标（建稿回执驱动）：仅在读取与目标仍一致时落 state，
+        # 读取期间被更新的目标会触发重读，避免壳层退回「历史首条」。
+        self._preferred_session_id: str | None = None
         # 原始首读投影：展开/收起/选中只重算展示，不重复读取、不触碰执行。
         self._raw_executions: tuple[Any, ...] = ()
         self._raw_messages: tuple[Any, ...] = ()
@@ -563,55 +568,39 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
     # 命令
     # ------------------------------------------------------------------
 
-    async def refresh(self) -> None:
-        """重新读取最近研究会话与待处理决定（只读；不触碰执行状态）。"""
+    async def refresh(self, session_id: str | None = None) -> None:
+        """重新读取当前（或指定）研究会话与待处理决定（只读；不触碰执行状态）。
+
+        ``session_id`` 为精确导航目标（建稿回执驱动）：传入时读取该会话，不以
+        「历史首条」替代；不传时沿用当前已选会话，仅在首次进入（无会话）时取
+        历史最新一条。读取期间目标被更新会重读，保证落 state 的会话与目标一致。
+        """
 
         if self._service is None or not self._state.available:
             return
+        if session_id is not None:
+            self._preferred_session_id = session_id
         if self._state.loading:
             return
         self._track_inflight_cancellable()
         self._set_state(loading=True, error_key=None, last_error_code=None)
         try:
-            history = await self._service.search(
-                HistoryQuery(
-                    scope="all_saved",
-                    round_selection=HistoryRoundSelection(kind="all_rounds"),
-                    query_text="",
-                    time_basis="updated",
-                    sort="newest_first",
-                    limit=10,
-                ),
-                user_scope=self._user_scope,
-            )
-            session_id = next((hit.session_id for hit in history.hits), None)
-            if session_id is None:
-                self._raw_executions = ()
-                self._raw_messages = ()
-                self._raw_artifacts = ()
-                self._set_state(
-                    loading=False,
-                    session_id=None,
-                    session_title=None,
-                    executions=(),
-                    execution_nodes=(),
-                    messages=(),
-                    artifacts=(),
-                    messages_has_more=False,
-                    artifacts_has_more=False,
-                    session_draft_revision=0,
-                    artifact_body_pending_keys=(),
-                    session_draft=None,
-                    draft_error_code=None,
-                    decisions=(),
-                    pending_count=0,
-                    last_updated_at=history.read_moment,
+            for _attempt in range(_REFRESH_TARGET_ATTEMPTS):
+                chosen = await self._resolve_session(self._preferred_session_id)
+                if chosen is None:
+                    return
+                read = await self._service.read_session(
+                    SessionReadQuery(session_id=chosen, limit=50),
+                    user_scope=self._user_scope,
                 )
+                if self._preferred_session_id is not None and self._preferred_session_id != chosen:
+                    continue  # 读取期间目标已更新：以最新目标重读，不落过期会话
+                self._apply_session_read(chosen, read)
+                if self._preferred_session_id == chosen:
+                    self._preferred_session_id = None
                 return
-            read = await self._service.read_session(
-                SessionReadQuery(session_id=session_id, limit=50),
-                user_scope=self._user_scope,
-            )
+            # 目标连续变化超过上限：保留既有快照，如实报码（不伪装成已导航）
+            self._set_state(loading=False, last_error_code="REFRESH_TARGET_CHANGED")
         except asyncio.CancelledError:
             # R2：取消必须传播；先释放 loading，避免会话存续期间刷新永久被拦截。
             self._set_state(loading=False)
@@ -619,7 +608,73 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         except Exception as e:  # facade 已脱敏的类型化错误；未知错误如实报码，不伪装空结果
             # 断线不清空既有快照：保留上次已知状态，只如实报错（R21）。
             self._set_state(loading=False, last_error_code=self._error_code(e))
+
+    async def open_session(self, session_id: str) -> None:
+        """导航到精确会话（建稿回执驱动；不退回历史首条、不派发研究）。"""
+
+        if self._service is None or not self._state.available:
+            self._set_state(error_key=self._state.unavailable_reason_key)
             return
+        target = (session_id or "").strip()
+        if not target:
+            return
+        await self.refresh(target)
+
+    async def _resolve_session(self, target: str | None) -> str | None:
+        """解析要读取的会话：显式目标优先，其次当前会话，最后历史最新一条。
+
+        历史最新一条仅用于首次进入（无任何目标/当前会话），不得覆盖精确导航。
+        """
+
+        service = self._service
+        if service is None:
+            return None
+        chosen = target or self._state.session_id
+        if chosen is not None:
+            return chosen
+        history = await service.search(
+            HistoryQuery(
+                scope="all_saved",
+                round_selection=HistoryRoundSelection(kind="all_rounds"),
+                query_text="",
+                time_basis="updated",
+                sort="newest_first",
+                limit=10,
+            ),
+            user_scope=self._user_scope,
+        )
+        chosen = next((hit.session_id for hit in history.hits), None)
+        if chosen is None:
+            self._clear_session_state(history.read_moment)
+        return chosen
+
+    def _clear_session_state(self, read_moment: str | None) -> None:
+        """无任何会话时的空状态（如实无研究，不保留上一会话残影）。"""
+
+        self._raw_executions = ()
+        self._raw_messages = ()
+        self._raw_artifacts = ()
+        self._set_state(
+            loading=False,
+            session_id=None,
+            session_title=None,
+            executions=(),
+            execution_nodes=(),
+            messages=(),
+            artifacts=(),
+            messages_has_more=False,
+            artifacts_has_more=False,
+            session_draft_revision=0,
+            artifact_body_pending_keys=(),
+            session_draft=None,
+            draft_error_code=None,
+            decisions=(),
+            pending_count=0,
+            last_updated_at=read_moment,
+        )
+
+    def _apply_session_read(self, session_id: str, read: SessionRead) -> None:
+        """把会话首读投影到 state（纯展示，不触碰执行）。"""
 
         pending = _pending_decisions(read)
         previous_session_id = self._state.session_id

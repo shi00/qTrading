@@ -286,3 +286,69 @@ class TestReadErrorsNotDisguisedAsEmpty:
             await dao.get_watchlist()
         with pytest.raises(DatabaseQueryError, match="read boom"):
             await dao.is_in_watchlist("000001.SZ")
+
+
+class TestAddToWatchlistChecked:
+    """R2-I13 / R21: 写入前原备注 CAS —— 并发变化拒写，绝不以成功收尾。"""
+
+    @staticmethod
+    def _dao_with_rowcounts(*rowcounts: int):
+        import contextlib
+
+        dao = _make_dao()
+        dao._read_db_select.return_value = pd.DataFrame()
+        conn = MagicMock()
+        results = []
+        for rowcount in rowcounts:
+            result = MagicMock()
+            result.rowcount = rowcount
+            results.append(result)
+        conn.exec_driver_sql = AsyncMock(side_effect=results)
+
+        @contextlib.asynccontextmanager
+        async def _fake_begin(conn_arg=None):
+            yield conn
+
+        dao._guarded_begin = _fake_begin  # type: ignore[method-assign]  # 测试替身：隔离真实事务
+        return dao, conn
+
+    @pytest.mark.asyncio
+    async def test_matching_note_updates_in_place(self):
+        """原备注匹配：条件 UPDATE 命中即写入，不再尝试 INSERT。"""
+        dao, conn = self._dao_with_rowcounts(1)
+        assert await dao.add_to_watchlist_checked("000001.SZ", "平安银行", "新备注", expected_note="旧备注") == 1
+        assert conn.exec_driver_sql.await_count == 1
+        sql, params = conn.exec_driver_sql.call_args.args
+        assert "$1" in sql and "$4" in sql and "%s" not in sql
+        assert params == ("000001.SZ", "平安银行", "新备注", "旧备注")
+
+    @pytest.mark.asyncio
+    async def test_absent_row_inserts_on_first_add(self):
+        """未关注（原备注空串）：UPDATE 0 行后按「不存在才插入」落库。"""
+        dao, conn = self._dao_with_rowcounts(0, 1)
+        assert await dao.add_to_watchlist_checked("600000.SH", "浦发银行", "备注", expected_note="") == 1
+        assert conn.exec_driver_sql.await_count == 2
+        assert "NOT EXISTS" in conn.exec_driver_sql.call_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_changed_note_raises_conflict_without_writing(self):
+        """原备注已被并发修改：UPDATE 与 INSERT 均 0 行 → 抛冲突，不写观察起点。"""
+        from data.persistence.daos.watchlist_dao import WatchlistNoteConflictError
+
+        dao, conn = self._dao_with_rowcounts(0, 0)
+        with pytest.raises(WatchlistNoteConflictError) as exc_info:
+            await dao.add_to_watchlist_checked("000001.SZ", "平安银行", "新备注", expected_note="旧备注")
+        assert exc_info.value.ts_code == "000001.SZ"
+        assert "changed since read" in str(exc_info.value)
+        assert conn.exec_driver_sql.await_count == 2
+        dao._write_db.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_success_pins_origin_with_null_guard(self):
+        """CAS 成功后才固化观察起点（IS NULL 守卫，不覆盖已固化值）。"""
+        dao, _conn = self._dao_with_rowcounts(1)
+        dao._read_db_select.return_value = _quote_df(datetime.date(2026, 9, 19), 10.0, 2.0)
+        await dao.add_to_watchlist_checked("000001.SZ", "平安银行", "备注", expected_note="旧备注")
+        dao._write_db.assert_awaited_once()
+        sql = dao._write_db.call_args.args[0]
+        assert "added_trade_date IS NULL" in sql

@@ -1186,6 +1186,17 @@ class CacheManager:
         """加入关注列表（upsert by ts_code，保留首次加入日期）。"""
         return await self.watchlist_dao.add_to_watchlist(ts_code, stock_name, note)
 
+    async def add_to_watchlist_checked(
+        self,
+        ts_code: str,
+        stock_name: str,
+        note: str | None = None,
+        *,
+        expected_note: str,
+    ) -> int:
+        """按写入前原备注 CAS 加入关注（并发变化即拒写）。"""
+        return await self.watchlist_dao.add_to_watchlist_checked(ts_code, stock_name, note, expected_note=expected_note)
+
     async def remove_from_watchlist(self, ts_code: str) -> int:
         """移除关注。"""
         return await self.watchlist_dao.remove_from_watchlist(ts_code)

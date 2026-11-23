@@ -223,17 +223,24 @@ class StrategyMetaMixin:
         presets = ConfigHandler.get_strategy_presets(strategy_key)
         return list(presets.keys())
 
-    async def save_preset(self, name: str, strategy_key: str, params: dict) -> None:
+    async def save_preset(self, name: str, strategy_key: str, params: dict) -> bool:
         """保存命名参数预设 (Task 4.1). 同名最后写者胜出.
 
         R2-I12: 重名不得静默覆盖 —— 调用方须先经 ``prepare_preset_save`` 获知同名
         方案并取得用户确认后才调用本方法。
 
+        Returns:
+            bool: 写盘成功返回 True；配置层拒写（并发修改/文件锁失败等）返回 False，
+            调用方不得提示成功（R21：拒写不伪装为已保存）。
+
         Raises:
             Exception: ConfigHandler 失败时抛出 (View 负责展示错误)
         """
 
-        await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_strategy_preset, strategy_key, name, params)
+        result = await ThreadPoolManager().run_async(
+            TaskType.IO, ConfigHandler.save_strategy_preset, strategy_key, name, params
+        )
+        return bool(result)
 
     def load_preset(self, name: str, strategy_key: str) -> dict:
         """载入命名参数预设 (Task 4.1).
