@@ -31,6 +31,8 @@ from core.agent_types import (
     AnswerCommandFact,
     CommandRef,
     CommitState,
+    ConsumeAnswerRequest,
+    ConsumptionFact,
     ConsumptionState,
     DeliveryState,
     DispatchCloseFact,
@@ -44,6 +46,7 @@ from services.agent_service.runtime import CloseCommandIdentity
 from services.agent_service.skills import SkillCatalogService
 from services.agent_service.recovery import InstanceGuardEvidence
 from services.agent_service.runtime import OwnerLoopBridge
+from services.agent_service.workflows import AnswerConsumerRegistry
 
 pytestmark = pytest.mark.unit
 
@@ -115,10 +118,21 @@ class _FakeHandle:
 
 
 class _FakeRegistry:
-    """应用登记面替身（AgentDao 最小恢复面）。"""
+    """应用登记面替身（AgentDao 最小恢复面 + 答复消费面）。"""
 
     def __init__(self) -> None:
         self.finalized: list[str] = []
+        self.consumed: list[ConsumeAnswerRequest] = []
+
+    async def consume_answer(self, request: ConsumeAnswerRequest) -> ConsumptionFact:
+        self.consumed.append(request)
+        return ConsumptionFact(
+            command_record_id=request.command_record_id,
+            decision_id="d-1",
+            consumption_state=ConsumptionState.CONSUMED,
+            consumed_at="2026-11-23T00:00:00.000000Z",
+            answer_consumed_at="2026-11-23T00:00:00.000000Z",
+        )
 
     async def list_recovery_executions(self, user_scope: str) -> tuple[Any, ...]:
         return ()
@@ -208,6 +222,32 @@ async def test_launched_handle_wires_native_answer_sender(monkeypatch: pytest.Mo
     assert returned_handle is handle
     assert wiring.launched is True
     assert isinstance(wiring.service._answer_sender, _NativeAnswerSender)
+
+
+async def test_wiring_installs_answer_consumer_bound_to_shared_ledger(monkeypatch: pytest.MonkeyPatch) -> None:
+    """答复消费接线（P1-05）：消费者绑定同一用户域与共享账本，命令身份与保存一致。"""
+
+    monkeypatch.setattr(wiring_mod, "launch_agent_runtime", lambda _handle: None)
+    cache = _cache_manager()
+    ledger = cache.agent_dao
+
+    wiring = await wire_agent_runtime(
+        cache,
+        isolation_id="startup-test",
+        assemble_func=lambda _settings: _FakeHandle(client=_FakeClient()),
+        instance_guard=_FakeGuard(),
+        blocking_runner=_direct_runner,
+        launch_allowed=False,
+    )
+
+    consumer = AnswerConsumerRegistry.require()
+    fact = await consumer("d-1", "ui-answer:d-1")
+
+    expected_id = stable_id("command", ["local-desktop", "d-1", "ui-answer:d-1"])
+    assert fact.command_record_id == expected_id
+    assert [request.command_record_id for request in ledger.consumed] == [expected_id]
+    assert [request.user_scope for request in ledger.consumed] == ["local-desktop"]
+    assert wiring.service is not None
 
 
 async def test_skills_root_wires_catalog_into_facade(tmp_path: Path) -> None:

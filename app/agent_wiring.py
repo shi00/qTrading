@@ -34,6 +34,8 @@
 - 答复投递（P1-05）：已 launch 宿主复用同一 DBOS client 注入 ``AnswerSender``
   （按原答复命令身份投递，幂等键 = 客户端命令键）；未 launch 不注入，答复交付
   保持 fail-closed（保存成功但如实停留 not_delivered）；
+- 答复消费（P1-05）：登记 ``AnswerConsumerRegistry``（同一用户域 + 共享 DAO），
+  原生父 workflow 的 ``recv`` 步骤据此做幂等 CAS 消费（投递 → 消费闭环）；
 - 派发门闩与关闭链共用同一 ``_ProcessDispatchGate``：关闭派发后新提交零派发。
 """
 
@@ -57,7 +59,10 @@ from core.agent_types import (
     AgentServiceError,
     AgentValidationError,
     AnswerCommandFact,
+    ConsumeAnswerRequest,
+    ConsumptionFact,
     DispatchCloseRequest,
+    stable_id,
 )
 from services.agent_service import (
     AgentRuntime,
@@ -108,7 +113,11 @@ from services.agent_service.runtime import (
 from services.agent_service.skills import ManagedSkillStore, SkillCatalogService
 from services.agent_service.tool_runtime import build_tool_runtime_factory
 from services.agent_service.units import UnitConversion
-from services.agent_service.workflows import submit_research_workflow
+from services.agent_service.workflows import (
+    ANSWER_MESSAGE_TOPIC,
+    AnswerConsumerRegistry,
+    submit_research_workflow,
+)
 from utils.config.db import (
     AGENT_MIGRATION_DB_URL_ENV,
     DatabaseMode,
@@ -462,11 +471,28 @@ class _NativeAnswerSender:
             await self._client.send_async(
                 fact.workflow_id,
                 message,
-                topic="answer",
+                topic=ANSWER_MESSAGE_TOPIC,
                 idempotency_key=fact.client_command_id,
             )
         finally:
             self._port_io.exit("answer_send")
+
+
+def _build_answer_consumer(dao: Any, user_scope: str) -> Callable[[str, str], Awaitable[ConsumptionFact]]:
+    """生产答复消费者（P1-05）：按保存时同一命令身份派生并走 DAO 幂等 CAS。
+
+    命令身份派生与 ``AgentDao.save_answer`` 一致（``stable_id("command",
+    [user_scope, decision_id, client_command_id])``），不新建答复、不改投递事实；
+    已消费重放由 DAO 返回原事实（重复投递只消费一次）。
+    """
+
+    async def _consume(decision_id: str, client_command_id: str) -> ConsumptionFact:
+        command_record_id = stable_id("command", [user_scope, decision_id, client_command_id])
+        return await dao.consume_answer(
+            ConsumeAnswerRequest(user_scope=user_scope, command_record_id=command_record_id)
+        )
+
+    return _consume
 
 
 class _PendingCloseFactSink:
@@ -874,6 +900,9 @@ async def wire_agent_runtime(
     usage_dao = getattr(cache_manager, "ai_usage_dao", None)
     skills = _build_skill_catalog(dao, skills_root)
     service = AgentService(dao, usage_dao, skills=skills)
+    #: 答复消费（P1-05）：原生 workflow 的 recv 消费步骤按同一用户域 + 共享账本
+    #: 消费（未 launch 时无 workflow，安装无副作用；步骤缺少消费者时明确拒绝）。
+    AnswerConsumerRegistry.install(_build_answer_consumer(dao, user_scope))
     try:
         runtime_url = _agent_runtime_sync_url(engine)
     except Exception as e:
