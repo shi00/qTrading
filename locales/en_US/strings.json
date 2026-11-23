@@ -2630,5 +2630,21 @@
     "wizard_step_model_scenario_desc": "Configure available AI models and their scenarios",
     "wizard_step_model_substep_1": "Connection",
     "wizard_step_model_substep_2": "Billing",
-    "wizard_step_model_substep_3": "Scenarios & Review"
+    "wizard_step_model_substep_3": "Scenarios & Review",
+    "agent_research_composer": "Start research",
+    "agent_research_composer_label": "First question",
+    "agent_research_composer_hint": "Describe what to research; discuss/plan never start data retrieval automatically",
+    "agent_research_composer_unavailable": "First-question intake is not wired: send becomes available once the agent runtime is ready.",
+    "agent_research_mode_discuss": "Discuss",
+    "agent_research_mode_plan": "Plan",
+    "agent_research_mode_execute": "Execute",
+    "agent_research_send": "Send",
+    "agent_research_sending": "Submitting…",
+    "agent_research_plan_preview": "Plan preview",
+    "agent_research_plan_empty": "No plan steps yet (plan generation unfinished or not wired).",
+    "agent_research_plan_depends_fmt": "Depends on: {depends}",
+    "agent_research_start_plan": "Start this plan",
+    "agent_research_plan_missing": "No plan version to start: generate and confirm a plan first.",
+    "agent_research_dispatch_reason_fmt": "Dispatch status: {reason}",
+    "agent_research_dispatch_zero": "Not dispatched"
 }

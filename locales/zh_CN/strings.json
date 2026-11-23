@@ -2630,5 +2630,21 @@
     "wizard_step_model_scenario_desc": "配置可用的 AI 模型及其使用场景",
     "wizard_step_model_substep_1": "连接信息",
     "wizard_step_model_substep_2": "统计方式",
-    "wizard_step_model_substep_3": "场景与检查"
+    "wizard_step_model_substep_3": "场景与检查",
+    "agent_research_composer": "开始研究",
+    "agent_research_composer_label": "首问",
+    "agent_research_composer_hint": "描述你要研究的问题；讨论/计划不会自动启动取数",
+    "agent_research_composer_unavailable": "首问入口未接线：需要 Agent 运行时就绪后才可发送。",
+    "agent_research_mode_discuss": "讨论",
+    "agent_research_mode_plan": "计划",
+    "agent_research_mode_execute": "执行",
+    "agent_research_send": "发送",
+    "agent_research_sending": "提交中…",
+    "agent_research_plan_preview": "计划预览",
+    "agent_research_plan_empty": "暂无计划步骤（计划生成未完成或未接线）。",
+    "agent_research_plan_depends_fmt": "依赖：{depends}",
+    "agent_research_start_plan": "开始这份计划",
+    "agent_research_plan_missing": "没有可启动的计划版本：请先生成并确认计划。",
+    "agent_research_dispatch_reason_fmt": "派发状态：{reason}",
+    "agent_research_dispatch_zero": "未派发"
 }

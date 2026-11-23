@@ -60,6 +60,7 @@ from services.agent_service import (
     launch_agent_runtime,
     start_agent_runtime,
 )
+from services.agent_service.capabilities import PlanProposalStore, PlanStoreBinding
 from services.agent_service.cleanup import CleanupService, DaoCleanupJobStore
 from services.agent_service.cleanup_execution import CleanupExecutionService
 from services.agent_service.cleanup_native import NativeCleanupExecutor
@@ -70,6 +71,13 @@ from services.agent_service.dispatch import (
     RootWorkflowSubmitter,
 )
 from services.agent_service.leaf_runtime import default_leaf_runtime
+from services.agent_service.loop import AgentTurn, ResearchResultProducer
+from services.agent_service.main_turn import (
+    MainTurnIntake,
+    MainTurnRunner,
+    build_plan_spec_provider,
+    build_role_capability_provider,
+)
 from services.agent_service.mcp_lifecycle import MCPServiceLifecycle
 from services.agent_service.runtime import CloseCommandIdentity, CloseFactOutcome, OwnerLoopBridge
 from services.agent_service.skills import ManagedSkillStore, SkillCatalogService
@@ -150,6 +158,12 @@ class AgentWiring:
     cleanup_failure: str | None = None
     #: MCP 生命周期门面（构造期零连接；关闭前置逐个断开已连服务）。
     mcp_lifecycle: MCPServiceLifecycle | None = None
+    #: 首问 / 开始计划受理入口（组合根注入；未就绪时为 ``None``，UI 如实拒绝）。
+    intake: MainTurnIntake | None = None
+    #: 主回合生产构造（需注入模型回合端口；未注入时 ``None``，不伪造回合）。
+    main_turn: MainTurnRunner | None = None
+    #: Agent 用户域（与受理/派发/回合身份同源）。
+    user_scope: str = _LOCAL_USER_SCOPE
     unclosed_handle: AgentRuntimeHandle | None = None
     instance_guard: Any | None = None
     _close_command: CloseCommandIdentity | None = None
@@ -523,6 +537,7 @@ async def wire_agent_runtime(
     workflow_submitter: RootWorkflowSubmitter | None = None,
     workflow_result_reader: RootWorkflowResultReader | None = None,
     skills_root: str | None = None,
+    main_turn_turn: AgentTurn | None = None,
 ) -> AgentWiring:
     """生产组合根接线（P01/R2-I01）：facade + 共享桥 + 叶运行链 + 宿主/派发。
 
@@ -674,8 +689,11 @@ async def wire_agent_runtime(
     dispatcher = ResearchDispatcher(
         gate=gate,
         submit=_tracked_submit,
-        plan_provider=plan_provider,
+        # 生产计划来源：冻结受理 manifest 的计划引用 → 已确认计划版 → 可执行节点表。
+        plan_provider=plan_provider if plan_provider is not None else build_plan_spec_provider(dao),
         read_result=_tracked_read,
+        # 生产角色能力来源：只取本次请求冻结的 Skill/MCP 显式手选集（未选择即零派发）。
+        capability_provider=build_role_capability_provider(dao),
     )
     runtime = AgentRuntime(
         handle=handle,
@@ -691,8 +709,20 @@ async def wire_agent_runtime(
         outcome.isolation.ready if outcome.isolation is not None else None,
     )
     cleanup, cleanup_failure = _build_cleanup_wiring(handle=handle, dao=dao)
+    facade = AgentService(dao, usage_dao, dispatcher=dispatcher, skills=skills)
+    intake = MainTurnIntake(facade, manifest_reader=dao, user_scope=user_scope)
+    main_turn = None
+    if main_turn_turn is not None:
+        # 主回合生产构造：需要注入模型回合端口；生产缺省未注入时不伪造回合。
+        main_turn = MainTurnRunner(
+            producer=ResearchResultProducer(dao),
+            plan_store_factory=lambda identity: PlanProposalStore(
+                dao,
+                PlanStoreBinding(user_scope=identity.user_scope, execution_id=identity.execution_id),
+            ),
+        )
     return AgentWiring(
-        service=AgentService(dao, usage_dao, dispatcher=dispatcher, skills=skills),
+        service=facade,
         bridge=bridge,
         isolation=outcome.isolation,
         launched=launched,
@@ -702,5 +732,8 @@ async def wire_agent_runtime(
         cleanup=cleanup,
         cleanup_failure=cleanup_failure,
         mcp_lifecycle=lifecycle,
+        intake=intake,
+        main_turn=main_turn,
+        user_scope=user_scope,
         instance_guard=outcome.instance_guard,
     )

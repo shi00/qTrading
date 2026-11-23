@@ -70,6 +70,7 @@ from core.agent_types import (
     HistoryQuery,
     OperationRead,
     OperationReadQuery,
+    PlanProposal,
     ReadMarkCommand,
     ReadMarkReceipt,
     ResearchEvent,
@@ -474,6 +475,33 @@ class AgentService:
                 f"{user_scope}/history",
             ) from exc
         return await self._dao.search_history(query, user_scope=user_scope)
+
+    async def read_plan(self, *, user_scope: str, execution_id: str, plan_revision: int) -> PlanProposal:
+        """读取已保存的用户可读计划版（只读；不生成、不推进计划）。
+
+        未保存的计划版由 DAO 抛类型化错误，不返回空计划冒充（R21）；调用方据
+        ``plan_revision`` 精确读取，避免把新版计划当作界面呈现的旧版。
+        """
+
+        self._require_open("read_plan")
+        if not isinstance(user_scope, str) or not user_scope:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "invalid_type: $.user_scope", "plan")
+        if not isinstance(execution_id, str) or not execution_id:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "invalid_type: $.execution_id", "plan")
+        if isinstance(plan_revision, bool) or not isinstance(plan_revision, int) or plan_revision < 1:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "invalid_revision: $.plan_revision", "plan")
+        proposal = await self._dao.read_plan_proposal(
+            user_scope=user_scope,
+            execution_id=execution_id,
+            plan_revision=plan_revision,
+        )
+        if proposal is None:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                "plan proposal not found",
+                f"{user_scope}/{execution_id}@{plan_revision}",
+            )
+        return proposal
 
     async def wait_result(
         self,

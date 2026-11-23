@@ -864,3 +864,150 @@ class TestSharedInstance:
 
     def test_state_reason_key_defaults(self) -> None:
         assert ResearchObserverState().unavailable_reason_key == UNAVAILABLE_NOT_WIRED
+
+
+class _FakeIntake:
+    def __init__(
+        self,
+        *,
+        dispatch: Any | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.dispatch = dispatch
+        self.error = error
+        self.question_calls: list[tuple[str, Any, str | None]] = []
+        self.plan_calls: list[tuple[Any, str, int]] = []
+
+    async def start_question(
+        self,
+        text: str,
+        *,
+        mode: Any,
+        session_id: str | None = None,
+        session_title: str | None = None,
+        expected_revision: int | None = None,
+    ) -> Any:
+        self.question_calls.append((text, mode, session_id, expected_revision))
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(receipt=object(), dispatch=self.dispatch, plan_reference=None)
+
+    async def start_plan(self, reference: Any, *, session_id: str, expected_revision: int) -> Any:
+        self.plan_calls.append((reference, session_id, expected_revision))
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(receipt=object(), dispatch=self.dispatch, plan_reference=reference)
+
+
+class _PlanService(_FakeService):
+    def __init__(self, proposal: Any, *, error: Exception | None = None) -> None:
+        super().__init__()
+        self.proposal = proposal
+        self.plan_error = error
+        self.plan_calls: list[tuple[str, str, int]] = []
+
+    async def read_plan(self, *, user_scope: str, execution_id: str, plan_revision: int) -> Any:
+        self.plan_calls.append((user_scope, execution_id, plan_revision))
+        if self.plan_error is not None:
+            raise self.plan_error
+        return self.proposal
+
+
+class TestComposer:
+    @pytest.mark.asyncio
+    async def test_send_without_intake_reports_unavailable(self) -> None:
+        service = _FakeService()
+        vm = ResearchObserverViewModel(service)
+
+        assert vm.state.composer_available is False
+        vm.set_composer_text("研究问题")
+        await vm.send_first_question()
+
+        assert vm.state.composer_error_key == UNAVAILABLE_NOT_WIRED
+        assert vm.state.composer_text == "研究问题"
+
+    @pytest.mark.asyncio
+    async def test_send_first_question_uses_selected_mode_and_clears_text(self) -> None:
+        service = _FakeService()
+        intake = _FakeIntake(dispatch=SimpleNamespace(submitted=False, reason="mode_research_disabled"))
+        vm = ResearchObserverViewModel(service, intake=intake)
+        vm.set_composer_text("  研究银行股  ")
+        vm.set_composer_mode("discuss")
+
+        await vm.send_first_question()
+
+        assert intake.question_calls == [("研究银行股", Mode.DISCUSS, None, 0)]
+        assert vm.state.composer_text == ""
+        assert vm.state.composer_pending is False
+        assert vm.state.last_dispatch_reason == "mode_research_disabled"
+
+    @pytest.mark.asyncio
+    async def test_empty_question_is_not_submitted(self) -> None:
+        intake = _FakeIntake()
+        vm = ResearchObserverViewModel(_FakeService(), intake=intake)
+        vm.set_composer_text("   ")
+
+        await vm.send_first_question()
+
+        assert intake.question_calls == []
+        assert vm.state.composer_error_key == "agent_research_empty_draft"
+
+    def test_unknown_mode_is_ignored(self) -> None:
+        vm = ResearchObserverViewModel(_FakeService(), intake=_FakeIntake())
+
+        vm.set_composer_mode("autopilot")
+
+        assert vm.state.composer_mode == "execute"
+
+    @pytest.mark.asyncio
+    async def test_start_plan_requires_visible_reference(self) -> None:
+        intake = _FakeIntake()
+        vm = ResearchObserverViewModel(_FakeService(), intake=intake)
+
+        await vm.start_confirmed_plan()
+
+        assert intake.plan_calls == []
+        assert vm.state.composer_error_key == "agent_research_plan_missing"
+
+    @pytest.mark.asyncio
+    async def test_start_plan_uses_visible_reference_and_revision(self) -> None:
+        intake = _FakeIntake(dispatch=SimpleNamespace(submitted=True, reason=None))
+        vm = ResearchObserverViewModel(_FakeService(), intake=intake)
+        vm._set_state(plan_reference=("execution-0", 2), session_id="s-1", session_draft_revision=4)
+
+        await vm.start_confirmed_plan()
+
+        reference, session_id, revision = intake.plan_calls[0]
+        assert (reference.execution_id, reference.plan_revision) == ("execution-0", 2)
+        assert (session_id, revision) == ("s-1", 4)
+        assert vm.state.last_dispatch_reason is None
+
+    @pytest.mark.asyncio
+    async def test_load_plan_preview_projects_steps(self) -> None:
+        proposal = SimpleNamespace(
+            items=(
+                SimpleNamespace(id="s1", content="步骤一", depends_on=()),
+                SimpleNamespace(id="s2", content="步骤二", depends_on=("s1",)),
+            )
+        )
+        service = _PlanService(proposal)
+        vm = ResearchObserverViewModel(service)
+
+        await vm.load_plan_preview("execution-0", 1)
+
+        assert [(step.step_id, step.content) for step in vm.state.plan_steps] == [
+            ("s1", "步骤一"),
+            ("s2", "步骤二"),
+        ]
+        assert vm.state.plan_reference == ("execution-0", 1)
+
+    @pytest.mark.asyncio
+    async def test_load_plan_preview_keeps_error_and_empty_steps(self) -> None:
+        service = _PlanService(None, error=_FakeError("PERSISTENCE_UNAVAILABLE"))
+        vm = ResearchObserverViewModel(service)
+
+        await vm.load_plan_preview("execution-0", 1)
+
+        assert vm.state.plan_steps == ()
+        assert vm.state.plan_reference is None
+        assert vm.state.plan_error_key == "PERSISTENCE_UNAVAILABLE"
