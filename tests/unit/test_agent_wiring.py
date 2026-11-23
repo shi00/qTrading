@@ -20,15 +20,24 @@ from app.agent_wiring import (
     AgentWiring,
     _LaunchedCloseFactSink,
     _LaunchedWorkflowLedger,
+    _NativeAnswerSender,
     _PendingCloseFactSink,
     _ProcessDispatchGate,
     wire_agent_runtime,
 )
 from core.agent_types import (
+    AgentErrorCode,
+    AgentServiceError,
+    AnswerCommandFact,
     CommandRef,
     CommitState,
+    ConsumeAnswerRequest,
+    ConsumptionFact,
+    ConsumptionState,
+    DeliveryState,
     DispatchCloseFact,
     SubmissionReceipt,
+    json_doc,
     stable_id,
 )
 from services.agent_service import AgentService, CloseReadinessReceipt
@@ -37,6 +46,7 @@ from services.agent_service.runtime import CloseCommandIdentity
 from services.agent_service.skills import SkillCatalogService
 from services.agent_service.recovery import InstanceGuardEvidence
 from services.agent_service.runtime import OwnerLoopBridge
+from services.agent_service.workflows import AnswerConsumerRegistry
 
 pytestmark = pytest.mark.unit
 
@@ -108,10 +118,21 @@ class _FakeHandle:
 
 
 class _FakeRegistry:
-    """应用登记面替身（AgentDao 最小恢复面）。"""
+    """应用登记面替身（AgentDao 最小恢复面 + 答复消费面）。"""
 
     def __init__(self) -> None:
         self.finalized: list[str] = []
+        self.consumed: list[ConsumeAnswerRequest] = []
+
+    async def consume_answer(self, request: ConsumeAnswerRequest) -> ConsumptionFact:
+        self.consumed.append(request)
+        return ConsumptionFact(
+            command_record_id=request.command_record_id,
+            decision_id="d-1",
+            consumption_state=ConsumptionState.CONSUMED,
+            consumed_at="2026-11-23T00:00:00.000000Z",
+            answer_consumed_at="2026-11-23T00:00:00.000000Z",
+        )
 
     async def list_recovery_executions(self, user_scope: str) -> tuple[Any, ...]:
         return ()
@@ -177,6 +198,56 @@ async def test_facade_reuses_shared_engine_and_ledger(monkeypatch: pytest.Monkey
     assert wiring.service._dao is cache.agent_dao  # 共享引擎/账本，不另起连接池
     assert isinstance(wiring.bridge, OwnerLoopBridge)
     assert launched == []  # needs-spike 门闩：不提前 launch
+
+
+async def test_unlaunched_handle_keeps_answer_delivery_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """未 launch（零 workflow）不注入答复发送器：交付入口保持 fail-closed。"""
+
+    monkeypatch.setattr(wiring_mod, "launch_agent_runtime", lambda _handle: None)
+    wiring, _handle, _guard = await _wire()
+
+    assert wiring.launched is False
+    assert wiring.service._answer_sender is None
+
+
+async def test_launched_handle_wires_native_answer_sender(monkeypatch: pytest.MonkeyPatch) -> None:
+    """已 launch 宿主复用同一 DBOS client 注入答复发送器（P1-05 生产接线）。"""
+
+    monkeypatch.setattr(wiring_mod, "launch_agent_runtime", lambda _handle: None)
+    handle = _FakeHandle(client=_FakeClient())
+    handle._launched = True
+
+    wiring, returned_handle, _guard = await _wire(handle=handle)
+
+    assert returned_handle is handle
+    assert wiring.launched is True
+    assert isinstance(wiring.service._answer_sender, _NativeAnswerSender)
+
+
+async def test_wiring_installs_answer_consumer_bound_to_shared_ledger(monkeypatch: pytest.MonkeyPatch) -> None:
+    """答复消费接线（P1-05）：消费者绑定同一用户域与共享账本，命令身份与保存一致。"""
+
+    monkeypatch.setattr(wiring_mod, "launch_agent_runtime", lambda _handle: None)
+    cache = _cache_manager()
+    ledger = cache.agent_dao
+
+    wiring = await wire_agent_runtime(
+        cache,
+        isolation_id="startup-test",
+        assemble_func=lambda _settings: _FakeHandle(client=_FakeClient()),
+        instance_guard=_FakeGuard(),
+        blocking_runner=_direct_runner,
+        launch_allowed=False,
+    )
+
+    consumer = AnswerConsumerRegistry.require()
+    fact = await consumer("d-1", "ui-answer:d-1")
+
+    expected_id = stable_id("command", ["local-desktop", "d-1", "ui-answer:d-1"])
+    assert fact.command_record_id == expected_id
+    assert [request.command_record_id for request in ledger.consumed] == [expected_id]
+    assert [request.user_scope for request in ledger.consumed] == ["local-desktop"]
+    assert wiring.service is not None
 
 
 async def test_skills_root_wires_catalog_into_facade(tmp_path: Path) -> None:
@@ -1277,3 +1348,103 @@ async def test_dispatch_stays_closed_after_launched_host_close() -> None:
 
     assert outcome.submitted is False
     assert outcome.reason == DISPATCH_CLOSED
+
+
+class _RecordingSendClient:
+    """答复消息投递替身：记录 send_async 的目标/消息/幂等键。"""
+
+    def __init__(self, *, error: Exception | None = None) -> None:
+        self.error = error
+        self.calls: list[dict[str, Any]] = []
+
+    async def send_async(
+        self,
+        destination_id: str,
+        message: Any,
+        *,
+        topic: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> None:
+        self.calls.append(
+            {
+                "destination_id": destination_id,
+                "message": message,
+                "topic": topic,
+                "idempotency_key": idempotency_key,
+            }
+        )
+        if self.error is not None:
+            raise self.error
+
+
+def _answer_fact(*, workflow_id: str = "wf-1", payload: str | None = None) -> AnswerCommandFact:
+    return AnswerCommandFact(
+        command_record_id="cmd-1",
+        client_command_id="ui-answer:d-1",
+        decision_id="d-1",
+        session_id="s1",
+        execution_id="exec-1",
+        round_id="round-1",
+        workflow_id=workflow_id,
+        delivery_state=DeliveryState.NOT_DELIVERED,
+        consumption_state=ConsumptionState.NOT_CONSUMED,
+        answer_digest="sha256:abc",
+        request_payload=payload if payload is not None else json_doc({"text": "选择第一家"}),
+        verified_at=None,
+    )
+
+
+class TestNativeAnswerSender:
+    """生产答复发送器（P1-05）：复用 DBOS client 投递，门闩关闭即拒绝。"""
+
+    @pytest.mark.asyncio
+    async def test_sends_answer_message_with_idempotent_command_key(self) -> None:
+        client = _RecordingSendClient()
+        sender = _NativeAnswerSender(
+            client=client,
+            gate=_ProcessDispatchGate(launched=True),
+            port_io=wiring_mod._InFlightPortIo(),
+        )
+
+        await sender.send_answer(_answer_fact())
+
+        assert [call["destination_id"] for call in client.calls] == ["wf-1"]
+        call = client.calls[0]
+        assert call["destination_id"] == "wf-1"
+        assert call["topic"] == "answer"
+        assert call["idempotency_key"] == "ui-answer:d-1"
+        assert call["message"]["decision_id"] == "d-1"
+        assert call["message"]["client_command_id"] == "ui-answer:d-1"
+        assert call["message"]["answer"] == {"text": "选择第一家"}
+
+    @pytest.mark.asyncio
+    async def test_closed_dispatch_gate_refuses_before_native_send(self) -> None:
+        client = _RecordingSendClient()
+        sender = _NativeAnswerSender(
+            client=client,
+            gate=_ProcessDispatchGate(launched=False),
+            port_io=wiring_mod._InFlightPortIo(),
+        )
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await sender.send_answer(_answer_fact())
+
+        assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        assert client.calls == []
+
+    @pytest.mark.asyncio
+    async def test_native_send_failure_propagates_without_port_residue(self) -> None:
+        client = _RecordingSendClient(error=RuntimeError("native send failed"))
+        port_io = wiring_mod._InFlightPortIo()
+        sender = _NativeAnswerSender(
+            client=client,
+            gate=_ProcessDispatchGate(launched=True),
+            port_io=port_io,
+        )
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await sender.send_answer(_answer_fact())
+
+        assert str(excinfo.value) == "native send failed"
+        assert [call["destination_id"] for call in client.calls] == ["wf-1"]
+        assert port_io.residual_names() == ()

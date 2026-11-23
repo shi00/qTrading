@@ -15,6 +15,7 @@
 | P1-01 | 宪法绝对规则与已批准例外必须集中登记，例外唯一注册入口 | 文档体系检视 P1 系列 | [exceptions.yml](./exceptions.yml) | 使用中 |
 | P1-02 | 首问受理、主回合成环与已确认计划派发准入（讨论/计划零研究派发，缺配置 fail-closed） | 本地检视报告（gitignored） | [main_turn.py](../../services/agent_service/main_turn.py) | 使用中 |
 | P1-03 | 受理重放先证命令键绑定并以受理权威模式派发（同键异意图 fail-closed） | 本地检视报告（gitignored） | [agent_dao.py](../../data/persistence/daos/agent_dao.py) | 使用中 |
+| P1-05 | 另义（同名异义双义登记）：跨会话待处理聚合与答复交付闭环（保存/交付/消费三态分列、幂等可重试、命令键复用、fail-closed 受治理入口；原生 workflow 按决定身份核验后消费） | 本地检视报告（gitignored） | [workflows.py](../../services/agent_service/workflows.py) | 使用中 |
 | P1-07 | 父 workflow 派发前绑定应用轮次与实际输入，叶载荷携带身份/输入版/前置产物，叶启动须过树级票据门（缺登记或未核对即零叶派发、退出未核记 `unknown`） | 本地检视报告（gitignored） | [workflows.py](../../services/agent_service/workflows.py) | 使用中 |
 | P2-03 | 架构守护范围：import-linter 契约（layers + 补充 forbidden） + AST 静态测试互补 | 文档体系检视 P2 系列 | [docs/architecture/overview.md](../architecture/overview.md#41-分层架构) §4.1 | 使用中 |
 | P2-06 | 受检 markdown 递归发现 + 显式排除清单（_build_doc_excludes） | 文档体系检视 P2 系列 | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |

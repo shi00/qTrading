@@ -21,13 +21,24 @@ from typing import Any
 
 import pytest
 
-from core.agent_types import AgentValidationError, PlanNodeSpec, PlanSpecProposal, plan_spec_digest
+from core.agent_types import (
+    AgentErrorCode,
+    AgentServiceError,
+    AgentValidationError,
+    ConsumptionFact,
+    ConsumptionState,
+    PlanNodeSpec,
+    PlanSpecProposal,
+    plan_spec_digest,
+)
 from dbos import DBOS
 from services.agent_service.workflows import (
+    ANSWER_MESSAGE_TOPIC,
     IDLE_WAIT_INTERVAL_SEC,
     LEAF_EXECUTE_STEP_NAME,
     ActualInputBinderRegistry,
     ActualInputBinding,
+    AnswerConsumerRegistry,
     LeafDagScheduler,
     LeafExecutionContext,
     LeafIdentity,
@@ -48,7 +59,9 @@ from services.agent_service.workflows import (
     claim_leaf_ticket,
     compute_actual_input_manifest,
     compute_retry_scope,
+    consume_answer_step,
     decode_actual_input_binding,
+    decode_answer_message,
     decode_binding_identity,
     decode_leaf_payload,
     decode_node_outcome,
@@ -59,6 +72,7 @@ from services.agent_service.workflows import (
     leaf_ticket_slot_id,
     leaf_workflow_id,
     observe_leaf_children,
+    receive_pending_answers,
     record_plan_admission,
     release_leaf_ticket,
     validate_actual_input_binding,
@@ -1540,3 +1554,221 @@ def test_release_step_keeps_capacity_when_exit_unverified() -> None:
         LeafTicketGateRegistry._reset_singleton()
     assert result is False
     assert released == [False]
+
+
+# ---------------------------------------------------------------------------
+# 答复消费（P1-05）：原生 recv → 身份核验 → DAO 幂等 CAS
+# ---------------------------------------------------------------------------
+
+
+def _answer_message(**overrides: Any) -> dict[str, Any]:
+    message: dict[str, Any] = {
+        "schema_version": 1,
+        "decision_id": "d-1",
+        "execution_id": "exec-1",
+        "round_id": "round-1",
+        "client_command_id": "ui-answer:d-1",
+        "answer": {"option": "a"},
+    }
+    message.update(overrides)
+    return message
+
+
+def _consumption(*, consumed_at: str = "2026-11-23T00:00:00.000000Z") -> ConsumptionFact:
+    return ConsumptionFact(
+        command_record_id="command-1",
+        decision_id="d-1",
+        consumption_state=ConsumptionState.CONSUMED,
+        consumed_at=consumed_at,
+        answer_consumed_at=consumed_at,
+    )
+
+
+def test_decode_answer_message_roundtrip_and_closed_keys() -> None:
+    """答复消息封闭解码：身份四键可读；额外键拒绝（不放开任意 wire）。"""
+    message = decode_answer_message(_answer_message())
+    assert (message.decision_id, message.execution_id, message.round_id) == ("d-1", "exec-1", "round-1")
+    assert message.client_command_id == "ui-answer:d-1"
+    with pytest.raises(AgentValidationError) as excinfo:
+        decode_answer_message({**_answer_message(), "extra": 1})
+    assert excinfo.value.code == "unknown_field"
+
+
+def test_decode_answer_message_rejects_unsupported_version() -> None:
+    with pytest.raises(AgentValidationError) as excinfo:
+        decode_answer_message(_answer_message(schema_version=2))
+    assert excinfo.value.code == "unsupported_version"
+
+
+def test_receive_answers_consumes_matching_message() -> None:
+    """匹配本执行/本轮的答复经受治理步骤消费（只按原命令身份）。"""
+    calls: list[tuple[str, str]] = []
+
+    async def recv(topic: str, *, timeout_seconds: float) -> object:
+        assert topic == ANSWER_MESSAGE_TOPIC
+        assert timeout_seconds == 0.0
+        return _answer_message()
+
+    async def consume(decision_id: str, client_command_id: str) -> dict[str, Any]:
+        calls.append((decision_id, client_command_id))
+        return {
+            "status": "consumed",
+            "decision_id": decision_id,
+            "command_record_id": "command-1",
+            "consumption_state": ConsumptionState.CONSUMED.value,
+            "reason": None,
+        }
+
+    outcome = asyncio.run(
+        receive_pending_answers(execution_id="exec-1", round_id="round-1", recv=recv, consume=consume)
+    )
+    assert outcome is not None
+    assert outcome.status == "consumed"
+    assert outcome.command_record_id == "command-1"
+    assert outcome.consumption_state == ConsumptionState.CONSUMED.value
+    assert calls == [("d-1", "ui-answer:d-1")]
+
+
+def test_receive_answers_rejects_identity_mismatch_without_consuming() -> None:
+    """执行/轮次不符：拒绝且不调用消费入口（应用侧保留 not_consumed）。"""
+    calls: list[tuple[str, str]] = []
+
+    async def recv(topic: str, *, timeout_seconds: float) -> object:
+        return _answer_message(round_id="round-other")
+
+    async def consume(decision_id: str, client_command_id: str) -> dict[str, Any]:  # pragma: no cover
+        calls.append((decision_id, client_command_id))
+        raise AssertionError("mismatched answer must not be consumed")
+
+    outcome = asyncio.run(
+        receive_pending_answers(execution_id="exec-1", round_id="round-1", recv=recv, consume=consume)
+    )
+    assert outcome is not None
+    assert outcome.status == "rejected"
+    assert outcome.reason == "answer_identity_mismatch"
+    assert outcome.consumption_state is None
+    assert calls == []
+
+
+def test_receive_answers_returns_none_without_message() -> None:
+    """无答复：recv 超时返回 None，本入口返回 None（不阻塞叶推进）。"""
+
+    async def recv(topic: str, *, timeout_seconds: float) -> object:
+        return None
+
+    async def consume(decision_id: str, client_command_id: str) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("no message must not be consumed")
+
+    assert (
+        asyncio.run(receive_pending_answers(execution_id="exec-1", round_id="round-1", recv=recv, consume=consume))
+        is None
+    )
+
+
+def test_receive_answers_rejects_malformed_message() -> None:
+    """坏消息如实拒绝（不解析为任意身份，不冒充已消费）。"""
+
+    async def recv(topic: str, *, timeout_seconds: float) -> object:
+        return {"schema_version": 1}
+
+    outcome = asyncio.run(receive_pending_answers(execution_id="exec-1", round_id="round-1", recv=recv))
+    assert outcome is not None
+    assert outcome.status == "rejected"
+    assert outcome.reason == "invalid_answer_message:missing_field"
+
+
+def test_consume_answer_step_is_idempotent_on_duplicate_delivery() -> None:
+    """重复投递：DAO 已消费重放返回原事实，步骤两次读到同一消费事实。"""
+    seen: list[tuple[str, str]] = []
+
+    async def consumer(decision_id: str, client_command_id: str) -> ConsumptionFact:
+        seen.append((decision_id, client_command_id))
+        return _consumption()  # 重放返回同一原事实（consumed_at 不变）
+
+    AnswerConsumerRegistry.install(consumer)
+    try:
+        first = asyncio.run(consume_answer_step("d-1", "ui-answer:d-1"))
+        second = asyncio.run(consume_answer_step("d-1", "ui-answer:d-1"))
+    finally:
+        AnswerConsumerRegistry._reset_singleton()
+
+    assert first == second
+    assert first["status"] == "consumed"
+    assert first["consumption_state"] == ConsumptionState.CONSUMED.value
+    assert seen == [("d-1", "ui-answer:d-1"), ("d-1", "ui-answer:d-1")]
+
+
+def test_consume_answer_step_rejects_denied_answer_without_consuming() -> None:
+    """DAO 拒绝（过期/终止/旧轮）：步骤返回拒绝并保留 not_consumed，不伪造已消费。"""
+
+    async def consumer(decision_id: str, client_command_id: str) -> ConsumptionFact:
+        raise AgentServiceError(AgentErrorCode.POLICY_DENIED, "question expired", "u1/d-1")
+
+    AnswerConsumerRegistry.install(consumer)
+    try:
+        wire = asyncio.run(consume_answer_step("d-1", "ui-answer:d-1"))
+    finally:
+        AnswerConsumerRegistry._reset_singleton()
+
+    assert wire["status"] == "rejected"
+    assert wire["reason"] == AgentErrorCode.POLICY_DENIED.value
+    assert wire["consumption_state"] == ConsumptionState.NOT_CONSUMED.value
+    assert wire["command_record_id"] is None
+
+
+def test_consume_answer_step_requires_installed_consumer() -> None:
+    """未安装消费者：明确拒绝（不默认放行、不伪造已消费）。"""
+    AnswerConsumerRegistry._reset_singleton()
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(consume_answer_step("d-1", "ui-answer:d-1"))
+    assert "answer consumer not installed" in str(excinfo.value)
+
+
+def test_receive_answers_propagates_recv_cancellation() -> None:
+    """接收阶段取消原样上抛（不把取消读成「无消息」，R2）。"""
+
+    async def recv(topic: str, *, timeout_seconds: float) -> object:
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError) as excinfo:
+        asyncio.run(receive_pending_answers(execution_id="exec-1", round_id="round-1", recv=recv))
+    assert excinfo.type is asyncio.CancelledError
+
+
+def test_receive_answers_propagates_consume_cancellation() -> None:
+    """消费阶段取消原样上抛（R2）。"""
+
+    async def recv(topic: str, *, timeout_seconds: float) -> object:
+        return _answer_message()
+
+    async def consume(decision_id: str, client_command_id: str) -> dict[str, Any]:
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError) as excinfo:
+        asyncio.run(receive_pending_answers(execution_id="exec-1", round_id="round-1", recv=recv, consume=consume))
+    assert excinfo.type is asyncio.CancelledError
+
+
+def test_drive_invokes_answer_drain_before_progress() -> None:
+    """每轮推进前先消费答复（drain 先于叶启动；无消息不阻塞）。"""
+    plan = _plan(_node("a"))
+    harness = _DagHarness()
+    hits: list[str] = []
+
+    async def drain() -> None:
+        hits.append("drain")
+
+    async def start(node: PlanNodeSpec, predecessors: tuple[tuple[str, str], ...]) -> str:
+        hits.append(f"start:{node.node_id}")
+        return await harness.start(node, predecessors)
+
+    async def scenario() -> PlanRunSummary:
+        task = asyncio.ensure_future(drive_leaf_dag(plan, start, harness.observe, drain_answers=drain))
+        await _wait_until(lambda: "start:a" in hits)
+        harness.gate("a").set()
+        return await task
+
+    summary = asyncio.run(scenario())
+    assert hits[0] == "drain"
+    assert hits[1] == "start:a"
+    assert summary.succeeded == ("a",)

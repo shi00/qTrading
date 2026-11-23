@@ -20,8 +20,11 @@ from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.research_observer_view_model import (
     COMPOSER_MODES,
+    PENDING_SCOPE_ALL,
+    PENDING_STAGES,
     ExecutionNodeView,
     LoadedArtifactBody,
+    PendingAnswerView,
     PendingDecision,
     PlanStepView,
     ResearchObserverState,
@@ -45,6 +48,10 @@ def _ignore_click() -> None:
     """缺省点击回调（无注入即无动作）。"""
 
 
+def _ignore_decision(_decision_id: str) -> None:
+    """缺省决定级回调（无注入即无动作，不伪造重试）。"""
+
+
 _ROLE_KEYS = {
     "user": "agent_research_role_user",
     "assistant": "agent_research_role_assistant",
@@ -63,6 +70,13 @@ _MODE_LABEL_KEYS = {
 _ARTIFACT_UNAVAILABLE_KEYS = {
     "body_not_saved": "agent_research_artifact_body_not_saved",
     "body_cleaned": "agent_research_artifact_body_cleaned",
+}
+
+#: 跨会话待处理阶段分组标题（记录/交付/消费）。
+_PENDING_STAGE_KEYS = {
+    "answer": "agent_research_pending_answer",
+    "delivery": "agent_research_pending_delivery",
+    "consumption": "agent_research_pending_consumption",
 }
 
 
@@ -643,6 +657,7 @@ def _build_body(
     on_composer_mode: Callable[[str], None],
     on_send: Callable[[], None],
     on_start_plan: Callable[[], None],
+    on_retry_delivery: Callable[[str], None] = _ignore_decision,
 ) -> ft.Control:
     """面板主体：首问 / 计划预览 / 主会话 / 子任务树 / 成果 / 待处理决定。"""
 
@@ -821,6 +836,24 @@ def _build_body(
                 on_submit=on_submit,
             )
         )
+    if state.last_answer_delivery_state:
+        rows.append(
+            ft.Text(
+                I18n.get("agent_research_delivery_state_fmt").format(state=state.last_answer_delivery_state),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.TEXT_HINT,
+            )
+        )
+    if state.last_answer_delivery_reason:
+        rows.append(
+            ft.Text(
+                I18n.get("agent_research_delivery_reason_fmt").format(reason=state.last_answer_delivery_reason),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.ERROR,
+            )
+        )
+    # --- 跨会话待处理（P1-05）：记录/交付/消费分列，不只取首条会话 ---
+    rows.append(_build_pending_overview(state, on_retry_delivery=on_retry_delivery))
     if state.last_updated_at:
         rows.append(
             ft.Text(
@@ -830,6 +863,113 @@ def _build_body(
             )
         )
     return ft.Column(rows, spacing=AppStyles.SPACING_SM, scroll=ft.ScrollMode.AUTO, expand=True)
+
+
+def _build_pending_row(item: PendingAnswerView, *, on_retry_delivery: Callable[[str], None]) -> ft.Control:
+    """跨会话待处理项（记录/交付/消费）：只读事实 + 未投递项的可重试入口。"""
+
+    rows: list[ft.Control] = [
+        ft.Text(
+            I18n.get("agent_research_pending_item_fmt").format(
+                session=item.session_title or I18n.get("agent_research_pending_unknown_session"),
+                kind=item.decision_kind,
+                revision=item.revision,
+            ),
+            size=AppStyles.FONT_SIZE_BODY_SM,
+            color=AppColors.TEXT_PRIMARY,
+        )
+    ]
+    if item.question_text:
+        rows.append(
+            ft.Text(
+                item.question_text,
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.TEXT_PRIMARY,
+            )
+        )
+    states: list[str] = []
+    if item.delivery_state is not None:
+        states.append(I18n.get("agent_research_delivery_state_fmt").format(state=item.delivery_state))
+    if item.consumption_state is not None:
+        states.append(I18n.get("agent_research_consumption_state_fmt").format(state=item.consumption_state))
+    if states:
+        rows.append(ft.Text(" · ".join(states), size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_HINT))
+    if item.retryable_delivery:
+        rows.append(
+            ft.TextButton(
+                content=ft.Text(I18n.get("agent_research_delivery_retry"), size=AppStyles.FONT_SIZE_BODY_SM),
+                on_click=lambda _e, decision_id=item.decision_id: on_retry_delivery(decision_id),
+            )
+        )
+    return ft.Container(
+        content=ft.Column(rows, spacing=AppStyles.SPACING_XS),
+        padding=AppStyles.SPACING_SM,
+        bgcolor=AppColors.BACKGROUND,
+        border_radius=4,
+        border=ft.Border.all(1, AppColors.BORDER),
+    )
+
+
+def _build_pending_overview(
+    state: ResearchObserverState,
+    *,
+    on_retry_delivery: Callable[[str], None],
+) -> ft.Control:
+    """跨会话待处理概览（P1-05）：记录/交付/消费三段分列，徽标范围如实标注。
+
+    当前会话的待答复决定已在下方逐卡渲染，本段只补其他会话的待答复项；
+    交付/消费阶段三项均列出（含当前会话），保证「已保存未投递」不提前消失。
+    """
+
+    scope_key = (
+        "agent_research_pending_global"
+        if state.pending_scope == PENDING_SCOPE_ALL
+        else "agent_research_pending_session_only"
+    )
+    rows: list[ft.Control] = [
+        ft.Row(
+            [
+                _section_title(scope_key),
+                ft.Text(
+                    I18n.get("agent_research_pending_fmt").format(count=state.pending_count),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.TEXT_HINT,
+                ),
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+        )
+    ]
+    for stage in PENDING_STAGES:
+        items = state.pending_for(stage)
+        if stage == "answer":
+            items = tuple(item for item in items if not item.belongs_to(state.session_id))
+        if not items:
+            continue
+        rows.append(
+            ft.Text(
+                I18n.get(_PENDING_STAGE_KEYS[stage]),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                weight=ft.FontWeight.BOLD,
+                color=AppColors.TEXT_HINT,
+            )
+        )
+        for item in items:
+            rows.append(_build_pending_row(item, on_retry_delivery=on_retry_delivery))
+    if state.pending_items_truncated:
+        rows.append(
+            ft.Text(
+                I18n.get("agent_research_pending_truncated"),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.TEXT_HINT,
+            )
+        )
+    return ft.Container(
+        content=ft.Column(rows, spacing=AppStyles.SPACING_XS),
+        padding=AppStyles.SPACING_SM,
+        bgcolor=AppColors.BACKGROUND,
+        border_radius=4,
+        border=ft.Border.all(1, AppColors.BORDER),
+    )
 
 
 def _build_decision_card(
@@ -931,6 +1071,7 @@ def ResearchObserverPanel(
     on_composer_mode: Callable[[str], None] = _ignore_mode,
     on_send: Callable[[], None] = _ignore_click,
     on_start_plan: Callable[[], None] = _ignore_click,
+    on_retry_delivery: Callable[[str], None] = _ignore_decision,
 ) -> ft.Container:
     """非模态研究观察层（右侧公共区；收起只隐藏，不卸载业务页、不清草稿）。"""
 
@@ -980,6 +1121,7 @@ def ResearchObserverPanel(
             on_composer_mode=on_composer_mode,
             on_send=on_send,
             on_start_plan=on_start_plan,
+            on_retry_delivery=on_retry_delivery,
         )
     )
     return ft.Container(

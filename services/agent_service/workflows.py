@@ -45,6 +45,8 @@ from core.agent_types import (
     AgentErrorCode,
     AgentServiceError,
     AgentValidationError,
+    ConsumptionFact,
+    ConsumptionState,
     PlanNodeSpec,
     PlanSpecProposal,
     decode_plan_node_spec,
@@ -78,6 +80,14 @@ ACTUAL_INPUT_BIND_STEP_NAME: Final[str] = "agent_actual_input_bind"
 #: 叶资源票据认领/释放 step 稳定名（树级额度闭环：认领容量后才启动叶）。
 LEAF_TICKET_CLAIM_STEP_NAME: Final[str] = "agent_leaf_ticket_claim"
 LEAF_TICKET_RELEASE_STEP_NAME: Final[str] = "agent_leaf_ticket_release"
+#: 答复消费 step 稳定名（原生侧确认已投递答复生效的唯一写入口）。
+CONSUME_ANSWER_STEP_NAME: Final[str] = "agent_consume_answer"
+#: 答复消息主题（与生产发送器 ``_NativeAnswerSender`` 同源；答复只经此主题消费）。
+ANSWER_MESSAGE_TOPIC: Final[str] = "answer"
+#: 答复消息结构版本（进入封闭校验；跨版本恢复前须核对兼容矩阵 §8.4）。
+ANSWER_MESSAGE_VERSION: Final[int] = 1
+#: 单次答复接收等待上限（0 = 非阻塞轮询：无答复立即返回，不拖慢叶推进）。
+ANSWER_RECV_TIMEOUT_SEC: Final[float] = 0.0
 
 #: 载荷结构版本（进入封闭校验；跨版本恢复前须核对兼容矩阵 §8.4）。
 PAYLOAD_VERSION: Final[int] = 1
@@ -122,6 +132,10 @@ _LEAF_PAYLOAD_OPTIONAL_KEYS: Final = frozenset({"input_digest", "leaf_id", "inpu
 _NODE_OUTCOME_KEYS: Final = frozenset({"node_id", "state", "error_code", "artifact_ref"})
 #: 叶结果兼容扩展键：该叶实际采用的输入指纹（缺省 = 未报告，不伪造）、实际退出是否已核。
 _NODE_OUTCOME_OPTIONAL_KEYS: Final = frozenset({"input_digest", "exit_verified"})
+#: 答复消息封闭键（与生产发送器同一 wire；缺键/额外键均拒绝）。
+_ANSWER_MESSAGE_KEYS: Final = frozenset(
+    {"schema_version", "decision_id", "execution_id", "round_id", "client_command_id", "answer"}
+)
 
 #: 叶状态语义分类（值域 = 冻结的 display_state 15 值，不自造词表）。
 _SUCCESS_STATES: Final[frozenset[str]] = frozenset({"complete"})
@@ -278,6 +292,40 @@ def decode_node_outcome(value: object, path: str = "$.node_outcome") -> NodeOutc
         artifact_ref=_opt_str_or_none(value["artifact_ref"], f"{path}.artifact_ref"),
         input_digest=_opt_digest_or_none(value.get("input_digest"), f"{path}.input_digest"),
         exit_verified=_require_bool_default_true(value.get("exit_verified"), f"{path}.exit_verified"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerMessage:
+    """一条原生答复消息的可核验身份（答复正文不进入编排层）。"""
+
+    decision_id: str
+    execution_id: str
+    round_id: str
+    client_command_id: str
+
+
+def decode_answer_message(value: object, path: str = "$.answer_message") -> AnswerMessage:
+    """严格解码答复消息 wire（全键必填、禁额外键；结构版本封闭校验）。
+
+    会话归属不在消息中单列：答复命令保存时已由原决定绑定 ``session_id``，消费
+    时由 DAO 在决定行锁内核对（``AgentDao.consume_answer``），故编排层只核本
+    workflow 的执行/轮次身份，会话/决定身份由权威行裁决。
+    """
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_exact_keys(value, _ANSWER_MESSAGE_KEYS, path)
+    version = value["schema_version"]
+    if isinstance(version, bool) or not isinstance(version, int) or version != ANSWER_MESSAGE_VERSION:
+        _fail("unsupported_version", f"{path}.schema_version")
+    if not isinstance(value["answer"], dict):
+        _fail("invalid_type", f"{path}.answer")
+    return AnswerMessage(
+        decision_id=_require_str(value["decision_id"], f"{path}.decision_id"),
+        execution_id=_require_str(value["execution_id"], f"{path}.execution_id"),
+        round_id=_require_str(value["round_id"], f"{path}.round_id"),
+        client_command_id=_require_str(value["client_command_id"], f"{path}.client_command_id"),
     )
 
 
@@ -1583,6 +1631,7 @@ async def drive_leaf_dag(
     wait_checkpoint: LeafWaitCheckpoint | None = None,
     claim_leaf: LeafTicketClaim | None = None,
     release_leaf: LeafTicketRelease | None = None,
+    drain_answers: Callable[[], Awaitable[None]] | None = None,
 ) -> PlanRunSummary:
     """事件驱动推进一层叶 DAG，返回叶事实汇总。
 
@@ -1603,6 +1652,9 @@ async def drive_leaf_dag(
     检查点结果决定。故重放时父体操作序号逐项对齐，子 workflow 记录不会错配。
     ``manifest`` 为计划准入确定的实际输入清单（R2-I09）：提供时保留前置与叶回报
     的输入指纹按清单核对，不适用即阻断下游；缺省保持既有结构判据。
+    ``drain_answers`` 为每轮推进前的答复消费入口（生产为原生 ``recv``，无答复
+    即空转）：只消费本执行/本轮的答复，不阻塞叶观察；缺省不接收答复（纯逻辑
+    调用）。
     """
 
     scheduler = LeafDagScheduler(plan, manifest=manifest, preserved_expected=preserved_expected)
@@ -1610,6 +1662,9 @@ async def drive_leaf_dag(
     running: dict[str, str] = {}
     idle_observations = 0
     while True:
+        if drain_answers is not None:
+            # 受治理答复消费：每轮推进前接收一条（无消息即返回，不拖慢叶推进）。
+            await drain_answers()
         for node_id in scheduler.ready():
             node = scheduler.node(node_id)
             if manifest is not None and manifest.digest_for(node_id) is None:
@@ -1854,6 +1909,127 @@ async def observe_leaf_children(children: list[dict[str, str]], slice_seconds: f
         await asyncio.sleep(OBSERVE_POLL_INTERVAL_SEC)
 
 
+# ---------------------------------------------------------------------------
+# 答复消费（原生 recv → 身份核验 → DAO 幂等 CAS；投递后唯一消费入口）
+# ---------------------------------------------------------------------------
+
+ConsumeAnswer = Callable[[str, str], Awaitable[ConsumptionFact]]
+"""(decision_id, client_command_id) → 消费事实；装配期注入以绑定用户域与 DAO。"""
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerConsumption:
+    """一条原生答复消息的处理结论（拒绝不等于已消费，R21）。"""
+
+    decision_id: str | None
+    status: str
+    command_record_id: str | None
+    consumption_state: str | None
+    reason: str | None = None
+
+
+@register_singleton
+class AnswerConsumerRegistry:
+    """答复消费者登记（组合根安装；未安装明确拒绝，不伪造已消费）。"""
+
+    _instance: ConsumeAnswer | None = None
+
+    @classmethod
+    def install(cls, consumer: ConsumeAnswer) -> None:
+        if not callable(consumer):
+            raise TypeError("answer consumer must be callable")
+        cls._instance = consumer
+
+    @classmethod
+    def require(cls) -> ConsumeAnswer:
+        consumer = cls._instance
+        if consumer is None:
+            raise RuntimeError("answer consumer not installed (assemble agent runtime first)")
+        return consumer
+
+    @classmethod
+    def _reset_singleton(cls) -> None:
+        cls._instance = None
+
+
+@DBOS.step(name=CONSUME_ANSWER_STEP_NAME)
+async def consume_answer_step(decision_id: str, client_command_id: str) -> dict[str, Any]:
+    """受治理答复消费步骤：按原答复命令身份确认生效（DAO CAS 幂等）。
+
+    身份/期限/轮次不符时 DAO 在写 ``consumed`` 前拒绝（``AgentServiceError``）：
+    本步骤把该拒绝作为**步骤成功结果**返回（保留 ``not_consumed``），不让单条
+    无效答复把父 workflow 拖入恢复耗尽。取消与未预期异常原样上抛（R2）。
+    """
+
+    consumer = AnswerConsumerRegistry.require()
+    try:
+        fact = await consumer(decision_id, client_command_id)
+    except AgentServiceError as e:
+        return {
+            "status": "rejected",
+            "decision_id": decision_id,
+            "command_record_id": None,
+            "consumption_state": ConsumptionState.NOT_CONSUMED.value,
+            "reason": e.code.value,
+        }
+    return {
+        "status": "consumed",
+        "decision_id": fact.decision_id,
+        "command_record_id": fact.command_record_id,
+        "consumption_state": fact.consumption_state.value,
+        "reason": None,
+    }
+
+
+async def receive_pending_answers(
+    *,
+    execution_id: str,
+    round_id: str,
+    recv: Callable[..., Awaitable[Any]] = DBOS.recv_async,
+    consume: Callable[[str, str], Awaitable[dict[str, Any]]] = consume_answer_step,
+    timeout_seconds: float = ANSWER_RECV_TIMEOUT_SEC,
+) -> AnswerConsumption | None:
+    """从原生答复主题接收一条答复，核验本执行/本轮身份后消费。
+
+    - 无答复：``recv`` 超时返回 ``None``，本入口返回 ``None``（不阻塞叶推进）；
+    - 消息结构非法：如实拒绝（不解析为任意身份，不调用消费入口）；
+    - 身份不符（执行/轮次不是本 workflow 所属）：**拒绝**——不调用消费入口，
+      答复命令在应用侧保留 ``not_consumed``；
+    - 匹配：交受治理消费步骤（DAO 幂等 CAS；重复投递返回原事实，只消费一次）；
+    - 取消原样上抛（R2），不把取消读成「无消息」。
+    """
+
+    raw = await recv(ANSWER_MESSAGE_TOPIC, timeout_seconds=timeout_seconds)
+    if raw is None:
+        return None
+    try:
+        message = decode_answer_message(raw)
+    except AgentValidationError as e:
+        return AnswerConsumption(
+            decision_id=None,
+            status="rejected",
+            command_record_id=None,
+            consumption_state=None,
+            reason=f"invalid_answer_message:{e.code}",
+        )
+    if message.execution_id != execution_id or message.round_id != round_id:
+        return AnswerConsumption(
+            decision_id=message.decision_id,
+            status="rejected",
+            command_record_id=None,
+            consumption_state=None,
+            reason="answer_identity_mismatch",
+        )
+    wire = await consume(message.decision_id, message.client_command_id)
+    return AnswerConsumption(
+        decision_id=wire["decision_id"],
+        status=wire["status"],
+        command_record_id=wire["command_record_id"],
+        consumption_state=wire["consumption_state"],
+        reason=wire["reason"],
+    )
+
+
 @DBOS.workflow(name=RESEARCH_WORKFLOW_NAME, serialization_type=WorkflowSerializationFormat.PORTABLE)
 async def run_research_workflow(payload: dict[str, Any]) -> dict[str, Any]:
     """父研究 workflow：计划准入 → 启动就绪叶 → 消费完成事实 → 汇总叶事实。
@@ -1874,6 +2050,9 @@ async def run_research_workflow(payload: dict[str, Any]) -> dict[str, Any]:
     - 重放顺序（B1）：启动/观察操作全部由父协程按计划顺序发出，完成集合由
       ``agent_leaf_observe`` step 的记录还原；子 workflow ID 按身份固定
       （``leaf_workflow_id``）作为去重、观察复接与重试轮隔离。
+    - 答复消费（P1-05）：每轮推进前经原生 ``recv`` 接收一条 ``topic=answer``
+      答复（非阻塞），只消费本执行/本轮的答复；身份不符如实拒绝并保留
+      ``not_consumed``（详见 :func:`receive_pending_answers`）。
     """
 
     decoded = decode_research_payload_full(payload)
@@ -1978,6 +2157,10 @@ async def run_research_workflow(payload: dict[str, Any]) -> dict[str, Any]:
             outcomes[outcome.node_id] = outcome
         return outcomes
 
+    async def drain_answers() -> None:
+        # 受治理消费：只接收本执行/本轮的答复；无消息即返回，不阻塞叶观察。
+        await receive_pending_answers(execution_id=execution_id, round_id=round_id)
+
     summary = await drive_leaf_dag(
         decoded.plan,
         start_leaf,
@@ -1989,6 +2172,7 @@ async def run_research_workflow(payload: dict[str, Any]) -> dict[str, Any]:
         wait_checkpoint=wait_next_observation_window,
         claim_leaf=claim_leaf,
         release_leaf=release_leaf,
+        drain_answers=drain_answers,
     )
     return summary.to_wire()
 

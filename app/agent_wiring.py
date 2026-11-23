@@ -31,12 +31,18 @@
   未显式启连时工具工厂返回 ``None``（零工具、零外发）；
 - 宿主就绪后构造 ``ResearchDispatcher``（受理回执 → 持久父研究 workflow），
   计划来源与投递/读回端口由组合根注入；
+- 答复投递（P1-05）：已 launch 宿主复用同一 DBOS client 注入 ``AnswerSender``
+  （按原答复命令身份投递，幂等键 = 客户端命令键）；未 launch 不注入，答复交付
+  保持 fail-closed（保存成功但如实停留 not_delivered）；
+- 答复消费（P1-05）：登记 ``AnswerConsumerRegistry``（同一用户域 + 共享 DAO），
+  原生父 workflow 的 ``recv`` 步骤据此做幂等 CAS 消费（投递 → 消费闭环）；
 - 派发门闩与关闭链共用同一 ``_ProcessDispatchGate``：关闭派发后新提交零派发。
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import uuid
@@ -48,7 +54,16 @@ from typing import Any, Final, cast
 from dbos import WorkflowStatusString
 
 from app.agent_mcp import build_mcp_lifecycle
-from core.agent_types import AgentValidationError, DispatchCloseRequest
+from core.agent_types import (
+    AgentErrorCode,
+    AgentServiceError,
+    AgentValidationError,
+    AnswerCommandFact,
+    ConsumeAnswerRequest,
+    ConsumptionFact,
+    DispatchCloseRequest,
+    stable_id,
+)
 from services.agent_service import (
     AgentRuntime,
     AgentRuntimeHandle,
@@ -98,7 +113,11 @@ from services.agent_service.runtime import (
 from services.agent_service.skills import ManagedSkillStore, SkillCatalogService
 from services.agent_service.tool_runtime import build_tool_runtime_factory
 from services.agent_service.units import UnitConversion
-from services.agent_service.workflows import submit_research_workflow
+from services.agent_service.workflows import (
+    ANSWER_MESSAGE_TOPIC,
+    AnswerConsumerRegistry,
+    submit_research_workflow,
+)
 from utils.config.db import (
     AGENT_MIGRATION_DB_URL_ENV,
     DatabaseMode,
@@ -407,6 +426,73 @@ class _InFlightPortIo:
 
     def residual_names(self) -> tuple[str, ...]:
         return tuple(sorted(name for name, count in self._pending.items() if count > 0))
+
+
+class _NativeAnswerSender:
+    """生产答复发送器（P1-05）：复用已 launch 宿主的 DBOS client 投递答复消息。
+
+    - 只投递已保存答复（按原 ``workflow_id`` 目标 + ``client_command_id`` 幂等键），
+      不新建答复、不改命令状态；
+    - 派发门闩关闭（未 launch / 关闭链已关派发）→ 拒绝（``PERSISTENCE_UNAVAILABLE``），
+      不伪造已投递；
+    - 成功后仅代表「已交原生消息队列」，消费仍需原生 workflow 侧确认（INV-06）。
+    """
+
+    def __init__(self, *, client: Any, gate: _ProcessDispatchGate, port_io: _InFlightPortIo) -> None:
+        self._client = client
+        self._gate = gate
+        self._port_io = port_io
+
+    async def send_answer(self, fact: AnswerCommandFact) -> None:
+        identity = f"answer/{fact.client_command_id}"
+        if self._gate.dispatch_closed():
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "answer delivery closed: dispatch gate closed",
+                identity,
+            )
+        payload = json.loads(fact.request_payload)
+        if not isinstance(payload, dict):
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                "answer payload is not a wire object",
+                identity,
+            )
+        message = {
+            "schema_version": 1,
+            "decision_id": fact.decision_id,
+            "execution_id": fact.execution_id,
+            "round_id": fact.round_id,
+            "client_command_id": fact.client_command_id,
+            "answer": payload,
+        }
+        self._port_io.enter("answer_send")
+        try:
+            await self._client.send_async(
+                fact.workflow_id,
+                message,
+                topic=ANSWER_MESSAGE_TOPIC,
+                idempotency_key=fact.client_command_id,
+            )
+        finally:
+            self._port_io.exit("answer_send")
+
+
+def _build_answer_consumer(dao: Any, user_scope: str) -> Callable[[str, str], Awaitable[ConsumptionFact]]:
+    """生产答复消费者（P1-05）：按保存时同一命令身份派生并走 DAO 幂等 CAS。
+
+    命令身份派生与 ``AgentDao.save_answer`` 一致（``stable_id("command",
+    [user_scope, decision_id, client_command_id])``），不新建答复、不改投递事实；
+    已消费重放由 DAO 返回原事实（重复投递只消费一次）。
+    """
+
+    async def _consume(decision_id: str, client_command_id: str) -> ConsumptionFact:
+        command_record_id = stable_id("command", [user_scope, decision_id, client_command_id])
+        return await dao.consume_answer(
+            ConsumeAnswerRequest(user_scope=user_scope, command_record_id=command_record_id)
+        )
+
+    return _consume
 
 
 class _PendingCloseFactSink:
@@ -814,6 +900,9 @@ async def wire_agent_runtime(
     usage_dao = getattr(cache_manager, "ai_usage_dao", None)
     skills = _build_skill_catalog(dao, skills_root)
     service = AgentService(dao, usage_dao, skills=skills)
+    #: 答复消费（P1-05）：原生 workflow 的 recv 消费步骤按同一用户域 + 共享账本
+    #: 消费（未 launch 时无 workflow，安装无副作用；步骤缺少消费者时明确拒绝）。
+    AnswerConsumerRegistry.install(_build_answer_consumer(dao, user_scope))
     try:
         runtime_url = _agent_runtime_sync_url(engine)
     except Exception as e:
@@ -991,7 +1080,10 @@ async def wire_agent_runtime(
         outcome.isolation.ready if outcome.isolation is not None else None,
     )
     cleanup, cleanup_failure = _build_cleanup_wiring(handle=handle, dao=dao)
-    facade = AgentService(dao, usage_dao, dispatcher=dispatcher, skills=skills)
+    #: 答复投递（P1-05）：已 launch 宿主复用同一 DBOS client 投递答复消息；
+    #: 未 launch（零 workflow）不注入发送器 → facade 交付 fail-closed 拒绝。
+    answer_sender = _NativeAnswerSender(client=handle.client, gate=gate, port_io=port_io) if launched else None
+    facade = AgentService(dao, usage_dao, dispatcher=dispatcher, skills=skills, answer_sender=answer_sender)
     # 主回合生产构造：注入受治理模型回合工厂（复用 agent_research 场景路由/模型桥）；
     # 构造期零外发，路由不可用/缺配置时回合 fail-closed 并如实报错。
     turn_factory = (lambda _request: main_turn_turn) if main_turn_turn is not None else build_governed_turn_factory()

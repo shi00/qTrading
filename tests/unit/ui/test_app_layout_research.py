@@ -1109,7 +1109,9 @@ class TestDesktopInputEvidence:
 
         scheduled = [call.args[0] for call in page.run_task.call_args_list if call.args]
         assert toggle.focus not in scheduled, "导航收起不返焦（焦点应留给导航目标）"
-        assert len(scheduled) == 1, "导航收起只调度切页，不附加焦点动作"
+        # P1-05：收起时顺带一次只读刷新（让其他会话的待办进入徽标），
+        # 除刷新外只调度切页，不附加任何焦点动作。
+        assert [getattr(item, "__name__", "") for item in scheduled] == ["refresh", "_do_tab_switch"]
 
     def test_ime_composition_draft_round_trips_after_collapse(self, layout_env, monkeypatch) -> None:
         _open_panel(layout_env)

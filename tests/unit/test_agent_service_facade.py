@@ -6,6 +6,7 @@ DAO 事务语义由集成测试覆盖。
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
@@ -16,6 +17,8 @@ from core.agent_types import (
     AcceptRequest,
     AgentErrorCode,
     AgentServiceError,
+    AnswerCommandFact,
+    AnswerDeliveryRequest,
     CommandReceipt,
     CommandRef,
     CommitState,
@@ -36,6 +39,7 @@ from core.agent_types import (
     HistoryQuery,
     HistoryRoundSelection,
     Mode,
+    PendingAnswerPage,
     Purpose,
     ReadMarkCommand,
     ResearchSnapshot,
@@ -247,6 +251,20 @@ class _FakeDao:
         self.stop_receipt = object()
         self.read_mark_receipt = object()
         self.draft_read = object()
+        self.pending_page = PendingAnswerPage(
+            items=(),
+            read_moment="2026-11-23T00:00:00.000000Z",
+            truncated=False,
+            answer_count=0,
+            delivery_count=0,
+            consumption_count=0,
+        )
+        self.answer_command: Any = None
+        self.delivered_receipt = SimpleNamespace(
+            command_record_id="cmd-1",
+            delivery_state=DeliveryState.DELIVERED,
+            verified_at="2026-11-23T00:00:01.000000Z",
+        )
 
     async def accept_request(self, request: AcceptRequest) -> SubmissionReceipt:
         self.calls.append(("accept_request", (request,), {}))
@@ -345,6 +363,26 @@ class _FakeDao:
         if self.error is not None:
             raise self.error
         return self.read_mark_receipt
+
+    async def read_pending_answers(self, *, user_scope: str, limit: int = 200) -> PendingAnswerPage:
+        self.calls.append(("read_pending_answers", (), {"user_scope": user_scope, "limit": limit}))
+        if self.error is not None:
+            raise self.error
+        return self.pending_page
+
+    async def read_answer_command(self, *, user_scope: str, command_record_id: str) -> AnswerCommandFact:
+        self.calls.append(
+            ("read_answer_command", (), {"user_scope": user_scope, "command_record_id": command_record_id})
+        )
+        if self.error is not None:
+            raise self.error
+        return cast(AnswerCommandFact, self.answer_command)
+
+    async def mark_answer_delivered(self, request: Any) -> Any:
+        self.calls.append(("mark_answer_delivered", (request,), {}))
+        if self.error is not None:
+            raise self.error
+        return self.delivered_receipt
 
 
 def _service(fake: _FakeDao) -> AgentService:
@@ -899,6 +937,151 @@ class TestStopUsingAndMarkRead:
         for coroutine in (
             service.stop_using(_stop_command()),
             service.mark_read(_read_mark()),
+        ):
+            with pytest.raises(AgentServiceError) as excinfo:
+                await coroutine
+            assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        assert fake.calls == []
+
+
+def _answer_command_fact(
+    *,
+    delivery_state: DeliveryState = DeliveryState.NOT_DELIVERED,
+    consumption_state: ConsumptionState = ConsumptionState.NOT_CONSUMED,
+) -> AnswerCommandFact:
+    return AnswerCommandFact(
+        command_record_id="cmd-1",
+        client_command_id="ui-answer:decision-1",
+        decision_id="decision-1",
+        session_id="s1",
+        execution_id="exec-1",
+        round_id="round-1",
+        workflow_id="wf-1",
+        delivery_state=delivery_state,
+        consumption_state=consumption_state,
+        answer_digest="sha256:abc",
+        request_payload=json_doc({"text": "a"}),
+        verified_at=None,
+    )
+
+
+class _RecordingSender:
+    def __init__(self, *, error: Exception | None = None) -> None:
+        self.error = error
+        self.calls: list[AnswerCommandFact] = []
+
+    async def send_answer(self, fact: AnswerCommandFact) -> None:
+        self.calls.append(fact)
+        if self.error is not None:
+            raise self.error
+
+
+class TestPendingAnswersAndDelivery:
+    @pytest.mark.asyncio
+    async def test_pending_answers_delegates_scope_and_limit(self) -> None:
+        fake = _FakeDao()
+        page = await _service(fake).read_pending_answers(user_scope="u1", limit=7)
+        assert page is fake.pending_page
+        assert fake.calls == [("read_pending_answers", (), {"user_scope": "u1", "limit": 7})]
+
+    @pytest.mark.asyncio
+    async def test_delivery_rejected_when_sender_not_wired(self) -> None:
+        fake = _FakeDao()
+        fake.answer_command = _answer_command_fact()
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _service(fake).deliver_answer(AnswerDeliveryRequest(user_scope="u1", command_record_id="cmd-1"))
+        assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        assert [call[0] for call in fake.calls] == ["read_answer_command"]
+
+    @pytest.mark.asyncio
+    async def test_delivered_command_is_idempotent_and_not_resent(self) -> None:
+        fake = _FakeDao()
+        fake.answer_command = _answer_command_fact(delivery_state=DeliveryState.DELIVERED)
+        sender = _RecordingSender()
+        service = AgentService(cast(AgentDao, fake), answer_sender=sender)
+        outcome = await service.deliver_answer(AnswerDeliveryRequest(user_scope="u1", command_record_id="cmd-1"))
+        assert outcome.delivery_state is DeliveryState.DELIVERED
+        assert sender.calls == []
+        assert [call[0] for call in fake.calls] == ["read_answer_command"]
+
+    @pytest.mark.asyncio
+    async def test_delivery_unknown_is_not_resent(self) -> None:
+        fake = _FakeDao()
+        fake.answer_command = _answer_command_fact(delivery_state=DeliveryState.DELIVERY_UNKNOWN)
+        sender = _RecordingSender()
+        service = AgentService(cast(AgentDao, fake), answer_sender=sender)
+        with pytest.raises(AgentServiceError) as excinfo:
+            await service.deliver_answer(AnswerDeliveryRequest(user_scope="u1", command_record_id="cmd-1"))
+        assert excinfo.value.code is AgentErrorCode.OPERATION_UNKNOWN
+        assert sender.calls == []
+
+    @pytest.mark.asyncio
+    async def test_send_failure_stays_not_delivered_and_retryable(self) -> None:
+        fake = _FakeDao()
+        fake.answer_command = _answer_command_fact()
+        sender = _RecordingSender(error=TimeoutError("native send timed out"))
+        service = AgentService(cast(AgentDao, fake), answer_sender=sender)
+        outcome = await service.deliver_answer(AnswerDeliveryRequest(user_scope="u1", command_record_id="cmd-1"))
+        assert outcome.delivery_state is DeliveryState.NOT_DELIVERED
+        assert outcome.reason is not None and outcome.reason.startswith("send_failed:")
+        assert [fact.client_command_id for fact in sender.calls] == ["ui-answer:decision-1"]
+        assert all(call[0] != "mark_answer_delivered" for call in fake.calls)
+
+    @pytest.mark.asyncio
+    async def test_success_marks_delivered_once(self) -> None:
+        fake = _FakeDao()
+        fake.answer_command = _answer_command_fact()
+        sender = _RecordingSender()
+        service = AgentService(cast(AgentDao, fake), answer_sender=sender)
+        outcome = await service.deliver_answer(AnswerDeliveryRequest(user_scope="u1", command_record_id="cmd-1"))
+        assert outcome.delivery_state is DeliveryState.DELIVERED
+        assert outcome.verified_at == fake.delivered_receipt.verified_at
+        assert [call[0] for call in fake.calls] == ["read_answer_command", "mark_answer_delivered"]
+
+    @pytest.mark.asyncio
+    async def test_concurrent_delivery_is_single_flight(self) -> None:
+        fake = _FakeDao()
+        fake.answer_command = _answer_command_fact()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class _BlockingSender:
+            def __init__(self) -> None:
+                self.calls: list[AnswerCommandFact] = []
+
+            async def send_answer(self, fact: AnswerCommandFact) -> None:
+                self.calls.append(fact)
+                entered.set()
+                await release.wait()
+
+        sender = _BlockingSender()
+        service = AgentService(cast(AgentDao, fake), answer_sender=sender)
+        request = AnswerDeliveryRequest(user_scope="u1", command_record_id="cmd-1")
+        first = asyncio.create_task(service.deliver_answer(request))
+        await entered.wait()
+        second = await service.deliver_answer(request)
+        release.set()
+        outcome = await first
+        assert second.reason == "delivery_in_flight"
+        assert outcome.delivery_state is DeliveryState.DELIVERED
+        assert [fact.client_command_id for fact in sender.calls] == ["ui-answer:decision-1"]
+
+    @pytest.mark.asyncio
+    async def test_empty_command_id_rejected_before_dao(self) -> None:
+        fake = _FakeDao()
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _service(fake).deliver_answer(AnswerDeliveryRequest(user_scope="u1", command_record_id=""))
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert fake.calls == []
+
+    @pytest.mark.asyncio
+    async def test_pending_and_delivery_rejected_after_close(self) -> None:
+        fake = _FakeDao()
+        service = _service(fake)
+        await service.aclose()
+        for coroutine in (
+            service.read_pending_answers(user_scope="u1"),
+            service.deliver_answer(AnswerDeliveryRequest(user_scope="u1", command_record_id="cmd-1")),
         ):
             with pytest.raises(AgentServiceError) as excinfo:
                 await coroutine
