@@ -12,6 +12,13 @@
   叶 workflow），先复接叶再复接 root；A 不动 B，成功叶零重做，用户终止不复活，
   不可恢复终态明确拒绝（``blocked``），不静默跳过。
 
+**版本谓词贯穿取消集**：原生列举与登记项补读都带同一 ``application_name`` /
+``app_version`` / 名称谓词；无法证明与本进程同应用同版本的登记项**不进入取消
+集**（否则会误杀别的源码/制品版本的在途执行），只在快照与回执中如实标记
+``version-unproven``。取消集只含在途状态（``STARTUP_ACTIVE_STATUSES``）的原生
+行，已终态（含用户终止、恢复耗尽）零改写；复查只认显式终态，**缺行不等于已
+退出**（``unverified_workflow_ids`` 如实阻塞）。
+
 明确不做：
 
 - 不 ``launch``（启动编排在隔离 ``ready=True`` 后另行调用）；
@@ -76,8 +83,16 @@ RECOVERY_RESUMABLE_LEAF_STATUSES: Final[tuple[str, ...]] = (
 #: 分页/批量上限（固定集合后再取消的关键：先读满全部分页）。
 ISOLATION_PAGE_SIZE: Final[int] = 100
 
-#: 应用登记集合里原生行缺失时的快照标记（如实记录「无原生行」，不当作成功态）。
-ABSENT_NATIVE_STATE: Final[str] = "absent"
+#: 登记项无法证明与本次启动同应用/同版本时的快照标记（不纳入取消集）。
+VERSION_UNPROVEN: Final[str] = "version-unproven"
+
+#: 取消复查可接受的显式终态；仍在途或缺行都不算「已退出」。
+TERMINAL_WORKFLOW_STATUSES: Final[tuple[str, ...]] = (
+    WorkflowStatusString.SUCCESS.value,
+    WorkflowStatusString.ERROR.value,
+    WorkflowStatusString.CANCELLED.value,
+    WorkflowStatusString.MAX_RECOVERY_ATTEMPTS_EXCEEDED.value,
+)
 
 
 @dataclass(frozen=True)
@@ -87,6 +102,9 @@ class StartupIsolationReceipt:
     ``ready=True`` 表示：隔离命令与原状态已保存、应用派发门闩已关闭、快照内
     全部原生 workflow 已不在途。``blocking_reasons`` 为阻塞码（稳定 wire 值），
     ``unverified_workflow_ids`` 为复查仍未见终态的原生 ID。
+    ``cancelled_workflow_ids`` 为真正进入取消集的精确集合（只含在途行）；
+    ``unproven_version_workflow_ids`` 为登记但无法证明同应用同版本、未进入取消
+    集的项（快照原状态标 ``version-unproven``）。
     """
 
     command_id: str
@@ -97,6 +115,8 @@ class StartupIsolationReceipt:
     original_states: tuple[tuple[str, str], ...]
     blocking_reasons: tuple[str, ...]
     unverified_workflow_ids: tuple[str, ...]
+    cancelled_workflow_ids: tuple[str, ...] = ()
+    unproven_version_workflow_ids: tuple[str, ...] = ()
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -108,6 +128,8 @@ class StartupIsolationReceipt:
             "original_states": [list(item) for item in self.original_states],
             "blocking_reasons": list(self.blocking_reasons),
             "unverified_workflow_ids": list(self.unverified_workflow_ids),
+            "cancelled_workflow_ids": list(self.cancelled_workflow_ids),
+            "unproven_version_workflow_ids": list(self.unproven_version_workflow_ids),
         }
 
 
@@ -178,10 +200,11 @@ async def run_startup_isolation(
 ) -> StartupIsolationReceipt:
     """执行启动隔离（HANDOFF §8.4 第 2-3 条），返回不可变回执。
 
-    顺序固定：读登记集合 → 原生分页快照（读满才停）→ 按登记 ID 补读被过滤
-    的终态项 → 固定并保存隔离命令与原状态 → 关闭应用派发门闩 → 精确取消 →
-    复查。任一步普通异常即 ``ready=False`` 并停止后续步骤（不取消、不 launch）；
-    ``CancelledError`` 继续传播（R2）。
+    顺序固定：读登记集合 → 原生分页快照（读满才停）→ 按登记 ID 带同一版本谓词
+    补读被过滤项（无法证明版本者不取消、如实标记）→ 固定并保存隔离命令与原状态
+    → 关闭应用派发门闩 → 精确取消（仅限在途行）→ 复查显式终态。任一步普通异常即
+    ``ready=False`` 并停止后续步骤（不取消、不 launch）；``CancelledError`` 继续
+    传播（R2）。
 
     Args:
         user_scope: 用户域（与 DAO 同域校验）。
@@ -225,20 +248,33 @@ async def run_startup_isolation(
     except Exception as exc:  # 分页失败：集合不完整（§8.4 第 3 条）
         return _blocked_receipt(command_id, user_scope, "native_listing_failed", exc)
 
-    # 在途列举按名/版本/在途状态过滤，登记项若已处于终态不会被列入。仅凭该列举
-    # 就把它们记为「无原生行」会虚报不存在，故按登记 ID 补读一次，让原状态如实
-    # 区分「原生行缺失」与「过滤未命中（终态已结案）」。
+    # 在途列举按名/版本/在途状态过滤，登记项若已处于终态不会被列入。补读必须带
+    # **同一版本谓词**：只有能证明「同应用、同版本」的登记项才有资格进入取消集；
+    # 无法证明者不取消（否则会误杀别的源码/制品版本的在途执行），按
+    # ``VERSION_UNPROVEN`` 如实标记并列入回执。
     filtered_registered = tuple(item for item in registered_ids if item not in native_states)
+    unproven_registered: tuple[str, ...] = ()
     if filtered_registered:
         try:
-            terminal_states = await _list_states_by_id(client, filtered_registered)
-        except Exception as exc:  # 补读失败：无法证明登记项已结案，不取消/不 launch
+            scoped_states = await _list_states_by_id(
+                client,
+                filtered_registered,
+                application_name=application_name,
+                app_version=app_version,
+                workflow_names=workflow_names,
+            )
+        except Exception as exc:  # 补读失败：无法证明登记项归属/已结案，不取消/不 launch
             return _blocked_receipt(command_id, user_scope, "registered_state_read_failed", exc)
-        native_states = {**terminal_states, **native_states}
+        unproven_registered = tuple(sorted(set(filtered_registered) - set(scoped_states)))
+        native_states = {**scoped_states, **native_states}
 
     snapshot_ids = tuple(sorted(set(native_states) | set(registered_ids)))
     original_states = tuple(
-        (workflow_id, native_states.get(workflow_id, ABSENT_NATIVE_STATE)) for workflow_id in snapshot_ids
+        (
+            workflow_id,
+            VERSION_UNPROVEN if workflow_id in unproven_registered else native_states[workflow_id],
+        )
+        for workflow_id in snapshot_ids
     )
     snapshot_doc = json_doc(
         {
@@ -275,11 +311,17 @@ async def run_startup_isolation(
             registered_ids=registered_ids,
             snapshot_ids=snapshot_ids,
             original_states=original_states,
+            unproven_registered=unproven_registered,
         )
 
-    if snapshot_ids:
+    # 取消只发在途行：DBOS 的 cancel 会把非 SUCCESS/ERROR 行（含恢复耗尽终态）
+    # 统一改写成 CANCELLED，故已终态/用户终止项绝不能进入取消集。
+    cancel_ids = tuple(
+        sorted(workflow_id for workflow_id, state in native_states.items() if state in STARTUP_ACTIVE_STATUSES)
+    )
+    if cancel_ids:
         try:
-            await client.cancel_workflows_async(list(snapshot_ids), cancel_children=False)
+            await client.cancel_workflows_async(list(cancel_ids), cancel_children=False)
         except Exception as exc:  # 取消失败/未知：不得 launch
             return await _finalize_blocked(
                 registry,
@@ -290,10 +332,12 @@ async def run_startup_isolation(
                 registered_ids=registered_ids,
                 snapshot_ids=snapshot_ids,
                 original_states=original_states,
+                cancelled_ids=cancel_ids,
+                unproven_registered=unproven_registered,
             )
 
     try:
-        verified_states = await _list_states_by_id(client, snapshot_ids)
+        verified_states = await _list_states_by_id(client, cancel_ids)
     except Exception as exc:  # 复查失败：无法证明 0 在途
         return await _finalize_blocked(
             registry,
@@ -304,20 +348,25 @@ async def run_startup_isolation(
             registered_ids=registered_ids,
             snapshot_ids=snapshot_ids,
             original_states=original_states,
+            cancelled_ids=cancel_ids,
+            unproven_registered=unproven_registered,
         )
 
-    active_ids = tuple(
-        workflow_id for workflow_id in snapshot_ids if verified_states.get(workflow_id) in STARTUP_ACTIVE_STATUSES
+    # 只认显式终态：缺行可能来自清理删除/读取缺口，不能当作「原在途已退出」。
+    unverified_ids = tuple(
+        workflow_id for workflow_id in cancel_ids if verified_states.get(workflow_id) not in TERMINAL_WORKFLOW_STATUSES
     )
     receipt = StartupIsolationReceipt(
         command_id=command_id,
         user_scope=user_scope,
-        ready=not active_ids,
+        ready=not unverified_ids,
         registered_workflow_ids=registered_ids,
         isolated_workflow_ids=snapshot_ids,
         original_states=original_states,
-        blocking_reasons=() if not active_ids else ("cancel_unverified",),
-        unverified_workflow_ids=active_ids,
+        blocking_reasons=() if not unverified_ids else ("cancel_unverified",),
+        unverified_workflow_ids=unverified_ids,
+        cancelled_workflow_ids=cancel_ids,
+        unproven_version_workflow_ids=unproven_registered,
     )
     return await _finalize_receipt(registry, receipt)
 
@@ -773,14 +822,28 @@ async def _snapshot_native_workflows(
         offset += len(page)
 
 
-async def _list_states_by_id(client: WorkflowControlClient, workflow_ids: Sequence[str]) -> dict[str, str]:
-    """按精确 ID 查回原生状态（分批；无行即不在结果中，不伪终态）。"""
+async def _list_states_by_id(
+    client: WorkflowControlClient,
+    workflow_ids: Sequence[str],
+    *,
+    application_name: str | None = None,
+    app_version: str | None = None,
+    workflow_names: Sequence[str] | None = None,
+) -> dict[str, str]:
+    """按精确 ID 查回原生状态（分批；无行即不在结果中，不伪终态）。
+
+    给 ``application_name`` / ``app_version`` / ``workflow_names`` 时带同一版本谓词
+    （登记项补读必须与原生列举同谓词）；不给时按纯身份读（取消后复查用）。
+    """
 
     states: dict[str, str] = {}
     for start in range(0, len(workflow_ids), ISOLATION_PAGE_SIZE):
         chunk = list(workflow_ids[start : start + ISOLATION_PAGE_SIZE])
         page = await client.list_workflows_async(
             workflow_ids=chunk,
+            application_name=application_name,
+            app_version=app_version,
+            name=None if workflow_names is None else list(workflow_names),
             limit=len(chunk),
             load_input=False,
             load_output=False,
@@ -847,6 +910,8 @@ def _receipt(
     original_states: tuple[tuple[str, str], ...],
     blocking_reasons: tuple[str, ...],
     unverified_ids: tuple[str, ...] = (),
+    cancelled_ids: tuple[str, ...] = (),
+    unproven_registered: tuple[str, ...] = (),
 ) -> StartupIsolationReceipt:
     return StartupIsolationReceipt(
         command_id=command_id,
@@ -857,6 +922,8 @@ def _receipt(
         original_states=original_states,
         blocking_reasons=blocking_reasons,
         unverified_workflow_ids=unverified_ids,
+        cancelled_workflow_ids=cancelled_ids,
+        unproven_version_workflow_ids=unproven_registered,
     )
 
 
@@ -890,6 +957,8 @@ async def _finalize_blocked(
     registered_ids: tuple[str, ...],
     snapshot_ids: tuple[str, ...],
     original_states: tuple[tuple[str, str], ...],
+    cancelled_ids: tuple[str, ...] = (),
+    unproven_registered: tuple[str, ...] = (),
 ) -> StartupIsolationReceipt:
     """取消/复查阶段失败：回填阻塞回执并保持 ``ready=False``。"""
 
@@ -901,6 +970,8 @@ async def _finalize_blocked(
         snapshot_ids=snapshot_ids,
         original_states=original_states,
         blocking_reasons=(reason,) if exc is None else (reason, f"{reason}:{type(exc).__name__}"),
+        cancelled_ids=cancelled_ids,
+        unproven_registered=unproven_registered,
     )
     return await _finalize_receipt(registry, receipt)
 
@@ -928,12 +999,13 @@ StartupIsolationRunner = Callable[..., Awaitable[StartupIsolationReceipt]]
 
 
 __all__ = [
-    "ABSENT_NATIVE_STATE",
     "INSTANCE_LOCK_KEY",
     "ISOLATION_PAGE_SIZE",
     "RECOVERY_RESUMABLE_LEAF_STATUSES",
     "STARTUP_ACTIVE_STATUSES",
     "STARTUP_WORKFLOW_NAMES",
+    "TERMINAL_WORKFLOW_STATUSES",
+    "VERSION_UNPROVEN",
     "AdvisoryLockInstanceGuard",
     "BlockingRunner",
     "InstanceGuard",

@@ -84,6 +84,9 @@ _ENGINE_SESSION_OPTIONS = (
     f"-c idle_in_transaction_session_timeout={RUNTIME_IDLE_TX_TIMEOUT_MS}"
 )
 
+#: PostgreSQL 默认端口（URL 未显式给端口时用于「同一实例」比较）。
+DEFAULT_POSTGRES_PORT: Final[int] = 5432
+
 
 @dataclass(frozen=True)
 class AgentRuntimeSettings:
@@ -98,6 +101,8 @@ class AgentRuntimeSettings:
         migration_database_url: 独立的**迁移**连接 URL（高权限 ``agent_migrator``
             角色，HANDOFF §8.1 第 1/5 条）。迁移在创建任何运行池之前经此连接执行，
             运行池只用 ``system_database_url``；两者不同才是真正的最小权限分离。
+            该 URL 必须与运行 URL 同实例同逻辑库（URL 规范化后比较 host/port/
+            database），不一致拒绝启动。
         allow_shared_migration_credentials: 显式允许迁移与运行共用同一连接串。
             仅限本机内置 PostgreSQL 单用户/开发场景；外置部署必须提供独立迁移
             凭据。未显式允许时，缺迁移凭据或迁移 URL 与运行 URL 相同一律拒绝
@@ -160,15 +165,65 @@ class AgentRuntimeHandle:
             self._engines_disposed = True
 
 
+@dataclass(frozen=True)
+class _DatabaseIdentity:
+    """URL 规范化后的库身份：实例（host/port）+ 逻辑库名（与角色/驱动无关）。"""
+
+    host: str
+    port: int
+    database: str
+
+
+def _database_identity(url: str) -> _DatabaseIdentity:
+    """从连接 URL 提取可比较的实例/库身份。
+
+    归一化项：驱动名（``+psycopg``/``+asyncpg``）、角色与密码、主机大小写、缺省
+    端口（按 5432）。URL 变体不改变结论；``localhost`` 与 ``127.0.0.1`` 仍是不同
+    字面主机（不做 DNS 解析，避免把配置错误隐藏成「同名实例」）。
+    """
+
+    try:
+        parsed = sa.make_url(url)
+    except Exception as exc:  # 解析失败：消息不回显 URL（含密码，R9），只给配置项名与类型
+        raise AgentRuntimeMigrationError(f"Agent 运行库连接 URL 无法解析（{type(exc).__name__}），拒绝启动") from None
+    host = (parsed.host or "").strip().lower()
+    if not host:
+        socket_dir = parsed.query.get("host")
+        if isinstance(socket_dir, tuple):
+            socket_dir = socket_dir[0] if socket_dir else None
+        host = str(socket_dir or "").strip().lower()
+    return _DatabaseIdentity(
+        host=host,
+        port=parsed.port or DEFAULT_POSTGRES_PORT,
+        database=(parsed.database or "").strip(),
+    )
+
+
+def _assert_same_runtime_database(migration_url: str, runtime_url: str) -> None:
+    """迁移连接与运行连接必须指向同一实例、同一逻辑库（只允许角色/驱动不同）。
+
+    迁移落在另一实例/另一逻辑库时，运行库得到的迁移状态与版本守卫都无从保证；
+    此处拒绝启动。消息只提字段名，不输出连接串（R9）。
+    """
+
+    if _database_identity(migration_url) != _database_identity(runtime_url):
+        raise AgentRuntimeMigrationError(
+            "迁移连接与运行连接不是同一 PostgreSQL 实例/同一逻辑库"
+            "（host/port/database 不一致），拒绝启动（HANDOFF §8.1）"
+        )
+
+
 def _resolve_migration_url(settings: AgentRuntimeSettings) -> str:
     """解析迁移连接：专用高权限凭据优先；共用必须显式允许（不再静默共用）。
 
     ``migration_database_url`` 与 ``system_database_url`` 相同也会被视作共用
     （运维误把运行角色填进迁移配置时不冒充「已分离」）。未显式允许共用时抛
     :class:`AgentRuntimeMigrationError`，消息只含配置项名，不含连接串（R9）。
+    专用凭据还必须与运行连接同实例同库（``_assert_same_runtime_database``）。
     """
     dedicated = settings.migration_database_url
     if dedicated and dedicated != settings.system_database_url:
+        _assert_same_runtime_database(dedicated, settings.system_database_url)
         return dedicated
     if not settings.allow_shared_migration_credentials:
         raise AgentRuntimeMigrationError(

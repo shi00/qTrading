@@ -26,9 +26,9 @@ from core.agent_types import (
     StartupIsolationRecord,
 )
 from services.agent_service.recovery import (
-    ABSENT_NATIVE_STATE,
     ISOLATION_PAGE_SIZE,
     STARTUP_WORKFLOW_NAMES,
+    VERSION_UNPROVEN,
     resume_selected_workflows,
     run_startup_isolation,
 )
@@ -37,6 +37,7 @@ pytestmark = pytest.mark.unit
 
 _APP = "qtrading-agent-runtime"
 _VERSION = "0.11.7"
+_OTHER_VERSION = "0.11.6"
 
 
 @dataclass
@@ -46,6 +47,12 @@ class _Native:
     queue_name: str | None = None
     parent_workflow_id: str | None = None
     name: str | None = None
+    application_name: str | None = _APP
+    application_version: str | None = _VERSION
+
+
+def _allowed(value: Any) -> set[str]:
+    return {value} if isinstance(value, str) else set(value)
 
 
 class _FakeClient:
@@ -62,18 +69,44 @@ class _FakeClient:
         self.resume_error: BaseException | None = None
         self.cancel_effect = True
         self.list_ignores_offset = False
+        self.vanishes_after_cancel = False
 
     @staticmethod
     def _name(item: _Native) -> str:
         return item.name if item.name is not None else item.workflow_id.split(":", 1)[0]
+
+    def _matches_scope(self, item: _Native, kwargs: dict[str, Any]) -> bool:
+        app_version = kwargs.get("app_version")
+        if app_version is not None and item.application_version not in _allowed(app_version):
+            return False
+        application_name = kwargs.get("application_name")
+        if (
+            application_name is not None
+            and item.application_name is not None
+            and item.application_name not in _allowed(application_name)
+        ):
+            return False
+        name_filter = kwargs.get("name")
+        return not (name_filter is not None and self._name(item) not in _allowed(name_filter))
 
     async def list_workflows_async(self, **kwargs: Any) -> list[Any]:
         self.list_calls.append(kwargs)
         if "workflow_ids" in kwargs:
             if self.verify_error is not None:
                 raise self.verify_error
+            if self.vanishes_after_cancel and not kwargs.get("app_version"):
+                return []
             ids = kwargs["workflow_ids"]
-            return [_Native(workflow_id=item, status=self._active[item].status) for item in ids if item in self._active]
+            return [
+                _Native(
+                    workflow_id=item,
+                    status=self._active[item].status,
+                    application_version=self._active[item].application_version,
+                    application_name=self._active[item].application_name,
+                )
+                for item in ids
+                if item in self._active and self._matches_scope(self._active[item], kwargs)
+            ]
         if self.list_error is not None:
             raise self.list_error
         limit = kwargs.get("limit", ISOLATION_PAGE_SIZE)
@@ -81,15 +114,12 @@ class _FakeClient:
         items = sorted(self._active.values(), key=lambda item: item.workflow_id)
         status_filter = kwargs.get("status")
         if status_filter is not None:
-            allowed = {status_filter} if isinstance(status_filter, str) else set(status_filter)
+            allowed = _allowed(status_filter)
             items = [item for item in items if item.status in allowed]
-        name_filter = kwargs.get("name")
-        if name_filter is not None:
-            allowed_names = {name_filter} if isinstance(name_filter, str) else set(name_filter)
-            items = [item for item in items if self._name(item) in allowed_names]
+        items = [item for item in items if self._matches_scope(item, kwargs)]
         parent_filter = kwargs.get("parent_workflow_id")
         if parent_filter is not None:
-            allowed_parents = {parent_filter} if isinstance(parent_filter, str) else set(parent_filter)
+            allowed_parents = _allowed(parent_filter)
             items = [item for item in items if item.parent_workflow_id in allowed_parents]
         return [_Native(workflow_id=item.workflow_id, status=item.status) for item in items[offset : offset + limit]]
 
@@ -210,19 +240,21 @@ class TestStartupIsolation:
         ]
         assert len(client.cancelled) == 1
         cancelled = client.cancelled[0]
-        assert set(cancelled) == {item.workflow_id for item in active} | {"agent_research:registered-1"}
+        assert set(cancelled) == {item.workflow_id for item in active}
         assert list(cancelled) == sorted(cancelled)
-        # 原状态快照包含登记但原生缺失的项（如实标 absent，不伪成功/失败）
+        # 登记但原生查无此行（无法证明同版本）不进入取消集，只如实标记
+        assert receipt.unproven_version_workflow_ids == ("agent_research:registered-1",)
+        assert dict(receipt.original_states)["agent_research:registered-1"] == VERSION_UNPROVEN
+        # 原状态快照包含原生在途项
         original = dict(receipt.original_states)
         assert original["agent_research:root-1"] == "DELAYED"
-        assert original["agent_research:registered-1"] == ABSENT_NATIVE_STATE
         # 先保存再取消、先关门闩
         assert registry.calls[:3] == ["list", "save", "fence"]
         assert registry.saved_records[0].snapshot
         assert registry.fence_requests[0].workflow_ids == ("agent_research:registered-1",)
 
     async def test_registered_terminal_native_state_is_read_back_not_absent(self) -> None:
-        """R15：登记项原生已终态（被在途过滤）时按登记 ID 补读，不得虚报不存在。"""
+        """R15：登记项原生已终态（被在途过滤）时按同版本谓词补读，如实区分终态与不可证明。"""
 
         client = _FakeClient(
             [
@@ -245,9 +277,57 @@ class TestStartupIsolation:
         assert original["agent_research:done-1"] == "SUCCESS"
         assert original["agent_research:stopped-1"] == "CANCELLED"
         assert original["agent_leaf:a"] == "PENDING"
-        # 补读仍未查回原生行才记 absent：缺失 ≠ 过滤未命中
-        assert original["agent_research:gone-1"] == ABSENT_NATIVE_STATE
+        # 补读仍查无此行：无法证明同应用同版本，不取消、如实标记
+        assert original["agent_research:gone-1"] == VERSION_UNPROVEN
+        assert receipt.unproven_version_workflow_ids == ("agent_research:gone-1",)
+        # 已终态与不可证明项都不进入取消集（零改写）
+        assert client.cancelled == [("agent_leaf:a",)]
+        assert receipt.cancelled_workflow_ids == ("agent_leaf:a",)
         assert receipt.ready is True
+
+    async def test_registered_other_version_is_not_cancelled(self) -> None:
+        """①：版本谓词必须贯穿登记补读——别的制品版本的在途执行不得被误杀。"""
+
+        client = _FakeClient(
+            [
+                _Native("agent_leaf:mine", "PENDING"),
+                _Native("agent_research:old", "PENDING", application_version=_OTHER_VERSION),
+            ]
+        )
+        registry = _FakeRegistry(registered=(_execution("exec-old", "agent_research:old"),))
+
+        receipt = await _isolate(client, registry)
+
+        assert client.cancelled == [("agent_leaf:mine",)]
+        assert receipt.cancelled_workflow_ids == ("agent_leaf:mine",)
+        assert receipt.unproven_version_workflow_ids == ("agent_research:old",)
+        assert dict(receipt.original_states)["agent_research:old"] == VERSION_UNPROVEN
+        assert receipt.ready is True
+
+    async def test_user_terminated_registered_workflow_is_not_cancelled(self) -> None:
+        """④：用户终止（CANCELLED）不得再进取消集（DBOS 会把非 SUCCESS/ERROR 改写状态）。"""
+
+        client = _FakeClient([_Native("agent_research:stopped", "CANCELLED")])
+        registry = _FakeRegistry(registered=(_execution("exec-1", "agent_research:stopped"),))
+
+        receipt = await _isolate(client, registry)
+
+        assert client.cancelled == []
+        assert receipt.cancelled_workflow_ids == ()
+        assert dict(receipt.original_states)["agent_research:stopped"] == "CANCELLED"
+        assert receipt.ready is True
+
+    async def test_missing_row_after_cancel_is_not_ready(self) -> None:
+        """复查缺行不能证明原在途已退出：不得把缺行当成功。"""
+
+        client = _FakeClient([_Native("agent_leaf:a", "PENDING")])
+        client.vanishes_after_cancel = True
+
+        receipt = await _isolate(client, _FakeRegistry())
+
+        assert receipt.ready is False
+        assert receipt.unverified_workflow_ids == ("agent_leaf:a",)
+        assert "cancel_unverified" in receipt.blocking_reasons
 
     async def test_registered_state_read_failure_blocks_without_cancel(self) -> None:
         """R15 负例：补读失败即无法证明登记项已结案，不得取消/launch。"""

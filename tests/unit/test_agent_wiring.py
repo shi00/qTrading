@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -42,9 +43,10 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture(autouse=True)
 def _isolated_migration_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    """隔离迁移凭据来源：单测不读真实环境变量/keyring/用户配置（否则结果随开发机变化）。"""
+    """隔离迁移凭据与版本元数据来源：单测不读真实环境变量/keyring/用户配置。"""
     monkeypatch.setattr(wiring_mod, "get_agent_migration_db_url", lambda: None)
     monkeypatch.setattr(wiring_mod, "_embedded_single_user_mode", lambda: True)
+    monkeypatch.setattr(wiring_mod, "version", lambda _name: "0.11.7")
 
 
 async def _direct_runner(fn: Any) -> Any:
@@ -736,6 +738,40 @@ async def test_startup_outcome_failure_is_preserved(
 # ---------------------------------------------------------------------------
 
 
+async def test_application_version_unavailable_degrades_zero_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """③：发行版元数据不可得时不回落共享 dev，必须 fail-closed 说明。"""
+    monkeypatch.setattr(wiring_mod, "_application_version", lambda: None)
+    assembled: list[Any] = []
+
+    wiring = await wire_agent_runtime(
+        _cache_manager(),
+        isolation_id="startup-test",
+        assemble_func=assembled.append,
+        instance_guard=_FakeGuard(),
+        blocking_runner=_direct_runner,
+    )
+
+    assert wiring.failure == "application_version_unavailable"
+    assert wiring.handle is None
+    assert wiring.runtime is None
+    assert assembled == []
+
+
+def test_application_version_missing_or_blank_metadata_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """元数据缺失/空版本都返回 None（不回落共享 dev）。"""
+
+    def _missing(_name: str) -> str:
+        raise PackageNotFoundError("astock-screener")
+
+    monkeypatch.setattr(wiring_mod, "version", _missing)
+    assert wiring_mod._application_version() is None
+
+    monkeypatch.setattr(wiring_mod, "version", lambda _name: "   ")
+    assert wiring_mod._application_version() is None
+
+
 async def test_external_mode_without_migration_credentials_degrades(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -761,7 +797,7 @@ async def test_dedicated_migration_url_wired_into_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """配置了独立迁移 URL：原样传入 settings，且不打开共用开关。"""
-    migration_url = "postgresql+psycopg://agent_migrator@migrator-host/qtrading_agent_runtime"
+    migration_url = "postgresql+psycopg://agent_migrator@localhost/qtrading_agent_runtime"
     captured: list[Any] = []
     monkeypatch.setattr(wiring_mod, "get_agent_migration_db_url", lambda: migration_url)
 
@@ -853,7 +889,10 @@ class _StatusClient:
         return []
 
     async def cancel_workflows_async(self, workflow_ids: list[str], *, cancel_children: bool = False) -> None:
-        return None
+        # 模拟 DBOS 真实语义：取消把非 SUCCESS/ERROR 行改写为 CANCELLED（行仍在）。
+        for workflow_id in workflow_ids:
+            if self._by_id.get(workflow_id) not in {"SUCCESS", "ERROR"}:
+                self._by_id[workflow_id] = "CANCELLED"
 
     async def resume_workflows_async(self, workflow_ids: list[str]) -> None:
         return None
