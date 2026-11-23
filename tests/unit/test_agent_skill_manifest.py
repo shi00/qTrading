@@ -384,12 +384,27 @@ class TestDirectoryImport:
             inspect_skill_directory(str(directory), budget=SkillBudget(max_objects=3))
         assert exc.value.code == "skill_objects_exceeded"
 
-    def test_directory_original_bytes_exact_passes_and_over_rejected(self, tmp_path) -> None:
+    def test_directory_expanded_bytes_exact_passes_and_over_rejected(self, tmp_path) -> None:
+        # 目录无压缩：内容体积按展开上限（max_expanded_bytes）判定，恰等通过、超一拒绝。
         directory = self._write(tmp_path / "pkg", {"SKILL.md": _DEFAULT_MANIFEST, "big.bin": b"x" * 32})
         total = len(_DEFAULT_MANIFEST) + 32
-        inspect_skill_directory(str(directory), budget=SkillBudget(max_archive_bytes=total))
+        inspect_skill_directory(str(directory), budget=SkillBudget(max_expanded_bytes=total))
         with pytest.raises(AgentValidationError) as exc:
-            inspect_skill_directory(str(directory), budget=SkillBudget(max_archive_bytes=total - 1))
+            inspect_skill_directory(str(directory), budget=SkillBudget(max_expanded_bytes=total - 1))
+        assert exc.value.code == "skill_expanded_bytes_exceeded"
+
+    def test_directory_content_not_bounded_by_zip_archive_limit(self, tmp_path) -> None:
+        # 同一内容：目录不受 ZIP 归档上限（压缩包体积）约束，ZIP 仍按归档上限拒绝。
+        entries = {"SKILL.md": _DEFAULT_MANIFEST, "big.bin": b"x" * 32}
+        total = len(_DEFAULT_MANIFEST) + 32
+        directory = self._write(tmp_path / "pkg", entries)
+
+        inspection = inspect_skill_directory(str(directory), budget=SkillBudget(max_archive_bytes=total - 1))
+        assert inspection.total_expanded_bytes == total
+
+        archived = _zip_bytes(entries)
+        with pytest.raises(AgentValidationError) as exc:
+            inspect_skill_package(archived, budget=SkillBudget(max_archive_bytes=len(archived) - 1))
         assert exc.value.code == "skill_archive_bytes_exceeded"
 
     def test_directory_checkpoint_cancels_streaming_enumeration(self, tmp_path) -> None:
