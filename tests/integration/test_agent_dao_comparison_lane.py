@@ -24,6 +24,7 @@ from sqlalchemy import insert, text
 
 from core.agent_types import Mode, Purpose, decode_json_doc
 from data.persistence.daos.agent_dao import AgentDao
+from data.persistence.embedded_postgres.protocol import ConnectionInfo
 from data.persistence.models import AgentCommand, AgentExecution, AgentSession
 from services.agent_service.comparison import (
     ComparisonLaneSelection,
@@ -148,9 +149,11 @@ async def _seed_lane_command(
 
 
 class TestReadComparisonManifestAuthority:
-    @pytest.mark.asyncio
-    async def test_authoritative_version_is_latest_confirmed_not_earliest(self, real_embedded_pg: str) -> None:
-        dao = await _setup(real_embedded_pg)
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_authoritative_version_is_latest_confirmed_not_earliest(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        dao = await _setup(real_embedded_pg.url)
         group_ab = _group("conn-a", "conn-b")
         group_abc = _group("conn-a", "conn-b", "conn-c")
         group_abcd = _group("conn-a", "conn-b", "conn-c", "conn-d")
@@ -211,16 +214,16 @@ class TestReadComparisonManifestAuthority:
         assert authoritative.manifest_digest != group_ab.manifest_digest
         assert authoritative.manifest_digest != group_abcd.manifest_digest
 
-    @pytest.mark.asyncio
-    async def test_unknown_group_returns_none(self, real_embedded_pg: str) -> None:
-        dao = await _setup(real_embedded_pg)
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_unknown_group_returns_none(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
         assert await dao.read_comparison_manifest(user_scope=_USER, group_ref="comparison_group_missing") is None
 
 
 class TestWithdrawComparisonLane:
-    @pytest.mark.asyncio
-    async def test_queued_lane_is_withdrawn_and_dispatch_closed(self, real_embedded_pg: str) -> None:
-        dao = await _setup(real_embedded_pg)
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_queued_lane_is_withdrawn_and_dispatch_closed(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
         group = _group("conn-a", "conn-b")
         await _seed_session(dao, "session-cmp")
         await _seed_lane(
@@ -250,9 +253,9 @@ class TestWithdrawComparisonLane:
         assert row.ended_at is not None
         assert row.revision == 2
 
-    @pytest.mark.asyncio
-    async def test_repeated_withdraw_is_idempotent(self, real_embedded_pg: str) -> None:
-        dao = await _setup(real_embedded_pg)
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_repeated_withdraw_is_idempotent(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
         group = _group("conn-a", "conn-b")
         await _seed_session(dao, "session-cmp")
         await _seed_lane(
@@ -273,9 +276,9 @@ class TestWithdrawComparisonLane:
             ).scalar_one()
         assert revision == 2
 
-    @pytest.mark.asyncio
-    async def test_dispatched_lane_is_preserved_not_rewritten(self, real_embedded_pg: str) -> None:
-        dao = await _setup(real_embedded_pg)
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_dispatched_lane_is_preserved_not_rewritten(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
         group = _group("conn-a", "conn-b")
         await _seed_session(dao, "session-cmp")
         await _seed_lane(
@@ -301,9 +304,9 @@ class TestWithdrawComparisonLane:
         assert row.display_state == "running"
         assert row.dispatch_closed is False
 
-    @pytest.mark.asyncio
-    async def test_round_linked_lane_is_preserved(self, real_embedded_pg: str) -> None:
-        dao = await _setup(real_embedded_pg)
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_round_linked_lane_is_preserved(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
         group = _group("conn-a", "conn-b")
         await _seed_session(dao, "session-cmp")
         await _seed_lane(
@@ -320,9 +323,9 @@ class TestWithdrawComparisonLane:
 
         assert (outcome.withdrawn, outcome.preserved) == (False, True)
 
-    @pytest.mark.asyncio
-    async def test_non_lane_and_unknown_execution_are_not_withdrawn(self, real_embedded_pg: str) -> None:
-        dao = await _setup(real_embedded_pg)
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_non_lane_and_unknown_execution_are_not_withdrawn(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, "session-cmp")
         await _seed_lane(
             dao,
