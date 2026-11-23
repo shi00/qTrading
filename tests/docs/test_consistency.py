@@ -7668,3 +7668,29 @@ class TestDocsWorkflowMergeQueueContract:
         permissions = data["permissions"]
         assert isinstance(permissions, dict), f"permissions 应为 mapping, got: {type(permissions)}"
         assert permissions == {"contents": "read"}, f"permissions 应最小化为 contents: read, got: {permissions}"
+
+
+class TestRequiredCheckPullRequestEditedTrigger:
+    """PR 基线在最后一次 push 之后才改到 main 时，GitHub 只发 edited 事件。
+
+    默认活动类型 opened / synchronize / reopened 均不触发，required check 的聚合 job
+    永不生成，PR 永久 BLOCKED（PR #2384 即此形态）。故三个 required check workflow
+    必须显式声明 `types` 且包含 `edited`；声明 `types` 会覆盖默认值，须同时保留
+    opened / synchronize / reopened。
+    """
+
+    REQUIRED_CI_WORKFLOWS = ("ci_cd.yml", "docs-ci.yml", "ci-aux-gate.yml")
+    REQUIRED_PR_ACTIONS = ("opened", "synchronize", "reopened", "edited")
+
+    @pytest.mark.parametrize("workflow_name", REQUIRED_CI_WORKFLOWS)
+    def test_pull_request_types_include_edited(self, workflow_name: str) -> None:
+        import yaml
+
+        path = ROOT / ".github" / "workflows" / workflow_name
+        data = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+        pull_request = data["on"]["pull_request"]
+        assert isinstance(pull_request, dict), f"{workflow_name}: pull_request 触发块应为 mapping, got: {pull_request}"
+        types = pull_request.get("types")
+        assert types is not None, f"{workflow_name}: 未声明 types 时改基只发 edited，required check 会永久停在 Pending"
+        missing = [action for action in self.REQUIRED_PR_ACTIONS if action not in types]
+        assert not missing, f"{workflow_name}: types 缺少 {missing}（声明 types 会覆盖默认活动类型）, got: {types}"

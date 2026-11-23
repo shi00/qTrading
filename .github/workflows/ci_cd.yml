@@ -10,6 +10,11 @@ on:
       - 'LICENSE'
   pull_request:
     branches: [ "main" ]
+    # 显式声明活动类型并加入 edited：PR 基线（base）在最后一次 push 之后才改到 main 时，
+    # GitHub 只发 edited（默认 opened / synchronize / reopened 均不触发），聚合门禁
+    # `CI Gate` 便永不生成，required check 永久停在 Pending 并阻塞合并（PR #2384 即此形态）。
+    # 代价：标题 / 正文编辑同样触发一次全量 CI（edited 无法按字段过滤）。
+    types: [opened, synchronize, reopened, edited]
     # 不使用 paths 过滤：main 的 required status check 是聚合门禁 CI Gate，
     # 若 paths 未命中则本 workflow 根本不触发，该 check 永久停在 Pending 并阻塞合并。
     # 变更是否属于代码类由 Changes job（scripts/classify_changed_paths.py）在运行时判定，
