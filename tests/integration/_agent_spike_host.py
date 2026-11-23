@@ -37,6 +37,17 @@ def _marker_path() -> str:
     return os.environ["AGENT_SPIKE_MARKER"]
 
 
+def _marker_executed() -> bool:
+    """工作流函数体已真实执行（已追加执行标记）。
+
+    DBOS 在派发前就以 ``PENDING`` 落行（``_init_workflow``），异步 workflow 还需
+    跨线程移交后台事件循环，故「状态为 PENDING」不能证明函数体已运行；父测试
+    以 marker 行数为派发证据，宿主必须等到 marker 出现再硬崩溃。
+    """
+    path = Path(_marker_path())
+    return path.exists() and bool(path.read_text(encoding="utf-8").strip())
+
+
 @DBOS.workflow()
 async def agent_spike_blocking_wf() -> None:
     """阻塞宿主的工作流：先写执行标记（非 step，恢复重执行会重复追加），再长等待。"""
@@ -63,17 +74,18 @@ def main() -> int:
     launch_agent_runtime(handle)
     with SetWorkflowID("agent-spike-wf-1"):
         wf_handle = DBOS.start_workflow(agent_spike_blocking_wf)
-    # 等待工作流进入 PENDING（recv 阻塞中），上限 30s
+    # 就绪条件：函数体已执行（marker 已写）且仍阻塞在 recv（状态 PENDING），上限 30s
     import time
 
     deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
-        status = wf_handle.get_status()
-        if status is not None and status.status == "PENDING":
-            break
+        if _marker_executed():
+            status = wf_handle.get_status()
+            if status is not None and status.status == "PENDING":
+                break
         time.sleep(0.2)
     else:
-        return 2  # 未达 PENDING，实验前置失败
+        return 2  # 未达就绪（函数体未执行或未阻塞），实验前置失败
     # 真进程硬崩溃：无优雅清理（os._exit 不触发 atexit/DBOS.destroy）
     os._exit(1)
 
