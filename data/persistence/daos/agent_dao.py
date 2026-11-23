@@ -3844,7 +3844,8 @@ class AgentDao(BaseDao):
         """读答复命令原事实（P1-05 交付核定）：只按原命令身份读，不新建、不改状态。
 
         0 行或非 ``answer`` 命令 → ``INPUT_INVALID``（不区分「不存在」与「属他人」）；
-        状态不在冻结枚举内或载荷缺失 → ``OPERATION_UNKNOWN``（坏事实不读成确定状态）。
+        状态不在冻结枚举内、轮缺 workflow 身份或载荷缺失 → ``OPERATION_UNKNOWN``
+        （坏事实不读成确定状态，也不冒充可投递）。
         """
 
         self._check_engine()
@@ -3869,7 +3870,17 @@ class AgentDao(BaseDao):
                         AgentCommand.input_digest,
                         AgentCommand.request_payload,
                         AgentCommand.verified_at,
-                    ).where(
+                        AgentRound.workflow_id.label("round_workflow_id"),
+                    )
+                    .select_from(AgentCommand)
+                    .outerjoin(
+                        AgentRound,
+                        sa.and_(
+                            AgentRound.user_scope == AgentCommand.user_scope,
+                            AgentRound.round_id == AgentCommand.round_id,
+                        ),
+                    )
+                    .where(
                         AgentCommand.user_scope == user_scope,
                         AgentCommand.command_record_id == command_record_id,
                     )
@@ -3888,6 +3899,14 @@ class AgentDao(BaseDao):
             ) from exc
         if row.request_payload is None or not isinstance(row.input_digest, str):
             raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "answer command payload is unavailable", identity)
+        workflow_id = row.round_workflow_id
+        if not isinstance(workflow_id, str) or workflow_id == "":
+            # 无持久 workflow 身份 → 无原生投递目的地：不可读成「可投递」。
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                "answer command round has no workflow identity",
+                identity,
+            )
         return AnswerCommandFact(
             command_record_id=row.command_record_id,
             client_command_id=row.client_command_id,
@@ -3895,6 +3914,7 @@ class AgentDao(BaseDao):
             session_id=row.session_id,
             execution_id=row.execution_id,
             round_id=row.round_id,
+            workflow_id=workflow_id,
             delivery_state=delivery_state,
             consumption_state=consumption_state,
             answer_digest=row.input_digest,

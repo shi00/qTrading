@@ -171,6 +171,7 @@ class TestReadAnswerCommand:
             input_digest="sha256:abc",
             request_payload={"text": "选择第一家"},
             verified_at=None,
+            round_workflow_id="wf-1",
         )
 
         fact = await _dao(_PendingConn(command_row=command_row)).read_answer_command(
@@ -179,6 +180,7 @@ class TestReadAnswerCommand:
 
         assert fact.decision_id == "d-1"
         assert fact.client_command_id == "ui-answer:d-1"
+        assert fact.workflow_id == "wf-1"
         assert fact.delivery_state is DeliveryState.NOT_DELIVERED
         assert json.loads(fact.request_payload) == {"text": "选择第一家"}
         assert fact.verified_at is None
@@ -202,6 +204,7 @@ class TestReadAnswerCommand:
             input_digest="sha256:abc",
             request_payload={"text": "x"},
             verified_at=None,
+            round_workflow_id="wf-1",
         )
         with pytest.raises(AgentServiceError) as excinfo:
             await _dao(_PendingConn(command_row=non_answer)).read_answer_command(
@@ -224,6 +227,30 @@ class TestReadAnswerCommand:
             input_digest="sha256:abc",
             request_payload={"text": "x"},
             verified_at=None,
+            round_workflow_id="wf-1",
+        )
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _dao(_PendingConn(command_row=command_row)).read_answer_command(
+                user_scope="u1", command_record_id="cmd-1"
+            )
+        assert excinfo.value.code is AgentErrorCode.OPERATION_UNKNOWN
+
+    @pytest.mark.asyncio
+    async def test_missing_round_workflow_is_not_read_as_deliverable(self) -> None:
+        command_row = SimpleNamespace(
+            command_record_id="cmd-1",
+            client_command_id="c-1",
+            target_id="d-1",
+            session_id="s1",
+            execution_id="e-1",
+            round_id="r-1",
+            command_kind="answer",
+            delivery_state="not_delivered",
+            consumption_state="not_consumed",
+            input_digest="sha256:abc",
+            request_payload={"text": "x"},
+            verified_at=None,
+            round_workflow_id=None,
         )
         with pytest.raises(AgentServiceError) as excinfo:
             await _dao(_PendingConn(command_row=command_row)).read_answer_command(
@@ -246,6 +273,7 @@ class TestReadAnswerCommand:
             input_digest=None,
             request_payload=None,
             verified_at=None,
+            round_workflow_id="wf-1",
         )
         with pytest.raises(AgentServiceError) as excinfo:
             await _dao(_PendingConn(command_row=command_row)).read_answer_command(

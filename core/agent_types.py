@@ -2633,7 +2633,11 @@ class AnswerDeliveryRequest:
 
 @dataclass(frozen=True, slots=True)
 class AnswerCommandFact:
-    """答复命令原事实（交付核定用）：只读回执身份 + 待投递载荷，不回显正文。"""
+    """答复命令原事实（交付核定用）：只读回执身份 + 待投递载荷，不回显正文。
+
+    ``workflow_id`` 为答复所属轮的持久 workflow 身份（原生投递目的地）；
+    投递成功只表示「已交原生消息队列」，消费仍由原生侧确认（INV-06）。
+    """
 
     command_record_id: str
     client_command_id: str
@@ -2641,6 +2645,7 @@ class AnswerCommandFact:
     session_id: str
     execution_id: str
     round_id: str
+    workflow_id: str
     delivery_state: DeliveryState
     consumption_state: ConsumptionState
     answer_digest: str

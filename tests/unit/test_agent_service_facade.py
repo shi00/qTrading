@@ -956,6 +956,7 @@ def _answer_command_fact(
         session_id="s1",
         execution_id="exec-1",
         round_id="round-1",
+        workflow_id="wf-1",
         delivery_state=delivery_state,
         consumption_state=consumption_state,
         answer_digest="sha256:abc",
