@@ -90,6 +90,7 @@
 | UIX-12 | 字段级错误提示（`ft.TextField(error=...)` 原生插槽程序化关联） | 本地检视报告（gitignored） | [backtest_config_panel.py](../../ui/components/backtest/backtest_config_panel.py) | 使用中 |
 | UIX-13 | toast 迁移到 ToastManager + 响应式断点结构性批次（M12 / UIX-13） | 本地检视报告（gitignored） | [accessibility-baseline.md](../flet/accessibility-baseline.md) | 使用中 |
 | T-04 | 许可逐项绑定派发目标、无公开分片失败不自动重试且记 OUTBOUND_UNCONFIRMED、严格登记不靠预留补写、桥剥离工具协议字段 | 本地检视报告（gitignored） | [scenario_executor.py](../../services/ai_service/scenario_executor.py) | 使用中 |
+| T-06 | 费用投影接线补齐 attempt_id 与 operation 账本引用（引用只追加保序、缺行 fail-closed、零出站不记成功） | 本地检视报告（gitignored） | [ai_usage_dao.py](../../data/persistence/daos/ai_usage_dao.py) | 使用中 |
 | UIX-14 | 声明式三态组件（空态/错误态/加载态）统一复用，消除手工复制 | 本地检视报告（gitignored） | [state_views.py](../../ui/components/state_views.py) | 使用中 |
 | UIX-16 | 未引用 i18n key 的 ratchet baseline 门禁（基线计数只降不升） | 本地检视报告（gitignored） | [test_i18n_keys_completeness.py](../../tests/unit/test_i18n_keys_completeness.py) | 使用中 |
 | UIX-17 | VM locale remediation——placeholder 卡 error 的 i18n fallback，去硬编码中文默认值 | 本地检视报告（gitignored） | [test_uix_17_vm_locale_remediation.py](../../tests/unit/ui/viewmodels/test_uix_17_vm_locale_remediation.py) | 使用中 |

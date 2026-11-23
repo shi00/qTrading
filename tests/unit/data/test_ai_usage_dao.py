@@ -1299,7 +1299,13 @@ class TestRecordOperationLedgerRefs:
             )
             is False
         )
-        assert len(conn.calls) == 1  # 无行即不写，不静默补建
+        # 无行即不写：只执行行锁读，未追加 UPDATE（不静默补建 operation 行）
+        lock_sql, lock_params = conn.calls[0]
+        assert "FROM agent_operation" in lock_sql
+        assert "FOR UPDATE" in lock_sql
+        assert "UPDATE agent_operation" not in lock_sql
+        assert lock_params == {"user_scope": "user-1", "operation_id": "mc-missing"}
+        assert [sql for sql, _ in conn.calls if "UPDATE agent_operation" in sql] == []
 
 
 class TestReadBudgetSummary:
