@@ -291,7 +291,7 @@ class _FakeDao:
         return _TRANSFER_RECEIPT
 
     async def read_draft_transfer(
-        self, ref: CommandRef, *, user_scope: str, target_session_id: str | None = None
+        self, ref: CommandRef, *, user_scope: str, target_session_id: str
     ) -> DraftTransferReceipt:
         self.calls.append(
             ("read_draft_transfer", (ref,), {"user_scope": user_scope, "target_session_id": target_session_id})
@@ -306,7 +306,7 @@ class _FakeDao:
             raise self.error
         return cast(DraftRead, self.draft_read)
 
-    async def read_command(self, ref: CommandRef, *, user_scope: str, target_id: str | None = None) -> CommandReceipt:
+    async def read_command(self, ref: CommandRef, *, user_scope: str, target_id: str) -> CommandReceipt:
         self.calls.append(("read_command", (ref,), {"user_scope": user_scope, "target_id": target_id}))
         if self.error is not None:
             raise self.error
@@ -697,7 +697,7 @@ class TestDraftTransferAuthority:
         service = _service(fake)
         await service.aclose()
         with pytest.raises(AgentServiceError) as excinfo:
-            await service.read_draft_transfer(_REF, user_scope="u1")
+            await service.read_draft_transfer(_REF, user_scope="u1", target_session_id="s2")
         assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
         assert fake.calls == []
 
@@ -710,7 +710,7 @@ class TestClosedService:
         await service.aclose()
         await service.aclose()
         with pytest.raises(AgentServiceError) as excinfo:
-            await service.read_command(_REF, user_scope="u1")
+            await service.read_command(_REF, user_scope="u1", target_id="s1")
         assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
         assert fake.calls == []
 
@@ -728,7 +728,7 @@ class TestErrorPropagation:
         fake = _FakeDao()
         fake.error = AgentServiceError(AgentErrorCode.INPUT_INVALID, "not found", "u1/client-1")
         with pytest.raises(AgentServiceError) as excinfo:
-            await _service(fake).read_command(_REF, user_scope="u1")
+            await _service(fake).read_command(_REF, user_scope="u1", target_id="s1")
         assert excinfo.value is fake.error
 
 

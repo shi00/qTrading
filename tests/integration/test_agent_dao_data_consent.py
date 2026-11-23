@@ -47,6 +47,7 @@ from core.agent_types import (
     Purpose,
     decode_data_consent_binding,
     decode_data_consent_source_item,
+    derive_round_id,
     encode_data_consent_binding,
     encode_data_consent_claim,
     json_doc,
@@ -100,6 +101,16 @@ async def _seed_research_chain(dao: AgentDao, user_scope: str = USER_SCOPE) -> t
                 title="consent test session",
             )
         )
+    manifest = json_doc(
+        {
+            "schema_version": 1,
+            "source_module": "ui",
+            "business_request_id": "req-consent",
+            "mode": "execute",
+            "purpose": "end_of_day_research",
+            "text": "研究这三家公司",
+        }
+    )
     receipt = await dao.accept_request(
         AcceptRequest(
             user_scope=user_scope,
@@ -113,16 +124,7 @@ async def _seed_research_chain(dao: AgentDao, user_scope: str = USER_SCOPE) -> t
             mode=Mode.EXECUTE,
             purpose=Purpose.END_OF_DAY_RESEARCH,
             text="研究这三家公司",
-            manifest_payload=json_doc(
-                {
-                    "schema_version": 1,
-                    "source_module": "ui",
-                    "business_request_id": "req-consent",
-                    "mode": "execute",
-                    "purpose": "end_of_day_research",
-                    "text": "研究这三家公司",
-                }
-            ),
+            manifest_payload=manifest,
             source_display_name="用户消息",
         )
     )
@@ -136,7 +138,24 @@ async def _seed_research_chain(dao: AgentDao, user_scope: str = USER_SCOPE) -> t
             workflow_code_version="wcv-1",
             run_epoch=1,
             expected_input_revision=1,
-            frozen_manifest=json_doc({"schema_version": 1, "kind": "frozen_manifest"}),
+            frozen_manifest=json_doc(
+                {
+                    "payload_version": 2,
+                    "execution_id": receipt.execution_id,
+                    "round_id": derive_round_id(
+                        user_scope=user_scope,
+                        execution_id=receipt.execution_id,
+                        workflow_id=receipt.workflow_id,
+                    ),
+                    "binding_identity": {
+                        "user_scope": user_scope,
+                        "session_id": session_id,
+                        "workflow_code_version": "wcv-1",
+                        "run_epoch": 1,
+                        "expected_input_revision": 1,
+                    },
+                }
+            ),
             actual_input=json_doc({"schema_version": 1, "kind": "actual_input"}),
         )
     )

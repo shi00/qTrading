@@ -309,11 +309,11 @@ class AgentService:
     # 读取面（§4.1 get_snapshot / §4.2 read_* / observe）
     # ------------------------------------------------------------------
 
-    async def read_command(self, ref: CommandRef, *, user_scope: str, target_id: str | None = None) -> CommandReceipt:
+    async def read_command(self, ref: CommandRef, *, user_scope: str, target_id: str) -> CommandReceipt:
         """查命令原回执（保存/投递/消费分列）；未知时不猜、不重发。
 
-        ``target_id`` 可选：调用方已知准确 target 时给出，按该 target 下的命令记录
-        定位（同一命令键跨 target 合法并存，检视 D20）。
+        ``target_id`` 必须给出：``CommandRef`` 不携带 target，同一命令键跨 target
+        合法并存；缺失即拒绝（不在同域内回退到另一 target 的同键命令，检视 T-07）。
         """
 
         self._require_open("read_command")
@@ -1477,14 +1477,14 @@ class AgentService:
         return await self._dao.transfer_draft(command)
 
     async def read_draft_transfer(
-        self, ref: CommandRef, *, user_scope: str, target_session_id: str | None = None
+        self, ref: CommandRef, *, user_scope: str, target_session_id: str
     ) -> DraftTransferReceipt:
         """只查原转移回执（§4.2 ``read_draft_transfer``）：零移动、零发送。
 
-        读取失败由 DAO 抛类型化错误（不存在/歧义/非转移命令 → ``INPUT_INVALID``；
+        读取失败由 DAO 抛类型化错误（不存在/非转移命令/目标缺失 → ``INPUT_INVALID``；
         坏回执 → ``OPERATION_UNKNOWN``），服务不把失败读成「未转移」。
-        ``target_session_id`` 可选：已知准确目标会话时按该 target 定位转移记录
-        （同一命令键跨 target 合法并存，检视 D20）。
+        ``target_session_id`` 必须给出：同一命令键跨目标会话合法并存，缺失即拒绝
+        （不在同域内回退到另一目标会话的转移记录，检视 T-07）。
         """
 
         self._require_open("read_draft_transfer")

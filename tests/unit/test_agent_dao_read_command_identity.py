@@ -1,14 +1,14 @@
-"""read_command / read_draft_transfer 身份前置过滤（检视 D20）。
+"""read_command / read_draft_transfer 准确 target 身份（检视 D20/T-07）。
 
-缺陷：两个读取面先按 ``client_command_id`` 多行即判「跨 target 歧义」，之后才核
-预期版/意图键；而存储 PK 是 ``stable_id("command",[user_scope, target_id,
-client_command_id])``，同一命令键在不同合法 target 下本就并存。本文件用内存行事实
-（按语句绑定参数过滤）验证：
+缺陷（T-07）：两个读取面把 target 当作可选的「缩小条件」，不带准确目标时只按
+命令键 + 预期版 + 意图键过滤，同域另一 target 的同键命令会冒认原命令回执。存储
+PK 是 ``stable_id("command",[user_scope, target_id, client_command_id])``，同一命令
+键在不同合法 target 下本就并存，因此准确 target 必须是必需身份。本文件用内存行
+事实（按语句绑定参数过滤）验证：
 
-- 身份条件（``expected_revision`` / 链到根 execution 的意图键 / 可选准确 target）
-  确实进入 SQL 并先缩小候选，之后才判多行；
-- 合法跨 target 并存可各自查回；真歧义（同 target 身份也分不开）仍拒；
-- 跨用户域、非转移命令、预期版不符的诊断语义不变；重启（新 DAO/新连接）仍可查回。
+- 准确 target 条件确实进入 SQL（首选候选），并按该 target 的记录查回；
+- 该 target 下无该命令 → not found，绝不回退同域另一 target 的同键记录；
+- 跨用户域、空 target、非转移命令、预期版不符的诊断语义不变；重启仍可查回。
 
 真实 PG 链路由 ``tests/integration/test_agent_dao_read_command.py`` 与
 ``tests/integration/test_agent_dao_transfer_draft.py`` 覆盖。
@@ -168,7 +168,7 @@ def _transfer_receipt(expected_target: int = 1, *, target: str = "s2") -> dict[s
 
 
 class TestReadCommandIdentityPreFilter:
-    async def test_same_key_across_targets_resolved_by_intent_identity(self) -> None:
+    async def test_same_key_across_targets_resolved_by_exact_target(self) -> None:
         store = _CommandStore(
             [
                 _command_row(target_id="s1", intent_business_request_id="req-1"),
@@ -176,9 +176,10 @@ class TestReadCommandIdentityPreFilter:
             ]
         )
 
-        receipt = await _dao(store).read_command(_ref(), user_scope="u1")
+        receipt = await _dao(store).read_command(_ref(), user_scope="u1", target_id="s1")
 
         assert receipt.target_id == "s1"
+        assert "agent_command.target_id = " in store.statements[0]
         assert "agent_command.expected_revision = " in store.statements[0]
         assert "agent_execution.source_module = " in store.statements[0]
 
@@ -186,12 +187,12 @@ class TestReadCommandIdentityPreFilter:
         store = _CommandStore([_command_row(intent_source_module=None, intent_business_request_id=None)])
 
         receipt = await _dao(store).read_command(
-            _ref(source_module="api", business_request_id="other"), user_scope="u1"
+            _ref(source_module="api", business_request_id="other"), user_scope="u1", target_id="s1"
         )
 
         assert receipt.target_id == "s1"
 
-    async def test_same_identity_still_ambiguous(self) -> None:
+    async def test_other_target_with_same_identity_is_not_returned(self) -> None:
         store = _CommandStore(
             [
                 _command_row(target_id="s1"),
@@ -200,11 +201,11 @@ class TestReadCommandIdentityPreFilter:
         )
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await _dao(store).read_command(_ref(), user_scope="u1")
+            await _dao(store).read_command(_ref(), user_scope="u1", target_id="s3")
         assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
-        assert "ambiguous" in excinfo.value.sanitized_message
+        assert "not found in user scope" in excinfo.value.sanitized_message
 
-    async def test_exact_target_resolves_residual_ambiguity(self) -> None:
+    async def test_exact_target_selects_that_targets_record(self) -> None:
         store = _CommandStore(
             [
                 _command_row(target_id="s1"),
@@ -220,8 +221,8 @@ class TestReadCommandIdentityPreFilter:
     async def test_restart_new_dao_and_connection_still_reads_back(self) -> None:
         store = _CommandStore([_command_row(target_id="s1")])
 
-        first = await _dao(store).read_command(_ref(), user_scope="u1")
-        restarted = await _dao(store).read_command(_ref(), user_scope="u1")
+        first = await _dao(store).read_command(_ref(), user_scope="u1", target_id="s1")
+        restarted = await _dao(store).read_command(_ref(), user_scope="u1", target_id="s1")
 
         assert first == restarted
 
@@ -229,25 +230,25 @@ class TestReadCommandIdentityPreFilter:
         store = _CommandStore([_command_row(intent_source_module="ui")])
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await _dao(store).read_command(_ref(source_module="api"), user_scope="u1")
+            await _dao(store).read_command(_ref(source_module="api"), user_scope="u1", target_id="s1")
         assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
         assert "does not match stored command" in excinfo.value.sanitized_message
         assert "source_module" in excinfo.value.sanitized_message
-        # 诊断路径不携带身份条件（回看全部候选以区分「不存在」与「不符」）。
+        # 诊断路径不携带身份条件（回看该 target 全部候选以区分「不存在」与「不符」）。
         assert "agent_execution.source_module = " not in store.statements[-1]
 
     async def test_unknown_command_reports_not_found(self) -> None:
         store = _CommandStore([])
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await _dao(store).read_command(_ref(), user_scope="u1")
+            await _dao(store).read_command(_ref(), user_scope="u1", target_id="s1")
         assert "not found in user scope" in excinfo.value.sanitized_message
 
     async def test_cross_user_scope_rejected_before_lookup(self) -> None:
         store = _CommandStore([_command_row()])
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await _dao(store).read_command(_ref(), user_scope="u2")
+            await _dao(store).read_command(_ref(), user_scope="u2", target_id="s1")
         assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
         assert store.statements == []
 
@@ -261,7 +262,7 @@ class TestReadCommandIdentityPreFilter:
 
 
 class TestReadDraftTransferIdentityPreFilter:
-    async def test_kind_and_revision_prefiltered_before_ambiguity(self) -> None:
+    async def test_exact_target_and_revision_prefiltered(self) -> None:
         store = _CommandStore(
             [
                 _command_row(
@@ -279,13 +280,16 @@ class TestReadDraftTransferIdentityPreFilter:
             ]
         )
 
-        receipt = await _dao(store).read_draft_transfer(_ref(expected_revision=1), user_scope="u1")
+        receipt = await _dao(store).read_draft_transfer(
+            _ref(expected_revision=1), user_scope="u1", target_session_id="s2"
+        )
 
         assert receipt.target_session_id == "s2"
+        assert "agent_command.target_id = " in store.statements[0]
         assert "agent_command.command_kind = " in store.statements[0]
         assert "agent_command.expected_revision = " in store.statements[0]
 
-    async def test_true_ambiguity_after_filter_still_rejected(self) -> None:
+    async def test_other_target_with_same_key_is_not_returned(self) -> None:
         store = _CommandStore(
             [
                 _command_row(
@@ -304,10 +308,11 @@ class TestReadDraftTransferIdentityPreFilter:
         )
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await _dao(store).read_draft_transfer(_ref(expected_revision=1), user_scope="u1")
-        assert "ambiguous" in excinfo.value.sanitized_message
+            await _dao(store).read_draft_transfer(_ref(expected_revision=1), user_scope="u1", target_session_id="s3")
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "not found in user scope" in excinfo.value.sanitized_message
 
-    async def test_exact_target_resolves_residual_ambiguity(self) -> None:
+    async def test_exact_target_selects_that_targets_record(self) -> None:
         store = _CommandStore(
             [
                 _command_row(
@@ -344,31 +349,52 @@ class TestReadDraftTransferIdentityPreFilter:
             ]
         )
 
-        first = await _dao(store).read_draft_transfer(_ref(expected_revision=1), user_scope="u1")
-        restarted = await _dao(store).read_draft_transfer(_ref(expected_revision=1), user_scope="u1")
+        first = await _dao(store).read_draft_transfer(
+            _ref(expected_revision=1), user_scope="u1", target_session_id="s2"
+        )
+        restarted = await _dao(store).read_draft_transfer(
+            _ref(expected_revision=1), user_scope="u1", target_session_id="s2"
+        )
 
         assert first == restarted
 
     async def test_non_transfer_command_diagnosed(self) -> None:
-        store = _CommandStore([_command_row(command_kind="save_draft", expected_revision=1)])
+        store = _CommandStore([_command_row(target_id="s1", command_kind="save_draft", expected_revision=1)])
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await _dao(store).read_draft_transfer(_ref(expected_revision=1), user_scope="u1")
+            await _dao(store).read_draft_transfer(_ref(expected_revision=1), user_scope="u1", target_session_id="s1")
         assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
         assert "not a draft transfer" in excinfo.value.sanitized_message
 
     async def test_revision_mismatch_diagnosed(self) -> None:
         store = _CommandStore(
-            [_command_row(command_kind="draft_transfer", expected_revision=2, receipt_payload=_transfer_receipt(2))]
+            [
+                _command_row(
+                    target_id="s1",
+                    command_kind="draft_transfer",
+                    expected_revision=2,
+                    receipt_payload=_transfer_receipt(2),
+                )
+            ]
         )
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await _dao(store).read_draft_transfer(_ref(expected_revision=1), user_scope="u1")
+            await _dao(store).read_draft_transfer(_ref(expected_revision=1), user_scope="u1", target_session_id="s1")
         assert "expected_revision" in excinfo.value.sanitized_message
 
     async def test_missing_receipt_is_unknown(self) -> None:
-        store = _CommandStore([_command_row(command_kind="draft_transfer", expected_revision=1, receipt_payload=None)])
+        store = _CommandStore(
+            [_command_row(target_id="s1", command_kind="draft_transfer", expected_revision=1, receipt_payload=None)]
+        )
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await _dao(store).read_draft_transfer(_ref(expected_revision=1), user_scope="u1")
+            await _dao(store).read_draft_transfer(_ref(expected_revision=1), user_scope="u1", target_session_id="s1")
         assert excinfo.value.code is AgentErrorCode.OPERATION_UNKNOWN
+
+    async def test_empty_target_session_rejected(self) -> None:
+        store = _CommandStore([_command_row(command_kind="draft_transfer", expected_revision=1)])
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _dao(store).read_draft_transfer(_ref(expected_revision=1), user_scope="u1", target_session_id="")
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert store.statements == []
