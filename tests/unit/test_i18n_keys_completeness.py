@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 import pytest
 
+from core.i18n import I18n
+
 
 pytestmark = pytest.mark.unit
 
@@ -120,6 +122,27 @@ def _load_baseline_with_ratchet(baseline_path: Path, ceiling: int) -> tuple[set[
     return baseline_keys, baseline_count
 
 
+def _collect_duplicate_keys(path: Path) -> list[str]:
+    """读取 locale JSON 并返回重复出现的键。
+
+    ``json.load`` 对重复键静默取后者，重复定义会让「文件里看到的文本」与
+    「运行时实际生效的文本」不一致，故须用 ``object_pairs_hook`` 逐对检查。
+    """
+    duplicates: list[str] = []
+    seen: set[str] = set()
+
+    def _hook(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        for key, _ in pairs:
+            if key in seen:
+                duplicates.append(key)
+            seen.add(key)
+        return dict(pairs)
+
+    with open(path, encoding="utf-8") as f:
+        json.load(f, object_pairs_hook=_hook)
+    return duplicates
+
+
 class TestI18nKeysCompleteness(unittest.TestCase):
     LOCALES_DIR = Path(__file__).parent.parent.parent / "locales"
 
@@ -143,6 +166,22 @@ class TestI18nKeysCompleteness(unittest.TestCase):
             missing_in_zh,
             f"Keys in en_US but missing from zh_CN: {sorted(missing_in_zh)[:20]}",
         )
+
+    def test_locale_files_have_no_duplicate_keys(self):
+        """T-13: 两份 locale JSON 不得存在重复键。
+
+        ``json.load`` 对重复键静默取后者，同一文件里的两份定义会让
+        「文件里看到的文本」与「运行时实际生效的文本」不一致，且易漏改其中一份。
+        历史事故：``screener_preset_saved`` / ``_deleted`` 等 7 键各定义两次，
+        后者含 ``{name}`` 而调用方未传参，用户看到字面 ``{name}``。
+        """
+        for locale in ("zh_CN", "en_US"):
+            path = self.LOCALES_DIR / locale / "strings.json"
+            duplicates = _collect_duplicate_keys(path)
+            self.assertFalse(
+                duplicates,
+                f"{locale}/strings.json 存在重复键（json.load 只保留最后一个定义）: {duplicates}",
+            )
 
     def test_screener_section_titles_are_neutral(self):
         """CRITICAL-01: 结果区三分区标题不得含投资判断语义 (推荐/看好/买入 等)。
@@ -471,6 +510,44 @@ class TestI18nKeysCompleteness(unittest.TestCase):
             f"Unreferenced i18n keys count ({len(unreferenced_keys)}) exceeded baseline ({baseline_count}). "
             f"Ratchet invariant violated: dead key count may only decrease.",
         )
+
+
+@pytest.fixture()
+def isolated_i18n():
+    """隔离 I18n 全局状态，避免 locale/缓存污染其他用例（R7 同款做法）。"""
+    saved_listeners = list(I18n._listeners) if I18n._listeners else None
+    I18n._initialized = False
+    I18n._locale = "zh_CN"
+    I18n._strings_cache = {}
+    I18n._missing_keys = {}
+    I18n.initialize("zh_CN")
+    yield I18n
+    I18n._listeners = saved_listeners
+    I18n._initialized = False
+    I18n._locale = "zh_CN"
+    I18n._strings_cache = {}
+    I18n._missing_keys = {}
+
+
+class TestScreenerPresetMessageRendering:
+    """T-13: 方案操作提示必须渲染出方案名，且不残留 ``{name}`` 占位符。
+
+    这些 key 的模板含 ``{name}``，调用方漏传参时 ``I18n.get`` 会原样返回模板，
+    用户看到字面 ``{name}``。本用例用真实 locale 数据锁定「传入 name → 正常渲染」。
+    """
+
+    _NAME_TEMPLATE_KEYS = (
+        "screener_preset_saved",
+        "screener_preset_deleted",
+        "screener_preset_loaded",
+    )
+
+    @pytest.mark.parametrize("locale", ["zh_CN", "en_US"])
+    @pytest.mark.parametrize("key", _NAME_TEMPLATE_KEYS)
+    def test_preset_message_renders_name_without_residual_placeholder(self, isolated_i18n, locale, key) -> None:
+        rendered = isolated_i18n.get(key, locale=locale, name="示例方案")
+        assert "{name}" not in rendered, f"{locale} {key} 渲染后仍残留占位符: {rendered!r}"
+        assert "示例方案" in rendered, f"{locale} {key} 未渲染方案名: {rendered!r}"
 
 
 def test_baseline_ceiling_rejects_excess_dead_keys(tmp_path: Path) -> None:

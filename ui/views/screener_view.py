@@ -2940,7 +2940,7 @@ def ScreenerView(
                 await vm.refresh_presets(strategy)
                 set_preset_selected(name)
             if page := _get_page():
-                _show_toast(page, I18n.get("screener_preset_saved"), "success")
+                _show_toast(page, I18n.get("screener_preset_saved", name=name), "success")
         except asyncio.CancelledError:
             raise
         except Exception as ex:
@@ -3016,7 +3016,7 @@ def ScreenerView(
                 set_preset_selected("")
             if page is not None:
                 if deleted:
-                    _show_toast(page, I18n.get("screener_preset_deleted"), "success")
+                    _show_toast(page, I18n.get("screener_preset_deleted", name=name), "success")
                 else:
                     _show_toast(page, I18n.get("screener_preset_missing"), "warning")
         except asyncio.CancelledError:
