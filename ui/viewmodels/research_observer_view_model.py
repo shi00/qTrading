@@ -21,12 +21,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final, Protocol, cast
 from core.agent_types import (
+    AnswerDeliveryOutcome,
+    AnswerDeliveryRequest,
     AnswerReceipt,
     ArtifactReadQuery,
     DraftRead,
@@ -35,6 +36,8 @@ from core.agent_types import (
     HistoryQuery,
     HistoryRoundSelection,
     Mode,
+    PendingAnswerFact,
+    PendingAnswerPage,
     SaveAnswerRequest,
     SessionRead,
     SessionReadQuery,
@@ -51,6 +54,19 @@ _ANSWERABLE_DECISION_KINDS = frozenset({"user_choice"})
 
 #: 问题正文提取的候选键（其余结构化参数保持不展开，避免把授权参数当普通文本展示）。
 _QUESTION_KEYS = ("question", "prompt", "text", "title", "label", "description")
+
+#: 答复命令键前缀（P1-05）：按决定身份派生稳定键，重传/重启后仍命中同一命令。
+_ANSWER_COMMAND_KEY_PREFIX = "ui-answer:"
+
+#: 跨会话待处理阶段（与 core.agent_types.PENDING_ANSWER_STAGES 一致）。
+PENDING_STAGES: Final[tuple[str, ...]] = ("answer", "delivery", "consumption")
+
+#: 待处理聚合读取上限（单类）：达到上限时如实标注截断（R21）。
+PENDING_ANSWER_READ_LIMIT: Final[int] = 200
+
+#: 待处理徽标范围：全部会话（聚合成功）/ 仅本会话（聚合未接线或读取失败）。
+PENDING_SCOPE_ALL = "all_sessions"
+PENDING_SCOPE_SESSION = "session_only"
 
 UNAVAILABLE_NOT_WIRED = "agent_research_not_wired"
 UNAVAILABLE_NOT_READY = "agent_research_not_ready"
@@ -95,6 +111,10 @@ class AgentResearchService(Protocol):
     async def read_artifact(self, query: ArtifactReadQuery, *, user_scope: str) -> Any: ...
 
     async def answer(self, request: SaveAnswerRequest) -> AnswerReceipt: ...
+
+    async def read_pending_answers(self, *, user_scope: str, limit: int = 200) -> PendingAnswerPage: ...
+
+    async def deliver_answer(self, request: AnswerDeliveryRequest) -> AnswerDeliveryOutcome: ...
 
     async def read_draft(self, query: DraftReadQuery, *, user_scope: str) -> DraftRead: ...
 
@@ -216,6 +236,45 @@ class PendingDecision:
 
 
 @dataclass(frozen=True)
+class PendingAnswerView:
+    """跨会话待处理项的只读投影（P1-05）：记录/交付/消费分列。
+
+    ``stage`` 取 :data:`PENDING_STAGES`；``command_record_id`` 仅交付/消费阶段存在，
+    重试投递按它定位原命令（不新建答复、不换命令键）。
+    """
+
+    session_id: str
+    session_title: str | None
+    decision_id: str
+    execution_id: str
+    round_id: str
+    decision_kind: str
+    revision: int
+    stage: str
+    created_at: str
+    expires_at: str | None
+    question_text: str | None
+    command_record_id: str | None
+    delivery_state: str | None
+    consumption_state: str | None
+
+    @property
+    def answerable(self) -> bool:
+        """阶段为待答复且属于本观察层可提交的决定类型。"""
+
+        return self.stage == "answer" and self.decision_kind in _ANSWERABLE_DECISION_KINDS
+
+    @property
+    def retryable_delivery(self) -> bool:
+        """待交付且投递未被判为 unknown（unknown 不重发、不冒充已投递）。"""
+
+        return self.stage == "delivery" and self.delivery_state == "not_delivered"
+
+    def belongs_to(self, session_id: str | None) -> bool:
+        return session_id is not None and self.session_id == session_id
+
+
+@dataclass(frozen=True)
 class ResearchObserverState:
     """观察层不可变快照。
 
@@ -237,6 +296,14 @@ class ResearchObserverState:
     answer_drafts: tuple[tuple[str, str], ...] = ()
     last_updated_at: str | None = None
     last_answer_delivery_state: str | None = None
+    #: 最近一次交付失败原因码（未交付才能重试；None 表示无失败或已交付）。
+    last_answer_delivery_reason: str | None = None
+    #: 交付在途的原答复命令（同命令不并发重发；None 表示无在途交付）。
+    answer_delivery_pending_command: str | None = None
+    #: 跨会话待处理（P1-05）：三态分列 + 截断事实 + 徽标范围（R21）。
+    pending_items: tuple[PendingAnswerView, ...] = ()
+    pending_items_truncated: bool = False
+    pending_scope: str = PENDING_SCOPE_SESSION
     execution_nodes: tuple[ExecutionNodeView, ...] = ()
     messages: tuple[SessionMessageView, ...] = ()
     artifacts: tuple[SessionArtifactView, ...] = ()
@@ -278,6 +345,16 @@ class ResearchObserverState:
         """子任务节点是否处于收起态（展开态由共享 VM 持久化，切页不丢）。"""
 
         return execution_id in self.collapsed_execution_ids
+
+    def pending_for(self, stage: str) -> tuple[PendingAnswerView, ...]:
+        """读取某阶段的跨会话待处理项（未知阶段返回空，不猜归属）。"""
+
+        return tuple(item for item in self.pending_items if item.stage == stage)
+
+    def pending_for_other_sessions(self) -> tuple[PendingAnswerView, ...]:
+        """其他会话的待处理项（当前会话已有完整决定卡，不在此重复列出）。"""
+
+        return tuple(item for item in self.pending_items if not item.belongs_to(self.session_id))
 
     def artifact_body_for(self, artifact_id: str, artifact_version: int) -> LoadedArtifactBody | None:
         """读取已载入的成果正文；未载入返回 ``None``（未知即未知，不造空正文）。"""
@@ -327,6 +404,33 @@ def _pending_decisions(read: SessionRead) -> tuple[PendingDecision, ...]:
             )
         )
     return tuple(pending)
+
+
+def _pending_answer_view(fact: PendingAnswerFact) -> PendingAnswerView:
+    """聚合事实 → 只读投影（阶段与命令态原样保留，未知不猜）。"""
+
+    return PendingAnswerView(
+        session_id=fact.session_id,
+        session_title=fact.session_title,
+        decision_id=fact.decision_id,
+        execution_id=fact.execution_id,
+        round_id=fact.round_id,
+        decision_kind=fact.decision_kind,
+        revision=fact.revision,
+        stage=fact.stage,
+        created_at=fact.created_at,
+        expires_at=fact.expires_at,
+        question_text=_extract_question_text(fact.question_payload),
+        command_record_id=fact.command_record_id,
+        delivery_state=_tag_text(fact.delivery_state),
+        consumption_state=_tag_text(fact.consumption_state),
+    )
+
+
+def _answer_command_key(decision_id: str) -> str:
+    """答复命令键：按决定身份派生（同一决定的每次提交命中同一命令）。"""
+
+    return f"{_ANSWER_COMMAND_KEY_PREFIX}{decision_id}"
 
 
 def _is_expired(expires_at: str | None) -> bool:
@@ -589,13 +693,16 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
                 chosen = await self._resolve_session(self._preferred_session_id)
                 if chosen is None:
                     return
+                # 跨会话待处理聚合（P1-05）：徽标不由首条会话单独决定；读取失败
+                # 退回本会话并如实标注范围（R21），不把失败读成 0 待办。
+                overview, overview_error = await self._read_pending_overview()
                 read = await self._service.read_session(
                     SessionReadQuery(session_id=chosen, limit=50),
                     user_scope=self._user_scope,
                 )
                 if self._preferred_session_id is not None and self._preferred_session_id != chosen:
                     continue  # 读取期间目标已更新：以最新目标重读，不落过期会话
-                self._apply_session_read(chosen, read)
+                self._apply_session_read(chosen, read, overview=overview, overview_error=overview_error)
                 if self._preferred_session_id == chosen:
                     self._preferred_session_id = None
                 return
@@ -670,13 +777,71 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             draft_error_code=None,
             decisions=(),
             pending_count=0,
+            pending_items=(),
+            pending_items_truncated=False,
+            pending_scope=PENDING_SCOPE_SESSION,
             last_updated_at=read_moment,
         )
 
-    def _apply_session_read(self, session_id: str, read: SessionRead) -> None:
-        """把会话首读投影到 state（纯展示，不触碰执行）。"""
+    async def _read_pending_overview(self) -> tuple[PendingAnswerPage | None, str | None]:
+        """跨会话待处理聚合读取（P1-05）：未接线返回 None，失败返回原因码。"""
+
+        service = self._service
+        reader = getattr(service, "read_pending_answers", None) if service is not None else None
+        if not callable(reader):
+            return None, None
+        load_page = cast("Callable[..., Awaitable[PendingAnswerPage]]", reader)
+        try:
+            page = await load_page(user_scope=self._user_scope, limit=PENDING_ANSWER_READ_LIMIT)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            return None, self._error_code(e)
+        return page, None
+
+    def _apply_session_read(
+        self,
+        session_id: str,
+        read: SessionRead,
+        *,
+        overview: PendingAnswerPage | None = None,
+        overview_error: str | None = None,
+    ) -> None:
+        """把会话首读投影到 state（纯展示，不触碰执行）。
+
+        待处理徽标优先取跨会话聚合；聚合未接线/失败时退回本会话集合，并把
+        ``pending_scope`` 如实标为 ``session_only``（不冒充全局完整）。
+        """
 
         pending = _pending_decisions(read)
+        if overview is not None:
+            pending_items = tuple(_pending_answer_view(item) for item in overview.items)
+            pending_count = int(overview.answer_count) + int(overview.delivery_count)
+            pending_scope = PENDING_SCOPE_ALL
+            pending_truncated = bool(overview.truncated)
+        else:
+            pending_items = tuple(
+                PendingAnswerView(
+                    session_id=session_id,
+                    session_title=read.summary.title,
+                    decision_id=decision.decision_id,
+                    execution_id=decision.execution_id,
+                    round_id=decision.round_id,
+                    decision_kind=decision.decision_kind,
+                    revision=decision.revision,
+                    stage="answer",
+                    created_at=decision.created_at,
+                    expires_at=decision.expires_at,
+                    question_text=decision.question_text,
+                    command_record_id=None,
+                    delivery_state=None,
+                    consumption_state=None,
+                )
+                for decision in pending
+            )
+            pending_count = len(pending)
+            pending_scope = PENDING_SCOPE_SESSION
+            pending_truncated = False
         previous_session_id = self._state.session_id
         session_changed = previous_session_id is not None and previous_session_id != session_id
         self._raw_executions = tuple(read.executions)
@@ -699,7 +864,11 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             session_title=read.summary.title,
             executions=tuple((execution.execution_id, execution.display_state) for execution in read.executions),
             decisions=pending,
-            pending_count=len(pending),
+            pending_count=pending_count,
+            pending_items=pending_items,
+            pending_items_truncated=pending_truncated,
+            pending_scope=pending_scope,
+            last_error_code=overview_error,
             last_updated_at=read.summary.updated_at,
             messages_has_more=bool(read.messages.has_more),
             artifacts_has_more=bool(read.artifacts.has_more),
@@ -1027,17 +1196,38 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
     async def submit_answer(self, decision_id: str, *, execution_id: str, round_id: str) -> None:
         """提交答复：唯一写入口经 facade ``answer``（统一决定，不直连 DAO）。
 
-        ``execution_id`` / ``round_id`` 必须是界面呈现该决定时的归属：与当前投影
-        任一不符即视为过期视图（拒绝，不按同 id 作答另一轮）；已过期决定在 UI 层
-        直接拒绝。授权类决定（data_consent / tool_grant）拒绝在本层提交（需专用
-        授权界面）；空草稿不提交；facade 拒绝时保留草稿并如实给出错误码。
+        命令键按决定身份派生（P1-05）：重传/重启后命中同一答复命令，不为同一
+        决定生成第二个有效答复；保存成功后立即尝试交付一次，交付成功才清草稿，
+        失败保留草稿与待交付项（可重试）。``execution_id`` / ``round_id`` 必须是
+        界面呈现该决定时的归属：与当前投影任一不符即视为过期视图（拒绝，不按同
+        id 作答另一轮）；已保存但未交付的决定再次提交按原命令重试交付。
+        授权类决定拒绝在本层提交（需专用授权界面）；空草稿不提交；facade 拒绝
+        时保留草稿并如实给出错误码。
         """
 
         if self._service is None or not self._state.available:
             self._set_state(error_key=self._state.unavailable_reason_key)
             return
         decision = next((item for item in self._state.decisions if item.decision_id == decision_id), None)
-        if decision is None or decision.execution_id != execution_id or decision.round_id != round_id:
+        if decision is None:
+            delivery_item = next(
+                (
+                    item
+                    for item in self._state.pending_items
+                    if item.decision_id == decision_id and item.stage == "delivery"
+                ),
+                None,
+            )
+            if (
+                delivery_item is not None
+                and delivery_item.execution_id == execution_id
+                and delivery_item.round_id == round_id
+            ):
+                await self.retry_delivery(decision_id)
+                return
+            self._set_state(error_key="agent_research_decision_stale")
+            return
+        if decision.execution_id != execution_id or decision.round_id != round_id:
             self._set_state(error_key="agent_research_decision_stale")
             return
         if not decision.answerable:
@@ -1061,7 +1251,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
                 SaveAnswerRequest(
                     user_scope=self._user_scope,
                     decision_id=decision_id,
-                    client_command_id=f"ui-{uuid.uuid4().hex}",
+                    client_command_id=_answer_command_key(decision_id),
                     expected_decision_revision=decision.revision,
                     expected_execution_id=execution_id,
                     expected_round_id=round_id,
@@ -1074,13 +1264,96 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             self._set_state(submitting=False, last_error_code=self._error_code(e))
             return
 
-        delivery_state = getattr(receipt.delivery_state, "value", str(receipt.delivery_state))
-        self._set_state(
-            submitting=False,
-            last_answer_delivery_state=delivery_state,
-            answer_drafts=tuple((key, value) for key, value in self._state.answer_drafts if key != decision_id),
-        )
+        self._set_state(submitting=False, last_answer_delivery_state=_tag_text(receipt.delivery_state))
+        command_record_id = getattr(receipt, "command_record_id", None)
+        if not (isinstance(command_record_id, str) and command_record_id):
+            # 保存回执未带原命令身份：不能假装已交付，保留草稿等重试入口（R21）。
+            self._set_state(
+                last_answer_delivery_state="not_delivered", last_answer_delivery_reason="delivery_command_missing"
+            )
+            await self.refresh()
+            return
+        # 保存成功 ≠ 已投递（INV-06）：立即尝试交付一次；失败保留草稿可重试。
+        await self._attempt_delivery(command_record_id, decision_id)
         await self.refresh()
+
+    async def retry_delivery(self, decision_id: str) -> None:
+        """按原答复命令重试交付（不新建答复、不换命令键；unknown 不重发）。"""
+
+        if self._service is None or not self._state.available:
+            self._set_state(error_key=self._state.unavailable_reason_key)
+            return
+        item = next(
+            (
+                candidate
+                for candidate in self._state.pending_items
+                if candidate.decision_id == decision_id and candidate.stage == "delivery"
+            ),
+            None,
+        )
+        if item is None or item.command_record_id is None:
+            self._set_state(error_key="agent_research_decision_stale")
+            return
+        if not item.retryable_delivery:
+            self._set_state(error_key="agent_research_delivery_unknown")
+            return
+        if self._state.submitting:
+            return
+        await self._attempt_delivery(item.command_record_id, decision_id)
+        await self.refresh()
+
+    async def _attempt_delivery(self, command_record_id: str, decision_id: str) -> bool:
+        """交付一次原答复命令：返回是否已确认投递（失败保持可重试，R21）。"""
+
+        if self._state.submitting:
+            return False
+        deliver = getattr(self._service, "deliver_answer", None)
+        if not callable(deliver):
+            # 未接线即 fail-closed：保存仍成功，但不得宣称已投递（R21）。
+            self._set_state(
+                submitting=False,
+                answer_delivery_pending_command=None,
+                last_answer_delivery_state="not_delivered",
+                last_answer_delivery_reason="delivery_not_wired",
+            )
+            return False
+        deliver_once = cast("Callable[[AnswerDeliveryRequest], Awaitable[AnswerDeliveryOutcome]]", deliver)
+        self._set_state(
+            submitting=True,
+            error_key=None,
+            last_error_code=None,
+            answer_delivery_pending_command=command_record_id,
+        )
+        self._mark_inflight_committing()
+        try:
+            outcome = await deliver_once(
+                AnswerDeliveryRequest(user_scope=self._user_scope, command_record_id=command_record_id)
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            code = self._error_code(e)
+            self._set_state(
+                submitting=False,
+                answer_delivery_pending_command=None,
+                last_answer_delivery_state="not_delivered",
+                last_answer_delivery_reason=code,
+                last_error_code=code,
+            )
+            return False
+        delivery_state = _tag_text(getattr(outcome, "delivery_state", None)) or "not_delivered"
+        changes: dict[str, Any] = {
+            "submitting": False,
+            "answer_delivery_pending_command": None,
+            "last_answer_delivery_state": delivery_state,
+            "last_answer_delivery_reason": getattr(outcome, "reason", None),
+        }
+        if delivery_state == "delivered":
+            changes["answer_drafts"] = tuple(
+                (key, value) for key, value in self._state.answer_drafts if key != decision_id
+            )
+        self._set_state(**changes)
+        return delivery_state == "delivered"
 
     # ------------------------------------------------------------------
     # 内部

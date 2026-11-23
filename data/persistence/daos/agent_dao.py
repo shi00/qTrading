@@ -46,6 +46,7 @@ from core.agent_types import (
     AgentErrorCode,
     AgentServiceError,
     AgentValidationError,
+    AnswerCommandFact,
     AnswerReceipt,
     ArtifactPage,
     ArtifactPageItem,
@@ -130,6 +131,8 @@ from core.agent_types import (
     OperationRead,
     OperationReadQuery,
     OperationSummary,
+    PendingAnswerFact,
+    PendingAnswerPage,
     ReadMarkCommand,
     ReadMarkEntry,
     ReadMarkReceipt,
@@ -613,6 +616,38 @@ def _parse_answer_payload(answer_payload: CanonicalJson, identity: str) -> dict[
     if not isinstance(payload, dict):
         raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "answer payload must be a JSON object", identity)
     return payload
+
+
+#: 跨会话待处理聚合的单类上限（P1-05）：达到上限标记截断，不冒充完整集合。
+_PENDING_ANSWER_LIMIT_MAX: Final[int] = 500
+
+
+def _pending_answer_facts(rows: Sequence[Any], *, stage: str) -> list[PendingAnswerFact]:
+    """聚合行 → 待处理事实（阶段由调用分类给定；命令态仅在命令阶段出现）。"""
+
+    facts: list[PendingAnswerFact] = []
+    for row in rows:
+        delivery_state = getattr(row, "delivery_state", None)
+        consumption_state = getattr(row, "consumption_state", None)
+        facts.append(
+            PendingAnswerFact(
+                session_id=row.session_id,
+                session_title=row.session_title,
+                decision_id=row.decision_id,
+                execution_id=row.execution_id,
+                round_id=row.round_id,
+                decision_kind=row.decision_kind,
+                revision=int(row.revision),
+                created_at=_wire_time(row.created_at),
+                expires_at=_wire_time(row.expires_at) if row.expires_at is not None else None,
+                question_payload=json_doc(row.question_payload) if row.question_payload is not None else None,
+                stage=stage,
+                command_record_id=getattr(row, "command_record_id", None),
+                delivery_state=DeliveryState(delivery_state) if delivery_state is not None else None,
+                consumption_state=ConsumptionState(consumption_state) if consumption_state is not None else None,
+            )
+        )
+    return facts
 
 
 def _validate_answer_against_question_schema(payload: Any, answer_schema: Any, identity: str) -> None:
@@ -3663,6 +3698,209 @@ class AgentDao(BaseDao):
                 consumed_at=_wire_time(occurred),
                 answer_consumed_at=_wire_time(occurred),
             )
+
+    async def read_pending_answers(self, *, user_scope: str, limit: int = 200) -> PendingAnswerPage:
+        """跨会话聚合待答复/待交付/待消费（P1-05）：徽标不再只看首条会话。
+
+        三个分类各自取 ``limit`` + 1 行判截断，合并后按决定创建时刻倒序：
+
+        - ``answer``：``answer_command_id IS NULL``，且原问题未过期、执行未终止、
+          所属轮仍为当前活动轮、会话未清理（仍可安全答复）；
+        - ``delivery``：答复命令存在但投递未确认（``not_delivered`` /
+          ``delivery_unknown``，后者不可重发也不冒充已投递）；
+        - ``consumption``：已投递但消费未确认。
+
+        保存/投递/消费三态分列（INV-06）；任一分类达到上限即 ``truncated=True``，
+        不把截断集合冒充完整集合（R21）。
+        """
+
+        self._check_engine()
+        identity = f"{user_scope}/pending-answers"
+        _require_text_field(user_scope, "user_scope", identity)
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 or limit > _PENDING_ANSWER_LIMIT_MAX:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                f"limit must be an int in [1, {_PENDING_ANSWER_LIMIT_MAX}]",
+                identity,
+            )
+        occurred = datetime.now(UTC)
+        decision_columns = (
+            AgentDecision.session_id,
+            AgentDecision.decision_id,
+            AgentDecision.execution_id,
+            AgentDecision.round_id,
+            AgentDecision.decision_kind,
+            AgentDecision.revision,
+            AgentDecision.created_at,
+            AgentDecision.expires_at,
+            AgentDecision.question_payload,
+            AgentSession.title.label("session_title"),
+        )
+        order_by = (AgentDecision.created_at.desc(), AgentDecision.decision_id.asc())
+        answer_stmt = (
+            sa.select(*decision_columns)
+            .select_from(AgentDecision)
+            .join(
+                AgentSession,
+                sa.and_(
+                    AgentSession.user_scope == AgentDecision.user_scope,
+                    AgentSession.session_id == AgentDecision.session_id,
+                ),
+            )
+            .join(
+                AgentExecution,
+                sa.and_(
+                    AgentExecution.user_scope == AgentDecision.user_scope,
+                    AgentExecution.execution_id == AgentDecision.execution_id,
+                ),
+            )
+            .join(
+                AgentRound,
+                sa.and_(
+                    AgentRound.user_scope == AgentDecision.user_scope,
+                    AgentRound.round_id == AgentDecision.round_id,
+                ),
+            )
+            .where(
+                AgentDecision.user_scope == user_scope,
+                AgentDecision.answer_command_id.is_(None),
+                sa.or_(AgentDecision.expires_at.is_(None), AgentDecision.expires_at > occurred),
+                AgentRound.active_round.is_(True),
+                AgentRound.stop_reason.is_(None),
+                AgentExecution.current_round_id == AgentDecision.round_id,
+                AgentExecution.display_state.not_in(sorted(NON_RECOVERABLE_DISPLAY_STATES)),
+                AgentSession.cleaned_at.is_(None),
+                # 归档会话拒绝新答复（POLICY_DENIED）：不作为「待答复」冒领用户操作。
+                AgentSession.archived.is_(False),
+            )
+            .order_by(*order_by)
+            .limit(limit + 1)
+        )
+        command_columns = (
+            *decision_columns,
+            AgentCommand.command_record_id,
+            AgentCommand.delivery_state,
+            AgentCommand.consumption_state,
+        )
+        command_base = (
+            sa.select(*command_columns)
+            .select_from(AgentDecision)
+            .join(
+                AgentSession,
+                sa.and_(
+                    AgentSession.user_scope == AgentDecision.user_scope,
+                    AgentSession.session_id == AgentDecision.session_id,
+                ),
+            )
+            .join(
+                AgentCommand,
+                sa.and_(
+                    AgentCommand.user_scope == AgentDecision.user_scope,
+                    AgentCommand.command_record_id == AgentDecision.answer_command_id,
+                ),
+            )
+            .where(
+                AgentDecision.user_scope == user_scope,
+                AgentDecision.answer_command_id.is_not(None),
+                AgentCommand.command_kind == "answer",
+            )
+        )
+        delivery_stmt = (
+            command_base.where(AgentCommand.delivery_state != DeliveryState.DELIVERED.value)
+            .order_by(*order_by)
+            .limit(limit + 1)
+        )
+        consumption_stmt = (
+            command_base.where(
+                AgentCommand.delivery_state == DeliveryState.DELIVERED.value,
+                AgentCommand.consumption_state != ConsumptionState.CONSUMED.value,
+            )
+            .order_by(*order_by)
+            .limit(limit + 1)
+        )
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            answer_rows = (await conn.execute(answer_stmt)).all()
+            delivery_rows = (await conn.execute(delivery_stmt)).all()
+            consumption_rows = (await conn.execute(consumption_stmt)).all()
+        truncated = any(len(rows) > limit for rows in (answer_rows, delivery_rows, consumption_rows))
+        items = [
+            *_pending_answer_facts(answer_rows[:limit], stage="answer"),
+            *_pending_answer_facts(delivery_rows[:limit], stage="delivery"),
+            *_pending_answer_facts(consumption_rows[:limit], stage="consumption"),
+        ]
+        items.sort(key=lambda item: (item.created_at, item.decision_id), reverse=True)
+        return PendingAnswerPage(
+            items=tuple(items),
+            read_moment=_wire_time(occurred),
+            truncated=truncated,
+            answer_count=len(answer_rows[:limit]),
+            delivery_count=len(delivery_rows[:limit]),
+            consumption_count=len(consumption_rows[:limit]),
+        )
+
+    async def read_answer_command(self, *, user_scope: str, command_record_id: str) -> AnswerCommandFact:
+        """读答复命令原事实（P1-05 交付核定）：只按原命令身份读，不新建、不改状态。
+
+        0 行或非 ``answer`` 命令 → ``INPUT_INVALID``（不区分「不存在」与「属他人」）；
+        状态不在冻结枚举内或载荷缺失 → ``OPERATION_UNKNOWN``（坏事实不读成确定状态）。
+        """
+
+        self._check_engine()
+        identity = f"{user_scope}/{command_record_id}"
+        _require_text_field(user_scope, "user_scope", identity)
+        _require_text_field(command_record_id, "command_record_id", identity)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(
+                        AgentCommand.command_record_id,
+                        AgentCommand.client_command_id,
+                        AgentCommand.target_id,
+                        AgentCommand.session_id,
+                        AgentCommand.execution_id,
+                        AgentCommand.round_id,
+                        AgentCommand.command_kind,
+                        AgentCommand.delivery_state,
+                        AgentCommand.consumption_state,
+                        AgentCommand.input_digest,
+                        AgentCommand.request_payload,
+                        AgentCommand.verified_at,
+                    ).where(
+                        AgentCommand.user_scope == user_scope,
+                        AgentCommand.command_record_id == command_record_id,
+                    )
+                )
+            ).first()
+        if row is None or row.command_kind != "answer" or row.target_id is None:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "answer command does not exist", identity)
+        try:
+            delivery_state = DeliveryState(row.delivery_state)
+            consumption_state = ConsumptionState(row.consumption_state)
+        except ValueError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                "answer command state is outside frozen enums",
+                identity,
+            ) from exc
+        if row.request_payload is None or not isinstance(row.input_digest, str):
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "answer command payload is unavailable", identity)
+        return AnswerCommandFact(
+            command_record_id=row.command_record_id,
+            client_command_id=row.client_command_id,
+            decision_id=row.target_id,
+            session_id=row.session_id,
+            execution_id=row.execution_id,
+            round_id=row.round_id,
+            delivery_state=delivery_state,
+            consumption_state=consumption_state,
+            answer_digest=row.input_digest,
+            request_payload=json_doc(row.request_payload),
+            verified_at=_wire_time(row.verified_at) if row.verified_at is not None else None,
+        )
 
     async def claim_tool_dispatch(self, request: GrantRevisionRequest) -> ToolGrantFact:
         """派发认领（§5.4 第 6 条/SQ-03）：grant_revision CAS 单胜者，

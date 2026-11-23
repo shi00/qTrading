@@ -40,7 +40,7 @@ import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Protocol
 
 from core.agent_types import (
     NON_RECOVERABLE_DISPLAY_STATES,
@@ -48,6 +48,9 @@ from core.agent_types import (
     AgentErrorCode,
     AgentServiceError,
     AgentValidationError,
+    AnswerCommandFact,
+    AnswerDeliveryOutcome,
+    AnswerDeliveryRequest,
     AnswerReceipt,
     ArtifactRead,
     ArtifactReadQuery,
@@ -58,6 +61,7 @@ from core.agent_types import (
     CommitState,
     CostProjection,
     DeliveryRead,
+    DeliveryState,
     DraftRead,
     DraftReadQuery,
     DraftReceipt,
@@ -68,8 +72,10 @@ from core.agent_types import (
     EventReadQuery,
     HistoryPage,
     HistoryQuery,
+    MarkAnswerDeliveredRequest,
     OperationRead,
     OperationReadQuery,
+    PendingAnswerPage,
     PlanProposal,
     ReadMarkCommand,
     ReadMarkReceipt,
@@ -246,6 +252,16 @@ class _LaneDispatchRefused(RuntimeError):
         self.note_prefix = note_prefix
 
 
+class AnswerSender(Protocol):
+    """答复原生发送端口（P1-05）：由组合根注入；未注入时交付 fail-closed。
+
+    实现必须以 ``fact.client_command_id`` 为幂等键把已保存答复投递给等待中的
+    原生执行；本端口只负责发送，投递核定由服务层按原命令 CAS 落定。
+    """
+
+    async def send_answer(self, fact: AnswerCommandFact) -> None: ...
+
+
 class AgentService:
     """统一受理/查询 facade（DD §4.1）。构造后由应用组合根持有同一实例。"""
 
@@ -256,19 +272,24 @@ class AgentService:
         *,
         dispatcher: ResearchDispatcher | None = None,
         skills: SkillCatalogService | None = None,
+        answer_sender: AnswerSender | None = None,
     ) -> None:
         """``usage_dao`` 为共享模型调度账本（同一引擎）；缺省时费用投影如实报读取失败。
 
         ``dispatcher`` 由组合根在宿主就绪后注入（受理 → 持久 workflow 派发）；
         缺省时服务只提供受理事实与读取面（零派发，不伪造投递）。``skills`` 承载
         用户级 Skill 启停与角色版本选择（F12/F13），未接线时相关入口如实报
-        ``PERSISTENCE_UNAVAILABLE``，不伪造已生效。
+        ``PERSISTENCE_UNAVAILABLE``，不伪造已生效。``answer_sender`` 为答复原生
+        发送端口（P1-05）：未注入时答复保存仍成功，但交付入口 fail-closed 拒绝。
         """
 
         self._dao = dao
         self._usage_dao = usage_dao
         self._dispatcher = dispatcher
         self._skills = skills
+        self._answer_sender = answer_sender
+        # 进程内交付单飞（同一命令在途时不并发重发；原生发送按命令键幂等）。
+        self._answer_delivery_inflight: set[str] = set()
         self._closed = False
 
     # ------------------------------------------------------------------
@@ -1090,6 +1111,91 @@ class AgentService:
 
         self._require_open("answer")
         return await self._dao.save_answer(request)
+
+    async def read_pending_answers(self, *, user_scope: str, limit: int = 200) -> PendingAnswerPage:
+        """跨会话待处理聚合（P1-05）：记录/交付/消费三态分列，徽标取真实合计。"""
+
+        self._require_open("read_pending_answers")
+        return await self._dao.read_pending_answers(user_scope=user_scope, limit=limit)
+
+    async def deliver_answer(self, request: AnswerDeliveryRequest) -> AnswerDeliveryOutcome:
+        """答复交付（P1-05）：保存与投递分离，成功后才按原命令核定 delivered。
+
+        - 已 ``delivered`` → 返回原事实（零重发）；
+        - ``delivery_unknown`` → ``OPERATION_UNKNOWN``（不可确证，不重发、不冒认）；
+        - 未注入发送器 → ``PERSISTENCE_UNAVAILABLE``（fail-closed，不伪造已投递）；
+        - 发送失败 → ``NOT_DELIVERED`` + 原因码（同一命令可重试；原生发送按命令键
+          幂等，重试不产生第二条答复）。
+        """
+
+        self._require_open("deliver_answer")
+        user_scope = request.user_scope
+        command_record_id = request.command_record_id
+        identity = f"{user_scope}/{command_record_id}"
+        if not isinstance(user_scope, str) or user_scope == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "user_scope must be non-empty text", identity)
+        if not isinstance(command_record_id, str) or command_record_id == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command_record_id must be non-empty text", identity)
+        fact = await self._dao.read_answer_command(user_scope=user_scope, command_record_id=command_record_id)
+        if fact.delivery_state is DeliveryState.DELIVERED:
+            return AnswerDeliveryOutcome(
+                command_record_id=fact.command_record_id,
+                decision_id=fact.decision_id,
+                delivery_state=DeliveryState.DELIVERED,
+                consumption_state=fact.consumption_state,
+                reason=None,
+                verified_at=fact.verified_at,
+            )
+        if fact.delivery_state is DeliveryState.DELIVERY_UNKNOWN:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                "answer delivery state unknown; not re-sending",
+                identity,
+            )
+        sender = self._answer_sender
+        if sender is None:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "answer delivery sender is not wired",
+                identity,
+            )
+        if command_record_id in self._answer_delivery_inflight:
+            return AnswerDeliveryOutcome(
+                command_record_id=fact.command_record_id,
+                decision_id=fact.decision_id,
+                delivery_state=DeliveryState.NOT_DELIVERED,
+                consumption_state=fact.consumption_state,
+                reason="delivery_in_flight",
+                verified_at=None,
+            )
+        self._answer_delivery_inflight.add(command_record_id)
+        try:
+            try:
+                await sender.send_answer(fact)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                return AnswerDeliveryOutcome(
+                    command_record_id=fact.command_record_id,
+                    decision_id=fact.decision_id,
+                    delivery_state=DeliveryState.NOT_DELIVERED,
+                    consumption_state=fact.consumption_state,
+                    reason=f"send_failed:{classify_error(exc, context='general').get('code', type(exc).__name__)}",
+                    verified_at=None,
+                )
+            delivered = await self._dao.mark_answer_delivered(
+                MarkAnswerDeliveredRequest(user_scope=user_scope, command_record_id=command_record_id)
+            )
+        finally:
+            self._answer_delivery_inflight.discard(command_record_id)
+        return AnswerDeliveryOutcome(
+            command_record_id=delivered.command_record_id,
+            decision_id=fact.decision_id,
+            delivery_state=delivered.delivery_state,
+            consumption_state=fact.consumption_state,
+            reason=None,
+            verified_at=delivered.verified_at,
+        )
 
     async def stop_using(self, request: SourceStopCommand) -> SourceStopReceipt:
         """停止使用来源入口（§4.1 ``stop_using``）：委托源禁用事务，零新出站。

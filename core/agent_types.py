@@ -2580,6 +2580,90 @@ class AnswerReceipt:
     verified_at: str
 
 
+#: 跨会话待处理阶段（P1-05）：记录（待答复）/交付（已保存待投递）/消费（已投递待消费）。
+PENDING_ANSWER_STAGES: Final[frozenset[str]] = frozenset({"answer", "delivery", "consumption"})
+
+
+@dataclass(frozen=True, slots=True)
+class PendingAnswerFact:
+    """跨会话聚合的待答复/待交付/待消费事实（P1-05）。
+
+    ``stage`` 取 :data:`PENDING_ANSWER_STAGES`：``answer`` 为尚未答复（原问题仍
+    可答）；``delivery`` 为已保存答复但命令投递未确认；``consumption`` 为已投递
+    但消费未确认。保存/投递/消费三态分列（INV-06），不把「已保存」读成「已生效」。
+    ``command_record_id`` / ``delivery_state`` / ``consumption_state`` 仅在后两阶段
+    出现（``answer`` 阶段为 None，表示尚无答复命令）。
+    """
+
+    session_id: str
+    session_title: str | None
+    decision_id: str
+    execution_id: str
+    round_id: str
+    decision_kind: str
+    revision: int
+    created_at: str
+    expires_at: str | None
+    question_payload: CanonicalJson | None
+    stage: str
+    command_record_id: str | None
+    delivery_state: DeliveryState | None
+    consumption_state: ConsumptionState | None
+
+
+@dataclass(frozen=True, slots=True)
+class PendingAnswerPage:
+    """跨会话待处理页（P1-05）：分类计数 + 截断事实（R21 不把上限当全量）。"""
+
+    items: tuple[PendingAnswerFact, ...]
+    read_moment: str
+    truncated: bool
+    answer_count: int
+    delivery_count: int
+    consumption_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerDeliveryRequest:
+    """答复交付输入（P1-05）：按原答复命令身份投递一次，不新建答复。"""
+
+    user_scope: str
+    command_record_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerCommandFact:
+    """答复命令原事实（交付核定用）：只读回执身份 + 待投递载荷，不回显正文。"""
+
+    command_record_id: str
+    client_command_id: str
+    decision_id: str
+    session_id: str
+    execution_id: str
+    round_id: str
+    delivery_state: DeliveryState
+    consumption_state: ConsumptionState
+    answer_digest: str
+    request_payload: CanonicalJson
+    verified_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerDeliveryOutcome:
+    """答复交付结果：``delivery_state`` 为核定后事实，``reason`` 为未交付原因码。
+
+    未接线发送器时服务层直接拒绝（不返回伪 delivered）；发送失败返回
+    ``NOT_DELIVERED`` + ``reason``（可重试），不冒认已投递（R21）。
+    """
+
+    command_record_id: str
+    decision_id: str
+    delivery_state: DeliveryState
+    consumption_state: ConsumptionState
+    reason: str | None
+    verified_at: str | None
+
+
 @dataclass(frozen=True)
 class MarkAnswerDeliveredRequest:
     """答复投递核定输入（§5.3：同 command_id 幂等原生 send 后核定）。"""

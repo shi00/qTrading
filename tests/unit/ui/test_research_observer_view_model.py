@@ -2,7 +2,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -180,6 +180,45 @@ def _draft_read(
     )
 
 
+def _pending_fact(
+    decision: Any,
+    *,
+    stage: str = "answer",
+    session_id: str = "s-1",
+    session_title: str | None = "研究 A",
+    command_record_id: str | None = None,
+    delivery_state: str | None = None,
+    consumption_state: str | None = None,
+) -> Any:
+    return SimpleNamespace(
+        session_id=session_id,
+        session_title=session_title,
+        decision_id=decision.decision_id,
+        execution_id=decision.execution_id,
+        round_id=decision.round_id,
+        decision_kind=decision.decision_kind,
+        revision=decision.revision,
+        created_at=decision.created_at,
+        expires_at=decision.expires_at,
+        question_payload=decision.question_payload,
+        stage=stage,
+        command_record_id=command_record_id,
+        delivery_state=delivery_state,
+        consumption_state=consumption_state,
+    )
+
+
+def _pending_page(items: tuple[Any, ...], *, truncated: bool = False) -> Any:
+    return SimpleNamespace(
+        items=items,
+        read_moment="2026-11-17T05:00:00.000000Z",
+        truncated=truncated,
+        answer_count=sum(1 for item in items if item.stage == "answer"),
+        delivery_count=sum(1 for item in items if item.stage == "delivery"),
+        consumption_count=sum(1 for item in items if item.stage == "consumption"),
+    )
+
+
 class _FakeService:
     def __init__(
         self,
@@ -192,6 +231,10 @@ class _FakeService:
         artifact_error: Exception | None = None,
         draft_read: Any | None = None,
         draft_error: Exception | None = None,
+        pending_page: Any | None = None,
+        pending_error: Exception | None = None,
+        deliver_error: Exception | None = None,
+        delivery_state: str = "delivered",
     ) -> None:
         self.hits = hits
         self.read = read if read is not None else _session_read()
@@ -210,11 +253,17 @@ class _FakeService:
         self.artifact_error = artifact_error
         self.draft_read = draft_read if draft_read is not None else _draft_read()
         self.draft_error = draft_error
+        self.pending_page = pending_page
+        self.pending_error = pending_error
+        self.deliver_error = deliver_error
+        self.delivery_state = delivery_state
         self.search_calls: list[Any] = []
         self.read_calls: list[Any] = []
         self.answer_calls: list[Any] = []
         self.artifact_calls: list[Any] = []
         self.draft_calls: list[Any] = []
+        self.pending_calls: list[Any] = []
+        self.deliver_calls: list[Any] = []
 
     async def search(self, query: Any, *, user_scope: str) -> Any:
         self.search_calls.append((query, user_scope))
@@ -236,7 +285,36 @@ class _FakeService:
         self.answer_calls.append(request)
         if self.answer_error is not None:
             raise self.answer_error
-        return SimpleNamespace(delivery_state=SimpleNamespace(value="not_delivered"))
+        return SimpleNamespace(
+            command_record_id="cmd-1",
+            delivery_state=SimpleNamespace(value="not_delivered"),
+        )
+
+    async def read_pending_answers(self, *, user_scope: str, limit: int = 200) -> Any:
+        self.pending_calls.append((user_scope, limit))
+        if self.pending_error is not None:
+            raise self.pending_error
+        if self.pending_page is not None:
+            return self.pending_page
+        decisions = tuple(
+            decision
+            for decision in getattr(self.read, "decisions", ()) or ()
+            if getattr(decision, "answer_command_id", None) is None
+        )
+        return _pending_page(tuple(_pending_fact(decision) for decision in decisions))
+
+    async def deliver_answer(self, request: Any) -> Any:
+        self.deliver_calls.append(request)
+        if self.deliver_error is not None:
+            raise self.deliver_error
+        return SimpleNamespace(
+            decision_id="d-1",
+            command_record_id=request.command_record_id,
+            delivery_state=SimpleNamespace(value=self.delivery_state),
+            consumption_state=SimpleNamespace(value="not_consumed"),
+            reason=None,
+            verified_at="2026-11-17T05:00:00.000000Z",
+        )
 
     async def read_draft(self, query: Any, *, user_scope: str) -> Any:
         self.draft_calls.append((query, user_scope))
@@ -463,8 +541,12 @@ class TestDraftAndSubmit:
         assert request.user_scope == "local-desktop"
         assert '"选择第一家"' in request.answer_payload
         assert vm.state.submitting is False
-        assert vm.state.last_answer_delivery_state == "not_delivered"
-        # 提交成功后刷新当前会话（不再重查历史首条）；草稿按已提交决定清理
+        assert vm.state.last_answer_delivery_state == "delivered"
+        assert request.client_command_id == "ui-answer:d-1"
+        # 交付一次后才有确认，草稿此时才清理（保存成功 ≠ 已交付）
+        assert len(service.deliver_calls) == 1
+        assert service.deliver_calls[0].command_record_id == "cmd-1"
+        # 提交成功后刷新当前会话（不再重查历史首条）；草稿按已交付决定清理
         assert len(service.search_calls) == 1
         assert len(service.read_calls) == 2
         assert vm.state.draft_for("d-1") == ""
@@ -509,6 +591,204 @@ class TestDraftAndSubmit:
 
         assert vm.state.error_key == "agent_research_decision_expired"
         assert service.answer_calls == []
+
+
+class _SessionOnlyService:
+    """旧服务桩：未接线跨会话聚合，验证徽标范围如实退回本会话（P1-05）。"""
+
+    def __init__(self, read: Any) -> None:
+        self.read = read
+
+    async def search(self, query: Any, *, user_scope: str) -> Any:
+        return SimpleNamespace(hits=(SimpleNamespace(session_id="s-1"),), read_moment="2026-11-17T03:00:00.000000Z")
+
+    async def read_session(self, query: Any, *, user_scope: str) -> Any:
+        return self.read
+
+
+class TestPendingAggregationAndDeliveryRetry:
+    @pytest.mark.asyncio
+    async def test_badge_aggregates_all_sessions_instead_of_first_hit(self) -> None:
+        """B 会话的新决定进入徽标：不再只由「历史首条命中会话」决定（P1-05）。"""
+
+        current = _session_read(decisions=(_decision("d-1"),))
+        other = _decision("d-9", execution_id="e-9", round_id="r-9")
+        page = _pending_page(
+            (
+                _pending_fact(_decision("d-1")),
+                _pending_fact(other, session_id="s-9", session_title="研究 B"),
+            )
+        )
+        service = _FakeService(read=current, pending_page=page)
+        vm = ResearchObserverViewModel(service)
+
+        await vm.refresh()
+
+        assert vm.state.pending_count == 2
+        assert vm.state.pending_scope == "all_sessions"
+        assert [item.decision_id for item in vm.state.pending_for_other_sessions()] == ["d-9"]
+        assert service.pending_calls[0][0] == "local-desktop"
+
+    @pytest.mark.asyncio
+    async def test_badge_includes_delivery_stage_and_marks_truncation(self) -> None:
+        page = _pending_page(
+            (
+                _pending_fact(_decision("d-1")),
+                _pending_fact(
+                    _decision("d-2", answered=True),
+                    stage="delivery",
+                    command_record_id="cmd-2",
+                    delivery_state="not_delivered",
+                ),
+                _pending_fact(
+                    _decision("d-3", answered=True),
+                    stage="consumption",
+                    command_record_id="cmd-3",
+                    delivery_state="delivered",
+                    consumption_state="not_consumed",
+                ),
+            ),
+            truncated=True,
+        )
+        service = _FakeService(read=_session_read(decisions=(_decision("d-1"),)), pending_page=page)
+        vm = ResearchObserverViewModel(service)
+
+        await vm.refresh()
+
+        assert vm.state.pending_count == 2  # 待答复 + 待投递需处理；待消费不计入徽标
+        assert vm.state.pending_items_truncated is True
+        assert [item.stage for item in vm.state.pending_for("consumption")] == ["consumption"]
+        assert vm.state.pending_for("delivery")[0].command_record_id == "cmd-2"
+
+    @pytest.mark.asyncio
+    async def test_badge_falls_back_to_session_scope_when_aggregate_not_wired(self) -> None:
+        service = _SessionOnlyService(_session_read(decisions=(_decision("d-1"), _decision("d-2"))))
+        vm = ResearchObserverViewModel(cast(Any, service))
+
+        await vm.refresh()
+
+        assert vm.state.pending_count == 2
+        assert vm.state.pending_scope == "session_only"
+        assert [item.stage for item in vm.state.pending_items] == ["answer", "answer"]
+
+    @pytest.mark.asyncio
+    async def test_badge_read_failure_is_reported_not_read_as_zero(self) -> None:
+        service = _FakeService(
+            read=_session_read(decisions=(_decision("d-1"),)),
+            pending_error=_FakeError("PERSISTENCE_UNAVAILABLE"),
+        )
+        vm = ResearchObserverViewModel(service)
+
+        await vm.refresh()
+
+        assert vm.state.pending_scope == "session_only"
+        assert vm.state.pending_count == 1
+        assert vm.state.last_error_code == "PERSISTENCE_UNAVAILABLE"
+
+    @pytest.mark.asyncio
+    async def test_repeated_submit_reuses_same_command_key(self) -> None:
+        service = _FakeService(
+            read=_session_read(decisions=(_decision("d-1"),)),
+            answer_error=_FakeError("PERSISTENCE_UNAVAILABLE"),
+        )
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+        vm.set_answer_draft("d-1", "选择第一家")
+        await vm.submit_answer("d-1", execution_id="e-1", round_id="r-1")
+        await vm.submit_answer("d-1", execution_id="e-1", round_id="r-1")
+
+        assert [call.client_command_id for call in service.answer_calls] == [
+            "ui-answer:d-1",
+            "ui-answer:d-1",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_delivery_failure_keeps_draft_and_reports_reason(self) -> None:
+        service = _FakeService(
+            read=_session_read(decisions=(_decision("d-1"),)),
+            deliver_error=_FakeError("PERSISTENCE_UNAVAILABLE"),
+        )
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+        vm.set_answer_draft("d-1", "选择第一家")
+
+        await vm.submit_answer("d-1", execution_id="e-1", round_id="r-1")
+
+        assert vm.state.last_answer_delivery_state == "not_delivered"
+        assert vm.state.last_answer_delivery_reason == "PERSISTENCE_UNAVAILABLE"
+        assert vm.state.draft_for("d-1") == "选择第一家"
+
+    @pytest.mark.asyncio
+    async def test_delivery_not_wired_is_fail_closed(self) -> None:
+        class _NoDeliveryService:
+            """已保存但组合根未注入发送器：交付入口不存在（fail-closed）。"""
+
+            def __init__(self, read: Any) -> None:
+                self.read = read
+
+            async def search(self, query: Any, *, user_scope: str) -> Any:
+                return SimpleNamespace(hits=(SimpleNamespace(session_id="s-1"),), read_moment="")
+
+            async def read_session(self, query: Any, *, user_scope: str) -> Any:
+                return self.read
+
+            async def answer(self, request: Any) -> Any:
+                return SimpleNamespace(command_record_id="cmd-1", delivery_state=None)
+
+        service = _NoDeliveryService(_session_read(decisions=(_decision("d-1"),)))
+        vm = ResearchObserverViewModel(cast(Any, service))
+        await vm.refresh()
+        vm.set_answer_draft("d-1", "选择第一家")
+
+        await vm.submit_answer("d-1", execution_id="e-1", round_id="r-1")
+
+        assert vm.state.last_answer_delivery_state == "not_delivered"
+        assert vm.state.last_answer_delivery_reason == "delivery_not_wired"
+        assert vm.state.draft_for("d-1") == "选择第一家"
+
+    @pytest.mark.asyncio
+    async def test_retry_delivery_uses_original_command_without_new_answer(self) -> None:
+        other = _decision("d-2", answered=True)
+        page = _pending_page(
+            (
+                _pending_fact(
+                    other,
+                    stage="delivery",
+                    command_record_id="cmd-2",
+                    delivery_state="not_delivered",
+                ),
+            )
+        )
+        service = _FakeService(read=_session_read(), pending_page=page)
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+
+        await vm.retry_delivery("d-2")
+
+        assert service.answer_calls == []
+        assert [call.command_record_id for call in service.deliver_calls] == ["cmd-2"]
+        assert vm.state.last_answer_delivery_state == "delivered"
+
+    @pytest.mark.asyncio
+    async def test_retry_delivery_refuses_unknown_state(self) -> None:
+        page = _pending_page(
+            (
+                _pending_fact(
+                    _decision("d-2", answered=True),
+                    stage="delivery",
+                    command_record_id="cmd-2",
+                    delivery_state="delivery_unknown",
+                ),
+            )
+        )
+        service = _FakeService(read=_session_read(), pending_page=page)
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+
+        await vm.retry_delivery("d-2")
+
+        assert vm.state.error_key == "agent_research_delivery_unknown"
+        assert service.deliver_calls == []
 
 
 class TestMainSessionReadOnlyProjection:

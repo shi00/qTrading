@@ -453,10 +453,16 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
     research_toggle_holder: Any = ft.use_ref(None)
 
     def _collapse_research() -> None:
-        """只收起观察层：不清空草稿、不停止/取消研究（观察不控制执行）。"""
+        """只收起观察层：不清空草稿、不停止/取消研究（观察不控制执行）。
+
+        业务导航/快捷键切换都走到这里：顺手只读刷新一次，让其他会话的新决定
+        无需手动点刷新即可进入徽标（P1-05 导航补齐；仍不控制任何执行）。
+        """
+
         if research_open_ref.current:
             research_open_ref.current = False
             set_research_open(False)
+        _refresh_research()
 
     def _return_focus_to_toggle() -> None:
         """把焦点还给观察入口按钮（返焦；观察层非模态，不抢占业务导航焦点）。"""
@@ -558,6 +564,13 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             round_id=round_id,
         )
         set_decision_notice(I18n.get(refusal) if refusal is not None else None)
+
+    def _retry_delivery(decision_id: str) -> None:
+        """按原答复命令重试交付（不新建答复；异步调度，事件处理器内不做同步 IO）。"""
+
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.retry_delivery, decision_id)
 
     # --- Pure UI state ---
 
@@ -906,6 +919,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             on_composer_mode=research_vm.set_composer_mode,
             on_send=_send_first_question,
             on_start_plan=_start_confirmed_plan,
+            on_retry_delivery=_retry_delivery,
         )
         if research_open
         else None
