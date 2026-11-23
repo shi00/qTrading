@@ -17,12 +17,22 @@ import sqlalchemy as sa
 from app import agent_wiring as wiring_mod
 from app.agent_wiring import (
     AgentWiring,
+    _LaunchedCloseFactSink,
+    _LaunchedWorkflowLedger,
     _PendingCloseFactSink,
     _ProcessDispatchGate,
     wire_agent_runtime,
 )
-from core.agent_types import DispatchCloseFact, stable_id
+from core.agent_types import (
+    CommandRef,
+    CommitState,
+    DispatchCloseFact,
+    SubmissionReceipt,
+    stable_id,
+)
 from services.agent_service import AgentService, CloseReadinessReceipt
+from services.agent_service.dispatch import DISPATCH_CLOSED
+from services.agent_service.runtime import CloseCommandIdentity
 from services.agent_service.skills import SkillCatalogService
 from services.agent_service.recovery import InstanceGuardEvidence
 from services.agent_service.runtime import OwnerLoopBridge
@@ -796,3 +806,299 @@ async def test_embedded_mode_missing_url_opts_in_to_shared_explicitly(
 
     assert captured[0].migration_database_url is None
     assert captured[0].allow_shared_migration_credentials is True
+
+
+# ---------------------------------------------------------------------------
+# P1-06：已 launch 宿主的关闭/切库门必须基于真实在途事实收敛
+# ---------------------------------------------------------------------------
+
+
+class _StatusClient:
+    """原生控制面替身：按 ID 返回状态；``status`` 过滤返回在途集合。"""
+
+    def __init__(
+        self,
+        *,
+        active: list[tuple[str, str]] | None = None,
+        by_id: dict[str, str] | None = None,
+        error: BaseException | None = None,
+        error_after: int = 0,
+        delay: float = 0.0,
+    ) -> None:
+        self._active = active or []
+        self._by_id = by_id or {}
+        self._error = error
+        self._error_after = error_after
+        self._delay = delay
+        self.list_calls = 0
+
+    async def list_workflows_async(
+        self,
+        *,
+        workflow_ids: list[str] | None = None,
+        status: Any = None,
+        **_kwargs: Any,
+    ) -> list[Any]:
+        self.list_calls += 1
+        if self._delay:
+            await asyncio.sleep(self._delay)
+        if self._error is not None and self.list_calls > self._error_after:
+            raise self._error
+        if workflow_ids is not None:
+            return [
+                SimpleNamespace(workflow_id=wid, status=self._by_id[wid]) for wid in workflow_ids if wid in self._by_id
+            ]
+        if status is not None:
+            return [SimpleNamespace(workflow_id=wid, status=state) for wid, state in self._active]
+        return []
+
+    async def cancel_workflows_async(self, workflow_ids: list[str], *, cancel_children: bool = False) -> None:
+        return None
+
+    async def resume_workflows_async(self, workflow_ids: list[str]) -> None:
+        return None
+
+    def delete_workflows(self, workflow_ids: list[str], *, delete_children: bool = False) -> None:
+        return None
+
+
+class _RecordingDao(_FakeRegistry):
+    """记录持久派发关闭事实的登记面替身。"""
+
+    def __init__(self, *, error: BaseException | None = None) -> None:
+        super().__init__()
+        self._error = error
+        self.close_requests: list[Any] = []
+
+    async def mark_dispatch_closed(self, request: Any) -> DispatchCloseFact:
+        self.close_requests.append(request)
+        if self._error is not None and request.workflow_ids:
+            raise self._error
+        return DispatchCloseFact(user_scope=request.user_scope, closed_execution_ids=())
+
+
+def _ledger(client: Any, *, timeout_s: float = 1.0) -> _LaunchedWorkflowLedger:
+    return _LaunchedWorkflowLedger(client=client, application_version="1.0.0", timeout_s=timeout_s)
+
+
+def _command() -> CloseCommandIdentity:
+    return CloseCommandIdentity(user_scope="local-desktop", close_command_id="close-p1-06")
+
+
+async def _wire_launched(
+    *,
+    client: _StatusClient,
+    dao: _FakeRegistry | None = None,
+) -> tuple[AgentWiring, _FakeHandle]:
+    fake_handle = _FakeHandle(client=cast(Any, client))
+
+    def _launch(handle: Any) -> None:
+        handle._launched = True
+
+    cache = SimpleNamespace(
+        agent_dao=dao or _FakeRegistry(),
+        engine=SimpleNamespace(url=sa.make_url("postgresql+asyncpg://u:p@localhost:5432/qtrading")),
+    )
+    wiring = await wire_agent_runtime(
+        cache,
+        isolation_id="startup-test",
+        assemble_func=lambda _settings: fake_handle,
+        instance_guard=_FakeGuard(),
+        blocking_runner=_direct_runner,
+        launch_allowed=True,
+        launch_func=_launch,
+    )
+    assert wiring.launched is True
+    return wiring, fake_handle
+
+
+async def test_launched_idle_host_can_close_after_native_verification() -> None:
+    """已启动空宿主（无在途 workflow）必须可关/切库，而非恒被常量阻断。"""
+    dao = _RecordingDao()
+    wiring, handle = await _wire_launched(client=_StatusClient(), dao=dao)
+
+    receipt = await wiring.prepare_close()
+
+    assert receipt is not None and receipt.ready is True
+    assert receipt.residual_io == ()
+    assert handle.closed is True
+    assert wiring.close_ready() is True
+    assert [request for request in dao.close_requests if request.workflow_ids] == []  # 无 workflow 可落，不伪造写入
+
+
+async def test_launched_host_with_active_workflow_still_blocks_close() -> None:
+    """真实仍在途的 workflow（含叶）继续阻断关闭，给出精确原因与计数。"""
+    wiring, handle = await _wire_launched(
+        client=_StatusClient(active=[("wf-active", "PENDING"), ("leaf-active", "ENQUEUED")])
+    )
+
+    receipt = await wiring.prepare_close()
+
+    assert receipt is not None and receipt.ready is False
+    assert "residual_io_unsettled:launched_workflows_in_flight:2" in receipt.blocking_reasons
+    assert handle.closed is False
+    assert wiring.close_ready() is False
+
+
+async def test_launched_workflow_ledger_settles_terminal_workflows() -> None:
+    client = _StatusClient(by_id={"wf-1": "SUCCESS"})
+    ledger = _ledger(client)
+    ledger.track("wf-1")
+
+    await ledger.verify()
+
+    assert ledger.residual_names() == ()
+    assert ledger.unresolved_ids() == ()
+
+
+async def test_launched_workflow_ledger_reports_in_flight_count() -> None:
+    client = _StatusClient(by_id={"wf-1": "ENQUEUED", "wf-2": "SUCCESS"})
+    ledger = _ledger(client)
+    ledger.track("wf-1")
+    ledger.track("wf-2")
+
+    await ledger.verify()
+
+    assert ledger.residual_names() == ("launched_workflows_in_flight:1",)
+    assert ledger.unresolved_ids() == ("wf-1",)
+
+
+async def test_launched_workflow_ledger_marks_missing_native_row_unsettled() -> None:
+    """已投递但无原生行：无终态证据，按未定项阻断（不伪造成已结束）。"""
+    ledger = _ledger(_StatusClient(by_id={}))
+    ledger.track("wf-missing")
+
+    await ledger.verify()
+
+    assert ledger.residual_names() == ("launched_workflows_unsettled:1",)
+    assert ledger.unresolved_ids() == ("wf-missing",)
+
+
+async def test_launched_workflow_ledger_query_failure_blocks_with_reason() -> None:
+    ledger = _ledger(_StatusClient(error=RuntimeError("native unavailable")))
+    ledger.track("wf-1")
+
+    await ledger.verify()
+
+    assert ledger.residual_names() == ("launched_workflows_query_failed:RuntimeError",)
+    assert ledger.unresolved_ids() == ("wf-1",)
+
+
+async def test_launched_workflow_ledger_query_timeout_blocks_with_reason() -> None:
+    ledger = _ledger(_StatusClient(delay=0.05), timeout_s=0.01)
+    ledger.track("wf-1")
+
+    await ledger.verify()
+
+    assert ledger.residual_names() == ("launched_workflows_query_failed:TimeoutError",)
+    assert ledger.unresolved_ids() == ("wf-1",)
+
+
+async def test_launched_workflow_ledger_tracks_workflows_added_after_verification() -> None:
+    """关闭中再投递：核对之后才出现的 workflow 无终态证据，不得被放行。"""
+    ledger = _ledger(_StatusClient())
+    await ledger.verify()
+    assert ledger.residual_names() == ()
+
+    ledger.track("wf-late")
+
+    assert ledger.residual_names() == ("launched_workflows_unsettled:1",)
+    assert ledger.unresolved_ids() == ("wf-late",)
+
+
+async def test_launched_close_fact_sink_persists_dispatch_close_for_settled_workflows() -> None:
+    dao = _RecordingDao()
+    ledger = _ledger(_StatusClient(by_id={"wf-1": "SUCCESS", "wf-2": "CANCELLED"}))
+    ledger.track("wf-1")
+    ledger.track("wf-2")
+    sink = _LaunchedCloseFactSink(ledger=ledger, dao=dao, user_scope="local-desktop")
+
+    outcome = await sink.save_end_or_unknown(_command())
+
+    assert outcome.saved is True
+    assert [tuple(item.workflow_ids) for item in dao.close_requests] == [("wf-1", "wf-2")]
+
+
+async def test_launched_close_fact_sink_reports_unresolved_as_unknown() -> None:
+    dao = _RecordingDao()
+    ledger = _ledger(_StatusClient(by_id={"wf-1": "DELAYED"}))
+    ledger.track("wf-1")
+    sink = _LaunchedCloseFactSink(ledger=ledger, dao=dao, user_scope="local-desktop")
+
+    outcome = await sink.save_end_or_unknown(_command())
+
+    assert outcome.saved is False
+    assert outcome.unknown_associations == ("wf-1",)
+    assert dao.close_requests == []  # 未核清即不得落「已结束」事实
+
+
+async def test_launched_close_fact_sink_propagates_persistence_failure() -> None:
+    dao = _RecordingDao(error=RuntimeError("db down"))
+    ledger = _ledger(_StatusClient(by_id={"wf-1": "SUCCESS"}))
+    ledger.track("wf-1")
+    sink = _LaunchedCloseFactSink(ledger=ledger, dao=dao, user_scope="local-desktop")
+
+    with pytest.raises(RuntimeError, match="db down"):
+        await sink.save_end_or_unknown(_command())
+
+    assert [tuple(item.workflow_ids) for item in dao.close_requests] == [("wf-1",)]
+
+
+async def test_launched_host_close_persistence_failure_keeps_gate_blocked() -> None:
+    """落库失败：关闭门继续阻断并保活宿主（不取消既有防护）。"""
+    dao = _RecordingDao(error=RuntimeError("db down"))
+    wiring, handle = await _wire_launched(client=_StatusClient(by_id={"wf-1": "SUCCESS"}), dao=dao)
+    ledger = wiring.launched_ledger
+    assert ledger is not None
+    ledger.track("wf-1")
+
+    receipt = await wiring.prepare_close()
+
+    assert receipt is not None and receipt.ready is False
+    assert "close_facts_save_failed" in receipt.blocking_reasons
+    assert handle.closed is False
+    assert wiring.close_ready() is False
+
+
+async def test_launched_close_propagates_cancellation_from_verification() -> None:
+    """原生核对被取消：``CancelledError`` 原样传播（R2），不转成阻塞码。"""
+    wiring, handle = await _wire_launched(client=_StatusClient(error=asyncio.CancelledError(), error_after=1))
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await wiring.prepare_close()
+
+    assert isinstance(exc_info.value, asyncio.CancelledError)
+    assert handle.closed is False
+    assert wiring.close_ready() is False
+
+
+async def test_dispatch_stays_closed_after_launched_host_close() -> None:
+    """关闭中/关闭后新提交零派发（门闩先于残余核对关闭）。"""
+    wiring, _handle = await _wire_launched(client=_StatusClient())
+    assert wiring.dispatcher is not None
+
+    receipt = await wiring.prepare_close()
+
+    assert receipt is not None and receipt.ready is True
+    submission = SubmissionReceipt(
+        command=CommandRef(
+            user_scope="local-desktop",
+            source_module="test",
+            business_request_id="req-1",
+            command_id="cmd-1",
+            expected_revision=0,
+        ),
+        command_record_id="cmd-rec-1",
+        session_id="session-1",
+        execution_id="exec-1",
+        workflow_id="wf-new",
+        intent_digest="0" * 64,
+        commit_state=CommitState.COMMITTED,
+        verified_at="2026-11-23T00:00:00.000000Z",
+        next_action=None,
+    )
+
+    outcome = await wiring.dispatcher.dispatch(submission, user_scope="local-desktop")
+
+    assert outcome.submitted is False
+    assert outcome.reason == DISPATCH_CLOSED

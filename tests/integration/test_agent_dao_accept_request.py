@@ -235,21 +235,78 @@ class TestAcceptRequestTransaction:
         await engine.dispose()
 
     @pytest.mark.asyncio(loop_scope="session")
-    async def test_same_command_key_same_input_returns_original_receipt(self, real_embedded_pg: ConnectionInfo) -> None:
-        """同命令键同完整输入（不同 intent id）→ 取原已分配消息/源（§3.3.2 重传规则）。"""
+    async def test_same_command_key_with_new_intent_conflicts(self, real_embedded_pg: ConnectionInfo) -> None:
+        """P1-03：同命令键 + 新意图/同正文同 manifest → INPUT_CONFLICT，不得返回别的研究。
+
+        命令身份是「目标 + 客户端键」，同一键不能同时属于两个意图；旧实现按命令摘要
+        重放会返回别的研究的 COMMITTED 身份（并按本次模式派发）。
+        """
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, "u1", "s1")
-        # 冻结 manifest 与 intent 键解耦：两次请求共享同一 manifest 字节（同输入）。
+        frozen = json_doc({"schema_version": 1, "source_module": "ui", "text": "研究三家公司"})
+        await dao.accept_request(_request(manifest_payload=frozen))
+        engine = create_test_engine(real_embedded_pg.url)
+        before = {t: await _count(engine, t) for t in ("agent_execution", "agent_command", "agent_message")}
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.accept_request(_request(business_request_id="req-2", manifest_payload=frozen))
+
+        assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
+        after = {t: await _count(engine, t) for t in before}
+        assert after == before
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_same_command_key_new_intent_changed_mode_conflicts(self, real_embedded_pg: ConnectionInfo) -> None:
+        """P1-03：同命令键 + 新意图 + 仅改模式/用途 → INPUT_CONFLICT，零新事实。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
         frozen = json_doc({"schema_version": 1, "source_module": "ui", "text": "研究三家公司"})
         first = await dao.accept_request(_request(manifest_payload=frozen))
         engine = create_test_engine(real_embedded_pg.url)
         before = {t: await _count(engine, t) for t in ("agent_execution", "agent_command", "agent_message")}
 
-        # 同命令键 + 同正文 + 同 manifest + 不同 business_request_id：命令身份相同
-        # （target+键），同完整输入取原记录，不新建第二 intent。
-        replay = await dao.accept_request(_request(business_request_id="req-2", manifest_payload=frozen))
+        for index, overrides in enumerate(
+            (
+                {"mode": Mode.EXECUTE},
+                {"purpose": Purpose.END_OF_DAY_RESEARCH},
+                {"workflow_id": "wf-2"},
+            ),
+            start=1,
+        ):
+            with pytest.raises(AgentServiceError) as excinfo:
+                await dao.accept_request(
+                    _request(business_request_id=f"req-new-{index}", manifest_payload=frozen, **overrides)
+                )
+            assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
 
-        assert replay == first
+        after = {t: await _count(engine, t) for t in before}
+        assert after == before
+        assert first.mode is Mode.DISCUSS
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_replay_intent_with_client_key_bound_to_other_intent_conflicts(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        """P1-03：两个既有意图各有客户端键时，用别家的键重传原意图 → INPUT_CONFLICT。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        frozen = json_doc({"schema_version": 1, "source_module": "ui", "text": "研究三家公司"})
+        first = await dao.accept_request(_request(manifest_payload=frozen, client_command_id="c1"))
+        second = await dao.accept_request(
+            _request(business_request_id="req-2", manifest_payload=frozen, client_command_id="c2")
+        )
+        engine = create_test_engine(real_embedded_pg.url)
+        before = {t: await _count(engine, t) for t in ("agent_execution", "agent_command", "agent_message")}
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.accept_request(_request(manifest_payload=frozen, client_command_id="c2"))
+
+        assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
+        assert first.execution_id != second.execution_id
         after = {t: await _count(engine, t) for t in before}
         assert after == before
         await engine.dispose()
@@ -302,10 +359,11 @@ class TestAcceptRequestTransaction:
         await engine.dispose()
 
     @pytest.mark.asyncio(loop_scope="session")
-    async def test_legacy_digest_row_replays_and_manifest_change_conflicts(
+    async def test_legacy_command_digest_row_replays_by_full_intent_digest(
         self, real_embedded_pg: ConnectionInfo
     ) -> None:
-        """旧摘要行（仅正文）同输入重放返回原回执；同正文换 manifest 仍冲突（D05 兼容路径）。"""
+        """旧命令摘要行（仅正文）：同 intent 完整摘要相同仍重放，换 manifest 冲突（D05）。"""
+
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, "u1", "s1")
         frozen_a = json_doc({"schema_version": 1, "source_module": "ui", "text": "研究三家公司", "purpose": "concept"})
@@ -321,17 +379,16 @@ class TestAcceptRequestTransaction:
             )
         before = {t: await _count(engine, t) for t in ("agent_execution", "agent_command", "agent_message")}
 
-        replay = await dao.accept_request(_request(business_request_id="req-2", manifest_payload=frozen_a))
+        replay = await dao.accept_request(_request(manifest_payload=frozen_a, client_command_id="c2"))
         assert replay == first
+        assert replay.mode is Mode.DISCUSS
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.accept_request(
-                _request(business_request_id="req-3", manifest_payload=frozen_a, expected_revision=5)
-            )
+            await dao.accept_request(_request(manifest_payload=frozen_a, client_command_id="c3", expected_revision=5))
         assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.accept_request(_request(business_request_id="req-4", manifest_payload=frozen_b))
+            await dao.accept_request(_request(manifest_payload=frozen_b, client_command_id="c4"))
         assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
         after = {t: await _count(engine, t) for t in before}
         assert after == before
@@ -399,7 +456,16 @@ class TestAcceptRequestTransaction:
         """I14 旧行兼容：仅当存储事实能证明完整输入一致才重放，其余显式冲突。"""
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, "u1", "s1")
-        frozen = json_doc({"schema_version": 1, "source_module": "ui", "text": "研究三家公司"})
+        # 旧行需由冻结 manifest 声明模式/用途，才能证明受理时冻结值与本次一致（P1-03）。
+        frozen = json_doc(
+            {
+                "schema_version": 1,
+                "source_module": "ui",
+                "text": "研究三家公司",
+                "mode": "discuss",
+                "purpose": "concept",
+            }
+        )
         first = await dao.accept_request(_request(manifest_payload=frozen, client_command_id="c1"))
         engine = create_test_engine(real_embedded_pg.url)
         # 模拟 I14 修复前的历史行：意图摘要只覆盖 manifest，命令摘要只覆盖正文。
@@ -435,6 +501,101 @@ class TestAcceptRequestTransaction:
 
         after = {t: await _count(engine, t) for t in before}
         assert after == before, f"legacy replay must not create facts: {before} -> {after}"
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_legacy_intent_row_mode_or_purpose_change_conflicts(self, real_embedded_pg: ConnectionInfo) -> None:
+        """P1-03：旧行重放必须证明 mode/purpose；改模式/用途 → INPUT_CONFLICT。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        frozen = json_doc(
+            {
+                "schema_version": 1,
+                "source_module": "ui",
+                "text": "研究三家公司",
+                "mode": "discuss",
+                "purpose": "concept",
+            }
+        )
+        await dao.accept_request(_request(manifest_payload=frozen, client_command_id="c1"))
+        engine = create_test_engine(real_embedded_pg.url)
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.update(AgentExecution)
+                .where(AgentExecution.user_scope == "u1", AgentExecution.business_request_id == "req-1")
+                .values(intent_digest=sha256_hex(frozen))
+            )
+            await conn.execute(
+                sa.update(AgentCommand)
+                .where(AgentCommand.user_scope == "u1", AgentCommand.command_kind == "submit")
+                .values(input_digest=sha256_hex("研究三家公司"))
+            )
+        before = {t: await _count(engine, t) for t in ("agent_execution", "agent_command", "agent_message")}
+
+        for index, overrides in enumerate(
+            ({"mode": Mode.EXECUTE}, {"purpose": Purpose.END_OF_DAY_RESEARCH}),
+            start=2,
+        ):
+            with pytest.raises(AgentServiceError) as excinfo:
+                await dao.accept_request(_request(manifest_payload=frozen, client_command_id=f"c{index}", **overrides))
+            assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
+
+        after = {t: await _count(engine, t) for t in before}
+        assert after == before
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_legacy_intent_row_without_declared_mode_does_not_replay(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        """P1-03：旧行 manifest 未声明 mode/purpose → 无法证明 → 不得按完整重放。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        frozen = json_doc({"schema_version": 1, "source_module": "ui", "text": "研究三家公司"})
+        await dao.accept_request(_request(manifest_payload=frozen, client_command_id="c1"))
+        engine = create_test_engine(real_embedded_pg.url)
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.update(AgentExecution)
+                .where(AgentExecution.user_scope == "u1", AgentExecution.business_request_id == "req-1")
+                .values(intent_digest=sha256_hex(frozen))
+            )
+        before = {t: await _count(engine, t) for t in ("agent_execution", "agent_command", "agent_message")}
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.accept_request(_request(manifest_payload=frozen, client_command_id="c2"))
+
+        assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
+        after = {t: await _count(engine, t) for t in before}
+        assert after == before
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_missing_intent_digest_row_does_not_fall_into_new_acceptance(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        """P1-03：意图摘要缺失（NULL）的历史行不得被当新受理，重传按冲突处理。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await dao.accept_request(_request())
+        engine = create_test_engine(real_embedded_pg.url)
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.update(AgentExecution)
+                .where(AgentExecution.user_scope == "u1", AgentExecution.business_request_id == "req-1")
+                .values(intent_digest=None)
+            )
+        before = {t: await _count(engine, t) for t in ("agent_execution", "agent_command", "agent_message")}
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.accept_request(_request())
+
+        assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
+        after = {t: await _count(engine, t) for t in before}
+        assert after == before
         await engine.dispose()
 
     @pytest.mark.asyncio(loop_scope="session")

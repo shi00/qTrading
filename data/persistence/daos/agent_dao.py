@@ -262,6 +262,7 @@ from core.agent_types import (
     evaluate_data_attempt,
     frozen_command_input_digest,
     frozen_manifest_inconsistency,
+    frozen_manifest_mode_purpose,
     json_doc,
     is_digest,
     classify_data_consent_input_digest,
@@ -763,6 +764,25 @@ def _command_input_replays(
     return json_doc(stored_payload) == json_doc(json.loads(manifest_payload))
 
 
+def _assert_command_key_binding(existing: Any | None, execution_id: str, request: AcceptRequest) -> None:
+    """同命令键必须绑定本次重放的目标执行（P1-03/§3.2）。
+
+    ``None`` 表示该键尚未落库（允许按意图重传换键）；已存在则必须是同一执行上的
+    ``submit`` 命令。键上绑定了别的研究/其他命令族即 ``INPUT_CONFLICT``、零新事实
+    ——不把异意图提交当同命令重放（否则会返回别的研究的 COMMITTED 身份）。
+    """
+
+    if existing is None:
+        return
+    if existing.command_kind == "submit" and existing.execution_id == execution_id:
+        return
+    raise AgentServiceError(
+        AgentErrorCode.INPUT_CONFLICT,
+        "client command key is already bound to another command; use a new command id",
+        f"{request.user_scope}/{request.session_id}/{request.client_command_id}",
+    )
+
+
 def _validate_plan_items_for_save(items: object, *, execution_id: str, identity: str) -> tuple[PlanItemSnapshot, ...]:
     """写入前校验步骤序列（结构、状态值、id 唯一；失败 ``INPUT_INVALID``）。"""
 
@@ -801,11 +821,16 @@ class AgentDao(BaseDao):
         - 同 intent 异输入（上述任一字段不同）→ ``AgentServiceError(INPUT_CONFLICT)``，
           零新事实；旧行（意图摘要仅覆盖 manifest 字节）改以存储事实逐项证明，
           无法证明一致即冲突（``_legacy_intent_replays``）；
-        - 同命令键（target+client_command_id）同完整输入（正文 + 冻结 manifest +
-          期望版/node 身份，``frozen_command_input_digest`` 相等）→ 返回原回执；
-        - 同命令键异输入（正文、manifest、期望版或 node 任一不同）→
-          ``INPUT_CONFLICT``；旧行摘要仅覆盖正文，按 command 行存储的 manifest 与
-          期望版补核（检视 D05）。
+        - 重放还须命令键绑定一致（P1-03）：客户端键若已落库，必须指向本次命中的
+          同一执行上的 ``submit`` 命令；键上已绑定别的研究/其他命令族 →
+          ``INPUT_CONFLICT``，不按意图返回别的研究；意图键未命中而仅客户端键命中
+          （异意图复用旧键）同样 ``INPUT_CONFLICT``（改用新命令键再提交），
+          零新事实。
+
+        同命令键同完整输入（正文 + 冻结 manifest + 期望版/node 身份，
+        ``frozen_command_input_digest`` 相等）由 intent 完整摘要与键绑定共同证明
+        （``accept_intent_digest`` 已覆盖 workflow/模式/用途/修订声明，P1-03）；
+        旧行摘要仅覆盖正文/manifest 时按执行存储事实逐项补核（检视 D05）。
 
         序号分配持目标 session 行锁（§5.4.4）；**序号起点 1**（首条消息
         ``session_seq=1``，与事件 codec 的 ``session_seq ≥ 1`` 及 ``read_events``
@@ -879,7 +904,26 @@ class AgentDao(BaseDao):
                     f"{request.user_scope}/{request.session_id}",
                 )
 
-            # 2. intent 查重（INV-01/R2-I14：同身份必须比较完整受理输入）。
+            # 2. 命令键绑定（§3.2：命令身份 = 目标 + 客户端键）：先取键上历史绑定，
+            #    重放前必须证明它与本次命中的意图是同一命令（P1-03：不能先按意图就
+            #    返回别的研究，也不能把异意图/异冻结字段的新提交当同命令重放）。
+            existing_command = (
+                await conn.execute(
+                    sa.select(
+                        AgentCommand.execution_id,
+                        AgentCommand.command_kind,
+                        AgentCommand.input_digest,
+                        AgentCommand.expected_revision,
+                        AgentCommand.request_payload,
+                    ).where(
+                        AgentCommand.user_scope == request.user_scope,
+                        AgentCommand.target_id == request.session_id,
+                        AgentCommand.client_command_id == request.client_command_id,
+                    )
+                )
+            ).first()
+
+            # 3. intent 查重（INV-01/R2-I14：同身份必须比较完整受理输入）。
             existing_execution = (
                 await conn.execute(
                     sa.select(
@@ -896,6 +940,7 @@ class AgentDao(BaseDao):
             ).first()
             if existing_execution is not None:
                 if existing_execution.intent_digest == identity.intent_digest:
+                    _assert_command_key_binding(existing_command, existing_execution.execution_id, request)
                     return await self._replay_original_receipt(conn, request, existing_execution.execution_id)
                 # 旧行（意图摘要仅覆盖 manifest 字节）：改以存储事实逐项证明完整
                 # 输入一致，无法证明即冲突（R21：不得把未知当相等）。
@@ -907,6 +952,7 @@ class AgentDao(BaseDao):
                     request,
                     command_input_digest=command_input_digest,
                 ):
+                    _assert_command_key_binding(existing_command, existing_execution.execution_id, request)
                     return await self._replay_original_receipt(conn, request, existing_execution.execution_id)
                 raise AgentServiceError(
                     AgentErrorCode.INPUT_CONFLICT,
@@ -914,33 +960,13 @@ class AgentDao(BaseDao):
                     _identity_str(request),
                 )
 
-            # 3. 命令键查重（§3.3.2：相同目标/键重传取原记录；同命令异输入冲突）。
-            existing_command = (
-                await conn.execute(
-                    sa.select(
-                        AgentCommand.execution_id,
-                        AgentCommand.input_digest,
-                        AgentCommand.expected_revision,
-                        AgentCommand.request_payload,
-                    ).where(
-                        AgentCommand.user_scope == request.user_scope,
-                        AgentCommand.target_id == request.session_id,
-                        AgentCommand.client_command_id == request.client_command_id,
-                    )
-                )
-            ).first()
             if existing_command is not None:
-                if _command_input_replays(
-                    existing_command,
-                    text=request.text,
-                    manifest_payload=request.manifest_payload,
-                    expected_revision=request.expected_revision,
-                    command_input_digest=command_input_digest,
-                ):
-                    return await self._replay_original_receipt(conn, request, existing_command.execution_id)
+                # 意图键未命中、仅客户端键命中：该键已属于另一研究命令（别的研究/意图），
+                # 不得把本次异意图提交当同命令重放（P1-03/§3.2/AC34）。按新受理处理须
+                # 换新命令键；这里显式冲突、零新事实，并指出需要新键。
                 raise AgentServiceError(
                     AgentErrorCode.INPUT_CONFLICT,
-                    "same command key with different input",
+                    "client command key is already bound to another research intent; use a new command id",
                     f"{request.user_scope}/{request.session_id}/{request.client_command_id}",
                 )
 
@@ -1205,6 +1231,7 @@ class AgentDao(BaseDao):
                 commit_state=CommitState.COMMITTED,
                 verified_at=occurred_wire,
                 next_action="await workflow dispatch; query read_command for delivery facts",
+                mode=request.mode,
             )
             await conn.execute(
                 sa.update(AgentCommand)
@@ -1243,11 +1270,10 @@ class AgentDao(BaseDao):
 
         旧行未存完整摘要，只能以存储事实逐项证明完整输入一致：比较组/路引用
         （execution 列）、正文/manifest/期望版/node（命令完整输入摘要）、
-        ``workflow_id``（受理回执）、来源显示名（受理源资产）。任一事实缺失或
-        不一致即返回 False，调用方按 ``INPUT_CONFLICT`` 处理（不静默放行）。
-        ``mode``/``purpose`` 未单独落库，由冻结 manifest 契约承载（两者是 manifest
-        内容的一部分），manifest 摘要相等即视为相等——这是旧行唯一无法二次证明
-        的字段，仅对旧行适用。
+        ``workflow_id``/``session_id``（受理回执）、来源显示名（受理源资产）、
+        ``mode``/``purpose``（冻结 manifest 声明值，顶层或 ``shared`` 块）。任一
+        事实缺失或无法证明即返回 False，调用方按 ``INPUT_CONFLICT`` 处理（不静默
+        放行、不把未知当相等；P1-03）。
         """
 
         if existing.comparison_group_ref != request.comparison_group_ref:
@@ -1285,7 +1311,14 @@ class AgentDao(BaseDao):
             receipt = decode_submission_receipt(command.receipt_payload)
         except (AgentValidationError, ValueError):
             return False
+        if receipt.session_id != request.session_id:
+            return False
         if receipt.workflow_id != request.workflow_id:
+            return False
+        declared_mode, declared_purpose = frozen_manifest_mode_purpose(request.manifest_payload)
+        # mode/purpose 未单独落库：只有冻结 manifest 明确声明且与本次一致才算证明，
+        # 缺失/非法一律视为不可证明（R21）。
+        if declared_mode is not request.mode or declared_purpose is not request.purpose:
             return False
         stored_display_name = (
             await conn.execute(

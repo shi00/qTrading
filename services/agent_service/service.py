@@ -984,7 +984,11 @@ class AgentService:
         dispatcher = self._dispatcher
         if dispatcher is None:
             return receipt, None
-        outcome = await dispatcher.dispatch(receipt, user_scope=request.user_scope, mode=request.mode)
+        # 派发使用受理时权威模式（P1-03）：重放查回的是原受理回执，不能拿本次请求
+        # 的模式覆盖。历史回执无 mode 字段时，受理事务已按冻结 manifest 证明请求
+        # 模式与受理时一致（DAO ``_legacy_intent_replays``），故回退到请求值仍等价。
+        dispatch_mode = receipt.mode if receipt.mode is not None else request.mode
+        outcome = await dispatcher.dispatch(receipt, user_scope=request.user_scope, mode=dispatch_mode)
         return receipt, outcome
 
     async def _admit_business_sources(self, request: AcceptRequest, receipt: SubmissionReceipt) -> None:

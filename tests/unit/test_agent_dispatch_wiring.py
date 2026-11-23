@@ -93,7 +93,7 @@ _SNAPSHOT = ExecutionSnapshot(
 )
 
 
-def _receipt(*, commit_state: CommitState = CommitState.COMMITTED) -> SubmissionReceipt:
+def _receipt(*, commit_state: CommitState = CommitState.COMMITTED, mode: Mode | None = None) -> SubmissionReceipt:
     return SubmissionReceipt(
         command=_REF,
         command_record_id="cmd-1",
@@ -104,6 +104,7 @@ def _receipt(*, commit_state: CommitState = CommitState.COMMITTED) -> Submission
         commit_state=commit_state,
         verified_at="2026-11-18T00:00:00.000000Z",
         next_action=None,
+        mode=mode,
     )
 
 
@@ -358,6 +359,24 @@ def test_submit_in_discuss_mode_does_not_start_research() -> None:
 
     outcome = asyncio.run(
         service.submit_and_dispatch(_accept_request(mode=Mode.DISCUSS), command=cast(Any, _receipt().command))
+    )
+
+    assert outcome.dispatch is not None
+    assert outcome.dispatch.submitted is False
+    assert outcome.dispatch.reason == f"{MODE_RESEARCH_DISABLED}:{Mode.DISCUSS.value}"
+    assert submit.calls == []
+
+
+def test_submit_dispatch_uses_accepted_receipt_mode_not_request_mode() -> None:
+    """P1-03：重放返回原回执，派发必须用回执里的受理权威 mode。"""
+
+    submit = _RecordingSubmitter()
+    dispatcher = _dispatcher(gate=_FakeGate(closed=False), submit=submit)
+    dao = _FakeDao(_receipt(mode=Mode.DISCUSS))
+    service = AgentService(cast(Any, dao), dispatcher=dispatcher)
+
+    outcome = asyncio.run(
+        service.submit_and_dispatch(_accept_request(mode=Mode.EXECUTE), command=cast(Any, _receipt().command))
     )
 
     assert outcome.dispatch is not None

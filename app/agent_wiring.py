@@ -14,7 +14,8 @@
      ``AGENT_RUNTIME_MIGRATION_DATABASE_URL`` 或 keyring），运行池只用运行凭据；
      未配置时外置模式拒绝启动（零派发），仅本机内置单用户模式显式告警共用；
    - 关闭前置经 ``AgentRuntime.prepare_close``（既有关闭链：冻结桥提交 → 关派发 →
-     核 IO → 保存结束/unknown → 关闭 DBOS/Client/引擎），在释放共享引擎之前调用。
+     核对已 launch 宿主的 workflow 终态（原生事实）→ 保存结束/unknown → 关闭
+     DBOS/Client/引擎），在释放共享引擎之前调用。
 
 **launch 门闩**：needs-spike（HANDOFF §8.4：真 PG/真进程隔离实证）默认保持关闭——
 宿主照常组装并执行启动隔离，但 launch 与派发显式推迟（零派发）。门闩由显式
@@ -44,8 +45,10 @@ from dataclasses import dataclass
 from importlib.metadata import version
 from typing import Any, Final, cast
 
+from dbos import WorkflowStatusString
+
 from app.agent_mcp import build_mcp_lifecycle
-from core.agent_types import AgentValidationError
+from core.agent_types import AgentValidationError, DispatchCloseRequest
 from services.agent_service import (
     AgentRuntime,
     AgentRuntimeHandle,
@@ -80,7 +83,17 @@ from services.agent_service.main_turn import (
 )
 from services.agent_service.main_turn_model import build_governed_turn_factory
 from services.agent_service.mcp_lifecycle import MCPServiceLifecycle
-from services.agent_service.runtime import CloseCommandIdentity, CloseFactOutcome, OwnerLoopBridge
+from services.agent_service.recovery import (
+    ISOLATION_PAGE_SIZE,
+    STARTUP_ACTIVE_STATUSES,
+    STARTUP_WORKFLOW_NAMES,
+)
+from services.agent_service.runtime import (
+    RUNTIME_DB_NAME,
+    CloseCommandIdentity,
+    CloseFactOutcome,
+    OwnerLoopBridge,
+)
 from services.agent_service.skills import ManagedSkillStore, SkillCatalogService
 from services.agent_service.tool_runtime import build_tool_runtime_factory
 from services.agent_service.units import UnitConversion
@@ -106,6 +119,19 @@ _LOCAL_USER_SCOPE: Final[str] = "local-desktop"
 
 #: 关闭前置预算（先于 watchdog/do_cleanup 执行，须有界以免拖死退出路径）。
 AGENT_CLOSE_PRELUDE_TIMEOUT_S: Final[float] = 15.0
+
+#: 已 launch 宿主的 workflow 终态核对预算（关闭前置与持久化事实各一次，有界）。
+AGENT_LAUNCHED_WORKFLOW_VERIFY_TIMEOUT_S: Final[float] = 5.0
+
+#: 原生终态（核到即视为该 workflow 已收敛；在途状态见 ``STARTUP_ACTIVE_STATUSES``）。
+_LAUNCHED_WORKFLOW_TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
+    {
+        WorkflowStatusString.SUCCESS.value,
+        WorkflowStatusString.ERROR.value,
+        WorkflowStatusString.CANCELLED.value,
+        WorkflowStatusString.MAX_RECOVERY_ATTEMPTS_EXCEEDED.value,
+    }
+)
 
 
 def agent_unit_converter() -> UnitConversion:
@@ -165,6 +191,8 @@ class AgentWiring:
     main_turn: MainTurnRunner | None = None
     #: Agent 用户域（与受理/派发/回合身份同源）。
     user_scope: str = _LOCAL_USER_SCOPE
+    #: 已 launch 宿主的 workflow 收敛事实（关闭前置与关闭门闩共用同一份核对结果）。
+    launched_ledger: _LaunchedWorkflowLedger | None = None
     unclosed_handle: AgentRuntimeHandle | None = None
     instance_guard: Any | None = None
     _close_command: CloseCommandIdentity | None = None
@@ -196,7 +224,8 @@ class AgentWiring:
     async def prepare_close(self) -> CloseReadinessReceipt | None:
         """关闭前置：先收敛/释放 Agent 宿主，再由调用方释放共享引擎。
 
-        顺序：``AgentRuntime.prepare_close``（既有关闭链）→ facade ``aclose``。
+        顺序：已 launch 宿主先按原生 workflow 终态核对收敛事实 → ``AgentRuntime.
+        prepare_close``（既有关闭链，探针据同一份事实判定）→ facade ``aclose``。
         未就绪（宿主未组装/隔离失败）时为 no-op，不启动关闭链。不触碰他层资源
         （Recorder、业务引擎、内置 PG 由调用方按原协调顺序关闭）。
 
@@ -216,6 +245,8 @@ class AgentWiring:
             self._close_command = CloseCommandIdentity(_LOCAL_USER_SCOPE, f"app-close-{uuid.uuid4().hex}")
         receipt = self._receipt
         if self.runtime is not None and (receipt is None or not receipt.ready):
+            # 关闭门闩的残余探针是同步读面：先按真实原生事实刷新一次，再进关闭链。
+            await self._verify_launched_workflows()
             try:
                 receipt = await asyncio.wait_for(
                     self.runtime.prepare_close(self._close_command),
@@ -248,6 +279,18 @@ class AgentWiring:
         if self.close_ready():
             await self.service.aclose()
         return receipt
+
+    async def _verify_launched_workflows(self) -> None:
+        """关闭前按原生事实刷新收敛快照（未 launch/无 ledger 时为 no-op）。
+
+        核对失败由 ledger 如实记入残余项，关闭链随后继续阻断；这里不吞取消（R2），
+        也不把核对失败当成功。
+        """
+
+        ledger = self.launched_ledger
+        if ledger is None:
+            return
+        await ledger.verify()
 
     async def _disconnect_mcp_sessions(self) -> None:
         """关闭前置：断开本进程显式建立的 MCP 连接。
@@ -341,12 +384,11 @@ class _InFlightPortIo:
 
 
 class _PendingCloseFactSink:
-    """结束/unknown 事实端口。
+    """结束/unknown 事实端口（未 launch 宿主）。
 
-    生产派发路径尚未接线（launch 门闩推迟），未 launch 的宿主没有在途 operation
-    需要落结束/unknown，如实返回 ``saved=True``。若未来已 launch，结束/unknown 的
-    持久化落点尚未接线，不得谎报已保存（R21）——返回 ``saved=False`` 让关闭前置
-    如实报未就绪。
+    未 launch 的宿主没有派发路径、没有在途 workflow，结束/unknown 无事实可落，
+    如实返回 ``saved=True``（可核事实，不是把未知伪装成已保存）。已 launch 宿主
+    走 :class:`_LaunchedCloseFactSink`（按原生终态核对 + 持久派发关闭事实）。
     """
 
     def __init__(self, *, launched: bool) -> None:
@@ -355,6 +397,179 @@ class _PendingCloseFactSink:
     async def save_end_or_unknown(self, command: CloseCommandIdentity) -> CloseFactOutcome:
         if self._launched:
             return CloseFactOutcome(saved=False)
+        return CloseFactOutcome(saved=True)
+
+
+class _LaunchedWorkflowLedger:
+    """已 launch 宿主的 workflow 收敛事实（真实原生核对，非常量）。
+
+    - ``track``：投递成功的根 workflow 身份（关闭时须逐个核到终态）；
+    - ``verify``：按原生事实刷新——本应用/版本下仍在途的 workflow（含叶）与已
+      跟踪 workflow 的原生状态；查询失败/超时如实记录，不冒充已收敛（R21）；
+    - ``residual_names``：关闭门闩的**同步**探针读面（两次调用之间只读缓存事实）；
+      核对之后才出现的 workflow 无终态证据，按 ``tracked - terminal - in_flight``
+      计入未定项，故「关闭中再提交」不会被误放行。
+
+    只读原生控制面（``DBOSClient``），不写业务事实；单次核对有界（不拖死退出）。
+    """
+
+    def __init__(self, *, client: Any, application_version: str, timeout_s: float) -> None:
+        self._client = client
+        self._application_version = application_version
+        self._timeout_s = timeout_s
+        self._tracked: set[str] = set()
+        self._active_ids: frozenset[str] = frozenset()
+        self._terminal_ids: frozenset[str] = frozenset()
+        self._in_flight_ids: frozenset[str] = frozenset()
+        self._verified = False
+        self._query_failure: str | None = None
+
+    @property
+    def tracked_ids(self) -> tuple[str, ...]:
+        """本进程投递成功的根 workflow 身份（稳定排序）。"""
+
+        return tuple(sorted(self._tracked))
+
+    def track(self, workflow_id: str) -> None:
+        """登记一次成功投递的根 workflow（仅提交返回后调用）。"""
+
+        if workflow_id:
+            self._tracked.add(workflow_id)
+
+    def residual_names(self) -> tuple[str, ...]:
+        """残余项（精确原因 + 计数；无残余即空元组）。"""
+
+        if self._query_failure is not None:
+            return (f"launched_workflows_query_failed:{self._query_failure}",)
+        if not self._verified:
+            return ("launched_workflows_unverified",)
+        residual: list[str] = []
+        if self._in_flight_ids:
+            residual.append(f"launched_workflows_in_flight:{len(self._in_flight_ids)}")
+        unsettled = self._tracked - self._terminal_ids - self._in_flight_ids
+        if unsettled:
+            residual.append(f"launched_workflows_unsettled:{len(unsettled)}")
+        return tuple(residual)
+
+    def unresolved_ids(self) -> tuple[str, ...]:
+        """未核到终态的身份（无法核对时即全部已跟踪身份，不缩小未知）。"""
+
+        if self._query_failure is not None or not self._verified:
+            return self.tracked_ids
+        return tuple(sorted((self._tracked - self._terminal_ids) | self._active_ids))
+
+    async def verify(self) -> None:
+        """按原生事实刷新收敛快照；超时/异常如实记录，``CancelledError`` 传播。"""
+
+        try:
+            async with asyncio.timeout(self._timeout_s):
+                active_ids = await self._list_active_workflow_ids()
+                states = await self._list_tracked_states()
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError:
+            self._query_failure = "TimeoutError"
+            self._verified = False
+            logger.warning(
+                "[AgentWiring] launched workflow verification timed out after %.1fs; close stays blocked",
+                self._timeout_s,
+            )
+            return
+        except Exception as e:
+            self._query_failure = type(e).__name__
+            self._verified = False
+            logger.warning(
+                "[AgentWiring] launched workflow verification failed (%s); close stays blocked",
+                type(e).__name__,
+            )
+            return
+        self._active_ids = active_ids
+        self._terminal_ids = frozenset(
+            tid for tid in self._tracked if states.get(tid) in _LAUNCHED_WORKFLOW_TERMINAL_STATUSES
+        )
+        self._in_flight_ids = (
+            frozenset(tid for tid, state in states.items() if state in STARTUP_ACTIVE_STATUSES) | active_ids
+        )
+        self._query_failure = None
+        self._verified = True
+        logger.info(
+            "[AgentWiring] launched workflows verified (tracked=%d, in_flight=%d, terminal=%d)",
+            len(self._tracked),
+            len(self._in_flight_ids),
+            len(self._terminal_ids),
+        )
+
+    async def _list_active_workflow_ids(self) -> frozenset[str]:
+        """本应用/版本下仍在途的 workflow（含叶；分页读满后返回）。"""
+
+        active: set[str] = set()
+        offset = 0
+        while True:
+            page = await self._client.list_workflows_async(
+                status=list(STARTUP_ACTIVE_STATUSES),
+                name=list(STARTUP_WORKFLOW_NAMES),
+                application_name=RUNTIME_DB_NAME,
+                app_version=self._application_version,
+                limit=ISOLATION_PAGE_SIZE,
+                offset=offset,
+                load_input=False,
+                load_output=False,
+            )
+            for item in page:
+                active.add(str(item.workflow_id))
+            if len(page) < ISOLATION_PAGE_SIZE:
+                return frozenset(active)
+            offset += len(page)
+
+    async def _list_tracked_states(self) -> dict[str, str]:
+        """已跟踪 workflow 的原生状态（无行即不在结果中，不伪造终态）。"""
+
+        states: dict[str, str] = {}
+        tracked = sorted(self._tracked)
+        for start in range(0, len(tracked), ISOLATION_PAGE_SIZE):
+            chunk = tracked[start : start + ISOLATION_PAGE_SIZE]
+            page = await self._client.list_workflows_async(
+                workflow_ids=chunk,
+                limit=len(chunk),
+                load_input=False,
+                load_output=False,
+            )
+            for item in page:
+                states[str(item.workflow_id)] = str(item.status)
+        return states
+
+
+class _LaunchedCloseFactSink:
+    """已 launch 宿主的结束/unknown 持久化端口。
+
+    关闭链只在残余探针为空时调用本端口；这里再按原生事实复核一次（关闭前重核），
+    然后在有可跟踪 workflow 时落**持久派发关闭事实**（``mark_dispatch_closed``：
+    按精确 workflow 身份幂等，与启动隔离同一事实；现有 DAO 无独立 execution-ended
+    写入口，属 P1-08 范围）。任一 workflow 未核到终态即 ``saved=False`` 并把精确
+    身份作为 unknown 关联上报（不伪装已结束，R21）；落库失败异常上抛，由关闭链
+    记为 ``close_facts_save_failed`` 继续阻断。
+    """
+
+    def __init__(self, *, ledger: _LaunchedWorkflowLedger, dao: Any, user_scope: str) -> None:
+        self._ledger = ledger
+        self._dao = dao
+        self._user_scope = user_scope
+
+    async def save_end_or_unknown(self, command: CloseCommandIdentity) -> CloseFactOutcome:
+        await self._ledger.verify()
+        unresolved = self._ledger.unresolved_ids()
+        if unresolved:
+            logger.warning(
+                "[AgentWiring] close facts not saved: %d workflow(s) without terminal evidence",
+                len(unresolved),
+            )
+            return CloseFactOutcome(saved=False, unknown_associations=unresolved)
+        tracked = self._ledger.tracked_ids
+        if tracked:
+            await self._dao.mark_dispatch_closed(
+                DispatchCloseRequest(user_scope=self._user_scope, workflow_ids=tracked)
+            )
+            logger.info("[AgentWiring] close facts persisted (workflows=%d)", len(tracked))
         return CloseFactOutcome(saved=True)
 
 
@@ -663,6 +878,16 @@ async def wire_agent_runtime(
     port_io = _InFlightPortIo()
     submit_port = workflow_submitter if workflow_submitter is not None else _default_workflow_submitter(blocking_runner)
     read_port = workflow_result_reader if workflow_result_reader is not None else _default_result_reader(handle)
+    #: 已 launch 宿主才需要真实终态核对；未 launch 无派发路径（零 workflow）。
+    ledger = (
+        _LaunchedWorkflowLedger(
+            client=handle.client,
+            application_version=settings.application_version,
+            timeout_s=AGENT_LAUNCHED_WORKFLOW_VERIFY_TIMEOUT_S,
+        )
+        if launched
+        else None
+    )
 
     async def _tracked_submit(workflow_id: str, payload: dict[str, Any]) -> None:
         port_io.enter("research_submit")
@@ -670,6 +895,9 @@ async def wire_agent_runtime(
             await submit_port(workflow_id, payload)
         finally:
             port_io.exit("research_submit")
+        if ledger is not None:
+            # 只在投递成功后登记：失败即无该 workflow，不得凭空要求终态。
+            ledger.track(workflow_id)
 
     async def _tracked_read(workflow_id: str) -> ResearchWorkflowResult:
         port_io.enter("research_result_read")
@@ -679,12 +907,11 @@ async def wire_agent_runtime(
             port_io.exit("research_result_read")
 
     def _residual_io_probe() -> tuple[str, ...]:
-        """关闭门闩的残余 IO 探针：端口在途 + 已 launch 但无法核定的宿主执行。"""
+        """关闭门闩的残余 IO 探针：端口在途 + 已 launch 宿主的 workflow 收敛事实。"""
         residual = list(port_io.residual_names())
-        if launched:
-            # 已 launch 的 SDK 执行集没有可核对零在途的公开证据；在补齐真实探针前
-            # 不得谎报已收敛（R2-I35/R21）——关闭门闩据此阻断释放依赖。
-            residual.append("launched_workflows_unverified")
+        if ledger is not None:
+            # 真实原生事实（终态/在途/未定项与计数），不再用常量一刀切（R2-I35/R21）。
+            residual.extend(ledger.residual_names())
         return tuple(residual)
 
     dispatcher = ResearchDispatcher(
@@ -696,11 +923,16 @@ async def wire_agent_runtime(
         # 生产角色能力来源：只取本次请求冻结的 Skill/MCP 显式手选集（未选择即零派发）。
         capability_provider=build_role_capability_provider(dao),
     )
+    fact_sink = (
+        _LaunchedCloseFactSink(ledger=ledger, dao=dao, user_scope=user_scope)
+        if ledger is not None
+        else _PendingCloseFactSink(launched=False)
+    )
     runtime = AgentRuntime(
         handle=handle,
         bridge=bridge,
         dispatch_gate=gate,
-        fact_sink=_PendingCloseFactSink(launched=launched),
+        fact_sink=fact_sink,
         blocking_runner=cast(Any, blocking_runner),
         residual_io_probe=_residual_io_probe,
     )
@@ -737,5 +969,6 @@ async def wire_agent_runtime(
         intake=intake,
         main_turn=main_turn,
         user_scope=user_scope,
+        launched_ledger=ledger,
         instance_guard=outcome.instance_guard,
     )
