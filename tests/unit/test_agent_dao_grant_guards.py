@@ -24,7 +24,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from core.agent_types import AgentErrorCode, AgentServiceError, GrantRevisionRequest, ToolGrantState
+from core.agent_types import (
+    AgentErrorCode,
+    AgentServiceError,
+    GrantRevisionRequest,
+    MCPServiceIdentity,
+    ToolGrantState,
+)
 from data.persistence.daos.agent_dao import AgentDao
 
 pytestmark = pytest.mark.unit
@@ -373,3 +379,70 @@ class TestRevokeGrantGuards:
         assert "dispatch_operation_id" not in params
         assert params["grant_state"] == "revoked"
         assert "agent_operation" not in conn.reads
+
+
+class _GateDaoConn:
+    """停用门事务替身：门行 + 冻结使用者查询 + 写入捕获。"""
+
+    def __init__(self, *, gate: str | None = None, users: tuple[str, ...] = ()) -> None:
+        self.gate = gate
+        self.users = users
+        self.writes: list[str] = []
+
+    async def execute(self, statement: Any, params: Any = None) -> Any:
+        sql = str(statement)
+        result = MagicMock()
+        result.first.return_value = None
+        result.rowcount = 1
+        if sql.lstrip().upper().startswith("INSERT"):
+            self.writes.append("insert")
+            compiled = statement.compile().params
+            if "app_state" in sql:
+                self.gate = compiled.get("config_value")
+        elif "FROM app_state" in sql:
+            if self.gate is not None:
+                result.first.return_value = SimpleNamespace(config_value=self.gate)
+        elif "FROM agent_decision" in sql:
+            result.all.return_value = [SimpleNamespace(execution_id=u) for u in self.users]
+        else:
+            self.writes.append("other")
+        return result
+
+
+class TestMcpDispatchGate:
+    """P1-10：停用门与 claim 共享行锁；仍有冻结使用者即拒绝停用（零状态写）。"""
+
+    _IDENTITY = MCPServiceIdentity(service_id="svc-1", config_version=1)
+
+    async def test_stop_refused_while_frozen_users_exist(self) -> None:
+        conn = _GateDaoConn(users=("exec-1",))
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _dao(conn).stop_mcp_dispatch_gate(self._IDENTITY)
+
+        assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+        assert conn.gate is None or json.loads(conn.gate)["state"] == "active"
+
+    async def test_stop_commits_when_no_users(self) -> None:
+        conn = _GateDaoConn()
+
+        await _dao(conn).stop_mcp_dispatch_gate(self._IDENTITY)
+
+        gate = json.loads(conn.gate or "{}")
+        assert gate["state"] == "stopped"
+        assert gate["reason"] == "disconnect"
+
+    async def test_stop_is_idempotent_when_already_stopped(self) -> None:
+        conn = _GateDaoConn(gate=json.dumps({"schema_version": 1, "state": "stopped"}))
+        writes_before = list(conn.writes)
+
+        await _dao(conn).stop_mcp_dispatch_gate(self._IDENTITY)
+
+        assert conn.writes == writes_before
+
+    async def test_resume_reopens_gate(self) -> None:
+        conn = _GateDaoConn(gate=json.dumps({"schema_version": 1, "state": "stopped"}))
+
+        await _dao(conn).resume_mcp_dispatch_gate(self._IDENTITY)
+
+        assert json.loads(conn.gate or "{}")["state"] == "active"

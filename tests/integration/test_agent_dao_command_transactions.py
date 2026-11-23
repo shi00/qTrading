@@ -261,11 +261,15 @@ async def _seed_decision(
         "decision_kind": "tool_grant",
         "presentation_batch_seq": 1,
         # P1-10：派发认领核本次人答消费、有效期与授权摘要（来源边界持久认领）。
+        # 这里直接 seed「答复已消费」的事实，等价于走 建 pending → 写答复 →
+        # consume_answer 激活 granted 后的持久状态（claim 只读这些事实）。
         "answer_consumed_at": datetime.now(UTC),
         "expires_at": datetime.now(UTC) + timedelta(hours=1),
-        "question_payload": json_doc(
-            {"schema_digest": "b" * 64, "audit_scope_digest": "c" * 64, "boundary_digest": "d" * 64}
-        ),
+        "question_payload": {
+            "schema_digest": "b" * 64,
+            "audit_scope_digest": "c" * 64,
+            "boundary_digest": "d" * 64,
+        },
     }
     values.update(overrides)
     _SEEDED_DECISION_SCOPE[values["decision_id"]] = (values["execution_id"], values["round_id"])
@@ -1126,10 +1130,11 @@ class TestGrantCas:
             parameter_digest="a" * 64,
         )
         engine = create_test_engine(real_embedded_pg.url)
+        identity = MCPServiceIdentity(service_id="svc-1", config_version=1)
         async with engine.begin() as conn:
             await conn.execute(
                 sa.insert(AppState).values(
-                    config_key="agent.mcp.dispatch_gate.svc-1:1",
+                    config_key=f"agent.mcp.dispatch_gate.{identity.stable_key()}",
                     config_value=json_doc({"schema_version": 1, "state": "stopped"}),
                 )
             )
@@ -1154,15 +1159,13 @@ class TestGrantCas:
             grant_revision=1,
             grant_state="granted",
             parameter_digest="a" * 64,
-            question_payload=json_doc(
-                {
-                    "service_id": "svc-1",
-                    "config_version": 1,
-                    "schema_digest": "b" * 64,
-                    "audit_scope_digest": "c" * 64,
-                    "boundary_digest": "d" * 64,
-                }
-            ),
+            question_payload={
+                "service_id": "svc-1",
+                "config_version": 1,
+                "schema_digest": "b" * 64,
+                "audit_scope_digest": "c" * 64,
+                "boundary_digest": "d" * 64,
+            },
         )
         identity = MCPServiceIdentity(service_id="svc-1", config_version=1)
 
@@ -1183,7 +1186,9 @@ class TestGrantCas:
         async with engine.connect() as conn:
             raw = (
                 await conn.execute(
-                    sa.select(AppState.config_value).where(AppState.config_key == "agent.mcp.dispatch_gate.svc-9:1")
+                    sa.select(AppState.config_value).where(
+                        AppState.config_key == f"agent.mcp.dispatch_gate.{identity.stable_key()}"
+                    )
                 )
             ).scalar_one()
         assert json.loads(raw)["state"] == "stopped"
