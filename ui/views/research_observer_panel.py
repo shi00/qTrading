@@ -174,6 +174,29 @@ def _build_composer(
     )
 
 
+def _build_answer_preview(state: ResearchObserverState) -> ft.Control:
+    """主回合直答展示：只显示真实产出，不占位、不伪装已取数。"""
+
+    return ft.Container(
+        content=ft.Column(
+            [
+                _section_title("agent_research_answer_preview"),
+                ft.Text(
+                    state.last_answer_text,
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=AppColors.TEXT_PRIMARY,
+                    selectable=True,
+                ),
+            ],
+            spacing=AppStyles.SPACING_XS,
+        ),
+        padding=AppStyles.SPACING_SM,
+        bgcolor=AppColors.BACKGROUND,
+        border_radius=4,
+        border=ft.Border.all(1, AppColors.BORDER),
+    )
+
+
 def _build_plan_preview(state: ResearchObserverState, *, on_start_plan: Callable[[], None]) -> ft.Control | None:
     """计划预览与「开始这份计划」：无计划引用时不显示启动入口（不猜最新计划）。"""
 
@@ -640,6 +663,8 @@ def _build_body(
     preview = _build_plan_preview(state, on_start_plan=on_start_plan)
     if preview is not None:
         rows.append(preview)
+    if state.last_answer_text:
+        rows.append(_build_answer_preview(state))
     if state.loading:
         rows.append(ft.ProgressRing(width=16, height=16, stroke_width=2))
     if state.error_key:

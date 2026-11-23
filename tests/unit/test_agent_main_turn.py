@@ -376,7 +376,9 @@ async def test_discuss_turn_answers_with_zero_tools_and_zero_delegation() -> Non
         tools=tools,
         delegate=delegate,
     )
-    request = MainTurnRequest(identity=_IDENTITY, mode=Mode.DISCUSS, read_tool_names=frozenset({"read_source"}))
+    request = MainTurnRequest(
+        identity=_IDENTITY, mode=Mode.DISCUSS, prompt_text="研究问题", read_tool_names=frozenset({"read_source"})
+    )
     turn = _ScriptedTurn([TurnDecision(action=LoopAction.ANSWER, text="直接回答")])
 
     outcome = await runner.run(request, turn=turn)
@@ -391,7 +393,7 @@ async def test_discuss_turn_answers_with_zero_tools_and_zero_delegation() -> Non
 async def test_discuss_turn_rejects_delegation_without_calling_delegate() -> None:
     delegate = _RecordingDelegate()
     runner = MainTurnRunner(producer=ResearchResultProducer(_Store()), delegate=delegate)
-    request = MainTurnRequest(identity=_IDENTITY, mode=Mode.DISCUSS)
+    request = MainTurnRequest(identity=_IDENTITY, mode=Mode.DISCUSS, prompt_text="研究问题")
     turn = _ScriptedTurn(
         [
             TurnDecision(
@@ -415,7 +417,7 @@ async def test_plan_turn_saves_readable_plan_and_returns_reference() -> None:
         producer=ResearchResultProducer(_Store()),
         plan_store_factory=lambda _identity: store,
     )
-    request = MainTurnRequest(identity=_IDENTITY, mode=Mode.PLAN)
+    request = MainTurnRequest(identity=_IDENTITY, mode=Mode.PLAN, prompt_text="研究问题")
     turn = _ScriptedTurn(
         [
             TurnDecision(
@@ -439,7 +441,7 @@ async def test_plan_turn_without_structured_steps_has_no_reference() -> None:
         producer=ResearchResultProducer(_Store()),
         plan_store_factory=lambda _identity: store,
     )
-    request = MainTurnRequest(identity=_IDENTITY, mode=Mode.PLAN)
+    request = MainTurnRequest(identity=_IDENTITY, mode=Mode.PLAN, prompt_text="研究问题")
     turn = _ScriptedTurn([TurnDecision(action=LoopAction.PLAN, text="只有正文")])
 
     outcome = await runner.run(request, turn=turn)
@@ -676,3 +678,74 @@ async def test_intake_start_plan_refuses_without_source_manifest() -> None:
         )
 
     assert excinfo.value.code is AgentErrorCode.OPERATION_UNKNOWN
+
+
+class _MainTurnRunnerStub:
+    def __init__(self, plan_reference: PlanReference | None = None) -> None:
+        self.requests: list[MainTurnRequest] = []
+        self._plan_reference = plan_reference
+
+    async def run(self, request: MainTurnRequest, *, turn: Any = None) -> Any:
+        self.requests.append(request)
+        return SimpleNamespace(
+            outcome=SimpleNamespace(result=SimpleNamespace(body_text="主回合回答")),
+            plan_reference=self._plan_reference,
+        )
+
+
+@pytest.mark.asyncio
+async def test_intake_plan_runs_production_main_turn_and_returns_reference() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    runner = _MainTurnRunnerStub(plan_reference=PlanReference(execution_id="execution-1", plan_revision=1))
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+    )
+
+    result = await intake.start_question("研究银行股", mode=Mode.PLAN)
+
+    request = runner.requests[0]
+    assert request.mode is Mode.PLAN
+    assert request.prompt_text == "研究银行股"
+    assert request.identity.execution_id == "execution-1"
+    assert request.identity.input_revision == 1
+    assert len(request.identity.actual_input_digest) == 64
+    assert result.main_turn is not None
+    assert result.plan_reference == PlanReference(execution_id="execution-1", plan_revision=1)
+
+
+@pytest.mark.asyncio
+async def test_intake_discuss_runs_main_turn_and_returns_answer() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    runner = _MainTurnRunnerStub()
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+    )
+
+    result = await intake.start_question("解释一下量价背离", mode=Mode.DISCUSS)
+
+    assert runner.requests[0].mode is Mode.DISCUSS
+    assert result.main_turn is not None
+    assert result.main_turn.outcome.result.body_text == "主回合回答"
+
+
+@pytest.mark.asyncio
+async def test_intake_execute_does_not_run_main_turn() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    runner = _MainTurnRunnerStub()
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+    )
+
+    result = await intake.start_question("执行研究", mode=Mode.EXECUTE)
+
+    assert runner.requests == []
+    assert result.main_turn is None

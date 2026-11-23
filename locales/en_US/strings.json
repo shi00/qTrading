@@ -2646,5 +2646,6 @@
     "agent_research_start_plan": "Start this plan",
     "agent_research_plan_missing": "No plan version to start: generate and confirm a plan first.",
     "agent_research_dispatch_reason_fmt": "Dispatch status: {reason}",
-    "agent_research_dispatch_zero": "Not dispatched"
+    "agent_research_dispatch_zero": "Not dispatched",
+    "agent_research_answer_preview": "Main turn answer"
 }

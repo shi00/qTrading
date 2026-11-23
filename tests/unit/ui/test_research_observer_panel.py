@@ -6,7 +6,12 @@ import flet as ft
 import pytest
 
 from ui.viewmodels.research_observer_view_model import PlanStepView, ResearchObserverState
-from ui.views.research_observer_panel import _build_body, _build_composer, _build_plan_preview
+from ui.views.research_observer_panel import (
+    _build_answer_preview,
+    _build_body,
+    _build_composer,
+    _build_plan_preview,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -128,3 +133,40 @@ def test_body_keeps_composer_visible_without_session() -> None:
     assert isinstance(body.controls[0], ft.Container)
     texts = [row.value for row in body.controls if isinstance(row, ft.Text)]
     assert any("暂无" in text or "无" in text for text in texts)
+
+
+def test_answer_preview_renders_real_text_only() -> None:
+    state = ResearchObserverState(available=True, last_answer_text="银行股要看息差")
+
+    control = _build_answer_preview(state)
+
+    assert isinstance(control, ft.Container)
+    texts = [child.value for child in control.content.controls if isinstance(child, ft.Text)]
+    assert "银行股要看息差" in texts
+
+
+def test_body_omits_answer_preview_when_empty() -> None:
+    state = ResearchObserverState(available=True, composer_available=True, session_id="s1")
+
+    body = _build_body(
+        state,
+        on_draft_change=lambda _d, _t: None,
+        on_submit=lambda _d, _e, _r: None,
+        on_toggle_execution=lambda _e: None,
+        on_select_execution=lambda _e: None,
+        on_load_artifact=lambda _a, _v, _e, _r: None,
+        on_load_draft=_noop,
+        on_composer_text=_noop_text,
+        on_composer_mode=_noop_mode,
+        on_send=_noop,
+        on_start_plan=_noop,
+    )
+
+    labels = [
+        child.value
+        for row in body.controls
+        if isinstance(row, ft.Container)
+        for child in getattr(row.content, "controls", [])
+        if isinstance(child, ft.Text)
+    ]
+    assert "主回合回答" not in labels

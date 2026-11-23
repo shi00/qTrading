@@ -25,10 +25,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import Any, Final, Protocol, cast
 
 from core.agent_types import (
@@ -51,6 +52,8 @@ from core.agent_types import (
     SubmissionReceipt,
     decode_json_doc,
     decode_source_version_ref,
+    derive_round_id,
+    is_digest,
     json_doc,
 )
 from services.agent_service.capabilities import PlanProposalStore
@@ -85,6 +88,9 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+#: 路由级模型引用（真实模型名由执行器落账；回合身份只需稳定、可追溯的引用）。
+MAIN_TURN_MODEL_REF: Final[str] = "agent_research:governed"
 
 #: 结构化计划步骤在回合 ``structured_fields`` 中的顶层键。
 PLAN_STEPS_KEY: Final[str] = "steps"
@@ -370,10 +376,12 @@ def build_role_capability_provider(dao: _ManifestReader) -> RoleCapabilityProvid
 
 @dataclass(frozen=True, slots=True)
 class MainTurnRequest:
-    """一次主回合的冻结身份与模式（模式只由用户选择，模型不得切换）。"""
+    """一次主回合的冻结身份、模式与提示（模式只由用户选择，模型不得切换）。"""
 
     identity: LoopIdentity
     mode: Mode
+    prompt_text: str
+    source_refs: tuple[SourceVersionRef, ...] = ()
     read_tool_names: frozenset[str] = frozenset()
     plan_tool_names: frozenset[str] = DEFAULT_PLAN_TOOLS
 
@@ -382,6 +390,8 @@ class MainTurnRequest:
             raise ValueError("main turn identity must be a LoopIdentity")
         if not isinstance(self.mode, Mode):
             raise ValueError("main turn mode must be a Mode")
+        if not isinstance(self.prompt_text, str) or not self.prompt_text.strip():
+            raise ValueError("main turn prompt_text must be non-empty text")
         for name in ("read_tool_names", "plan_tool_names"):
             value = getattr(self, name)
             if not isinstance(value, frozenset) or any(not isinstance(item, str) or not item for item in value):
@@ -394,6 +404,10 @@ class MainTurnOutcome:
 
     outcome: LoopRunOutcome
     plan_reference: PlanReference | None = None
+
+
+#: 主回合回合端口工厂：按请求（含提示/模式）产出该次回合的模型调用。
+TurnFactory = Callable[[MainTurnRequest], AgentTurn]
 
 
 class MainTurnRunner:
@@ -412,21 +426,33 @@ class MainTurnRunner:
         delegate: DelegationRunner | None = None,
         limits: LoopLimits | None = None,
         plan_store_factory: Any | None = None,
+        turn_factory: TurnFactory | None = None,
     ) -> None:
         self._producer = producer
         self._tools = tools
         self._delegate = delegate
         self._limits = limits
         self._plan_store_factory = plan_store_factory
+        self._turn_factory = turn_factory
 
-    async def run(self, request: MainTurnRequest, *, turn: AgentTurn) -> MainTurnOutcome:
+    async def run(self, request: MainTurnRequest, *, turn: AgentTurn | None = None) -> MainTurnOutcome:
         """推进一次主回合；计划成功交付时保存用户可读计划版并返回其引用。"""
 
         mode = request.mode
+        effective_turn = turn
+        if effective_turn is None and self._turn_factory is not None:
+            effective_turn = self._turn_factory(request)
+        if effective_turn is None:
+            # 未注入模型回合端口：零模型调用、零成果（不伪造回合）。
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                "main turn model port not wired",
+                request.identity.execution_id,
+            )
         loop = ExecutionLoop(
             identity=request.identity,
             mode=mode,
-            turn=turn,
+            turn=effective_turn,
             producer=self._producer,
             tools=self._tools,
             # 讨论/计划一律不注入委派端口（零叶子派发，契约 §4.1）。
@@ -495,6 +521,8 @@ class MainTurnIntakeResult:
     receipt: SubmissionReceipt
     dispatch: DispatchOutcome | None
     plan_reference: PlanReference | None = None
+    #: 讨论/计划模式的主回合终态（执行模式由持久 workflow 承接，此处为 None）。
+    main_turn: MainTurnOutcome | None = None
 
 
 class MainTurnIntake:
@@ -513,12 +541,14 @@ class MainTurnIntake:
         user_scope: str,
         source_module: str = "ui",
         source_display_name: str = "Agent",
+        main_turn: MainTurnRunner | None = None,
     ) -> None:
         self._facade = facade
         self._manifest_reader = manifest_reader
         self._user_scope = user_scope
         self._source_module = source_module
         self._source_display_name = source_display_name
+        self._main_turn = main_turn
 
     async def start_question(
         self,
@@ -557,7 +587,45 @@ class MainTurnIntake:
                 )
             )
         manifest = self._base_manifest(text=question, mode=mode, purpose=Purpose.CONCEPT)
-        return await self._submit(target_session, expected_revision=revision, manifest=manifest)
+        result = await self._submit(target_session, expected_revision=revision, manifest=manifest)
+        if mode is Mode.EXECUTE or self._main_turn is None:
+            return result
+        # 讨论/计划：受理后由生产主回合产出直答/可读计划；零研究动作由回合端口保证。
+        identity = self._main_turn_identity(target_session, result.receipt, revision=revision, manifest=manifest)
+        turn_outcome = await self._main_turn.run(MainTurnRequest(identity=identity, mode=mode, prompt_text=question))
+        return replace(
+            result,
+            main_turn=turn_outcome,
+            plan_reference=turn_outcome.plan_reference or result.plan_reference,
+        )
+
+    def _main_turn_identity(
+        self,
+        session_id: str,
+        receipt: SubmissionReceipt,
+        *,
+        revision: int,
+        manifest: CanonicalJson,
+    ) -> LoopIdentity:
+        """由受理事实派生回合身份（digest 缺失时取冻结 manifest 摘要，不造假）。"""
+
+        digest = receipt.intent_digest
+        if not is_digest(digest):
+            digest = hashlib.sha256(manifest.encode("utf-8")).hexdigest()
+        return LoopIdentity(
+            user_scope=self._user_scope,
+            session_id=session_id,
+            execution_id=receipt.execution_id,
+            round_id=derive_round_id(
+                user_scope=self._user_scope,
+                execution_id=receipt.execution_id,
+                workflow_id=receipt.workflow_id,
+            ),
+            node_id="root",
+            input_revision=revision + 1,
+            actual_input_digest=digest,
+            actual_model_ref=MAIN_TURN_MODEL_REF,
+        )
 
     async def start_plan(
         self, reference: PlanReference, *, session_id: str, expected_revision: int

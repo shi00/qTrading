@@ -78,6 +78,7 @@ from services.agent_service.main_turn import (
     build_plan_spec_provider,
     build_role_capability_provider,
 )
+from services.agent_service.main_turn_model import build_governed_turn_factory
 from services.agent_service.mcp_lifecycle import MCPServiceLifecycle
 from services.agent_service.runtime import CloseCommandIdentity, CloseFactOutcome, OwnerLoopBridge
 from services.agent_service.skills import ManagedSkillStore, SkillCatalogService
@@ -160,7 +161,7 @@ class AgentWiring:
     mcp_lifecycle: MCPServiceLifecycle | None = None
     #: 首问 / 开始计划受理入口（组合根注入；未就绪时为 ``None``，UI 如实拒绝）。
     intake: MainTurnIntake | None = None
-    #: 主回合生产构造（需注入模型回合端口；未注入时 ``None``，不伪造回合）。
+    #: 主回合生产构造（默认注入受治理模型回合工厂；构造期零外发）。
     main_turn: MainTurnRunner | None = None
     #: Agent 用户域（与受理/派发/回合身份同源）。
     user_scope: str = _LOCAL_USER_SCOPE
@@ -710,17 +711,18 @@ async def wire_agent_runtime(
     )
     cleanup, cleanup_failure = _build_cleanup_wiring(handle=handle, dao=dao)
     facade = AgentService(dao, usage_dao, dispatcher=dispatcher, skills=skills)
-    intake = MainTurnIntake(facade, manifest_reader=dao, user_scope=user_scope)
-    main_turn = None
-    if main_turn_turn is not None:
-        # 主回合生产构造：需要注入模型回合端口；生产缺省未注入时不伪造回合。
-        main_turn = MainTurnRunner(
-            producer=ResearchResultProducer(dao),
-            plan_store_factory=lambda identity: PlanProposalStore(
-                dao,
-                PlanStoreBinding(user_scope=identity.user_scope, execution_id=identity.execution_id),
-            ),
-        )
+    # 主回合生产构造：注入受治理模型回合工厂（复用 agent_research 场景路由/模型桥）；
+    # 构造期零外发，路由不可用/缺配置时回合 fail-closed 并如实报错。
+    turn_factory = (lambda _request: main_turn_turn) if main_turn_turn is not None else build_governed_turn_factory()
+    main_turn = MainTurnRunner(
+        producer=ResearchResultProducer(dao),
+        plan_store_factory=lambda identity: PlanProposalStore(
+            dao,
+            PlanStoreBinding(user_scope=identity.user_scope, execution_id=identity.execution_id),
+        ),
+        turn_factory=turn_factory,
+    )
+    intake = MainTurnIntake(facade, manifest_reader=dao, user_scope=user_scope, main_turn=main_turn)
     return AgentWiring(
         service=facade,
         bridge=bridge,

@@ -1011,3 +1011,47 @@ class TestComposer:
         assert vm.state.plan_steps == ()
         assert vm.state.plan_reference is None
         assert vm.state.plan_error_key == "PERSISTENCE_UNAVAILABLE"
+
+
+class _MainTurnIntake:
+    def __init__(self, *, answer: str = "直答", plan_reference: Any = None) -> None:
+        self._answer = answer
+        self._plan_reference = plan_reference
+
+    async def start_question(self, text: str, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            receipt=object(),
+            dispatch=SimpleNamespace(submitted=False, reason="mode_research_disabled"),
+            plan_reference=None,
+            main_turn=SimpleNamespace(
+                outcome=SimpleNamespace(result=SimpleNamespace(body_text=self._answer)),
+                plan_reference=self._plan_reference,
+            ),
+        )
+
+    async def start_plan(self, reference: Any, **kwargs: Any) -> Any:
+        raise AssertionError("not used")
+
+
+class _MainTurnComposerTests:
+    @pytest.mark.asyncio
+    async def test_send_surfaces_main_turn_answer(self) -> None:
+        vm = ResearchObserverViewModel(_FakeService(), intake=_MainTurnIntake())
+        vm.set_composer_text("解释量价背离")
+
+        await vm.send_first_question()
+
+        assert vm.state.last_answer_text == "直答"
+        assert vm.state.last_dispatch_reason is None
+        assert vm.state.composer_text == ""
+
+    @pytest.mark.asyncio
+    async def test_send_surfaces_plan_reference_from_main_turn(self) -> None:
+        reference = SimpleNamespace(execution_id="execution-0", plan_revision=2)
+        vm = ResearchObserverViewModel(_FakeService(), intake=_MainTurnIntake(plan_reference=reference))
+        vm.set_composer_text("出计划")
+        vm.set_composer_mode("plan")
+
+        await vm.send_first_question()
+
+        assert vm.state.plan_reference == ("execution-0", 2)

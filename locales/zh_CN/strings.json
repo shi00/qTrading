@@ -2646,5 +2646,6 @@
     "agent_research_start_plan": "开始这份计划",
     "agent_research_plan_missing": "没有可启动的计划版本：请先生成并确认计划。",
     "agent_research_dispatch_reason_fmt": "派发状态：{reason}",
-    "agent_research_dispatch_zero": "未派发"
+    "agent_research_dispatch_zero": "未派发",
+    "agent_research_answer_preview": "主回合回答"
 }

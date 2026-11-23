@@ -257,6 +257,8 @@ class ResearchObserverState:
     #: 最近一次受理的派发事实：``submitted=False`` 的 ``reason``（讨论/计划为零派发，
     #: 属预期，不当作错误；执行模式零派发如实展示原因，不伪造成已启动）。
     last_dispatch_reason: str | None = None
+    #: 主回合直答（讨论/执行直答）；为空表示尚未产生或未接线，不以占位文本伪装。
+    last_answer_text: str = ""
     plan_steps: tuple[PlanStepView, ...] = ()
     plan_reference: tuple[str, int] | None = None
     plan_pending: bool = False
@@ -839,11 +841,23 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         except Exception as e:
             self._set_state(composer_pending=False, composer_error_key=self._error_code(e))
             return
-        self._set_state(
-            composer_pending=False,
-            composer_text="",
-            last_dispatch_reason=self._dispatch_reason(result),
-        )
+        main_turn = getattr(result, "main_turn", None)
+        changes: dict[str, Any] = {"composer_pending": False, "composer_text": ""}
+        if main_turn is None:
+            changes["last_dispatch_reason"] = self._dispatch_reason(result)
+        else:
+            loop_outcome = getattr(main_turn, "outcome", None)
+            answer = getattr(getattr(loop_outcome, "result", None), "body_text", "")
+            changes["last_answer_text"] = answer if isinstance(answer, str) else ""
+            changes["last_dispatch_reason"] = None
+            reference = getattr(main_turn, "plan_reference", None)
+            if reference is not None:
+                changes["plan_reference"] = (reference.execution_id, reference.plan_revision)
+        self._set_state(**changes)
+        reference = changes.get("plan_reference")
+        if isinstance(reference, tuple) and len(reference) == 2:
+            # 计划已保存：按界面呈现的版本读回步骤，避免与可执行计划错版。
+            await self.load_plan_preview(reference[0], reference[1])
         if self._service is not None and self._state.available:
             await self.refresh()
 
@@ -894,7 +908,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         service = self._service
         reader = getattr(service, "read_plan", None) if service is not None else None
         if not callable(reader):
-            self._set_state(plan_error_key=UNAVAILABLE_NOT_WIRED, plan_steps=(), plan_reference=None)
+            self._set_state(plan_error_key=UNAVAILABLE_NOT_WIRED, plan_steps=())
             return
         if self._state.plan_pending:
             return
