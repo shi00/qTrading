@@ -11,7 +11,9 @@
   Client 注入 control_engine+禁监听+禁无限连接重试
 - close() 顺序：DBOS.destroy → Client.destroy → 双引擎 dispose
 - 失败收口（检视 R08）：任一后续阶段失败按已取得对象逆序收口（Client → DBOS →
-  双引擎），原始异常不被清理异常掩盖；失败后可再次组装
+  双引擎）；清理确认成功后传播原始异常，收口未确认时以
+  ``AgentRuntimeAssemblyCloseError`` 上报真实异常与未核阶段并保留可重试半成品；
+  失败后可再次组装
 
 真实 PG 行为见 ``tests/integration/test_agent_runtime_host.py``。
 owner-loop 桥（§8.2）与 launch 启动隔离（§8.4 needs-spike）不在本片范围。
@@ -499,12 +501,26 @@ class TestAssemblyFailureCleanup:
         ]
         assert "client_destroy" not in failure_seams.calls  # 构造失败即无对象可收口
 
-    def test_cleanup_errors_do_not_mask_original_error(self, failure_seams: _FailureSeams) -> None:
-        failure_seams.datasource_error = RuntimeError("verify failed")
+    def test_unverified_cleanup_reports_facts_and_keeps_partial_handle(self, failure_seams: _FailureSeams) -> None:
+        """收口未确认：如实上报真实异常与未核阶段，保留可重试的半成品（不提前清引用）。"""
+
+        boom = RuntimeError("verify failed")
+        failure_seams.datasource_error = boom
         failure_seams.dbos_destroy_error = RuntimeError("destroy failed")
         failure_seams.dispose_errors.add(runtime_mod.CONTROL_ENGINE_POOL_SIZE)
-        with pytest.raises(RuntimeError, match="^verify failed$"):
+
+        with pytest.raises(runtime_mod.AgentRuntimeAssemblyCloseError) as exc_info:
             assemble_agent_runtime(_settings())
+
+        error = exc_info.value
+        assert error.original is boom
+        assert error.__cause__ is boom
+        assert error.close_failures == ("dbos:RuntimeError", "control_engine:RuntimeError")
+        # 原句柄可查：半成品保留已取得对象，且 runtime 引擎已确认为收口项
+        assert error.pending.dbos is not None
+        assert error.pending.control_engine is not None
+        assert error.pending.runtime_engine is not None
+        assert "RuntimeError" in str(error)
         # 清理自身失败后仍继续收口 runtime 引擎
         assert failure_seams.calls == [
             "migrations",
@@ -516,6 +532,39 @@ class TestAssemblyFailureCleanup:
             f"dispose:{runtime_mod.CONTROL_ENGINE_POOL_SIZE}",
             f"dispose:{runtime_mod.RUNTIME_ENGINE_POOL_SIZE}",
         ]
+
+    def test_partial_handle_retry_close_releases_references(self, failure_seams: _FailureSeams) -> None:
+        """重试关闭确认成功后释放半成品引用（幂等、可交给调用方收口后再放锁）。"""
+
+        failure_seams.datasource_error = RuntimeError("verify failed")
+        failure_seams.dbos_destroy_error = RuntimeError("destroy failed")
+        with pytest.raises(runtime_mod.AgentRuntimeAssemblyCloseError) as exc_info:
+            assemble_agent_runtime(_settings())
+        pending = exc_info.value.pending
+
+        failure_seams.dbos_destroy_error = None
+        pending.close()
+
+        assert pending.client is None
+        assert pending.dbos is None
+        assert pending.control_engine is None
+        assert pending.runtime_engine is None
+        assert failure_seams.calls.count("dbos_destroy") == 2
+
+    def test_cancel_during_assembly_is_not_masked_by_cleanup_failure(
+        self, failure_seams: _FailureSeams, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """``CancelledError`` 原样传播；收口未确认只如实记录，不冒充完成（R2/R21）。"""
+
+        caplog.set_level(logging.ERROR, logger=runtime_mod.__name__)
+        failure_seams.datasource_error = asyncio.CancelledError()
+        failure_seams.dbos_destroy_error = RuntimeError("destroy failed")
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            assemble_agent_runtime(_settings())
+
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert "dbos:RuntimeError" in caplog.text
 
     def test_reassembly_after_failed_attempt(self, failure_seams: _FailureSeams) -> None:
         failure_seams.datasource_error = RuntimeError("verify failed")

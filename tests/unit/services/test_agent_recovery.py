@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -978,6 +978,82 @@ class TestStartupOrchestration:
         assert handle.closed == 1
         assert guard.released == 1
         assert launched == []
+
+    async def test_assemble_cleanup_unverified_keeps_lock_and_pending_handle(self) -> None:
+        """组装失败且半成品收口未确认：保锁、保原句柄，failure 如实带真实异常与未核阶段。"""
+
+        from services.agent_service.runtime import (
+            AgentRuntimeAssemblyCloseError,
+            PartialAssemblyCloseError,
+        )
+
+        class _Pending:
+            def close(self) -> None:
+                raise PartialAssemblyCloseError(("dbos:RuntimeError",))
+
+        pending = _Pending()
+        guard = _FakeGuard()
+        original = ValueError("assemble boom")
+
+        def _assemble(_settings: Any) -> Any:
+            raise AgentRuntimeAssemblyCloseError(original, ("dbos:RuntimeError",), cast(Any, pending))
+
+        outcome = await self._start(assemble_func=_assemble, instance_guard=guard)
+
+        assert outcome.handle is None
+        assert outcome.failure == "assemble_failed:ValueError;close_failed:dbos:RuntimeError"
+        assert outcome.instance_guard is guard
+        assert outcome.unclosed_handle is pending  # 原句柄可查，供调用方重试关闭
+        assert guard.released == 0  # 不得提前释放唯一执行锁
+
+    async def test_cancel_during_assemble_with_unverified_cleanup_keeps_lock(self) -> None:
+        """取消期间半成品收口未确认：取消原样传播，但保锁且如实记录（R2/R21）。"""
+
+        from services.agent_service.recovery import start_agent_runtime
+        from services.agent_service.runtime import (
+            AgentRuntimeAssemblyCloseError,
+            PartialAssemblyCloseError,
+        )
+
+        class _Pending:
+            def close(self) -> None:
+                raise PartialAssemblyCloseError(("dbos:RuntimeError",))
+
+        guard = _FakeGuard()
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        def _assemble(_settings: Any) -> Any:
+            raise AgentRuntimeAssemblyCloseError(
+                ValueError("assemble boom"), ("dbos:RuntimeError",), cast(Any, _Pending())
+            )
+
+        async def _delayed_runner(fn: Any) -> Any:
+            started.set()
+            await release.wait()
+            return fn()
+
+        task = asyncio.create_task(
+            start_agent_runtime(
+                self._settings(),
+                user_scope="user-1",
+                isolation_id="startup-1",
+                registry=_FakeRegistry(),
+                assemble_func=_assemble,
+                launch_func=lambda _h: None,
+                instance_guard=guard,
+                blocking_runner=_delayed_runner,
+            )
+        )
+        await started.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        release.set()
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert guard.released == 0  # 未核收尾：锁即阻塞事实，不得释放
 
     async def test_cancel_during_launch_closes_launched_handle(self) -> None:
         """R06：launch 已真实执行完时传播取消前仍须关闭宿主并释放实例锁。"""

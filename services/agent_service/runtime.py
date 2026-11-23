@@ -249,8 +249,9 @@ def assemble_agent_runtime(settings: AgentRuntimeSettings) -> AgentRuntimeHandle
 
     双迁移失败时异常原样传播，不创建任何引擎/宿主对象（§10.6：不 launch、不补投、
     保历史与原迁移状态）。迁移成功后的任一阶段失败，按**已取得对象**逆序收口
-    （Client → DBOS → 双引擎，见 ``_close_partial_assembly``），原始异常不被清理
-    异常掩盖（检视 R08）。
+    （Client → DBOS → 双引擎，见 ``_close_partial_assembly``）；收口确认成功才
+    传播原始异常，**收口未确认**时抛 :class:`AgentRuntimeAssemblyCloseError`——
+    保留真实异常（``__cause__``）、未核阶段与可重试关闭的半成品句柄（检视 R08）。
 
     Args:
         settings: 组装参数（运行/迁移 URL、application_version、executor_id）。
@@ -268,9 +269,9 @@ def assemble_agent_runtime(settings: AgentRuntimeSettings) -> AgentRuntimeHandle
     runtime_engine = _create_runtime_engine(settings.system_database_url)
     try:
         control_engine = _create_control_engine(settings.system_database_url)
-    except BaseException:
-        # 控制引擎未取得：runtime 引擎仍须收口（检视 R08）
-        _dispose_quietly(runtime_engine)
+    except BaseException as original:
+        # 控制引擎未取得：runtime 引擎仍须收口（检视 R08）；收口未确认即保留半成品
+        _close_assembly_or_rethrow(original, PartialAgentRuntimeAssembly(runtime_engine=runtime_engine))
         raise
 
     dbos: DBOS | None = None
@@ -307,12 +308,15 @@ def assemble_agent_runtime(settings: AgentRuntimeSettings) -> AgentRuntimeHandle
             # 应用稳定名（HANDOFF §8.3 固定签名；§8.4 归属预检/取消按此过滤）
             application_name=RUNTIME_DB_NAME,
         )
-    except BaseException:
-        _close_partial_assembly(
-            client=client,
-            dbos=dbos,
-            control_engine=control_engine,
-            runtime_engine=runtime_engine,
+    except BaseException as original:
+        _close_assembly_or_rethrow(
+            original,
+            PartialAgentRuntimeAssembly(
+                runtime_engine=runtime_engine,
+                control_engine=control_engine,
+                dbos=dbos,
+                client=client,
+            ),
         )
         raise
     assert dbos is not None and datasource is not None and client is not None
@@ -387,22 +391,92 @@ def _create_engine(url: str, **engine_kwargs: Any) -> sa.Engine:
     return sa.create_engine(url, **engine_kwargs)
 
 
-def _dispose_quietly(engine: sa.Engine) -> None:
-    """组装半途失败时的兜底释放：dispose 异常不掩盖原始异常。"""
+@dataclass
+class PartialAgentRuntimeAssembly:
+    """组装半成品：收口未确认时保留已取得对象，供调用方重试关闭。
+
+    ``close`` 只在全部阶段确认收口后才清引用并返回；任一阶段失败即抛
+    :class:`PartialAssemblyCloseError`（携带失败阶段标签），调用方必须**保锁、
+    保该对象**并重试，不得把未核收尾当已关闭（R2/R21）。
+    """
+
+    runtime_engine: sa.Engine | None
+    control_engine: sa.Engine | None = None
+    dbos: DBOS | None = None
+    client: DBOSClient | None = None
+
+    def close(self) -> None:
+        failures = _close_partial_assembly(
+            client=self.client,
+            dbos=self.dbos,
+            control_engine=self.control_engine,
+            runtime_engine=self.runtime_engine,
+        )
+        if failures:
+            raise PartialAssemblyCloseError(failures)
+        self.client = None
+        self.dbos = None
+        self.control_engine = None
+        self.runtime_engine = None
+
+
+class PartialAssemblyCloseError(RuntimeError):
+    """半成品收口仍有未确认阶段（相关资源可能仍存活，可重试）。"""
+
+    def __init__(self, failures: tuple[str, ...]) -> None:
+        super().__init__(f"partial assembly close unverified: {','.join(failures)}")
+        self.close_failures = failures
+
+
+class AgentRuntimeAssemblyCloseError(RuntimeError):
+    """组装中途失败且半成品收口未确认。
+
+    ``original`` 保留真实组装异常（并作为 ``__cause__``），``close_failures`` 为
+    可核的未收口阶段标签，``pending`` 为可重试关闭的半成品句柄——调用方据此
+    保锁、保句柄，不得提前释放唯一执行锁。
+    """
+
+    def __init__(
+        self,
+        original: BaseException,
+        close_failures: tuple[str, ...],
+        pending: PartialAgentRuntimeAssembly,
+    ) -> None:
+        super().__init__(
+            f"assembly failed ({type(original).__name__}) with unverified cleanup: {','.join(close_failures)}"
+        )
+        self.original = original
+        self.close_failures = close_failures
+        self.pending = pending
+
+
+def _close_assembly_or_rethrow(original: BaseException, pending: PartialAgentRuntimeAssembly) -> None:
+    """收口组装半成品；未确认时按原异常类别上报（不静默、不掩盖取消）。
+
+    - 可捕获异常：包装为 :class:`AgentRuntimeAssemblyCloseError`（保留 cause 与半成品）；
+    - ``CancelledError`` 等非 ``Exception``：真实记录未核事实后原样传播（R2）。
+    """
+
     try:
-        engine.dispose()
-    # 兜底清理不得掩盖组装原始异常
-    except Exception:  # R2_ALLOWED: 只捕获 Exception，CancelledError 不属其中
-        pass
+        pending.close()
+    except PartialAssemblyCloseError as exc:
+        if not isinstance(original, Exception):
+            logger.error(
+                "[AgentRuntime] assembly interrupted (%s) and partial cleanup unverified: %s",
+                type(original).__name__,
+                ",".join(exc.close_failures),
+            )
+            raise original from None
+        raise AgentRuntimeAssemblyCloseError(original, exc.close_failures, pending) from original
 
 
 def _close_partial_assembly(
     *,
     client: DBOSClient | None,
     dbos: DBOS | None,
-    control_engine: sa.Engine,
-    runtime_engine: sa.Engine,
-) -> None:
+    control_engine: sa.Engine | None,
+    runtime_engine: sa.Engine | None,
+) -> tuple[str, ...]:
     """组装后续阶段失败时按已取得对象逆序收口（检视 R08）。
 
     所有权判定（按锁定版本 SDK 源码核实，非猜测）：
@@ -420,20 +494,30 @@ def _close_partial_assembly(
       ``DBOSRegistry.datasources`` 且无公开反注册 API，登记项不持有连接、仅被
       rewind 使用，连接随 ``runtime_engine.dispose()`` 释放（不据此宣称连接泄漏）。
 
-    清理异常一律不得掩盖组装原始异常（R2：只捕 Exception，取消照常传播）。
+    返回未确认收口的阶段标签（``<stage>:<异常类型>``）；空元组表示全部确认收口。
+    清理异常不掩盖组装原始异常（R2：只捕 Exception，取消照常传播），也不被静默
+    吞没——由调用方决定保锁保句柄与上报。
     """
+
+    failures: list[str] = []
     if client is not None:
         try:
             client.destroy()
-        except Exception:  # R2_ALLOWED: 只捕获 Exception，CancelledError 不属其中
-            pass
+        except Exception as exc:  # R2_ALLOWED: 只捕获 Exception，CancelledError 不属其中
+            failures.append(f"client:{type(exc).__name__}")
     if dbos is not None:
         try:
             DBOS.destroy()
-        except Exception:  # R2_ALLOWED: 只捕获 Exception，CancelledError 不属其中
-            pass
-    _dispose_quietly(control_engine)
-    _dispose_quietly(runtime_engine)
+        except Exception as exc:  # R2_ALLOWED: 只捕获 Exception，CancelledError 不属其中
+            failures.append(f"dbos:{type(exc).__name__}")
+    for label, engine in (("control_engine", control_engine), ("runtime_engine", runtime_engine)):
+        if engine is None:
+            continue
+        try:
+            engine.dispose()
+        except Exception as exc:  # R2_ALLOWED: 只捕获 Exception，CancelledError 不属其中
+            failures.append(f"{label}:{type(exc).__name__}")
+    return tuple(failures)
 
 
 # ---------------------------------------------------------------------------

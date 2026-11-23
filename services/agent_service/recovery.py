@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Final, Protocol
@@ -53,6 +54,7 @@ from core.agent_types import (
 from services.agent_service.runtime import (
     INSTANCE_GUARD_CONNECTION_RESERVE,
     RUNTIME_DB_NAME,
+    AgentRuntimeAssemblyCloseError,
     AgentRuntimeSettings,
     InstanceGuard,
     InstanceGuardEvidence,
@@ -61,6 +63,8 @@ from services.agent_service.runtime import (
 )
 from services.agent_service.workflows import LEAF_WORKFLOW_NAME, RESEARCH_WORKFLOW_NAME
 from utils.loop_local import get_loop_local
+
+logger = logging.getLogger(__name__)
 
 #: 启动隔离的「在途」原生状态（HANDOFF §8.4 第 3 条：PENDING/ENQUEUED/DELAYED）。
 STARTUP_ACTIVE_STATUSES: Final[tuple[str, ...]] = (
@@ -814,7 +818,9 @@ async def start_agent_runtime(
     **关闭失败一律保锁**：隔离未就绪/launch 失败时若 ``handle.close()`` 失败
     （如 ``DBOS.destroy`` 中途失败），不释放唯一执行锁，并保留句柄于
     ``unclosed_handle`` 供调用方重试关闭；取消路径同样保锁（句柄无法随结果
-    返回，锁即阻塞事实），确保旧宿主资源未收口时新实例不得接管。
+    返回，锁即阻塞事实），确保旧宿主资源未收口时新实例不得接管。**组装半成品
+    收口未确认**同理：保留锁与半成品句柄（``unclosed_handle``），``failure`` 如实
+    带 ``assemble_failed:<真实异常>;close_failed:<未核阶段>``，不得提前释放锁。
     """
 
     if not isinstance(settings, AgentRuntimeSettings):
@@ -882,14 +888,39 @@ async def start_agent_runtime(
             raise outcome.cancel
         return outcome.value
 
+    assemble_close_failures: list[AgentRuntimeAssemblyCloseError] = []
+
+    def _assemble() -> Any:
+        try:
+            return assemble(settings)
+        except AgentRuntimeAssemblyCloseError as exc:
+            assemble_close_failures.append(exc)
+            raise
+
     try:
-        assembled = await _run_owned_blocking(runner, lambda: assemble(settings))
-    except Exception as exc:  # 组装失败：不隔离、不 launch（0 派发）
+        assembled = await _run_owned_blocking(runner, _assemble)
+    except AgentRuntimeAssemblyCloseError as exc:
+        # 半成品收口未确认：保锁、保原句柄（可重试 close），如实上报真实异常与未核阶段
+        return StartupOutcome(
+            handle=None,
+            isolation=None,
+            failure=f"assemble_failed:{type(exc.original).__name__};close_failed:{','.join(exc.close_failures)}",
+            instance_guard=guard,
+            unclosed_handle=exc.pending,
+        )
+    except Exception as exc:  # 组装失败且收口已确认：不隔离、不 launch（0 派发）
         guard.release()
         return StartupOutcome(handle=None, isolation=None, failure=f"assemble_failed:{type(exc).__name__}")
     if assembled.cancel is not None:
         # 同步组装已真实退出：先收口其产物再传播取消，不留无主宿主（R06）
         if assembled.value is None:
+            if assemble_close_failures:
+                # 半成品收口未确认：保锁（锁即阻塞事实），如实记录后照常传播取消（R2）
+                logger.error(
+                    "[AgentStartup] assembly cancelled with unverified cleanup: %s",
+                    ",".join(assemble_close_failures[0].close_failures),
+                )
+                raise assembled.cancel
             guard.release()
         else:
             await _abort(assembled.value)
