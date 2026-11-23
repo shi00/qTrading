@@ -188,7 +188,9 @@ def validate_transport_config(config: MCPTransportConfig, path: str = "$.mcp.tra
     if config.kind is MCPTransportKind.SSE and not config.sse_compat_approved:
         raise AgentValidationError("sse_not_approved", f"{path}.sse_compat_approved")
     _validate_http_headers(config.headers, path)
-    if not config.http_risk_approved:
+    # 明文 HTTP 才需要显式风险确认：https 由 TLS 承载机密性，不得要求用户确认
+    # 一个与其实际配置不符的「明文传输」风险（那会误拒合法 https 配置）。
+    if parts.scheme == "http" and not config.http_risk_approved:
         raise AgentValidationError("http_not_approved", f"{path}.http_risk_approved")
 
 
@@ -275,13 +277,22 @@ class MCPToolDescriptor:
 
 @dataclass(frozen=True, slots=True)
 class MCPConnectionTestReceipt:
-    """连接测试回执：只含初始化/发现结果，``research_calls`` 恒为 0。"""
+    """连接测试回执：只含初始化/发现结果，``research_calls`` 恒为 0。
+
+    ``config_digest`` / ``catalog_digest`` / ``generation`` 共同冻结「本轮测试看到的
+    配置与目录」：启连必须拿同一份回执核对，测试与启连之间配置或目录发生漂移即拒绝，
+    不得用旧测试发现的工具去核准新连接（fail-closed）。
+    """
 
     identity: MCPServiceIdentity
     tool_names: tuple[str, ...]
     catalog_digest: str
     research_calls: int
     closed: bool
+    #: 本次测试使用的持久化配置快照摘要（与启连时重新加载的配置比对）。
+    config_digest: str = ""
+    #: 本身份的测试代次（单调递增）；更新的一次测试会使旧回执失效。
+    generation: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,6 +387,25 @@ def catalog_digest(tools: tuple[MCPToolDescriptor, ...]) -> str:
     return sha256_hex(canonical.encode("utf-8"))
 
 
+def config_snapshot_digest(config: MCPServerConfig) -> str:
+    """配置快照摘要：与持久化 wire 同形，供启连核对「本轮测试用的配置」。
+
+    使用编解码器的规范编码（局部导入避免 ``mcp`` ↔ ``mcp_config_codec`` 的模块级循环），
+    故保存/测试/启连三处对同一配置得到同一摘要；任何字段（含传输、预算、期限、审核、
+    显示名）变化都会改变摘要。
+    """
+
+    from services.agent_service.mcp_config_codec import encode_mcp_server_config
+
+    canonical = json.dumps(
+        encode_mcp_server_config(config),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return sha256_hex(canonical.encode("utf-8"))
+
+
 # ---------------------------------------------------------------------------
 # 共享连接管理
 # ---------------------------------------------------------------------------
@@ -421,20 +451,31 @@ class SharedMCPConnectionManager:
         self._generation_seq = 0
         #: 连接测试关闭未确认的临时会话（身份/错误/句柄）：只影响测试自身，不并入共享状态。
         self._test_residue: dict[str, list[MCPConnectionTestResidue]] = {}
+        #: 本身份最近一次测试的代次（单调递增，不复用）；旧回执据此失效。
+        self._test_seq = 0
+        self._test_generations: dict[str, int] = {}
 
     # -- 配置 ---------------------------------------------------------------
 
     async def save_config(self, config: MCPServerConfig) -> MCPConfigSaveReceipt:
         """保存配置：校验合同并持久化，**不打开连接、不发现工具**。
 
-        同一身份/版本的更新不得就地改写已被研究冻结的配置：先核持久化使用者，
-        存在未终结研究引用即拒绝（I59）；新建版本（``config_version`` 变更）身份
-        不同，天然不命中已冻结研究。
+        同一身份/版本的更新不得就地改写已被研究冻结或被活动连接持有的配置：存在
+        未终结研究引用即拒绝（I59）；已被活动连接持有的版本若内容发生变化同样拒绝
+        （该连接按冻结态服务，改写会让「已连接」不再等于「按存储配置服务」），须显式
+        断开或改用新 ``config_version`` 保存（同版更新/协议切换的收尾闭环）。
         """
 
         identity = config.identity
         label = _identity_text(identity)
         self._admit_config(config, label)
+        frozen = self._configs.get(label)
+        if frozen is not None and _frozen_config_drifted(frozen, config):
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                "config version is held by an active connection; disconnect or save a new config version",
+                label,
+            )
         await self._require_no_frozen_users(identity, label, "update")
         await self._store.save(config)
         return MCPConfigSaveReceipt(identity=identity, connections_opened=0)
@@ -469,14 +510,21 @@ class SharedMCPConnectionManager:
 
         临时会话只归本测试所有：不登记/不替换/不关闭共享连接；关闭失败或取消时
         保留残留（身份 + 错误类型 + 句柄）供重试关闭与定位，不回执 ``closed=True``。
+
+        回执携带本次测试的配置摘要与代次：代次在测试**开始时**推进，故任何失败/并发
+        测试都会让旧回执失效，启连只能使用最近一次成功测试的回执。
         """
 
         config = await self._require_config(identity)
         label = _identity_text(identity)
+        self._test_seq += 1
+        generation = self._test_seq
+        self._test_generations[label] = generation
+        config_digest = config_snapshot_digest(config)
         deadline = self._start_connect_deadline(config)
         session = await self._factory.open(config)
         try:
-            tools = await session.list_tools(deadline_s=self._remaining_deadline_s(deadline, "discovery", label))
+            tools = await self._discover(session, deadline, label)
         except BaseException:
             # 主失败优先传播；关闭失败只登记残留，不覆盖发现阶段的原因。
             try:
@@ -502,7 +550,51 @@ class SharedMCPConnectionManager:
             catalog_digest=catalog_digest(tools),
             research_calls=0,
             closed=True,
+            config_digest=config_digest,
+            generation=generation,
         )
+
+    def test_generation(self, identity: MCPServiceIdentity) -> int | None:
+        """本身份最近一次连接测试的代次；从未测试即 ``None``（不猜）。"""
+
+        return self._test_generations.get(_identity_text(identity))
+
+    async def retry_test_residue_close(self, identity: MCPServiceIdentity) -> int:
+        """重试关闭连接测试未确认的临时会话（测试残留的唯一收尾入口）。
+
+        返回本次确认关闭的数量（无残留即 0）；全部确认退出才清空残留，仍失败则保留
+        （错误类型更新为本次原因）并显式拒绝，不伪装已收尾。取消继续传播，未处理完的
+        残留保持登记。
+        """
+
+        label = _identity_text(identity)
+        residue = self._test_residue.get(label)
+        if not residue:
+            return 0
+        pending = list(residue)
+        failures: list[MCPConnectionTestResidue] = []
+        closed = 0
+        for index, item in enumerate(pending):
+            try:
+                await item.session.aclose()
+                closed += 1
+            except asyncio.CancelledError:
+                # 未处理完的（含本条）保持登记，下一轮继续收尾。
+                self._test_residue[label] = pending[index:]
+                raise
+            except Exception as exc:
+                failures.append(
+                    MCPConnectionTestResidue(identity=item.identity, error=type(exc).__name__, session=item.session)
+                )
+        if failures:
+            self._test_residue[label] = failures
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                "connection test residue close is still unconfirmed",
+                label,
+            )
+        self._test_residue.pop(label, None)
+        return closed
 
     def connection_test_residue(self, identity: MCPServiceIdentity) -> tuple[MCPConnectionTestResidue, ...]:
         """连接测试未确认关闭的残留（身份/错误类型/句柄）；已确认关闭则不含该项。"""
@@ -541,6 +633,8 @@ class SharedMCPConnectionManager:
         不会各自获得一份新的 ``connect_deadline_s``（I13）。
         重连前必须先确认上次关闭已实际退出，未确认则重试关闭，仍失败即显式拒绝（I17）。
         已有存活会话时同样重核审核证据：审核撤回/实现变化后不得按旧证据继续服务（I06）。
+        连接测试关闭未确认（残留）时拒绝新开：残留会话可能仍在运行，收尾未知不得
+        用新连接覆盖（须先经 ``retry_test_residue_close`` 确认退出）。
         """
 
         label = _identity_text(identity)
@@ -554,6 +648,12 @@ class SharedMCPConnectionManager:
                     label,
                 )
             return
+        if self._test_residue.get(label):
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                "connection test residue close is unconfirmed; retry close before connecting",
+                label,
+            )
         await self._confirm_previous_close(label)
         pending = self._connecting.get(key)
         if pending is None:
@@ -591,7 +691,7 @@ class SharedMCPConnectionManager:
         # （目录/schema/解码/单条/留存）累计在同一 guard 上，由管理器注入会话。
         session = await self._factory.open(config, guard=guard)
         try:
-            tools = await session.list_tools(deadline_s=self._remaining_deadline_s(deadline, "discovery", label))
+            tools = await self._discover(session, deadline, label)
         except BaseException:
             await self._close_quietly(label, session)
             raise
@@ -867,21 +967,27 @@ class SharedMCPConnectionManager:
         return MCPDeadline(seconds=config.connect_deadline_s, monotonic=self._monotonic)
 
     @staticmethod
-    def _remaining_deadline_s(deadline: MCPDeadline, stage: str, label: str) -> int:
-        """阶段预算 = 总预算剩余（整秒向下取整，绝不超出总期限）；耗尽即拒绝进入该阶段。
+    async def _discover(
+        session: MCPClientSessionPort, deadline: MCPDeadline, label: str
+    ) -> tuple[MCPToolDescriptor, ...]:
+        """在总预算剩余内发现工具：端口按整秒收预算，外层按真实剩余时长硬切。
 
-        端口以整秒表达 deadline，故剩余不足 1 秒时视为已耗尽：宁可显式拒绝，
-        也不允许某阶段再吃掉一个完整 ``connect_deadline_s``（I13）。
+        端口合同以整秒表达期限，故剩余不足 1 秒时取最小 1 秒而不是整数截断为 0
+        ——否则合法的 ``connect_deadline_s=1`` 配置会在发现阶段被误拒（I13）。总期限
+        仍由外层 ``asyncio.timeout`` 以**精确剩余秒数**约束，故 open 与发现两段串联
+        不会各自获得一份完整 ``connect_deadline_s``，也不会超出总期限。
         """
 
-        remaining = int(deadline.remaining())
-        if remaining < MCP_MIN_DEADLINE_S:
+        remaining = deadline.remaining()
+        if remaining <= 0.0:
             raise AgentServiceError(
                 AgentErrorCode.POLICY_DENIED,
-                f"mcp connect deadline exceeded before {stage}",
+                "mcp connect deadline exceeded before discovery",
                 label,
             )
-        return remaining
+        budget_s = max(MCP_MIN_DEADLINE_S, int(remaining))
+        async with asyncio.timeout(remaining):
+            return await session.list_tools(deadline_s=budget_s)
 
     async def recheck_audit_evidence(self, identity: MCPServiceIdentity) -> MCPAuditEvidenceRecheck:
         """工具调用/重复启连前重核审核证据与失效条件：**不缓存**结论。

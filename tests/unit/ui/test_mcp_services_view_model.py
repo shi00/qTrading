@@ -32,6 +32,7 @@ from services.agent_service.mcp import (
     MCPTransportConfig,
 )
 from services.agent_service.mcp_lifecycle import MCPConnectReceipt, MCPServiceLifecycle
+from ui.viewmodels import Message
 from ui.viewmodels.mcp_services_view_model import (
     STATUS_ERROR,
     STATUS_SUCCESS,
@@ -80,7 +81,10 @@ class _FakeLifecycle:
         self.saved: list[MCPServerConfig] = []
         self.tested: list[MCPServiceIdentity] = []
         self.connect_calls: list[tuple[MCPServiceIdentity, tuple[str, ...]]] = []
+        self.connect_receipts: list[MCPConnectionTestReceipt] = []
         self.disconnected: list[MCPServiceIdentity] = []
+        self.residue_retries: list[MCPServiceIdentity] = []
+        self.residue_closed = 1
         self.fail_with: BaseException | None = None
 
     def _maybe_fail(self) -> None:
@@ -107,6 +111,8 @@ class _FakeLifecycle:
             catalog_digest="d" * 64,
             research_calls=0,
             closed=True,
+            config_digest="c" * 64,
+            generation=len(self.tested),
         )
 
     async def connect(
@@ -114,12 +120,19 @@ class _FakeLifecycle:
         identity: MCPServiceIdentity,
         *,
         approved_tools: Iterable[str],
+        test_receipt: MCPConnectionTestReceipt,
     ) -> MCPConnectReceipt:
         self._maybe_fail()
         approved = tuple(sorted(approved_tools))
         self.connect_calls.append((identity, approved))
+        self.connect_receipts.append(test_receipt)
         self.connected_keys.add(identity.stable_key())
         return MCPConnectReceipt(identity=identity, catalog_digest="d" * 64, tools=approved)
+
+    async def retry_test_residue_close(self, identity: MCPServiceIdentity) -> int:
+        self._maybe_fail()
+        self.residue_retries.append(identity)
+        return self.residue_closed
 
     async def disconnect(self, identity: MCPServiceIdentity) -> None:
         self._maybe_fail()
@@ -340,9 +353,69 @@ class TestOperations:
         await vm.connect()
 
         assert fake.connect_calls == [(_identity(), ("read_quote",))]
+        assert len(fake.connect_receipts) == 1
+        assert fake.connect_receipts[0].generation == 1
+        assert fake.connect_receipts[0].config_digest == "c" * 64
         assert vm.state.status is not None
         assert vm.state.status.key == "mcp_status_connected"
         assert vm.state.rows[0].connected is True
+
+    @pytest.mark.asyncio
+    async def test_connect_passes_the_latest_test_receipt(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        vm = _vm(fake)
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+        await vm.connection_test()
+        await vm.connection_test()
+
+        await vm.connect()
+
+        assert [receipt.generation for receipt in fake.connect_receipts] == [2]
+
+    @pytest.mark.asyncio
+    async def test_selecting_or_editing_identity_drops_the_receipt(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        vm = _vm(fake)
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+        await vm.connection_test()
+        assert vm.state.discovered_tools == _TOOL_NAMES
+
+        vm.set_draft_text("transport_kind", "streamable_http")
+        await vm.connect()
+
+        assert fake.connect_calls == []
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_need_test"
+
+    @pytest.mark.asyncio
+    async def test_retry_test_residue_close_reports_status(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        vm = _vm(fake)
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+
+        await vm.retry_test_residue_close()
+
+        assert fake.residue_retries == [_identity()]
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_residue_closed"
+        assert vm.state.status.params["count"] == "1"
+        assert vm.state.busy is False
+
+    @pytest.mark.asyncio
+    async def test_retry_test_residue_close_without_residue_reports_nothing_closed(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        fake.residue_closed = 0
+        vm = _vm(fake)
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+
+        await vm.retry_test_residue_close()
+
+        assert vm.state.status == Message("mcp_status_no_residue", {"service_id": _identity().service_id, "count": "0"})
+        assert vm.state.busy is False
 
     @pytest.mark.asyncio
     async def test_disconnect_reports_status(self) -> None:

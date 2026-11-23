@@ -38,6 +38,7 @@ from services.agent_service.mcp_fastmcp import (
     MCPSessionDiagnostics,
     _ManagedStdioEnvironment,
     _build_stdio_env,
+    _resolve_stdio_env,
     _OS_BASELINE_KEYS,
 )
 
@@ -150,6 +151,53 @@ class TestStdioEnvironmentBaseline:
 
         for key in ("HTTPS_PROXY", "HTTP_PROXY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_ENTRYPOINT"):
             assert key not in env
+
+
+class TestSecureEnvReferences:
+    """本地凭据只存引用：``env:`` / ``keyring:`` 在 spawn 前解析，非引用值按字面量。"""
+
+    def test_env_reference_is_resolved(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MCP_LOCAL_SYNTHETIC_TOKEN", "synthetic-local-value")
+
+        resolved = _resolve_stdio_env((("MCP_TOKEN", "env:MCP_LOCAL_SYNTHETIC_TOKEN"),))
+
+        assert resolved == (("MCP_TOKEN", "synthetic-local-value"),)
+
+    def test_literal_values_are_preserved(self) -> None:
+        assert _resolve_stdio_env((("LOG_LEVEL", "debug"),)) == (("LOG_LEVEL", "debug"),)
+
+    def test_missing_reference_fails_without_secret(self) -> None:
+        with pytest.raises(ValueError) as exc:
+            _resolve_stdio_env((("MCP_TOKEN", "env:MCP_I18_MISSING_TOKEN"),))
+
+        assert "env:MCP_I18_MISSING_TOKEN" in str(exc.value)
+        assert "not found" in str(exc.value)
+
+    async def test_open_fails_before_any_spawn_when_reference_is_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _no_create(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("引用解析失败时不得创建受管目录/子进程")
+
+        monkeypatch.delenv("MCP_I18_MISSING_TOKEN", raising=False)
+        monkeypatch.setattr(_ManagedStdioEnvironment, "create", classmethod(_no_create))
+
+        config = _config()
+        config = MCPServerConfig(
+            identity=config.identity,
+            display_name=config.display_name,
+            transport=MCPTransportConfig(
+                kind=MCPTransportKind.STDIO,
+                command=config.transport.command,
+                cwd=config.transport.cwd,
+                env=(("MCP_TOKEN", "env:MCP_I18_MISSING_TOKEN"),),
+            ),
+            budget=config.budget,
+        )
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await FastMCPClientFactory().open(config)
+
+        assert excinfo.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+        assert "secure env reference unavailable" in excinfo.value.sanitized_message
 
 
 class TestManagedTempDirectory:

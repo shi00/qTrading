@@ -189,7 +189,7 @@ class TestLifecycleFlow:
         tool_factory = build_tool_runtime_factory(dao=_Dao(), lifecycle=lifecycle)
         assert tool_factory(scope) is None
 
-        connected = await lifecycle.connect(_IDENTITY, approved_tools=["search"])
+        connected = await lifecycle.connect(_IDENTITY, approved_tools=["search"], test_receipt=receipt)
         assert connected.tools == ("search",)
         assert lifecycle.manager.is_connected(_IDENTITY) is True
         runtime = tool_factory(scope)
@@ -223,7 +223,8 @@ class TestLifecycleFlow:
             grants=AppStateMCPGrantStore(read=memory.read, write=memory.write),
         )
         await lifecycle.save_config(_config())
-        await lifecycle.connect(_IDENTITY, approved_tools=["search"])
+        receipt = await lifecycle.connection_test(_IDENTITY)
+        await lifecycle.connect(_IDENTITY, approved_tools=["search"], test_receipt=receipt)
         # 启连后出现排队/暂停研究：断开前必须核持久化使用者并拒绝。
         usage.users = ("execution-paused",)
 
@@ -370,7 +371,8 @@ class TestRealStdioToolChain:
         )
 
         await lifecycle.save_config(config)
-        connected = await lifecycle.connect(_IDENTITY, approved_tools=["echo"])
+        receipt = await lifecycle.connection_test(_IDENTITY)
+        connected = await lifecycle.connect(_IDENTITY, approved_tools=["echo"], test_receipt=receipt)
         assert connected.tools == ("echo",)
         discovered = {item.name for item in lifecycle.manager.frozen_catalog(_IDENTITY)}
         assert discovered == {"echo", "hidden"}
