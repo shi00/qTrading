@@ -457,7 +457,7 @@ class TestRecoveryGrant:
             await dao.engine.dispose()  # type: ignore[union-attr]
 
     async def test_grant_then_resume_exact_set_and_replay_no_double(self, real_embedded_pg) -> None:
-        """M4：真实 DAO 授予 + resume 精确集合；同代次重放不再 resume（不双记）。"""
+        """M4：真实 DAO 授予 + resume 精确集合；同代次重试精确查回原授权并补做。"""
         dao = await _setup(real_embedded_pg.url)
         resumed: list[str] = []
 
@@ -511,10 +511,12 @@ class TestRecoveryGrant:
                 client=_Client(),
                 registry=dao,
             )
-            assert replay.ready is False
-            assert replay.blocking_reasons == ("no_granted_execution",)
-            assert resumed == ["agent_research:a"]  # 重放未追加 resume（不双记）
-            assert dict(replay.blocked)["exec-a"] == "epoch_not_advanced"
+            # 重试按 (owner_epoch, run_epoch) 从登记投影精确查回原授权：不再授予新代次，
+            # 但可补做 resume；未被该授权覆盖的 exec-b 保持原拒绝理由。
+            assert replay.ready is True
+            assert replay.granted_execution_ids == ("exec-a",)
+            assert dict(replay.blocked)["exec-b"] == "user_termination"
+            assert resumed == ["agent_research:a", "agent_research:a"]
         finally:
             await dao.engine.dispose()  # type: ignore[union-attr]
 
