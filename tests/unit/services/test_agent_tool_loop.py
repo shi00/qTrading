@@ -42,6 +42,9 @@ class _Agent:
         deps: Any = None,
         message_history: list[Any] | None = None,
         deferred_tool_results: Any = None,
+        model_settings: Any = None,
+        timeout: float | None = None,
+        event_stream_handler: Any = None,
     ) -> _Result:
         self.calls.append(
             {
@@ -49,6 +52,9 @@ class _Agent:
                 "deps": deps,
                 "message_history": message_history,
                 "deferred_tool_results": deferred_tool_results,
+                "model_settings": model_settings,
+                "timeout": timeout,
+                "event_stream_handler": event_stream_handler,
             }
         )
         return self.outputs.pop(0)
@@ -132,3 +138,43 @@ class TestRunAgentToolLoop:
         with pytest.raises(asyncio.CancelledError) as exc:
             await run_agent_tool_loop(agent, "prompt", deps=None, ports=ToolLoopPorts(executor=executor))
         assert type(exc.value) is asyncio.CancelledError
+
+    async def test_turn_model_settings_and_timeout_per_round(self) -> None:
+        """T-03：每轮重算剩余预算，桥层期限与 SDK 运行期限同源。"""
+
+        agent = _Agent([_Result(_deferred()), _Result("done")])
+        executor = _Executor(ToolCallOutcome(ToolCallState.COMPLETED, {}, "op-1"))
+        remaining = iter([30.0, 12.5])
+
+        async def _handler(_ctx: Any, _stream: Any) -> None:
+            return None
+
+        result = await run_agent_tool_loop(
+            agent,
+            "prompt",
+            deps=None,
+            ports=ToolLoopPorts(executor=executor),
+            turn_model_settings=lambda: {"timeout": next(remaining)},
+            event_stream_handler=_handler,
+        )
+
+        assert result.run_result.output == "done"
+        assert [call["timeout"] for call in agent.calls] == [30.0, 12.5]
+        assert [call["model_settings"] for call in agent.calls] == [{"timeout": 30.0}, {"timeout": 12.5}]
+        assert all(call["event_stream_handler"] is _handler for call in agent.calls)
+
+    async def test_turn_model_settings_without_timeout_fails_closed(self) -> None:
+        agent = _Agent([_Result("done")])
+        executor = _Executor(ToolCallOutcome(ToolCallState.COMPLETED, {}, "op-1"))
+
+        with pytest.raises(ValueError) as excinfo:
+            await run_agent_tool_loop(
+                agent,
+                "prompt",
+                deps=None,
+                ports=ToolLoopPorts(executor=executor),
+                turn_model_settings=lambda: {},
+            )
+
+        assert "positive 'timeout'" in str(excinfo.value)
+        assert agent.calls == []

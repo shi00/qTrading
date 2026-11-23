@@ -13,7 +13,9 @@
   execute_chat_turn 承载，SDK 默认 0 不倒灌账本）；
 - 流路径：ChatStreamEvent → SDK 流事件穷举分发、finish/usage 确认、
   provider_response_id = model_call_id（身份双通道）、生产任务 join（§6.4-1）、
-  失败回合不因迭代耗尽成功（§6.4-4）、分片后失败保 partial（§6.4-5）。
+  失败回合不因迭代耗尽成功（§6.4-4）、分片后失败保 partial（§6.4-5）；
+- T-03：截断流（无 finish 确认）与收尾未核（期限已过仍无法 join）按协议失败
+  收敛；流式 ``ModelResponse.model_name`` 沿真实模型身份（非绑定别名）。
 """
 
 import asyncio
@@ -837,6 +839,8 @@ class TestStreamPath:
             assert streamed.usage.input_tokens == 100
             response = streamed.get()
         assert response.usage.input_tokens == 100
+        # 流式路径同样沿真实模型身份回报（非绑定别名，R21）
+        assert response.model_name == "glm-4-air"
 
     @pytest.mark.asyncio
     async def test_stream_failure_does_not_end_cleanly(self):
@@ -1109,6 +1113,47 @@ class TestStreamPath:
                     pass
         assert excinfo.value.code == "unknown_part"
         assert len(executor.calls) == 1  # noqa: weak-assertion 派发次数即本用例事实：无重发路径
+
+    @pytest.mark.asyncio
+    async def test_stream_truncated_without_finish_fails_closed(self):
+        """T-03/R21：截断流（干净 EOF 但无 finish 确认）不得当作成功回合。"""
+
+        events = (ChatStreamEvent(sequence=1, kind="text", text_delta="hel"),)
+        executor = _FakeExecutor(_succeeded_outcome(model_call_id="mc-tr"), events=events)
+        model = _gateway(executor)
+        with pytest.raises(ModelTurnProtocolError) as excinfo:
+            async with model.request_stream(
+                [ModelRequest(parts=[UserPromptPart(content="hi")])], _settings(), _params()
+            ) as streamed:
+                async for _event in streamed:
+                    pass
+        assert excinfo.value.code == "invalid_field"
+        assert excinfo.value.field_path == "$.finish_reason"
+
+    @pytest.mark.asyncio
+    async def test_close_stream_unconfirmed_after_deadline(self):
+        """T-03/R21：期限已过仍无法确认生产收敛 → 未核收尾（不退化为干净关闭）。"""
+
+        started = asyncio.Event()
+
+        class _HangingExecutor:
+            async def execute_chat_turn(self, request, snapshot, *, binding, on_event=None) -> ChatTurnOutcome:
+                started.set()
+                await asyncio.Event().wait()  # 永不完成——只能等待取消
+                raise AssertionError("unreachable")
+
+        model = _gateway(_HangingExecutor())
+        with pytest.raises(asyncio.CancelledError) as excinfo:
+            async with model.request_stream(
+                [ModelRequest(parts=[UserPromptPart(content="hi")])], ModelSettings(timeout=0.01), _params()
+            ) as streamed:
+                await asyncio.wait_for(started.wait(), timeout=2.0)
+                await asyncio.sleep(0.05)  # 越过冻结期限
+                with pytest.raises(ModelTurnProtocolError) as protocol_exc:
+                    await streamed.close_stream()
+                assert protocol_exc.value.code == "unconfirmed_close"
+                assert protocol_exc.value.field_path == "$.stream.close"
+        assert type(excinfo.value) is asyncio.CancelledError
 
     @pytest.mark.asyncio
     async def test_stream_cancel_joins_producer(self):

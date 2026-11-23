@@ -20,8 +20,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import logging
+import math
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Final, Protocol, cast
@@ -67,13 +69,53 @@ AGENT_TOOL_SCHEMA_VERSION: Final[str] = "v1"
 
 @dataclass(frozen=True, slots=True)
 class LeafModelBinding:
-    """一次叶执行的冻结模型绑定（执行器 + 派发时点快照 + 受理绑定）。"""
+    """一次叶执行的冻结模型绑定（执行器 + 派发时点快照 + 受理绑定 + 绝对期限）。
+
+    ``deadline`` 为按单调时钟记的**绝对期限**（秒），取自派发侧冻结路由的
+    ``total_timeout_seconds``（``now + total``）：同一次叶执行的每个模型回合都
+    由它派生剩余预算，贯穿适配器期限、消费背压与收尾，不另造默认值（R21）。
+    """
 
     executor: ChatTurnExecutor
     snapshot: ExecutionSnapshot
     binding: Mapping[str, Any]
+    deadline: float
     tool_schema_version: str = AGENT_TOOL_SCHEMA_VERSION
     profile: ModelProfile | None = None
+
+
+class LeafDeadlineUnavailableError(RuntimeError):
+    """绑定未携带可核验的绝对期限（缺失 / 非有限数 / 非正）——叶零外发（R21）。"""
+
+
+class LeafDeadlineExhaustedError(RuntimeError):
+    """冻结绝对期限已耗尽——叶不再发起任何模型外发。"""
+
+
+def require_leaf_turn_timeout(binding: LeafModelBinding) -> float:
+    """本回合可用剩余秒数（同一冻结绝对期限派生，不做默认回退）。
+
+    桥层要求 ``ModelSettings['timeout']`` 为正数（缺失即协议失败），因此叶必须
+    交出真实剩余预算；绑定期限不可核验与已耗尽分别以稳定异常表达，调用方据此
+    如实失败（R21：不以臆造默认预算继续外发）。
+
+    Raises:
+        LeafDeadlineUnavailableError: 期限缺失 / 非有限数 / 非正（装配事实不成立）。
+        LeafDeadlineExhaustedError: 期限已耗尽。
+    """
+
+    deadline = binding.deadline
+    if (
+        isinstance(deadline, bool)
+        or not isinstance(deadline, int | float)
+        or not math.isfinite(float(deadline))
+        or float(deadline) <= 0
+    ):
+        raise LeafDeadlineUnavailableError("leaf model binding has no verified absolute deadline")
+    remaining = float(deadline) - asyncio.get_running_loop().time()
+    if remaining <= 0:
+        raise LeafDeadlineExhaustedError("leaf absolute deadline exhausted (no further outbound)")
+    return remaining
 
 
 #: 叶身份 → 冻结模型绑定（生产实现按场景路由解析；不可用即抛错，零模型外发）。
@@ -498,6 +540,9 @@ async def resolve_agent_model_binding(
     F37 比较路（``lane_freeze_provider`` 命中）：快照收窄到该路冻结连接，且资料
     许可的连接 ID/版本必须与冻结值逐项相等；任一缺失/不同 → 抛错（零外发），
     不以当前场景路由替换本路所选模型。
+
+    期限：``deadline = now + dispatch.total_timeout_seconds``（派发侧冻结路由的总
+    时限）；缺失 / 非法即抛错（零外发），不以臆造默认预算放行（R21）。
     """
 
     from services.ai_service.scenario_dispatch import resolve_executor
@@ -505,6 +550,17 @@ async def resolve_agent_model_binding(
     dispatch = await resolve_executor(AGENT_RESEARCH_SCENARIO_ID)
     if dispatch is None:
         raise RuntimeError(f"{AGENT_RESEARCH_SCENARIO_ID} route unavailable (zero model dispatch)")
+    total_timeout = dispatch.total_timeout_seconds
+    if (
+        isinstance(total_timeout, bool)
+        or not isinstance(total_timeout, int | float)
+        or not math.isfinite(float(total_timeout))
+        or float(total_timeout) <= 0
+    ):
+        raise ValueError(
+            f"{AGENT_RESEARCH_SCENARIO_ID} route total_timeout_seconds missing or invalid (zero model dispatch)"
+        )
+    deadline = asyncio.get_running_loop().time() + float(total_timeout)
     lane_freeze = await lane_freeze_provider(context) if lane_freeze_provider is not None else None
     snapshot = dispatch.snapshot
     raw_consent = await data_consent_provider(context) if data_consent_provider is not None else None
@@ -530,6 +586,7 @@ async def resolve_agent_model_binding(
         executor=dispatch.executor,
         snapshot=snapshot,
         binding=binding,
+        deadline=deadline,
     )
 
 

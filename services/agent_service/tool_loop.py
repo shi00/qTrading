@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Protocol
 
@@ -60,6 +60,10 @@ class ToolLoopPorts:
 
     executor: ToolExecutorPort
     max_rounds: int = MAX_TOOL_ROUNDS
+
+
+#: 逐回合模型设置提供者：每轮调用一次，返回该轮真实设置（必须含正数 ``timeout``）。
+TurnModelSettings = Callable[[], Mapping[str, Any]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,10 +135,30 @@ async def run_agent_tool_loop(
     *,
     deps: Any,
     ports: ToolLoopPorts,
+    turn_model_settings: TurnModelSettings | None = None,
+    event_stream_handler: Any = None,
 ) -> ToolLoopResult:
-    """首轮 + Deferred 续跑；原 ``tool_call_id`` 回填；``UNKNOWN`` 不重试。"""
+    """首轮 + Deferred 续跑；原 ``tool_call_id`` 回填；``UNKNOWN`` 不重试。
 
-    result = await agent.run(prompt, deps=deps)
+    ``turn_model_settings`` 每轮调用一次：叶把同一冻结绝对期限换算出的剩余预算
+    逐轮交出（桥层 ``timeout`` = 该轮剩余），SDK 运行期限取同一值；否则时段
+    无界。``event_stream_handler`` 原样交每轮 ``run``（公开事件回调）。
+    """
+
+    def _run_kwargs() -> dict[str, Any]:
+        kwargs: dict[str, Any] = {}
+        if event_stream_handler is not None:
+            kwargs["event_stream_handler"] = event_stream_handler
+        if turn_model_settings is not None:
+            settings = dict(turn_model_settings())
+            timeout = settings.get("timeout")
+            if isinstance(timeout, bool) or not isinstance(timeout, int | float) or float(timeout) <= 0:
+                raise ValueError("turn model settings must carry a positive 'timeout' (bridge deadline)")
+            kwargs["model_settings"] = settings
+            kwargs["timeout"] = float(timeout)
+        return kwargs
+
+    result = await agent.run(prompt, deps=deps, **_run_kwargs())
     rounds = 0
     unknown_refs: list[str] = []
     denied_names: list[str] = []
@@ -154,6 +178,7 @@ async def run_agent_tool_loop(
             message_history=result.all_messages(),
             deferred_tool_results=DeferredToolResults(calls=calls),
             deps=deps,
+            **_run_kwargs(),
         )
     return ToolLoopResult(
         run_result=result,

@@ -22,13 +22,24 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Final, Protocol, cast
+from typing import Any, Final, Literal, Protocol, cast
 
 from pydantic_ai import Agent, DeferredToolRequests, UnexpectedModelBehavior
-from pydantic_ai.messages import ModelResponse
+from pydantic_ai.agent import EventStreamHandler
+from pydantic_ai.exceptions import RunTimedOut
+from pydantic_ai.messages import (
+    FinalResultEvent,
+    FunctionToolCallEvent,
+    ModelResponse,
+    PartDeltaEvent,
+    PartStartEvent,
+    TextPart,
+    TextPartDelta,
+)
 
 from core.agent_types import (
     AgentErrorCode,
@@ -38,13 +49,17 @@ from core.agent_types import (
     ResearchResultDraft,
     is_digest,
 )
+from core.model_management_types import ModelTurnProtocolError
 from services.agent_service.capability_wiring import build_leaf_boundary
 from services.agent_service.leaf_runtime import (
     AGENT_RESEARCH_SCENARIO_ID,
     AdmissionCountingToolExecutor,
     LeafAgentRunner,
+    LeafDeadlineExhaustedError,
+    LeafDeadlineUnavailableError,
     LeafExecutionContext,
     LeafModelBinding,
+    require_leaf_turn_timeout,
 )
 from services.agent_service.model import GatewayModel
 from services.agent_service.tool_loop import ToolLoopPorts, run_agent_tool_loop
@@ -58,9 +73,11 @@ __all__ = [
     "LEAF_ATTRIBUTION_UNAVAILABLE",
     "LEAF_BINDING_REVISION_STALE",
     "LEAF_BINDING_REVISION_UNAVAILABLE",
+    "LEAF_DEADLINE_EXHAUSTED",
     "LEAF_EMPTY_RESULT",
     "LEAF_INPUT_DIGEST_MISSING",
     "LEAF_MODEL_FAILED",
+    "LEAF_MODEL_PROTOCOL_FAILED",
     "LEAF_MODEL_REF_UNAVAILABLE",
     "LEAF_POLICY_DENIED",
     "LEAF_PREDECESSOR_ARTIFACT_UNAVAILABLE",
@@ -68,6 +85,7 @@ __all__ = [
     "LEAF_RESULT_SAVE_FAILED",
     "LEAF_ROLE_PROMPT_KEY",
     "LEAF_ROLE_PROMPT_UNAVAILABLE",
+    "LEAF_TIMEOUT_UNAVAILABLE",
     "LEAF_TOOL_BUDGET_EXCEEDED",
     "LEAF_TOOL_RESULT_NOT_SAVED",
     "LEAF_TOOL_SETUP_FAILED",
@@ -75,7 +93,9 @@ __all__ = [
     "DaoLeafResultStore",
     "LeafAgentDeps",
     "LeafAttributionFacts",
+    "LeafEventHandler",
     "LeafResultStore",
+    "LeafStreamEvent",
     "RolePromptIdentity",
     "RolePromptReader",
     "build_leaf_agent_runner",
@@ -105,6 +125,34 @@ LEAF_ROLE_PROMPT_UNAVAILABLE: Final[str] = "leaf_role_prompt_unavailable"
 LEAF_TOOL_SETUP_FAILED: Final[str] = "leaf_tool_setup_failed"
 LEAF_TOOL_BUDGET_EXCEEDED: Final[str] = "tool_budget_exceeded"
 LEAF_TOOL_RESULT_NOT_SAVED: Final[str] = "tool_result_not_saved"
+#: 绑定期限不可核验 / 已耗尽（不发起任何模型外发，不用默认预算兜底）。
+LEAF_TIMEOUT_UNAVAILABLE: Final[str] = "leaf_timeout_unavailable"
+LEAF_DEADLINE_EXHAUSTED: Final[str] = "leaf_deadline_exhausted"
+#: 桥层协议事实失败（如截断流无 finish 确认 / 收尾未核）：不保存成果（R21）。
+LEAF_MODEL_PROTOCOL_FAILED: Final[str] = "leaf_model_protocol_failed"
+
+
+#: 叶模型回合公开事件的受治理类别（不含思考、工具参数、供应商载荷）。
+LeafStreamEventKind = Literal["text_delta", "tool_call", "finish"]
+
+
+@dataclass(frozen=True, slots=True)
+class LeafStreamEvent:
+    """叶模型回合的受治理公开事件。
+
+    只承载展示所需事实：``text_delta`` 为最终将被保存的正文分片，``tool_name``
+    仅为已公开的工具名；不含模型调用身份 / attempt / 工具参数 / 思考内容 /
+    供应商载荷（不泄漏内部状态）。
+    """
+
+    kind: LeafStreamEventKind
+    sequence: int
+    text_delta: str | None = None
+    tool_name: str | None = None
+
+
+#: 事件回调（可返回可等待对象，消费方 await 透传背压；异常被隔离，不影响成果）。
+LeafEventHandler = Callable[[LeafStreamEvent], object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,6 +341,51 @@ def _authorized_connection_id(binding: LeafModelBinding) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _leaf_stream_event(event: Any, sequence: int) -> LeafStreamEvent | None:
+    """SDK 流事件 → 受治理公开事件；未列入展示面的事件一律不透出。"""
+
+    if isinstance(event, PartStartEvent) and isinstance(event.part, TextPart):
+        return LeafStreamEvent(kind="text_delta", sequence=sequence, text_delta=event.part.content)
+    if isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta):
+        return LeafStreamEvent(kind="text_delta", sequence=sequence, text_delta=event.delta.content_delta)
+    if isinstance(event, FunctionToolCallEvent):
+        return LeafStreamEvent(kind="tool_call", sequence=sequence, tool_name=event.part.tool_name)
+    if isinstance(event, FinalResultEvent):
+        return LeafStreamEvent(kind="finish", sequence=sequence)
+    return None
+
+
+def _event_stream_handler(on_event: LeafEventHandler) -> EventStreamHandler[LeafAgentDeps]:
+    """公开事件回调装配：回调异常隔离（记录类型名后继续），取消照常传播（R2）。
+
+    回调只具观察语义：失败不得改变模型回合与成果事实；可等待返回值按背压 await。
+    """
+
+    sequence = 0
+
+    async def _handler(_run_context: Any, stream: Any) -> None:
+        nonlocal sequence
+        async for event in stream:
+            mapped = _leaf_stream_event(event, sequence + 1)
+            if mapped is None:
+                continue
+            sequence += 1
+            try:
+                outcome = on_event(mapped)
+                if inspect.isawaitable(outcome):
+                    await outcome
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(
+                    "[LeafAgent] event callback failed (kind=%s): %s",
+                    mapped.kind,
+                    type(e).__name__,
+                )
+
+    return _handler
+
+
 def _failed(context: LeafExecutionContext, code: str) -> NodeOutcome:
     """叶失败终态（不写成果、不伪造 complete）。"""
 
@@ -318,12 +411,19 @@ async def run_leaf_agent(
     result_kind: str = LEAF_RESULT_KIND,
     tool_runtime_factory: ToolRuntimeFactory | None = None,
     role_prompt_reader: RolePromptReader | None = None,
+    on_event: LeafEventHandler | None = None,
 ) -> NodeOutcome:
     """执行一次叶 Agent 回合并保存成果；失败如实返回 ``failed``（R21）。
 
     ``tool_runtime_factory=None`` 保持无工具单轮（第 2 项已验证行为）；显式注入时
     在归属事实可知后构造 runtime，并走 Deferred 工具循环。``role_prompt_reader``
     缺省时读设置页已保存的角色 Prompt（默认正文 + 追加），读不到即失败不放行。
+
+    期限：每个模型回合的 ``ModelSettings['timeout']`` 与 SDK 运行期限都取自绑定
+    冻结绝对期限的剩余秒数（``require_leaf_turn_timeout``）；期限不可核验 / 已耗尽
+    即零外发失败，不以默认预算继续（R21）。
+    ``on_event`` 为受治理公开事件回调（观察语义，异常隔离）；提供时经 SDK 真实
+    流路径驱动，截断（无 finish 确认）或收尾未核按协议失败收敛，不保存成果。
     """
 
     digest = context.input_digest
@@ -335,6 +435,23 @@ async def run_leaf_agent(
             context.node.node_id,
         )
         return _failed(context, LEAF_INPUT_DIGEST_MISSING)
+
+    try:
+        require_leaf_turn_timeout(binding)
+    except LeafDeadlineUnavailableError:
+        logger.warning(
+            "[LeafAgent] binding deadline unavailable, leaf fails without outbound (execution=%s node=%s)",
+            context.execution_id,
+            context.node.node_id,
+        )
+        return _failed(context, LEAF_TIMEOUT_UNAVAILABLE)
+    except LeafDeadlineExhaustedError:
+        logger.warning(
+            "[LeafAgent] binding deadline exhausted, leaf fails without outbound (execution=%s node=%s)",
+            context.execution_id,
+            context.node.node_id,
+        )
+        return _failed(context, LEAF_DEADLINE_EXHAUSTED)
 
     try:
         role_prompt = await _resolve_role_prompt(role_prompt_reader)
@@ -455,9 +572,23 @@ async def run_leaf_agent(
         node_id=context.node.node_id,
     )
     unknown_operation_refs: tuple[str, ...] = ()
+
+    def _turn_model_settings() -> dict[str, Any]:
+        """本回合设置：桥层期限与 SDK 运行期限同取绑定冻结期限的剩余秒数。"""
+
+        return {"timeout": require_leaf_turn_timeout(binding)}
+
+    event_stream_handler = _event_stream_handler(on_event) if on_event is not None else None
     try:
         if tool_runtime is None:
-            result = await agent.run(_leaf_prompt(context, predecessor_summaries), deps=deps)
+            settings = _turn_model_settings()
+            result = await agent.run(
+                _leaf_prompt(context, predecessor_summaries),
+                deps=deps,
+                model_settings=settings,
+                timeout=settings["timeout"],
+                event_stream_handler=event_stream_handler,
+            )
         else:
             loop_result = await run_agent_tool_loop(
                 agent,
@@ -468,11 +599,37 @@ async def run_leaf_agent(
                         tool_runtime, dao=dao, user_scope=facts.user_scope, execution_id=context.execution_id
                     )
                 ),
+                turn_model_settings=_turn_model_settings,
+                event_stream_handler=event_stream_handler,
             )
             result = loop_result.run_result
             unknown_operation_refs = loop_result.unknown_operation_refs
     except asyncio.CancelledError:
         raise
+    except (LeafDeadlineUnavailableError, LeafDeadlineExhaustedError) as e:
+        code = LEAF_TIMEOUT_UNAVAILABLE if isinstance(e, LeafDeadlineUnavailableError) else LEAF_DEADLINE_EXHAUSTED
+        logger.warning(
+            "[LeafAgent] leaf deadline guard tripped: %s (execution=%s node=%s)",
+            code,
+            context.execution_id,
+            context.node.node_id,
+        )
+        return _failed(context, code)
+    except RunTimedOut:
+        logger.warning(
+            "[LeafAgent] leaf run timed out at frozen deadline (execution=%s node=%s)",
+            context.execution_id,
+            context.node.node_id,
+        )
+        return _failed(context, LEAF_DEADLINE_EXHAUSTED)
+    except ModelTurnProtocolError as e:
+        logger.warning(
+            "[LeafAgent] leaf model turn protocol failure: %s (execution=%s node=%s)",
+            e.code,
+            context.execution_id,
+            context.node.node_id,
+        )
+        return _failed(context, LEAF_MODEL_PROTOCOL_FAILED)
     except AgentServiceError as e:
         if e.code is AgentErrorCode.BUDGET_BLOCKED:
             code = LEAF_TOOL_BUDGET_EXCEEDED
@@ -578,8 +735,13 @@ def build_leaf_agent_runner(
     *,
     tool_runtime_factory: ToolRuntimeFactory | None = None,
     role_prompt_reader: RolePromptReader | None = None,
+    on_event: LeafEventHandler | None = None,
 ) -> LeafAgentRunner:
-    """生产叶主体工厂：显式 DAO 优先，缺省惰性取共享 ``CacheManager``。"""
+    """生产叶主体工厂：显式 DAO 优先，缺省惰性取共享 ``CacheManager``。
+
+    ``on_event`` 为装配期注入的公开事件观察者（受治理、异常隔离）；接线前可为
+    ``None``，不改变既有行为。
+    """
 
     async def _runner(
         model: GatewayModel,
@@ -612,6 +774,7 @@ def build_leaf_agent_runner(
             dao=resolved,
             tool_runtime_factory=tool_runtime_factory,
             role_prompt_reader=role_prompt_reader,
+            on_event=on_event,
         )
 
     return _runner
