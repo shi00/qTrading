@@ -5,10 +5,21 @@
 - 发布前在**独占句柄**上核验目标「是否存在 + 文件身份 + 内容摘要」与用户确认一致，
   父目录身份未变；目标是重解析点（符号链接/junction）时拒绝覆盖；
 - 覆盖只作用于「用户确认过的那个文件」：句柄身份不符（同摘要异文件、预检后被
-  置换）即拒绝，绝不按路径重新猜测；确认过的目标先移到同目录私有备份名，再把
-  暂存文件以「不覆盖」方式移入，因此任何第三方新文件都不会被本次发布覆掉；
-  「移开已确认目标」本身也是条件替换：移开后按备份名复核身份，窗口内被外部
-  置换的就不是已确认文件，必须放回原处并失败（见 ``_GuardedFile.supersede_to``）；
+  置换）即拒绝，绝不按路径重新猜测；确认过的目标优先经平台单步原子替换
+  （Windows ``ReplaceFileW``）换成暂存文件，旧目标落到同目录私有备份名——目标
+  路径在替换前后都持有文件，不存在「目标名无文件」的中间态。平台拒绝（如只读
+  目标）且事实未变时才退回「移开已确认目标 → 不覆盖移入」两步法，此时任何第三方
+  新文件都不会被本次发布覆掉；「移开已确认目标」本身也是条件替换：移开后按备份名
+  复核身份，窗口内被外部置换的就不是已确认文件，必须放回原处并失败（见
+  ``_GuardedFile.supersede_to``）；
+- 备份名由**暂存文件身份**派生（``_superseded_name``），不随机：中断后可按原
+  交付回执（manifest 的 ``staged_volume_serial`` / ``staged_file_id``）复算出备份
+  路径，用 ``WindowsManagedFileStore.inspect_publish`` 查询阶段事实、
+  ``WindowsManagedFileStore.resume_publish`` 按原回执续接，不按路径猜结论、
+  不默认覆盖；
+- 备份只在复核「身份与摘要都是用户确认过的旧目标」后按句柄删除（不按名字删）；
+  不是那个文件即回滚（本次内容退回暂存名、备份放回目标名），既不覆盖也不删除
+  第三方文件；确实清不掉的残余随 ``PublishResult.residue`` 如实返回；
 - 发布后用目标重新计算摘要与文件身份；无法确证即 ``unknown``——不把无法确证的
   结果报告成发布成功；
 - 取消只清理「身份与摘要均与暂存记录一致」的暂存文件；路径被他人替换或文件被
@@ -55,6 +66,10 @@ _WIN_OPEN_EXISTING = 3
 _WIN_ATTRIBUTES = 0x80 | 0x00200000  # FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT
 _WIN_FILE_RENAME_INFO = 3
 _WIN_FILE_DISPOSITION_INFO = 4
+#: ``ReplaceFileW``：``REPLACEFILE_WRITE_THROUGH``（返回即已落盘）。
+_WIN_REPLACE_WRITE_THROUGH = 0x00000001
+#: ``ReplaceFileW``：``REPLACEFILE_IGNORE_MERGE_ERRORS``（属性/ACL 合并失败不致替换失败）。
+_WIN_REPLACE_IGNORE_MERGE_ERRORS = 0x00000002
 
 
 class DeliveryFileError(RuntimeError):
@@ -107,9 +122,33 @@ class StagedFile:
 
 @dataclass(frozen=True, slots=True)
 class PublishResult:
-    """发布确证结果：目标最终身份与内容摘要。"""
+    """发布确证结果：目标最终身份与内容摘要。
+
+    ``residue`` 是发布已确证、但无法清理的私有备份（旧目标）路径；调用方必须
+    如实呈现（例如「旧文件仍在该私有名下」），不得当作已完成清理。
+    """
 
     snapshot: FileSnapshot
+    residue: tuple[Path, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PublishRecovery:
+    """按原暂存回执复核的发布阶段事实（崩溃/中断后唯一的续接依据）。
+
+    只记录可核对的事实，不声称未证明的阶段：``target_state`` 为 ``absent`` /
+    ``confirmed``（仍是用户确认过的原文件）/ ``published``（已是本次暂存文件）/
+    ``changed``（其他文件）/ ``unverified``（无法核验）；``staged_state`` 与
+    ``backup_state`` 为 ``absent`` / ``match``（身份与摘要都与回执一致）/
+    ``changed``。``resumable`` 为假时 ``reason`` 给出拒绝续接的原因码。
+    """
+
+    target_state: str
+    staged_state: str
+    backup_state: str
+    backup_path: Path
+    resumable: bool
+    reason: str | None = None
 
 
 def _digest_file(path: Path) -> str:
@@ -145,10 +184,28 @@ def _stage_prefix(target_name: str, name_hint: str | None) -> str:
     return f".{target_name}.{name_hint}."
 
 
-def _superseded_name(target_path: Path) -> Path:
-    """被替换目标的私有备份名（同目录、随机后缀，避免与用户文件名冲突）。"""
+def _superseded_name(target_path: Path, *, volume_serial: int, file_id: int) -> Path:
+    """被替换目标的私有备份名（同目录，由**暂存文件身份**派生）。
 
-    return target_path.with_name(f".{target_path.name}.superseded.{os.urandom(8).hex()}")
+    名称必须能从原交付回执复原：manifest 记录了 ``staged_volume_serial`` /
+    ``staged_file_id``，据此可复算出同一个备份路径，崩溃后既能核验也能续接；
+    随机后缀会让备份成为不可报告的残留（P1-12）。
+    """
+
+    token = hashlib.sha256(f"{volume_serial}:{file_id}".encode("ascii")).hexdigest()[:16]
+    return target_path.with_name(f".{target_path.name}.superseded.{token}")
+
+
+def _resume_rule(target_state: str, staged_state: str, backup_state: str) -> tuple[bool, str | None]:
+    """可续接的事实组合（其余一律拒绝续接，不按路径猜结论）。"""
+
+    if target_state == "published" and backup_state in {"absent", "match"}:
+        return True, None
+    if target_state in {"confirmed", "absent"} and staged_state == "match" and backup_state == "absent":
+        return True, None
+    if target_state == "absent" and backup_state == "match" and staged_state in {"match", "absent"}:
+        return True, None
+    return False, "delivery_recovery_state_conflict"
 
 
 def _is_reparse_point(stat_result: os.stat_result) -> bool:
@@ -229,6 +286,15 @@ class _Win32FileApi:
             wintypes.DWORD,
         ]
         kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
+        kernel32.ReplaceFileW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        kernel32.ReplaceFileW.restype = wintypes.BOOL
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         kernel32.CloseHandle.restype = wintypes.BOOL
         self._kernel32: Any = kernel32
@@ -292,6 +358,23 @@ class _Win32FileApi:
         if not self._kernel32.SetFileInformationByHandle(
             handle, _WIN_FILE_DISPOSITION_INFO, ctypes.byref(info), ctypes.sizeof(info)
         ):
+            raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[reportAttributeAccessIssue]  # Windows-only：WinError 在 Linux 平台不存在
+
+    def replace_file(  # pragma: no cover -- win32 原生 API
+        self, replaced: Path, replacement: Path, backup: Path
+    ) -> None:
+        """``ReplaceFileW``：整卷内单步替换，旧文件落到 ``backup``，目标路径不留空档。
+
+        与「先移走旧文件、再移入新文件」不同，本调用由文件系统一次完成替换：目标
+        名称在前后都持有文件（P1-12）。两点实测语义必须由调用方兜住：① 备份名已
+        存在时平台会**静默覆盖**该文件，调用前须拒绝占用；② 只读目标会被拒绝
+        （``ERROR_ACCESS_DENIED``），调用方须按事实退回两步法。
+        """
+
+        import ctypes
+
+        flags = _WIN_REPLACE_WRITE_THROUGH | _WIN_REPLACE_IGNORE_MERGE_ERRORS
+        if not self._kernel32.ReplaceFileW(str(replaced), str(replacement), str(backup), flags, None, None):
             raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[reportAttributeAccessIssue]  # Windows-only：WinError 在 Linux 平台不存在
 
 
@@ -391,7 +474,12 @@ class _GuardedFile:
         os.unlink(self._path)
 
     def close(self) -> None:
-        os.close(self._fd)
+        """幂等关闭：同一句柄被多处释放时不能再次关闭复用了该描述符号的文件。"""
+
+        if self._fd < 0:
+            return
+        fd, self._fd = self._fd, -1
+        os.close(fd)
 
     def __enter__(self) -> _GuardedFile:
         return self
@@ -471,7 +559,13 @@ class WindowsManagedFileStore:
             raise
 
     def publish(self, *, target: DeliveryTarget, staged: StagedFile) -> PublishResult:
-        """独占核验目标身份后不覆盖移入，并回读目标内容摘要与文件身份。"""
+        """核验目标身份后替换为暂存内容，并回读目标内容摘要与文件身份。
+
+        覆盖已确认目标时先尝试平台单步原子替换（Windows ``ReplaceFileW``）：旧目标
+        落到由暂存身份派生的私有备份名，目标路径前后都持有文件，不存在「目标名无
+        文件」的中间态。平台拒绝（如只读目标）且事实未变时退回「移开已确认目标 →
+        不覆盖移入」两步法。备份只在身份与摘要都复核为原确认文件后按句柄删除。
+        """
 
         target_path = Path(validate_delivery_target_path(target.target_path))
         try:
@@ -488,9 +582,16 @@ class WindowsManagedFileStore:
         if staged.path.parent != target_path.parent:
             raise DeliveryFileError("delivery_stage_not_same_volume", "staged content is not on the target volume")
 
-        staged_guard = self._open_staged(staged)
-        superseded: _GuardedFile | None = None
         backup_path: Path | None = None
+        confirmed_identity: tuple[int, int] | None = None
+        residue: tuple[Path, ...] = ()
+        if target.expected_existing:
+            # 备份名可由原回执复算，且平台会静默覆盖已占用的备份名：先拒绝占用。
+            backup_path = _superseded_name(target_path, volume_serial=staged.volume_serial, file_id=staged.file_id)
+            self._assert_backup_available(backup_path)
+            confirmed_identity = self._confirmed_identity(target, staged)
+
+        staged_guard = self._open_staged(staged)
         try:
             self._verify_guard(
                 staged_guard,
@@ -499,53 +600,105 @@ class WindowsManagedFileStore:
                 code="delivery_stage_changed",
                 message="staged content changed before publish",
             )
-            if target.expected_existing:
-                superseded, confirmed_identity = self._open_confirmed_target(target_path, target, staged)
-                backup_path = _superseded_name(target_path)
+            if backup_path is None or confirmed_identity is None:
                 try:
-                    superseded.supersede_to(backup_path, expected_identity=confirmed_identity)
-                except OSError as exc:
-                    raise DeliveryFileError(
-                        "delivery_target_changed", "target cannot be superseded by the confirmed publish"
-                    ) from exc
-            try:
-                staged_guard.move_to(target_path)
-            except FileExistsError as exc:
-                if self._restore_superseded(superseded, backup_path, target_path):
+                    staged_guard.move_to(target_path)
+                except FileExistsError as exc:
                     raise DeliveryFileError(
                         "delivery_target_changed", "target appeared between verification and publish"
                     ) from exc
-                raise DeliveryUnknownError(
-                    "delivery_publish_unverified", "target appeared and the superseded file cannot be restored"
-                ) from exc
-            except OSError as exc:
-                self._restore_superseded(superseded, backup_path, target_path)
-                raise DeliveryUnknownError(
-                    "delivery_publish_unverified", "target publish failed and effect cannot be verified"
-                ) from exc
+                except OSError as exc:
+                    raise DeliveryUnknownError(
+                        "delivery_publish_unverified", "target publish failed and effect cannot be verified"
+                    ) from exc
+            else:
+                self._publish_over_confirmed_target(
+                    target=target,
+                    staged=staged,
+                    staged_guard=staged_guard,
+                    target_path=target_path,
+                    backup_path=backup_path,
+                    confirmed_identity=confirmed_identity,
+                )
         finally:
             with contextlib.suppress(OSError):
                 staged_guard.close()
-            if superseded is not None:
-                with contextlib.suppress(OSError):
-                    superseded.close()
 
-        after = _snapshot(target_path)
-        if not after.exists or after.digest != staged.digest or after.is_reparse_point:
-            raise DeliveryUnknownError(
-                "delivery_publish_unverified", "published target content does not match staged content"
+        # 替换后先确证目标已是本交付文件（不确证就不动旧文件备份）。
+        if backup_path is None or confirmed_identity is None:
+            return PublishResult(snapshot=self._verified_publish_snapshot(target_path, staged))
+        self._verified_publish_snapshot(target_path, staged)
+        residue = self._verify_and_drop_backup(
+            backup_path=backup_path,
+            confirmed_identity=confirmed_identity,
+            expected_digest=target.expected_existing_digest,
+            staged=staged,
+            target_path=target_path,
+        )
+        return PublishResult(snapshot=self._verified_publish_snapshot(target_path, staged), residue=residue)
+
+    def inspect_publish(self, *, target: DeliveryTarget, staged: StagedFile) -> PublishRecovery:
+        """按原暂存回执复核发布阶段事实（中断后唯一的续接依据，不按路径猜结论）。"""
+
+        target_path = Path(validate_delivery_target_path(target.target_path))
+        backup_path = _superseded_name(target_path, volume_serial=staged.volume_serial, file_id=staged.file_id)
+        target_state = self._target_state(target_path, target, staged)
+        staged_state = self._file_state(
+            staged.path, identity=(staged.volume_serial, staged.file_id), digest=staged.digest
+        )
+        confirmed_identity = self._confirmed_identity_or_none(target)
+        if confirmed_identity is None:
+            backup_state = "changed" if os.path.lexists(backup_path) else "absent"
+        else:
+            backup_state = self._file_state(
+                backup_path, identity=confirmed_identity, digest=target.expected_existing_digest
             )
-        if after.volume_serial != staged.volume_serial or after.file_id != staged.file_id:
+        resumable, reason = _resume_rule(target_state, staged_state, backup_state)
+        return PublishRecovery(
+            target_state=target_state,
+            staged_state=staged_state,
+            backup_state=backup_state,
+            backup_path=backup_path,
+            resumable=resumable,
+            reason=reason,
+        )
+
+    def resume_publish(self, *, target: DeliveryTarget, staged: StagedFile) -> PublishResult:
+        """按原回执续接中断的发布：只处理身份与摘要都与回执一致的文件。"""
+
+        recovery = self.inspect_publish(target=target, staged=staged)
+        if not recovery.resumable:
             raise DeliveryUnknownError(
-                "delivery_publish_unverified", "published target is not the staged file of this delivery"
+                "delivery_publish_unverified",
+                f"publish state cannot be resumed: {recovery.reason}",
             )
-        if after.parent_volume_serial != staged.parent_volume_serial or after.parent_file_id != staged.parent_file_id:
-            raise DeliveryUnknownError("delivery_publish_unverified", "target parent identity changed during publish")
-        if backup_path is not None:
-            # 覆盖已确证；旧目标是用户确认可替换的内容，清理备份（残留不影响发布结论）。
-            with contextlib.suppress(OSError):
-                backup_path.unlink()
-        return PublishResult(snapshot=after)
+        target_path = Path(validate_delivery_target_path(target.target_path))
+        if recovery.target_state == "published":
+            confirmed_identity = self._confirmed_identity_or_none(target)
+            residue: tuple[Path, ...] = ()
+            if confirmed_identity is not None:
+                residue = self._verify_and_drop_backup(
+                    backup_path=recovery.backup_path,
+                    confirmed_identity=confirmed_identity,
+                    expected_digest=target.expected_existing_digest,
+                    staged=staged,
+                    target_path=target_path,
+                )
+            return PublishResult(
+                snapshot=self._verified_publish_snapshot(target_path, staged),
+                residue=residue,
+            )
+        if recovery.staged_state == "match" and recovery.backup_state == "absent":
+            return self.publish(target=target, staged=staged)
+        if recovery.staged_state == "match":
+            return self._resume_move_in(
+                target=target, staged=staged, target_path=target_path, backup_path=recovery.backup_path
+            )
+        # 暂存已不在：只能按原回执把用户确认过的原文件放回目标名，不声称发布成功。
+        self._restore_confirmed_backup(recovery.backup_path, target_path, target)
+        raise DeliveryFileError(
+            "delivery_publish_rolled_back", "publish did not complete; the confirmed target was restored"
+        )
 
     def cancel(self, staged: StagedFile) -> bool:
         """取消发布：只删除身份与摘要都能对上原暂存记录的文件；返回是否实际删除。"""
@@ -601,20 +754,7 @@ class WindowsManagedFileStore:
     ) -> tuple[_GuardedFile, tuple[int, int]]:
         """独占打开目标并核验「就是确认时那个文件」；不符即拒绝，绝不按路径臆测。"""
 
-        if target.expected_volume_serial is None or target.expected_file_id is None:
-            raise DeliveryFileError(
-                "delivery_confirmation_identity_missing",
-                "overwrite confirmation does not carry the confirmed target file identity",
-            )
-        if (staged.confirmed_target_volume_serial, staged.confirmed_target_file_id) != (
-            target.expected_volume_serial,
-            target.expected_file_id,
-        ):
-            # 暂存记录与本次确认必须指向同一个文件；否则不是同一次确认，不得覆盖。
-            raise DeliveryFileError(
-                "delivery_target_changed", "staged record was confirmed against another target file"
-            )
-        identity = (target.expected_volume_serial, target.expected_file_id)
+        identity = self._confirmed_identity(target, staged)
         try:
             guard = _GuardedFile.open_exclusive(target_path)
         except FileNotFoundError as exc:
@@ -633,6 +773,333 @@ class WindowsManagedFileStore:
                 guard.close()
             raise
         return guard, identity
+
+    @staticmethod
+    def _confirmed_identity(target: DeliveryTarget, staged: StagedFile) -> tuple[int, int]:
+        """覆盖确认绑定的原目标身份；暂存记录与本次确认必须指向同一个文件。"""
+
+        if target.expected_volume_serial is None or target.expected_file_id is None:
+            raise DeliveryFileError(
+                "delivery_confirmation_identity_missing",
+                "overwrite confirmation does not carry the confirmed target file identity",
+            )
+        if (staged.confirmed_target_volume_serial, staged.confirmed_target_file_id) != (
+            target.expected_volume_serial,
+            target.expected_file_id,
+        ):
+            raise DeliveryFileError(
+                "delivery_target_changed", "staged record was confirmed against another target file"
+            )
+        return (target.expected_volume_serial, target.expected_file_id)
+
+    @staticmethod
+    def _confirmed_identity_or_none(target: DeliveryTarget) -> tuple[int, int] | None:
+        if not target.expected_existing:
+            return None
+        if target.expected_volume_serial is None or target.expected_file_id is None:
+            return None
+        return (target.expected_volume_serial, target.expected_file_id)
+
+    @staticmethod
+    def _assert_backup_available(backup_path: Path) -> None:
+        """备份名必须空闲：``ReplaceFileW`` 会静默覆盖已占用的备份名（实测）。"""
+
+        try:
+            occupied = os.path.lexists(backup_path)
+        except OSError as exc:
+            raise DeliveryFileError("delivery_target_changed", "superseded name cannot be inspected") from exc
+        if occupied:
+            raise DeliveryFileError("delivery_target_changed", "superseded backup name is already taken")
+
+    def _publish_over_confirmed_target(
+        self,
+        *,
+        target: DeliveryTarget,
+        staged: StagedFile,
+        staged_guard: _GuardedFile,
+        target_path: Path,
+        backup_path: Path,
+        confirmed_identity: tuple[int, int],
+    ) -> None:
+        """覆盖已确认目标：优先单步原子替换，平台拒绝且事实未变时退回两步法。"""
+
+        if _IS_WINDOWS:
+            # 原子替换必须由平台完成：两个独占句柄都须释放（ReplaceFileW 需要
+            # DELETE 访问权），因此「移开旧目标」与「移入新文件」不再分两步。
+            target_guard, _ = self._open_confirmed_target(target_path, target, staged)
+            target_guard.close()
+            staged_guard.close()
+            if self._try_atomic_replace(target=target, staged=staged, target_path=target_path, backup_path=backup_path):
+                return
+        self._two_step_replace(
+            target=target,
+            staged=staged,
+            target_path=target_path,
+            backup_path=backup_path,
+            confirmed_identity=confirmed_identity,
+        )
+
+    def _try_atomic_replace(
+        self,
+        *,
+        target: DeliveryTarget,
+        staged: StagedFile,
+        target_path: Path,
+        backup_path: Path,
+    ) -> bool:
+        """尝试单步原子替换；返回 ``False`` 仅当事实证明目标仍是原确认文件。"""
+
+        try:
+            _win32_api().replace_file(target_path, staged.path, backup_path)
+            return True
+        except OSError:
+            pass
+        # 不按错误码猜结论：按可核对事实判定替换是否已生效。
+        try:
+            current = _snapshot(target_path)
+        except OSError as exc:
+            raise DeliveryUnknownError(
+                "delivery_publish_unverified", "atomic replace failed and the target cannot be inspected"
+            ) from exc
+        if current.exists and (current.volume_serial, current.file_id) == (staged.volume_serial, staged.file_id):
+            return True
+        if (
+            current.exists
+            and (current.volume_serial, current.file_id) == (target.expected_volume_serial, target.expected_file_id)
+            and current.digest == target.expected_existing_digest
+        ):
+            return False
+        raise DeliveryUnknownError(
+            "delivery_publish_unverified", "atomic replace failed and its effect cannot be verified"
+        )
+
+    def _two_step_replace(
+        self,
+        *,
+        target: DeliveryTarget,
+        staged: StagedFile,
+        target_path: Path,
+        backup_path: Path,
+        confirmed_identity: tuple[int, int],
+    ) -> None:
+        """「移开已确认目标 → 不覆盖移入」：无原子替换可用时的兜底（有中断窗口）。"""
+
+        staged_guard = self._open_staged(staged)
+        target_guard, _ = self._open_confirmed_target(target_path, target, staged)
+        try:
+            self._verify_guard(
+                staged_guard,
+                identity=(staged.volume_serial, staged.file_id),
+                digest=staged.digest,
+                code="delivery_stage_changed",
+                message="staged content changed before publish",
+            )
+            try:
+                target_guard.supersede_to(backup_path, expected_identity=confirmed_identity)
+            except OSError as exc:
+                raise DeliveryFileError(
+                    "delivery_target_changed", "target cannot be superseded by the confirmed publish"
+                ) from exc
+            try:
+                staged_guard.move_to(target_path)
+            except FileExistsError as exc:
+                if self._restore_superseded(target_guard, backup_path, target_path):
+                    raise DeliveryFileError(
+                        "delivery_target_changed", "target appeared between verification and publish"
+                    ) from exc
+                raise DeliveryUnknownError(
+                    "delivery_publish_unverified", "target appeared and the superseded file cannot be restored"
+                ) from exc
+            except OSError as exc:
+                self._restore_superseded(target_guard, backup_path, target_path)
+                raise DeliveryUnknownError(
+                    "delivery_publish_unverified", "target publish failed and effect cannot be verified"
+                ) from exc
+        finally:
+            with contextlib.suppress(OSError):
+                staged_guard.close()
+            with contextlib.suppress(OSError):
+                target_guard.close()
+
+    @staticmethod
+    def _verified_publish_snapshot(target_path: Path, staged: StagedFile) -> FileSnapshot:
+        """发布后确证：目标必须是本交付的暂存文件（身份、摘要、父目录身份）。"""
+
+        after = _snapshot(target_path)
+        if not after.exists or after.digest != staged.digest or after.is_reparse_point:
+            raise DeliveryUnknownError(
+                "delivery_publish_unverified", "published target content does not match staged content"
+            )
+        if after.volume_serial != staged.volume_serial or after.file_id != staged.file_id:
+            raise DeliveryUnknownError(
+                "delivery_publish_unverified", "published target is not the staged file of this delivery"
+            )
+        if after.parent_volume_serial != staged.parent_volume_serial or after.parent_file_id != staged.parent_file_id:
+            raise DeliveryUnknownError("delivery_publish_unverified", "target parent identity changed during publish")
+        return after
+
+    def _verify_and_drop_backup(
+        self,
+        *,
+        backup_path: Path,
+        confirmed_identity: tuple[int, int],
+        expected_digest: str | None,
+        staged: StagedFile,
+        target_path: Path,
+    ) -> tuple[Path, ...]:
+        """复核私有备份就是用户确认过的旧目标，随后按句柄删除（不按名字删）。
+
+        不是那个文件（预检后窗口内被置换）→ 回滚：本次内容退回暂存名、备份放回
+        目标名，既不覆盖也不删除第三方文件；确实清不掉时返回残余路径，不静默丢弃。
+        """
+
+        try:
+            guard = _GuardedFile.open_exclusive(backup_path)
+        except FileNotFoundError:
+            return ()
+        except OSError:
+            return (backup_path,)
+        verified = False
+        try:
+            verified = guard.identity() == confirmed_identity and expected_digest is not None
+            verified = verified and guard.digest() == expected_digest
+            if verified:
+                try:
+                    guard.delete()
+                except OSError:
+                    # 只读旧目标（复制自只读介质）先清只读位再删；句柄独占期间该名字
+                    # 无法被他人替换，因此这里清的就是刚复核过的那个文件。
+                    with contextlib.suppress(OSError):
+                        os.chmod(backup_path, stat.S_IWRITE)
+                    guard.delete()
+        except OSError:
+            return (backup_path,)
+        finally:
+            with contextlib.suppress(OSError):
+                guard.close()
+        if not verified:
+            if self._rollback_replaced(target_path=target_path, staged=staged, backup_path=backup_path):
+                raise DeliveryFileError(
+                    "delivery_target_changed", "superseded file is not the target confirmed by the user"
+                )
+            raise DeliveryUnknownError(
+                "delivery_publish_unverified",
+                f"superseded file cannot be verified nor restored; residue at {backup_path.name}",
+            )
+        return () if not os.path.lexists(backup_path) else (backup_path,)
+
+    def _rollback_replaced(self, *, target_path: Path, staged: StagedFile, backup_path: Path) -> bool:
+        """发布后复核失败的回退：本次内容退回暂存名，备份放回目标名（都不覆盖）。"""
+
+        try:
+            with _GuardedFile.open_exclusive(target_path) as guard:
+                if guard.identity() != (staged.volume_serial, staged.file_id):
+                    return False
+                guard.move_to(staged.path)
+        except OSError:
+            return False
+        try:
+            with _GuardedFile.open_exclusive(backup_path) as guard:
+                guard.move_to(target_path)
+        except OSError:
+            return False
+        return True
+
+    def _resume_move_in(
+        self,
+        *,
+        target: DeliveryTarget,
+        staged: StagedFile,
+        target_path: Path,
+        backup_path: Path,
+    ) -> PublishResult:
+        """续接「原目标已移开、暂存尚未移入」的中断：按原回执完成移入并清理备份。"""
+
+        staged_guard = self._open_staged(staged)
+        try:
+            self._verify_guard(
+                staged_guard,
+                identity=(staged.volume_serial, staged.file_id),
+                digest=staged.digest,
+                code="delivery_stage_changed",
+                message="staged content changed before the resumed publish",
+            )
+            try:
+                staged_guard.move_to(target_path)
+            except FileExistsError as exc:
+                raise DeliveryFileError(
+                    "delivery_target_changed", "target appeared before the resumed publish"
+                ) from exc
+            except OSError as exc:
+                raise DeliveryUnknownError(
+                    "delivery_publish_unverified", "resumed publish failed and effect cannot be verified"
+                ) from exc
+        finally:
+            with contextlib.suppress(OSError):
+                staged_guard.close()
+        self._verified_publish_snapshot(target_path, staged)
+        residue = self._verify_and_drop_backup(
+            backup_path=backup_path,
+            confirmed_identity=self._confirmed_identity(target, staged),
+            expected_digest=target.expected_existing_digest,
+            staged=staged,
+            target_path=target_path,
+        )
+        return PublishResult(snapshot=self._verified_publish_snapshot(target_path, staged), residue=residue)
+
+    @staticmethod
+    def _restore_confirmed_backup(backup_path: Path, target_path: Path, target: DeliveryTarget) -> None:
+        """把原确认文件从备份名放回目标名（不覆盖）；不符即拒绝，不按路径猜测。"""
+
+        identity = WindowsManagedFileStore._confirmed_identity_or_none(target)
+        try:
+            with _GuardedFile.open_exclusive(backup_path) as guard:
+                if identity is None or guard.identity() != identity:
+                    raise DeliveryFileError(
+                        "delivery_target_changed", "superseded backup is not the target confirmed by the user"
+                    )
+                guard.move_to(target_path)
+        except FileExistsError as exc:
+            raise DeliveryFileError("delivery_target_changed", "target name is occupied by another file") from exc
+        except OSError as exc:
+            raise DeliveryUnknownError(
+                "delivery_publish_unverified", "confirmed target cannot be restored from the superseded backup"
+            ) from exc
+
+    @staticmethod
+    def _target_state(target_path: Path, target: DeliveryTarget, staged: StagedFile) -> str:
+        """目标当前事实：原确认文件 / 本次发布文件 / 不存在 / 其他文件 / 无法核验。"""
+
+        try:
+            snapshot = _snapshot(target_path)
+        except OSError:
+            return "unverified"
+        if not snapshot.exists:
+            return "absent"
+        if (snapshot.volume_serial, snapshot.file_id) == (staged.volume_serial, staged.file_id):
+            return "published" if snapshot.digest == staged.digest else "changed"
+        identity = WindowsManagedFileStore._confirmed_identity_or_none(target)
+        if (
+            identity is not None
+            and (snapshot.volume_serial, snapshot.file_id) == identity
+            and snapshot.digest == target.expected_existing_digest
+        ):
+            return "confirmed"
+        return "changed"
+
+    @staticmethod
+    def _file_state(path: Path, *, identity: tuple[int, int], digest: str | None) -> str:
+        """文件事实：``absent`` / ``match``（身份与摘要都与回执一致）/ ``changed``。"""
+
+        try:
+            snapshot = _snapshot(path)
+        except OSError:
+            return "changed"
+        if not snapshot.exists:
+            return "absent"
+        if (snapshot.volume_serial, snapshot.file_id) != identity:
+            return "changed"
+        return "match" if digest is not None and snapshot.digest == digest else "changed"
 
     @staticmethod
     def _restore_superseded(
