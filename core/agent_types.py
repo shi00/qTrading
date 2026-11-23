@@ -2501,11 +2501,16 @@ def derive_round_id(*, user_scope: str, execution_id: str, workflow_id: str) -> 
 # ---------------------------------------------------------------------------
 
 
-#: 精确工具许可状态（§9.8 grant_state；本轮工程冻结 wire 值 granted/claimed/
-#: revoked——设计未逐枚举，见 Plans.md §A7 C-02-3 裁决⑦）。
+#: 精确工具许可状态（§9.8 grant_state；工程冻结 wire 值 pending/granted/
+#: claimed/revoked——设计未逐枚举，见 Plans.md §A7 C-02-3 裁决⑦）。
 class ToolGrantState(Enum):
-    """精确工具许可状态：撤销先胜零新派发；派发先胜保真实在途（§5.4 第 6 条）。"""
+    """精确工具许可状态：撤销先胜零新派发；派发先胜保真实在途（§5.4 第 6 条）。
 
+    建立决定只落 ``pending``（等待本次人答），只有本次答复被消费且为批准时才
+    激活 ``granted``；``pending`` 不可 claim（P1-10：启连勾选不是逐调用批准）。
+    """
+
+    PENDING = "pending"
     GRANTED = "granted"
     CLAIMED = "claimed"
     REVOKED = "revoked"
@@ -2722,12 +2727,21 @@ class GrantRevisionRequest:
     ``operation_id`` 为派发认领的准确 operation 身份（检视 D07）：claim 必须
     提供并绑定到决定行 ``dispatch_operation_id``；revoke 不绑定 operation，
     该字段被忽略。
+
+    P1-10：claim 还必须携带授权时冻结的 ``schema_digest`` / ``audit_scope_digest``
+    / ``boundary_digest``（来源边界事实）与 ``mcp_service_key``（连接身份稳定键）。
+    DAO 在决定行锁内与已持久化的决定载荷逐项比对，并在同一事务内锁定该服务的
+    停用门（行锁）后才允许认领：停用先提交即拒绝新 claim，重放只读原事实、不扩大。
     """
 
     user_scope: str
     decision_id: str
     expected_grant_revision: int
     operation_id: str | None = None
+    schema_digest: str | None = None
+    audit_scope_digest: str | None = None
+    boundary_digest: str | None = None
+    mcp_service_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -3904,7 +3918,7 @@ OPERATION_PHASES: Final[frozenset[str]] = frozenset(
 )
 
 #: 工具 grant 状态（C-02-3 工程冻结 wire 值，无 DB CHECK）。
-GRANT_STATES: Final[frozenset[str]] = frozenset({"granted", "claimed", "revoked"})
+GRANT_STATES: Final[frozenset[str]] = frozenset({"pending", "granted", "claimed", "revoked"})
 
 #: 游标最小编码（工程裁决，§4.2 L402）：message ``m:<session_seq>``。
 _MESSAGE_CURSOR_RE: Final = re.compile(r"m:(?:0|[1-9][0-9]*)")

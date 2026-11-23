@@ -82,6 +82,13 @@ class TestDaoToolGrantPort:
         request = dao.claim_requests[0]
         assert (request.user_scope, request.decision_id, request.expected_grant_revision) == ("u1", "dec-1", 3)
         assert request.operation_id == "op-1"
+        # P1-10：授权摘要与连接身份随 claim 持久比对（来源认领绑定原操作）。
+        assert (request.schema_digest, request.audit_scope_digest, request.boundary_digest) == (
+            "b" * 64,
+            "c" * 64,
+            "e" * 64,
+        )
+        assert request.mcp_service_key == _IDENTITY.stable_key()
 
     async def test_argument_digest_mismatch_revokes_without_claim(self) -> None:
         dao = _Dao(_scope())
@@ -111,6 +118,20 @@ class TestDaoToolGrantPort:
 
     async def test_revoked_state_revokes(self) -> None:
         dao = _Dao(_scope(grant_state=ToolGrantState.REVOKED))
+        assert await _claim(dao) is ToolDispatchVerdict.REVOKED
+        assert dao.claim_requests == []
+
+    async def test_pending_state_revokes_without_claim(self) -> None:
+        """P1-10：未答/待消费的许可不是批准，零 claim。"""
+
+        dao = _Dao(_scope(grant_state=ToolGrantState.PENDING))
+        assert await _claim(dao) is ToolDispatchVerdict.REVOKED
+        assert dao.claim_requests == []
+
+    async def test_claimed_state_is_not_reclaimed(self) -> None:
+        """已在途（claimed）不得被再次认领为新的派发。"""
+
+        dao = _Dao(_scope(grant_state=ToolGrantState.CLAIMED))
         assert await _claim(dao) is ToolDispatchVerdict.REVOKED
         assert dao.claim_requests == []
 

@@ -194,16 +194,40 @@ class _FrozenUsers:
         return self.by_key.get(key, ())
 
 
+class _FakeGate:
+    """派发停用门替身（P1-10）：记录 stop/resume；可注入拒绝异常模拟使用者冻结。"""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.stops = 0
+        self.resumes = 0
+
+    async def stop(self, identity: MCPServiceIdentity) -> None:
+        self.stops += 1
+        if self.error is not None:
+            raise self.error
+
+    async def resume(self, identity: MCPServiceIdentity) -> None:
+        self.resumes += 1
+
+
 def _manager(
     *,
     session: _FakeSession | None = None,
     fingerprint: str | None = _FINGERPRINT,
     usage: _FrozenUsers | None = None,
+    dispatch_gate: Any = None,
 ) -> tuple[SharedMCPConnectionManager, _FakeStore, _FakeFactory, _FakeProbe]:
     store = _FakeStore()
     factory = _FakeFactory(session or _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),)))
     probe = _FakeProbe(fingerprint)
-    manager = SharedMCPConnectionManager(store=store, factory=factory, probe=probe, usage=usage or _FrozenUsers())
+    manager = SharedMCPConnectionManager(
+        store=store,
+        factory=factory,
+        probe=probe,
+        usage=usage or _FrozenUsers(),
+        dispatch_gate=dispatch_gate,
+    )
     return manager, store, factory, probe
 
 
@@ -893,6 +917,42 @@ class TestFrozenUsageGuard:
         # 无法证明无使用者即拒绝（fail-closed），不把未知当空。
         assert exc.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
         assert manager.is_connected(_identity()) is True
+
+    @pytest.mark.asyncio
+    async def test_disconnect_uses_dispatch_gate_linearization_point(self) -> None:
+        """P1-10：断开先经停用门（与工具 claim 同行锁），再摘会话。"""
+
+        session = _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),))
+        gate = _FakeGate()
+        manager, _store, _factory, _probe = _manager(session=session, dispatch_gate=gate)
+        await manager.save_config(_config())
+        await manager.connect(_identity())
+
+        await manager.disconnect(_identity())
+
+        assert gate.stops == 1
+        assert gate.resumes == 0
+        assert session.closed is True
+
+    @pytest.mark.asyncio
+    async def test_disconnect_gate_refusal_keeps_connection_and_no_close(self) -> None:
+        session = _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),))
+        gate = _FakeGate(
+            error=AgentServiceError(
+                AgentErrorCode.POLICY_DENIED, "mcp config is still frozen by queued researches", "svc"
+            )
+        )
+        manager, _store, _factory, _probe = _manager(session=session, dispatch_gate=gate)
+        await manager.save_config(_config())
+        await manager.connect(_identity())
+
+        with pytest.raises(AgentServiceError) as exc:
+            await manager.disconnect(_identity())
+
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert manager.is_connected(_identity()) is True
+        assert session.closed is False
+        assert gate.resumes == 0  # 停用未提交（DAO 未写状态），无需恢复
 
     @pytest.mark.asyncio
     async def test_disconnect_rechecks_in_flight_after_usage_query(self) -> None:

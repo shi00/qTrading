@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -230,6 +231,11 @@ class TestToolRuntimeExecute:
         # I43：授权时的研究边界事实摘要进入请求与持久化决定载荷。
         assert request.boundary_digest == _BOUNDARY_DIGEST
         assert payload["boundary_digest"] == _BOUNDARY_DIGEST
+        # P1-10：决定必须有界有效期（未答/过期不可派发），不得缺省为无限期。
+        decision = dao.decisions[0]
+        assert decision.expires_at is not None
+        expires_at = datetime.strptime(decision.expires_at, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+        assert datetime.now(UTC) < expires_at <= datetime.now(UTC) + timedelta(minutes=6)
         assert dao.results[-1].outcome_state == "completed"
         assert dao.results[-1].result_payload is not None
 

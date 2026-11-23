@@ -8,6 +8,9 @@
   （目录/审核范围/schema 漂移、参数摘要冻结、单一 deadline、UNKNOWN 不重试）；
 - **决定先落库再 claim**：``save_tool_decision`` 写 ``agent_decision`` +
   ``agent_operation``，使派发认领有可核来源；无新鲜许可即零派发；
+- **逐调用人答（P1-10）**：决定只落 ``pending`` + 有界有效期，只有本次答复被
+  消费且为批准才激活 ``granted``；启连审核/目录勾选不构成逐调用批准，未答/
+  拒答/过期一律零派发；
 - **研究边界新鲜核定**（I43）：保存决定前读取来源事实并冻结摘要，派发前由调用门
   重新读取比对；已登记来源中存在禁用版本即零决定/零 claim/零派发；
 - **结果如实落库**：``completed`` / ``failed`` / ``unknown`` 三态分别映射
@@ -25,6 +28,7 @@ import json
 import logging
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Protocol
 
 from pydantic_ai import Tool
@@ -72,6 +76,9 @@ __all__ = [
 ]
 
 _JSON_SEPARATORS: Final[tuple[str, str]] = (",", ":")
+#: 单次工具许可的人答窗口（P1-10）：过期即不可回答/不可认领，必须重新发起调用。
+#: 值为有界默认（不存在「无限期授权」）；调用方未给期限即拒绝（DAO 强制）。
+_TOOL_DECISION_TTL: Final[timedelta] = timedelta(minutes=5)
 #: 可折叠为「确定未派发」的调用门拒绝码；其余（审核/预算/引擎）继续传播。
 _DENIED_CODES: Final[frozenset[AgentErrorCode]] = frozenset(
     {
@@ -178,6 +185,9 @@ class ToolRuntime:
                     schema_digest=sha256_hex(descriptor.schema_json),
                     audit_scope_digest=audit_scope_digest(self.audit_scope),
                     question_payload=_question_payload(self.identity, tool_name, arguments_digest, attestation.digest),
+                    # P1-10：决定只落 pending 且有界有效期；本决定由本次人答激活，
+                    # 启连审核/目录勾选不构成逐调用批准。
+                    expires_at=_wire_moment(datetime.now(UTC) + _TOOL_DECISION_TTL),
                 )
             )
         except asyncio.CancelledError:
@@ -254,6 +264,12 @@ class ToolRuntime:
 
 #: 叶运行期构造工具 runtime 的工厂；``None`` = 本轮零工具（无 MCP 管理器）。
 ToolRuntimeFactory = Callable[[ToolRunScope], ToolRuntime | None]
+
+
+def _wire_moment(moment: datetime) -> str:
+    """UTC 微秒 Z 时刻文本（与 DAO wire 格式一致）。"""
+
+    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _canonical_text(payload: Any) -> str:

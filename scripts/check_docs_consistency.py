@@ -4243,7 +4243,6 @@ _REPORT_FINDING_SHARED_IDS: frozenset[str] = frozenset(
         "P0-7",
         "P0-8",
         "P1-001",
-        "P1-10",
         "P1-12",
         "P1-14",
         "P1-15",

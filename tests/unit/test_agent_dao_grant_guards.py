@@ -1,7 +1,8 @@
-"""派发认领守卫契约测试（检视 D07）。
+"""派发认领守卫契约测试（检视 D07 / P1-10）。
 
 ``claim_tool_dispatch`` 首生效必须在同一事务内绑定准确 operation/owner/run
-epoch，并核期限与轮次：过期、执行终止、旧轮、错 operation、旧代次一律
+epoch，并核期限、轮次、本次人答消费、授权摘要与 MCP 停用门：过期、未答、
+执行终止、旧轮、错 operation、旧代次、摘要不符、服务已停用一律
 ``POLICY_DENIED``（零新派发）；胜者 CAS 更新同写 ``dispatch_operation_id``；
 重放只读原事实，换 operation 的重放按竞争失败返回 ``REVISION_CONFLICT``。
 ``revoke_tool_grant`` 不绑定 operation、不核期限/轮次。
@@ -13,6 +14,8 @@ epoch，并核期限与轮次：过期、执行终止、旧轮、错 operation�
 
 from __future__ import annotations
 
+import json
+
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -21,14 +24,26 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from core.agent_types import AgentErrorCode, AgentServiceError, GrantRevisionRequest, ToolGrantState
+from core.agent_types import (
+    AgentErrorCode,
+    AgentServiceError,
+    GrantRevisionRequest,
+    MCPServiceIdentity,
+    ToolGrantState,
+)
 from data.persistence.daos.agent_dao import AgentDao
 
 pytestmark = pytest.mark.unit
 
+_SCHEMA_DIGEST = "b" * 64
+_SCOPE_DIGEST = "c" * 64
+_BOUNDARY_DIGEST = "d" * 64
+_SERVICE_KEY = "svc-1:1"
+_UNSET: Any = object()
+
 
 class _GrantGuardConn:
-    """按 SQL 目标表返回决定/执行/轮/operation 事实，并记录读取/写入序列。"""
+    """按 SQL 目标表返回决定/执行/轮/operation/停用门事实，并记录读写序列。"""
 
     def __init__(
         self,
@@ -38,6 +53,7 @@ class _GrantGuardConn:
         round_row: Any = None,
         operation: Any = None,
         cas_rowcount: int = 1,
+        gate_value: str | None = None,
     ) -> None:
         self.decision = decision
         self.execution = (
@@ -50,8 +66,10 @@ class _GrantGuardConn:
         )
         self.operation = operation
         self.cas_rowcount = cas_rowcount
+        self.gate_value = gate_value
         self.reads: list[str] = []
         self.updates: list[Any] = []
+        self.inserts: list[Any] = []
 
     async def execute(self, statement: Any, params: Any = None) -> Any:
         sql = str(statement)
@@ -61,6 +79,11 @@ class _GrantGuardConn:
         if sql.lstrip().upper().startswith("UPDATE"):
             self.updates.append(statement)
             result.rowcount = self.cas_rowcount
+        elif sql.lstrip().upper().startswith("INSERT"):
+            self.inserts.append(statement)
+            compiled = statement.compile().params
+            if "INSERT INTO app_state" in sql:
+                self.gate_value = compiled.get("config_value")
         elif "FROM agent_decision" in sql:
             self.reads.append("agent_decision")
             result.first.return_value = self.decision
@@ -73,6 +96,10 @@ class _GrantGuardConn:
         elif "FROM agent_operation" in sql:
             self.reads.append("agent_operation")
             result.first.return_value = self.operation
+        elif "FROM app_state" in sql:
+            self.reads.append("app_state")
+            if self.gate_value is not None:
+                result.first.return_value = SimpleNamespace(config_value=self.gate_value)
         return result
 
 
@@ -90,7 +117,9 @@ def _decision(
     grant_state: str = "granted",
     grant_revision: int = 1,
     dispatch_operation_id: str | None = None,
-    expires_at: datetime | None = None,
+    expires_at: Any = _UNSET,
+    answer_consumed_at: Any = _UNSET,
+    question_payload: Any = None,
     execution_id: str = "exec-1",
     round_id: str = "round-1",
 ) -> Any:
@@ -100,7 +129,15 @@ def _decision(
         grant_state=grant_state,
         execution_id=execution_id,
         round_id=round_id,
-        expires_at=expires_at,
+        expires_at=(datetime.now(UTC) + timedelta(minutes=5) if expires_at is _UNSET else expires_at),
+        answer_consumed_at=(datetime.now(UTC) if answer_consumed_at is _UNSET else answer_consumed_at),
+        question_payload=question_payload
+        if question_payload is not None
+        else {
+            "schema_digest": _SCHEMA_DIGEST,
+            "audit_scope_digest": _SCOPE_DIGEST,
+            "boundary_digest": _BOUNDARY_DIGEST,
+        },
         dispatch_operation_id=dispatch_operation_id,
     )
 
@@ -122,12 +159,24 @@ def _operation(
     )
 
 
-def _claim_request(expected: int = 1, operation_id: str | None = "op-1") -> GrantRevisionRequest:
+def _claim_request(
+    expected: int = 1,
+    operation_id: str | None = "op-1",
+    *,
+    schema_digest: str | None = _SCHEMA_DIGEST,
+    audit_scope_digest: str | None = _SCOPE_DIGEST,
+    boundary_digest: str | None = _BOUNDARY_DIGEST,
+    mcp_service_key: str | None = _SERVICE_KEY,
+) -> GrantRevisionRequest:
     return GrantRevisionRequest(
         user_scope="u1",
         decision_id="d-1",
         expected_grant_revision=expected,
         operation_id=operation_id,
+        schema_digest=schema_digest,
+        audit_scope_digest=audit_scope_digest,
+        boundary_digest=boundary_digest,
+        mcp_service_key=mcp_service_key,
     )
 
 
@@ -152,6 +201,65 @@ class TestClaimGrantGuards:
 
     async def test_claim_expired_rejected_zero_new(self) -> None:
         conn = _GrantGuardConn(decision=_decision(expires_at=datetime.now(UTC) - timedelta(minutes=1)))
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _dao(conn).claim_tool_dispatch(_claim_request())
+
+        assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+        assert conn.updates == []
+
+    async def test_claim_unanswered_rejected_zero_new(self) -> None:
+        """P1-10：未答复/未消费的工具问题不是批准，零派发。"""
+
+        conn = _GrantGuardConn(decision=_decision(answer_consumed_at=None))
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _dao(conn).claim_tool_dispatch(_claim_request())
+
+        assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+        assert conn.updates == [] and conn.inserts == []
+
+    async def test_claim_unverified_validity_rejected(self) -> None:
+        conn = _GrantGuardConn(decision=_decision(expires_at=None))
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _dao(conn).claim_tool_dispatch(_claim_request())
+
+        assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+        assert conn.updates == []
+
+    async def test_claim_boundary_digest_mismatch_rejected(self) -> None:
+        """R21：授权后来源边界摘要变化 → 旧许可不得放行。"""
+
+        conn = _GrantGuardConn(decision=_decision())
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _dao(conn).claim_tool_dispatch(_claim_request(boundary_digest="f" * 64))
+
+        assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+        assert conn.updates == []
+
+    async def test_claim_missing_authorized_digests_rejected(self) -> None:
+        conn = _GrantGuardConn(decision=_decision(question_payload={"schema_digest": _SCHEMA_DIGEST}))
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _dao(conn).claim_tool_dispatch(_claim_request())
+
+        assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+        assert conn.updates == []
+
+    async def test_claim_missing_service_key_rejected(self) -> None:
+        conn = _GrantGuardConn(decision=_decision())
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _dao(conn).claim_tool_dispatch(_claim_request(mcp_service_key=None))
+
+        assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+        assert conn.updates == []
+
+    async def test_claim_rejected_when_service_gate_stopped(self) -> None:
+        """P1-10：停用先提交 → 同一行锁下认领读到 stopped，零派发。"""
+
+        conn = _GrantGuardConn(
+            decision=_decision(),
+            gate_value=json.dumps(
+                {"schema_version": 1, "state": "stopped", "stopped_at": "2026-01-01T00:00:00.000000Z"}
+            ),
+        )
         with pytest.raises(AgentServiceError) as excinfo:
             await _dao(conn).claim_tool_dispatch(_claim_request())
 
@@ -226,6 +334,10 @@ class TestClaimGrantGuards:
         params = _update_params(conn.updates[0])
         assert params["dispatch_operation_id"] == "op-1"
         assert params["grant_state"] == "claimed"
+        # 认领前在同一事务内建/锁停用门（active）。
+        assert any("INSERT INTO app_state" in str(stmt) for stmt in conn.inserts)
+        gate = json.loads(conn.gate_value or "{}")
+        assert gate["state"] == "active"
 
     async def test_claim_replay_returns_fact_without_write(self) -> None:
         conn = _GrantGuardConn(
@@ -267,3 +379,70 @@ class TestRevokeGrantGuards:
         assert "dispatch_operation_id" not in params
         assert params["grant_state"] == "revoked"
         assert "agent_operation" not in conn.reads
+
+
+class _GateDaoConn:
+    """停用门事务替身：门行 + 冻结使用者查询 + 写入捕获。"""
+
+    def __init__(self, *, gate: str | None = None, users: tuple[str, ...] = ()) -> None:
+        self.gate = gate
+        self.users = users
+        self.writes: list[str] = []
+
+    async def execute(self, statement: Any, params: Any = None) -> Any:
+        sql = str(statement)
+        result = MagicMock()
+        result.first.return_value = None
+        result.rowcount = 1
+        if sql.lstrip().upper().startswith("INSERT"):
+            self.writes.append("insert")
+            compiled = statement.compile().params
+            if "app_state" in sql:
+                self.gate = compiled.get("config_value")
+        elif "FROM app_state" in sql:
+            if self.gate is not None:
+                result.first.return_value = SimpleNamespace(config_value=self.gate)
+        elif "FROM agent_decision" in sql:
+            result.all.return_value = [SimpleNamespace(execution_id=u) for u in self.users]
+        else:
+            self.writes.append("other")
+        return result
+
+
+class TestMcpDispatchGate:
+    """P1-10：停用门与 claim 共享行锁；仍有冻结使用者即拒绝停用（零状态写）。"""
+
+    _IDENTITY = MCPServiceIdentity(service_id="svc-1", config_version=1)
+
+    async def test_stop_refused_while_frozen_users_exist(self) -> None:
+        conn = _GateDaoConn(users=("exec-1",))
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _dao(conn).stop_mcp_dispatch_gate(self._IDENTITY)
+
+        assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+        assert conn.gate is None or json.loads(conn.gate)["state"] == "active"
+
+    async def test_stop_commits_when_no_users(self) -> None:
+        conn = _GateDaoConn()
+
+        await _dao(conn).stop_mcp_dispatch_gate(self._IDENTITY)
+
+        gate = json.loads(conn.gate or "{}")
+        assert gate["state"] == "stopped"
+        assert gate["reason"] == "disconnect"
+
+    async def test_stop_is_idempotent_when_already_stopped(self) -> None:
+        conn = _GateDaoConn(gate=json.dumps({"schema_version": 1, "state": "stopped"}))
+        writes_before = list(conn.writes)
+
+        await _dao(conn).stop_mcp_dispatch_gate(self._IDENTITY)
+
+        assert conn.writes == writes_before
+
+    async def test_resume_reopens_gate(self) -> None:
+        conn = _GateDaoConn(gate=json.dumps({"schema_version": 1, "state": "stopped"}))
+
+        await _dao(conn).resume_mcp_dispatch_gate(self._IDENTITY)
+
+        assert json.loads(conn.gate or "{}")["state"] == "active"

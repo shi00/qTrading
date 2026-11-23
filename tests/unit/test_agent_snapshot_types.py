@@ -1198,6 +1198,6 @@ def test_effect_state_enum_matches_db_check() -> None:
 
 
 def test_grant_states_engineering_freeze() -> None:
-    """grant_state 为 C-02-3 工程冻结（granted/claimed/revoked），无 DB CHECK。"""
+    """grant_state 为 C-02-3/P1-10 工程冻结（pending/granted/claimed/revoked），无 DB CHECK。"""
 
-    assert {"granted", "claimed", "revoked"} == GRANT_STATES
+    assert {"pending", "granted", "claimed", "revoked"} == GRANT_STATES

@@ -328,6 +328,19 @@ class MCPFrozenUsagePort(Protocol):
     async def frozen_users(self, identity: MCPServiceIdentity) -> tuple[str, ...]: ...
 
 
+class MCPDispatchGatePort(Protocol):
+    """派发停用门端口（P1-10）：与工具 claim 共享同一持久化线性化点（行锁）。
+
+    ``stop`` 必须在单事务内锁定门行、复核持久化冻结使用者并写 ``stopped``；
+    使用者存在即拒绝（不写状态）。认领侧在同一行锁下读门状态：停用先提交 →
+    零新 claim；任一方先胜即唯一合法顺序。
+    """
+
+    async def stop(self, identity: MCPServiceIdentity) -> None: ...
+
+    async def resume(self, identity: MCPServiceIdentity) -> None: ...
+
+
 class MCPClientSessionPort(Protocol):
     """目标版客户端会话端口（真实 FastMCP 接线为 needs-spike）。"""
 
@@ -421,6 +434,7 @@ class SharedMCPConnectionManager:
         factory: MCPClientFactoryPort,
         probe: MCPImplementationProbe,
         usage: MCPFrozenUsagePort,
+        dispatch_gate: MCPDispatchGatePort | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._store = store
@@ -428,6 +442,8 @@ class SharedMCPConnectionManager:
         self._probe = probe
         #: 已冻结该配置版的研究查询端口（持久化，不能以内存计数替代；I59）。
         self._usage = usage
+        #: 派发停用门（P1-10）：与工具 claim 共享行锁；None = 未接线（保留旧判定）。
+        self._dispatch_gate = dispatch_gate
         #: 启连总期限的单调时钟（可注入以便确定性测试；不得回退到墙钟）。
         self._monotonic = monotonic
         self._sessions: dict[str, MCPClientSessionPort] = {}
@@ -717,17 +733,33 @@ class SharedMCPConnectionManager:
         """
 
         label = _identity_text(identity)
-        await self._require_no_frozen_users(identity, label, "disconnect")
-        # 持久化查询含 await：其后必须重新做同步在途复核，且该复核到 pop 之间不得再 await，
-        # 否则等待查询期间新登记的调用会在「检查通过 → 摘下会话」缝隙里被执行中关闭（I17）。
         if self._executing_operations(label):
+            raise AgentServiceError(AgentErrorCode.POLICY_DENIED, "connection still has in-flight operations", label)
+        # P1-10：停用门与工具 claim 共享同一行锁——停用先提交即拒绝新 claim。
+        # 门实现内部在同事务复核持久化冻结使用者（存在即拒绝，零状态写）。
+        if self._dispatch_gate is not None:
+            await self._dispatch_gate.stop(identity)
+        else:
+            await self._require_no_frozen_users(identity, label, "disconnect")
+        # 持久化查询含 await：其后必须重新做同步在途复核，且该复核到 pop 之间不得
+        # 再 await，否则等待查询期间新登记的调用会在「检查通过 → 摘下会话」缝隙里
+        # 被执行中关闭（I17）。
+        if self._executing_operations(label):
+            if self._dispatch_gate is not None:
+                await self._dispatch_gate.resume(identity)
             raise AgentServiceError(AgentErrorCode.POLICY_DENIED, "connection still has in-flight operations", label)
         session = self._sessions.pop(label, None)
         self._forget_connection_state(label)
         if session is not None:
             self._closing_owner[label] = session
             self._track_closing(label, session)
-        await self._request_close(label)
+        try:
+            await self._request_close(label)
+        except BaseException:
+            # 关闭未确认：服务仍可能在线，恢复派发门以免永久拒绝新 claim（R2 继续传播）。
+            if self._dispatch_gate is not None:
+                await self._dispatch_gate.resume(identity)
+            raise
 
     def is_connected(self, identity: MCPServiceIdentity) -> bool:
         return _identity_text(identity) in self._sessions

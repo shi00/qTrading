@@ -62,6 +62,7 @@ class _AnswerGuardConn:
         self.command_fact = command_fact
         self.reads: list[str] = []
         self.writes: list[str] = []
+        self.update_statements: list[Any] = []
 
     async def execute(self, statement: Any, params: Any = None) -> Any:
         sql = str(statement)
@@ -72,6 +73,7 @@ class _AnswerGuardConn:
             self.writes.append("insert")
         elif sql.lstrip().upper().startswith("UPDATE"):
             self.writes.append("update")
+            self.update_statements.append(statement)
         elif "FROM agent_session" in sql:
             self.reads.append("agent_session")
             result.first.return_value = SimpleNamespace(event_seq=0)
@@ -110,6 +112,8 @@ def _decision(
     answer_command_id: str | None = None,
     answer_consumed_at: datetime | None = None,
     round_id: str = "round-1",
+    decision_kind: str = "question",
+    grant_state: str | None = None,
 ) -> Any:
     return SimpleNamespace(
         decision_id="d-1",
@@ -121,6 +125,8 @@ def _decision(
         answer_consumed_at=answer_consumed_at,
         expires_at=expires_at,
         answer_schema=answer_schema,
+        decision_kind=decision_kind,
+        grant_state=grant_state,
     )
 
 
@@ -376,6 +382,56 @@ class TestConsumeAnswerFirstEffectGuards:
         assert fact.consumption_state is ConsumptionState.CONSUMED
         # 命令消费 + 决定 CAS，随后同事务可靠事件（消息行 + 会话水位）。
         assert conn.writes == ["update", "update", "insert", "update"]
+
+    async def test_tool_approval_answer_activates_grant_in_same_transaction(self) -> None:
+        """P1-10：本次答复被消费且为批准 → pending→granted（claim 前置事实）。"""
+
+        conn = _AnswerGuardConn(
+            decision=_decision(decision_kind="tool_permission", grant_state="pending"),
+            command_fact=SimpleNamespace(
+                consumption_state=ConsumptionState.NOT_CONSUMED.value,
+                consumed_at=None,
+                request_payload={"approve": True},
+            ),
+        )
+
+        await _dao(conn).consume_answer(_consume_request())
+
+        assert conn.writes == ["update", "update", "update", "insert", "update"]
+        grant_update = conn.update_statements[2].compile().params
+        assert grant_update["grant_state"] == "granted"
+        assert "grant_revision" in str(conn.update_statements[2])
+
+    async def test_tool_denial_answer_revokes_grant(self) -> None:
+        conn = _AnswerGuardConn(
+            decision=_decision(decision_kind="tool_permission", grant_state="pending"),
+            command_fact=SimpleNamespace(
+                consumption_state=ConsumptionState.NOT_CONSUMED.value,
+                consumed_at=None,
+                request_payload={"approve": False},
+            ),
+        )
+
+        await _dao(conn).consume_answer(_consume_request())
+
+        assert conn.update_statements[2].compile().params["grant_state"] == "revoked"
+
+    async def test_unreadable_tool_answer_does_not_activate_grant(self) -> None:
+        """R21：答复不可解释时不把「未明确拒绝」当批准，许可保持 pending（零派发）。"""
+
+        conn = _AnswerGuardConn(
+            decision=_decision(decision_kind="tool_permission", grant_state="pending"),
+            command_fact=SimpleNamespace(
+                consumption_state=ConsumptionState.NOT_CONSUMED.value,
+                consumed_at=None,
+                request_payload={"option": "x"},
+            ),
+        )
+
+        await _dao(conn).consume_answer(_consume_request())
+
+        assert conn.writes == ["update", "update", "insert", "update"]
+        assert all("grant_state" not in stmt.compile().params for stmt in conn.update_statements)
 
     async def test_already_consumed_replay_skips_revalidation(self) -> None:
         consumed_at = datetime.now(UTC)
