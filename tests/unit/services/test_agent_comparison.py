@@ -1619,10 +1619,10 @@ class TestGroupStopExecution:
                 _row(group, lane_b.lane_ref, "running", "exec-b"),
             ],
         )
-        withdrawn: list[str] = []
+        withdrawn: list[tuple[str, str | None]] = []
 
-        async def _withdraw(lane: Any, reason: str) -> LaneWithdrawal:
-            withdrawn.append(lane.lane_ref)
+        async def _withdraw(lane: Any, execution_id: str | None, reason: str) -> LaneWithdrawal:
+            withdrawn.append((lane.lane_ref, execution_id))
             return LaneWithdrawal(lane_ref=lane.lane_ref, withdrawn=True)
 
         dispatcher = _RunDispatcher()
@@ -1641,7 +1641,7 @@ class TestGroupStopExecution:
         assert by_lane[lane_b.lane_ref].action == "stop_new_dispatch"
         # 在途路只停新派发：原生退出未核定前不报已停止。
         assert by_lane[lane_b.lane_ref].verified is False
-        assert withdrawn == [lane_a.lane_ref]
+        assert withdrawn == [(lane_a.lane_ref, "exec-a")]
 
         # 停止后同一入参再推进：零派发（不再启动任何路）。
         await service.run_comparison(_submission(group))
@@ -1668,7 +1668,7 @@ class TestGroupStopExecution:
         lane_a = group.lanes[0]
         dao = _RunDao(group, [_row(group, lane_a.lane_ref, "queued", "exec-a")])
 
-        async def _withdraw(lane: Any, reason: str) -> LaneWithdrawal:
+        async def _withdraw(lane: Any, execution_id: str | None, reason: str) -> LaneWithdrawal:
             return LaneWithdrawal(lane_ref=lane.lane_ref, withdrawn=False, reason="still_queued")
 
         service = AgentService(cast(AgentDao, dao), lane_withdrawer=_withdraw)
@@ -1677,6 +1677,70 @@ class TestGroupStopExecution:
         lane_outcome = next(item for item in outcome.lanes if item.lane_ref == lane_a.lane_ref)
         assert lane_outcome.verified is False
         assert lane_outcome.reason.endswith("still_queued")
+
+    @pytest.mark.asyncio
+    async def test_stop_uses_dao_withdraw_port_by_default(self) -> None:
+        group = _group()
+        lane_a = group.lanes[0]
+        dao = _RunDao(group, [_row(group, lane_a.lane_ref, "queued", "exec-a")])
+        calls: list[tuple[str, str]] = []
+
+        async def _withdraw_comparison_lane(*, user_scope: str, execution_id: str) -> SimpleNamespace:
+            calls.append((user_scope, execution_id))
+            return SimpleNamespace(withdrawn=True, preserved=False, reason="withdrawn")
+
+        dao.withdraw_comparison_lane = _withdraw_comparison_lane  # type: ignore[attr-defined]  # 测试注入 DAO 撤单端口
+        service = AgentService(cast(AgentDao, dao))
+
+        outcome = await service.stop_comparison_group(_stop_query(group))
+
+        lane_outcome = next(item for item in outcome.lanes if item.lane_ref == lane_a.lane_ref)
+        assert lane_outcome.verified is True
+        assert calls == [("u1", "exec-a")]
+
+    @pytest.mark.asyncio
+    async def test_stop_marks_lane_unverified_when_dao_preserves_dispatched(self) -> None:
+        group = _group()
+        lane_a = group.lanes[0]
+        dao = _RunDao(group, [_row(group, lane_a.lane_ref, "queued", "exec-a")])
+
+        async def _withdraw_comparison_lane(*, user_scope: str, execution_id: str) -> SimpleNamespace:
+            return SimpleNamespace(withdrawn=False, preserved=True, reason="already_dispatched")
+
+        dao.withdraw_comparison_lane = _withdraw_comparison_lane  # type: ignore[attr-defined]  # 测试注入 DAO 撤单端口
+        service = AgentService(cast(AgentDao, dao))
+
+        outcome = await service.stop_comparison_group(_stop_query(group))
+
+        lane_outcome = next(item for item in outcome.lanes if item.lane_ref == lane_a.lane_ref)
+        assert lane_outcome.verified is False
+        assert lane_outcome.reason.endswith("already_dispatched")
+
+    @pytest.mark.asyncio
+    async def test_stop_marks_execution_unknown_without_dao_call(self) -> None:
+        group = _group()
+        lane_a = group.lanes[0]
+        dao = _RunDao(group, [_row(group, lane_a.lane_ref, "queued", "exec-a")])
+        calls: list[str] = []
+
+        async def _withdraw_comparison_lane(*, user_scope: str, execution_id: str) -> SimpleNamespace:
+            calls.append(execution_id)
+            return SimpleNamespace(withdrawn=True, preserved=False, reason="withdrawn")
+
+        dao.withdraw_comparison_lane = _withdraw_comparison_lane  # type: ignore[attr-defined]  # 测试注入 DAO 撤单端口
+        service = AgentService(cast(AgentDao, dao))
+
+        outcome = await execute_group_stop(
+            group,
+            (ComparisonLaneObservation(lane_ref=lane_a.lane_ref, display_state="queued"),),
+            reason=STOP_REASON_USER_ENDED_GROUP,
+            withdraw_lane=service._dao_lane_withdrawer("u1"),  # pyright: ignore[reportPrivateUsage]
+        )
+
+        lane_outcome = next(item for item in outcome.lanes if item.lane_ref == lane_a.lane_ref)
+        assert lane_outcome.verified is False
+        assert lane_outcome.reason.endswith("execution_unknown")
+        assert calls == []
 
     @pytest.mark.asyncio
     async def test_retry_after_stop_is_rejected(self) -> None:

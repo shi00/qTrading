@@ -538,6 +538,26 @@ class ExecutionTerminalFact:
     reason: str | None = None
 
 
+#: 可撤回的比较路排队态（未派发）：其余状态视为已派发/已结束，撤回不得改写。
+WITHDRAWABLE_LANE_STATES: frozenset[str] = frozenset({"queued", "planned", "waiting_dependency", "waiting_user"})
+
+
+@dataclass(frozen=True, slots=True)
+class LaneWithdrawOutcome:
+    """比较路撤单结果（可核事实）：``withdrawn`` 仅在本次落定为已撤回时为真。
+
+    ``preserved=True`` 表示该路已派发/已结束，撤单不改写其状态（成果保留）；
+    ``reason`` 为机器码（``withdrawn`` / ``already_withdrawn`` / ``already_dispatched``
+    / ``not_comparison_lane`` / ``not_found``），不含正文。
+    """
+
+    user_scope: str
+    execution_id: str
+    withdrawn: bool
+    preserved: bool
+    reason: str
+
+
 # E-06 九类原生目标位于**运行库**（dbos / agent_ds，独立逻辑库），不属业务库；
 # 计数/Datasource 删除见 ``data.persistence.agent_runtime_store``，系统表删除走
 # DBOS 公开 API（``services.agent_service.cleanup_native``）。本 DAO 只承载应用域
@@ -1556,8 +1576,9 @@ class AgentDao(BaseDao):
         """读取比较组共同冻结 manifest（F37/SQ-08）：只读，零派发/零模型调用。
 
         组内各路受理时把**同一份**规范 manifest 存入命令 ``request_payload``；
-        本方法按 ``execution_kind=comparison_lane`` + ``comparison_group_ref``
-        任取其中一行的 manifest 并重新规范编码（键序无关，身份由其规范字节派生）。
+        本方法取该组**权威版本**：仅计入已确认提交（``commit_state='committed'``）
+        的比较路命令，按 ``created_at`` 降序、``revision`` 降序、命令身份降序取
+        最新一行（不取最早版本——旧版/后写回的旧快照不得冒充权威）。
         组不存在返回 ``None``（由调用方按未知处理，不伪造空组）；坏载荷交由上层
         ``OPERATION_UNKNOWN`` 判定，不在此层猜测。
         """
@@ -1587,14 +1608,110 @@ class AgentDao(BaseDao):
                         AgentExecution.user_scope == user_scope,
                         AgentExecution.comparison_group_ref == group_ref,
                         AgentExecution.execution_kind == "comparison_lane",
+                        AgentCommand.commit_state == "committed",
                     )
-                    .order_by(AgentCommand.created_at)
+                    .order_by(
+                        AgentCommand.created_at.desc(),
+                        AgentCommand.revision.desc(),
+                        AgentCommand.command_record_id.desc(),
+                    )
                     .limit(1)
                 )
             ).scalar_one_or_none()
         if payload is None:
             return None
         return json_doc(payload)
+
+    async def withdraw_comparison_lane(self, *, user_scope: str, execution_id: str) -> LaneWithdrawOutcome:
+        """撤回一路未派发的比较执行（组停止 F37；§9.4）：只改排队态、幂等。
+
+        仅当该执行 ``execution_kind='comparison_lane'``、``dispatch_closed=false``、
+        无当前轮且 ``display_state`` 属排队态时置 ``display_state='withdrawn'`` +
+        ``dispatch_closed=true`` + ``ended_at``（一次事务，行锁防并发重复撤单）。
+        已派发（有当前轮/非排队态/门闩已关）一律不改写并标 ``preserved``；已
+        ``withdrawn`` 幂等返回 ``already_withdrawn``；未找到 → ``not_found``。
+        可核否定不等于失败（R21）：调用方按 ``withdrawn``/``preserved`` 分列事实。
+
+        Raises:
+            AgentServiceError: INPUT_INVALID（``user_scope``/``execution_id`` 非法）。
+        """
+
+        self._check_engine()
+        identity = f"{user_scope}/{execution_id}"
+        _require_text_field(user_scope, "user_scope", identity)
+        _require_text_field(execution_id, "execution_id", identity)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        now = datetime.now(UTC)
+        async with engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(
+                        AgentExecution.execution_kind,
+                        AgentExecution.display_state,
+                        AgentExecution.dispatch_closed,
+                        AgentExecution.current_round_id,
+                    )
+                    .where(
+                        AgentExecution.user_scope == user_scope,
+                        AgentExecution.execution_id == execution_id,
+                    )
+                    .with_for_update()
+                )
+            ).one_or_none()
+            if row is None:
+                return LaneWithdrawOutcome(
+                    user_scope=user_scope,
+                    execution_id=execution_id,
+                    withdrawn=False,
+                    preserved=False,
+                    reason="not_found",
+                )
+            if row.execution_kind != "comparison_lane":
+                return LaneWithdrawOutcome(
+                    user_scope=user_scope,
+                    execution_id=execution_id,
+                    withdrawn=False,
+                    preserved=True,
+                    reason="not_comparison_lane",
+                )
+            if row.display_state == "withdrawn":
+                return LaneWithdrawOutcome(
+                    user_scope=user_scope,
+                    execution_id=execution_id,
+                    withdrawn=True,
+                    preserved=False,
+                    reason="already_withdrawn",
+                )
+            if (
+                row.dispatch_closed
+                or row.current_round_id is not None
+                or row.display_state not in WITHDRAWABLE_LANE_STATES
+            ):
+                return LaneWithdrawOutcome(
+                    user_scope=user_scope,
+                    execution_id=execution_id,
+                    withdrawn=False,
+                    preserved=True,
+                    reason="already_dispatched",
+                )
+            await conn.execute(
+                sa.update(AgentExecution)
+                .where(
+                    AgentExecution.user_scope == user_scope,
+                    AgentExecution.execution_id == execution_id,
+                )
+                .values(
+                    display_state="withdrawn",
+                    dispatch_closed=True,
+                    ended_at=now,
+                    revision=AgentExecution.revision + 1,
+                    updated_at=now,
+                )
+            )
+        return LaneWithdrawOutcome(
+            user_scope=user_scope, execution_id=execution_id, withdrawn=True, preserved=False, reason="withdrawn"
+        )
 
     async def read_execution_cost_refs(
         self, *, user_scope: str, execution_id: str
