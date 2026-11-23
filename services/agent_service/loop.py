@@ -415,6 +415,9 @@ class ResearchResultProducer:
             plan_version=identity.plan_version,
             parent_artifact_refs=identity.parent_artifact_refs,
             source_refs=identity.source_refs,
+            # 主回合产出的成果是本轮主结果：只有它能置 ``agent_round.final_saved``
+            # （叶/子结果缺省 False，P1-08）。
+            round_final=True,
         )
         saved = await self._store.save_research_result(draft)
         if not isinstance(saved, ResearchResult) or saved.final_output_saved is not True:
