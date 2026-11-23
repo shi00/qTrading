@@ -123,6 +123,11 @@ class AttemptTerminalRecord:
     归属月 / retry_index / 连接身份等结算参数，否则被 METADATA_INCOMPLETE
     守卫阻断，该次尝试的失败事实与预留收敛不可达账本。有观察时观察元数据
     仍为权威（本字段内容与其同源一致）。
+
+    ``insert_if_missing``（T-04）：``False`` = attempt 行缺失时只转换预留
+    （settled），**不得**以预留背书补写 attempt 行——严格路径（Agent 聊天回合）
+    的尝试登记只能由显式 ``begin_attempt`` 写入；默认 ``True`` 保持既有
+    旧直推链 F23 补记语义。
     """
 
     attempt_id: str
@@ -134,6 +139,7 @@ class AttemptTerminalRecord:
     reservation_id: str | None = None
     actual_model: str | None = None
     metadata: dict[str, Any] | None = None
+    insert_if_missing: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -567,6 +573,7 @@ class UsageRecorder:
                     usage_window_expires_at=self._wall_clock() + datetime.timedelta(seconds=self._window_seconds),
                     usage_fingerprint=metadata.get("usage_fingerprint"),
                     reservation_id=record.reservation_id,
+                    insert_if_missing=record.insert_if_missing,
                 )
             )
 
