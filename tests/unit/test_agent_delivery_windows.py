@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import stat
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -15,6 +18,7 @@ from services.agent_service import delivery as delivery_module
 from services.agent_service.delivery import (
     DeliveryFileError,
     DeliveryUnknownError,
+    StagedFile,
     WindowsManagedFileStore,
     _file_identity,
     _GuardedFile,
@@ -161,7 +165,7 @@ class TestTargetRaceProtection:
             real_move(mover, destination)
             if Path(destination) == target_path:
                 # 模拟「内容相同但不是本交付文件」：换成新文件（新文件 ID）。
-                os.close(mover._fd)
+                mover.close()
                 Path(destination).unlink()
                 Path(destination).write_bytes(_CONTENT)
 
@@ -174,13 +178,18 @@ class TestTargetRaceProtection:
     def test_publish_oserror_is_unknown_even_with_identical_target(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """移入失败且目标已是同内容：不得凭内容判成功，只能 unknown。"""
+        """单步替换与兜底移入都失败且目标已是同内容：不得凭内容判成功，只能 unknown。"""
 
         target_path = tmp_path / "same.md"
         target_path.write_bytes(_CONTENT)
         store = _store()
         target = _target(target_path, existing=True, digest=_DIGEST, confirmed=True)
         staged = store.stage(target=target, content=_CONTENT, expected_digest=_DIGEST)
+
+        def refuse_replace(replaced: Path, replacement: Path, backup: Path) -> None:
+            raise OSError("platform replace refused")
+
+        monkeypatch.setattr(delivery_module._win32_api(), "replace_file", refuse_replace)
         real_move = _GuardedFile.move_to
 
         def refuse_move(mover: _GuardedFile, destination: Path) -> None:
@@ -249,6 +258,149 @@ class TestExclusiveOverwriteCondition:
         with _GuardedFile.open_exclusive(staged.path):
             assert store.cancel(staged) is False
         assert staged.path.exists()
+
+
+class TestAtomicReplace:
+    """单步原子替换与中断恢复：任意发布边界目标路径都不缺文件（P1-12）。"""
+
+    def test_readonly_target_falls_back_to_two_step(self, tmp_path: Path) -> None:
+        """只读目标会被 ``ReplaceFileW`` 拒绝：退回两步法仍能完成且不留残余。"""
+
+        target_path = tmp_path / "readonly.csv"
+        target_path.write_bytes(b"old")
+        old_digest = hashlib.sha256(b"old").hexdigest()
+        store = _store()
+        target = _target(target_path, existing=True, digest=old_digest, confirmed=True)
+        staged = store.stage(target=target, content=_CONTENT, expected_digest=_DIGEST)
+        os.chmod(target_path, stat.S_IREAD)
+        try:
+            result = store.publish(target=target, staged=staged)
+        finally:
+            os.chmod(target_path, stat.S_IWRITE)
+        assert target_path.read_bytes() == _CONTENT
+        assert result.snapshot.digest == _DIGEST
+        assert result.residue == ()
+        assert list(tmp_path.glob("*.superseded.*")) == []
+
+    def test_replaced_foreign_file_is_restored_not_overwritten(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """替换窗口内目标被置换：移走的是外部文件，回滚放回原位且本次内容退回暂存名。"""
+
+        target_path = tmp_path / "out.txt"
+        target_path.write_bytes(b"old")
+        old_digest = hashlib.sha256(b"old").hexdigest()
+        store = _store()
+        target = _target(target_path, existing=True, digest=old_digest, confirmed=True)
+        staged = store.stage(target=target, content=_CONTENT, expected_digest=_DIGEST)
+        api = delivery_module._win32_api()
+        real_replace = api.replace_file
+
+        def racing_replace(replaced: Path, replacement: Path, backup: Path) -> None:
+            external = tmp_path / "external.tmp"
+            external.write_bytes(b"external-new")
+            os.replace(external, target_path)
+            real_replace(replaced, replacement, backup)
+
+        monkeypatch.setattr(api, "replace_file", racing_replace)
+        with pytest.raises(DeliveryFileError) as exc:
+            store.publish(target=target, staged=staged)
+        assert exc.value.code == "delivery_target_changed"
+        assert target_path.read_bytes() == b"external-new"
+        assert staged.path.read_bytes() == _CONTENT
+        assert list(tmp_path.glob("*.superseded.*")) == []
+
+    def test_hard_exit_after_replace_keeps_target_and_resumes(self, tmp_path: Path) -> None:
+        """硬退出发生在替换与备份清理之间：目标路径仍有文件，续接只按原回执。"""
+
+        target_path = tmp_path / "crash.md"
+        target_path.write_bytes(b"old")
+        facts_path = tmp_path / "facts.json"
+        repo_root = Path(__file__).resolve().parents[2]
+        script = textwrap.dedent(
+            """
+            import hashlib, json, os, sys
+            from pathlib import Path
+
+            root = Path(sys.argv[1]); facts = Path(sys.argv[2])
+            sys.path.insert(0, sys.argv[3])
+            from core.agent_types import DeliveryTarget
+            from services.agent_service import delivery
+
+            content = b"new-body"
+            digest = hashlib.sha256(content).hexdigest()
+            target_path = root / "crash.md"
+            target_stat = os.stat(target_path)
+            target = DeliveryTarget(
+                target_path=str(target_path),
+                expected_existing=True,
+                expected_existing_digest=hashlib.sha256(target_path.read_bytes()).hexdigest(),
+                overwrite_confirmed=True,
+                expected_volume_serial=int(target_stat.st_dev),
+                expected_file_id=int(target_stat.st_ino),
+            )
+            store = delivery.WindowsManagedFileStore()
+            staged = store.stage(target=target, content=content, expected_digest=digest)
+            facts.write_text(
+                json.dumps(
+                    {
+                        "path": str(staged.path),
+                        "digest": staged.digest,
+                        "size": staged.size,
+                        "volume_serial": staged.volume_serial,
+                        "file_id": staged.file_id,
+                        "parent_volume_serial": staged.parent_volume_serial,
+                        "parent_file_id": staged.parent_file_id,
+                        "confirmed_target_volume_serial": staged.confirmed_target_volume_serial,
+                        "confirmed_target_file_id": staged.confirmed_target_file_id,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            api = delivery._win32_api()
+            real_replace = api.replace_file
+
+            def crash_after_replace(replaced, replacement, backup):
+                real_replace(replaced, replacement, backup)
+                os._exit(9)
+
+            api.replace_file = crash_after_replace
+            store.publish(target=target, staged=staged)
+            os._exit(10)
+            """
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script, str(tmp_path), str(facts_path), str(repo_root)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 9, completed.stderr
+
+        facts = json.loads(facts_path.read_text(encoding="utf-8"))
+        staged = StagedFile(path=Path(facts.pop("path")), **facts)
+        target = DeliveryTarget(
+            target_path=str(target_path),
+            expected_existing=True,
+            expected_existing_digest=hashlib.sha256(b"old").hexdigest(),
+            overwrite_confirmed=True,
+            expected_volume_serial=facts["confirmed_target_volume_serial"],
+            expected_file_id=facts["confirmed_target_file_id"],
+        )
+        # 硬退出后用户选的路径仍然有文件（新内容），旧目标可按回执核验。
+        assert target_path.read_bytes() == b"new-body"
+        store = _store()
+        recovery = store.inspect_publish(target=target, staged=staged)
+        assert (recovery.target_state, recovery.staged_state, recovery.backup_state) == (
+            "published",
+            "absent",
+            "match",
+        )
+        assert recovery.backup_path.read_bytes() == b"old"
+        result = store.resume_publish(target=target, staged=staged)
+        assert result.snapshot.digest == staged.digest
+        assert result.residue == ()
+        assert not recovery.backup_path.exists()
 
 
 class TestStagingSafety:

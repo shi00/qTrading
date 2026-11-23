@@ -460,7 +460,7 @@ class TestConditionalSupersede:
         old_digest = hashlib.sha256(b"old").hexdigest()
         occupied = store_env / ".out.txt.superseded.occupied"
         occupied.write_bytes(b"someone-else")
-        monkeypatch.setattr(delivery_module, "_superseded_name", lambda path: occupied)
+        monkeypatch.setattr(delivery_module, "_superseded_name", lambda path, **_: occupied)
         store = WindowsManagedFileStore()
         target = _target(store_env, exists=True, digest=old_digest)
         staged = store.stage(target=target, content=_CONTENT, expected_digest=_DIGEST)
@@ -471,36 +471,170 @@ class TestConditionalSupersede:
         assert target_file.read_bytes() == b"old"
         assert staged.path.read_bytes() == _CONTENT
 
-    def test_publish_windows_exclusive_handle_blocks_foreign_replace(
-        self, store_env: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        """Windows：独占句柄期间外部替换被拒，发布仍作用于已确认文件且不触碰外部文件。"""
+    def test_windows_overwrite_never_splits_into_two_steps(self, store_env: Path, monkeypatch: pytest.MonkeyPatch):
+        """Windows 覆盖已确认目标由平台单步完成：不得先移走旧目标再移入（P1-12）。"""
 
         if sys.platform != "win32":
-            pytest.skip("独占共享语义仅在 Windows 成立")
+            pytest.skip("单步原子替换仅在 Windows 成立")
         target_file = store_env / "out.txt"
         target_file.write_bytes(b"old")
         old_digest = hashlib.sha256(b"old").hexdigest()
         store = WindowsManagedFileStore()
         target = _target(store_env, exists=True, digest=old_digest)
         staged = store.stage(target=target, content=_CONTENT, expected_digest=_DIGEST)
-        replacement = store_env / "external.tmp"
-        blocked: list[OSError] = []
+        calls = {"supersede": 0, "move": 0}
         real_supersede = _GuardedFile.supersede_to
+        real_move = _GuardedFile.move_to
 
-        def probe(self: _GuardedFile, destination: Path, *, expected_identity: tuple[int, int]) -> None:
-            replacement.write_bytes(b"external-new")
-            try:
-                os.replace(replacement, target_file)
-            except OSError as exc:
-                blocked.append(exc)
+        def spy_supersede(self: _GuardedFile, destination: Path, *, expected_identity: tuple[int, int]) -> None:
+            calls["supersede"] += 1
             real_supersede(self, destination, expected_identity=expected_identity)
 
-        monkeypatch.setattr(_GuardedFile, "supersede_to", probe)
-        store.publish(target=target, staged=staged)
-        assert blocked and isinstance(blocked[0], PermissionError)
+        def spy_move(self: _GuardedFile, destination: Path) -> None:
+            calls["move"] += 1
+            real_move(self, destination)
+
+        monkeypatch.setattr(_GuardedFile, "supersede_to", spy_supersede)
+        monkeypatch.setattr(_GuardedFile, "move_to", spy_move)
+        result = store.publish(target=target, staged=staged)
+        assert calls == {"supersede": 0, "move": 0}
+        assert result.residue == ()
         assert target_file.read_bytes() == _CONTENT
-        assert replacement.read_bytes() == b"external-new"
+        assert list(store_env.glob("*.superseded.*")) == []
+
+
+class TestPublishRecovery:
+    """中断后只能按原回执复核阶段并续接：不默认覆盖、不留未报告残余（P1-12）。"""
+
+    @staticmethod
+    def _confirmed_target(root: Path, content: bytes = b"old") -> DeliveryTarget:
+        (root / "out.txt").write_bytes(content)
+        return _target(root, exists=True, digest=hashlib.sha256(content).hexdigest())
+
+    @staticmethod
+    def _backup_path(root: Path, staged: StagedFile) -> Path:
+        return delivery_module._superseded_name(
+            root / "out.txt", volume_serial=staged.volume_serial, file_id=staged.file_id
+        )
+
+    def test_interrupted_after_supersede_is_resumable(self, store_env: Path):
+        """「已移开原目标、尚未移入」的硬退出：目标名无文件，但原文件可按回执核验并续接。"""
+
+        store = WindowsManagedFileStore()
+        target = self._confirmed_target(store_env)
+        staged = store.stage(target=target, content=_CONTENT, expected_digest=_DIGEST)
+        backup = self._backup_path(store_env, staged)
+        os.replace(store_env / "out.txt", backup)
+
+        recovery = store.inspect_publish(target=target, staged=staged)
+        assert (recovery.target_state, recovery.staged_state, recovery.backup_state) == ("absent", "match", "match")
+        assert recovery.resumable is True
+        assert recovery.backup_path == backup
+        assert backup.read_bytes() == b"old"
+
+        result = store.resume_publish(target=target, staged=staged)
+        assert result.snapshot.digest == _DIGEST
+        assert result.residue == ()
+        assert (store_env / "out.txt").read_bytes() == _CONTENT
+        assert not backup.exists()
+        assert not staged.path.exists()
+
+    def test_interrupted_after_replace_finalizes_without_republishing(self, store_env: Path):
+        """「已替换、备份尚未清理」：续接只清理可核备份，不再动目标。"""
+
+        store = WindowsManagedFileStore()
+        target = self._confirmed_target(store_env)
+        staged = store.stage(target=target, content=_CONTENT, expected_digest=_DIGEST)
+        backup = self._backup_path(store_env, staged)
+        os.replace(store_env / "out.txt", backup)
+        os.replace(staged.path, store_env / "out.txt")
+
+        recovery = store.inspect_publish(target=target, staged=staged)
+        assert (recovery.target_state, recovery.staged_state, recovery.backup_state) == ("published", "absent", "match")
+        assert recovery.resumable is True
+
+        result = store.resume_publish(target=target, staged=staged)
+        assert result.snapshot.digest == _DIGEST
+        assert result.residue == ()
+        assert (store_env / "out.txt").read_bytes() == _CONTENT
+        assert not backup.exists()
+
+    def test_interrupted_before_publish_retries_by_receipt(self, store_env: Path):
+        """尚未动手的中断：目标仍是原确认文件，续接即按原回执完成发布。"""
+
+        store = WindowsManagedFileStore()
+        target = self._confirmed_target(store_env)
+        staged = store.stage(target=target, content=_CONTENT, expected_digest=_DIGEST)
+
+        recovery = store.inspect_publish(target=target, staged=staged)
+        assert (recovery.target_state, recovery.staged_state, recovery.backup_state) == (
+            "confirmed",
+            "match",
+            "absent",
+        )
+        assert recovery.resumable is True
+
+        result = store.resume_publish(target=target, staged=staged)
+        assert result.snapshot.digest == _DIGEST
+        assert (store_env / "out.txt").read_bytes() == _CONTENT
+
+    def test_changed_staged_file_blocks_resume(self, store_env: Path):
+        """暂存已不是回执记录的文件：拒绝续接，不按路径重做。"""
+
+        store = WindowsManagedFileStore()
+        target = self._confirmed_target(store_env)
+        staged = store.stage(target=target, content=_CONTENT, expected_digest=_DIGEST)
+        backup = self._backup_path(store_env, staged)
+        os.replace(store_env / "out.txt", backup)
+        staged.path.write_bytes(b"tampered")
+
+        recovery = store.inspect_publish(target=target, staged=staged)
+        assert recovery.staged_state == "changed"
+        assert recovery.resumable is False
+        with pytest.raises(DeliveryUnknownError) as exc:
+            store.resume_publish(target=target, staged=staged)
+        assert exc.value.code == "delivery_publish_unverified"
+        assert (store_env / "out.txt").exists() is False
+        assert backup.read_bytes() == b"old"
+
+    def test_missing_staged_restores_confirmed_target(self, store_env: Path):
+        """暂存已不在：按原回执把原确认文件放回目标名，并如实报告未完成发布。"""
+
+        store = WindowsManagedFileStore()
+        target = self._confirmed_target(store_env)
+        staged = store.stage(target=target, content=_CONTENT, expected_digest=_DIGEST)
+        backup = self._backup_path(store_env, staged)
+        os.replace(store_env / "out.txt", backup)
+        staged.path.unlink()
+
+        recovery = store.inspect_publish(target=target, staged=staged)
+        assert (recovery.target_state, recovery.staged_state, recovery.backup_state) == ("absent", "absent", "match")
+        assert recovery.resumable is True
+        with pytest.raises(DeliveryFileError) as exc:
+            store.resume_publish(target=target, staged=staged)
+        assert exc.value.code == "delivery_publish_rolled_back"
+        assert (store_env / "out.txt").read_bytes() == b"old"
+        assert not backup.exists()
+
+    def test_foreign_backup_blocks_resume_and_is_kept(self, store_env: Path):
+        """备份名被外部文件占用（已发布）：不删除他人文件，也不声称可续接。"""
+
+        store = WindowsManagedFileStore()
+        target = self._confirmed_target(store_env)
+        staged = store.stage(target=target, content=_CONTENT, expected_digest=_DIGEST)
+        backup = self._backup_path(store_env, staged)
+        os.replace(staged.path, store_env / "out.txt")
+        backup.write_bytes(b"someone-else")
+
+        recovery = store.inspect_publish(target=target, staged=staged)
+        assert recovery.target_state == "published"
+        assert recovery.backup_state == "changed"
+        assert recovery.resumable is False
+        with pytest.raises(DeliveryUnknownError) as exc:
+            store.resume_publish(target=target, staged=staged)
+        assert exc.value.code == "delivery_publish_unverified"
+        assert backup.read_bytes() == b"someone-else"
+        assert (store_env / "out.txt").read_bytes() == _CONTENT
 
 
 class TestCancel:
