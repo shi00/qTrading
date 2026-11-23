@@ -444,6 +444,58 @@ class TestScreenerDao:
         assert float(row["block_amount_wan"]) == pytest.approx(123.4567)
         assert float(row["block_vol_wanshare"]) == pytest.approx(45.6789)
 
+    async def test_save_screening_results_persists_44_char_batch_run_id(
+        self, screener_dao, clean_db, test_engine: AsyncEngine
+    ):
+        """F34/AC23：stock_batch_<32 hex>（44 字符）在迁移后的 PG 原样落库并可与账本回查。
+
+        修复前 run_id 为 VARCHAR(16)，写入这 44 字符会因 value too long 失败，
+        实时结果只留内存、夜间预测无复盘记录。扩列后同一批次身份既在
+        screening_history 保存，也在 ai_invocation.run_id 保存，可双向关联。
+        """
+        batch_run_id = "stock_batch_" + "d" * 32
+        assert len(batch_run_id) == 44
+        await screener_dao.save_screening_results(
+            [
+                {
+                    "run_id": batch_run_id,
+                    "trade_date": _RECENT_DATE,
+                    "strategy_name": "ai_selection",
+                    "ts_code": "000001.SZ",
+                }
+            ]
+        )
+
+        history = await screener_dao.get_history_records(
+            trade_date=_RECENT_DATE,
+            strategy_name="ai_selection",
+        )
+        assert history["run_id"].tolist() == [batch_run_id]
+
+        # 原账本 ai_invocation.run_id 无长度上限；与历史同值即同一批次可双向回查。
+        async with test_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO ai_invocation (
+                        invocation_id, scenario_id, trigger, owner_session_id,
+                        owner_epoch, owner_lease_expires_at, reservations, run_id
+                    ) VALUES (
+                        :iid, 'scn-batch-run-id', 'manual', 'sess-batch',
+                        1, (now() AT TIME ZONE 'UTC'), CAST('[]' AS jsonb), :run_id
+                    )
+                    """
+                ),
+                {"iid": "inv-batch-run-id", "run_id": batch_run_id},
+            )
+            ledger_run_id = (
+                await conn.execute(
+                    text("SELECT run_id FROM ai_invocation WHERE invocation_id = :iid"),
+                    {"iid": "inv-batch-run-id"},
+                )
+            ).scalar_one()
+        assert ledger_run_id == batch_run_id
+
     async def test_get_history_tree(self, screener_dao, clean_db):
         """获取历史树形数据"""
         records = [
