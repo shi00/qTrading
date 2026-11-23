@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, cast
 
 import pytest
@@ -265,7 +266,10 @@ def test_installed_leaf_runner_uses_persistent_identity_for_model_calls() -> Non
     async def _resolve(ctx: LeafExecutionContext) -> LeafModelBinding:
         assert ctx is context
         return LeafModelBinding(
-            executor=cast(Any, executor), snapshot=_SNAPSHOT, binding={"scenario_id": "agent_research"}
+            executor=cast(Any, executor),
+            snapshot=_SNAPSHOT,
+            binding={"scenario_id": "agent_research"},
+            deadline=time.monotonic() + 60.0,
         )
 
     async def _run(model: Any, ctx: LeafExecutionContext, binding: LeafModelBinding) -> NodeOutcome:
@@ -293,7 +297,9 @@ def test_installed_leaf_runner_uses_persistent_identity_for_model_calls() -> Non
 
 def test_gateway_model_uses_bound_alias() -> None:
     context = _leaf_context()
-    binding = LeafModelBinding(executor=cast(Any, _FakeExecutor()), snapshot=_SNAPSHOT, binding={})
+    binding = LeafModelBinding(
+        executor=cast(Any, _FakeExecutor()), snapshot=_SNAPSHOT, binding={}, deadline=time.monotonic() + 60.0
+    )
     model = build_gateway_model(context, binding)
     assert model.model_name == BOUND_MODEL_ALIAS
 
@@ -684,7 +690,9 @@ def test_unavailable_leaf_agent_reports_failed_without_faking_success() -> None:
     from services.agent_service.leaf_runtime import unavailable_leaf_agent
 
     context = _leaf_context()
-    binding = LeafModelBinding(executor=cast(Any, _FakeExecutor()), snapshot=_SNAPSHOT, binding={})
+    binding = LeafModelBinding(
+        executor=cast(Any, _FakeExecutor()), snapshot=_SNAPSHOT, binding={}, deadline=time.monotonic() + 60.0
+    )
     model = build_gateway_model(context, binding)
 
     outcome = asyncio.run(unavailable_leaf_agent(model, context, binding))

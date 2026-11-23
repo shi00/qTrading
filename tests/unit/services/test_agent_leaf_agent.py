@@ -6,18 +6,31 @@
   才返回 ``complete``，``artifact_ref`` 为 ``id@version``、``input_digest`` 原样回报；
 - 前置失败：输入指纹缺失、归属事实不可读、空文本、模型名不可得、保存未确认；
 - 边界拒绝与模型失败映射为稳定 ``leaf_*`` 错误码；
+- T-03：绑定冻结绝对期限逐回合派生真实 ``timeout``（缺失/耗尽零外发失败）、受治理
+  公开事件回调（异常隔离 / 取消传播）、SDK 超时与截断协议失败如实失败且零保存；
 - ``CancelledError`` 原样传播（R2）；失败一律零保存 / 不伪造 ``complete``（R21）。
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from pydantic_ai import DeferredToolRequests
-from pydantic_ai.messages import ModelResponse, ToolCallPart
+from pydantic_ai.exceptions import RunTimedOut
+from pydantic_ai.messages import (
+    FinalResultEvent,
+    FunctionToolCallEvent,
+    ModelResponse,
+    PartDeltaEvent,
+    PartStartEvent,
+    TextPart,
+    TextPartDelta,
+    ToolCallPart,
+)
 
 from core.agent_types import (
     AgentErrorCode,
@@ -27,20 +40,23 @@ from core.agent_types import (
     SourceKind,
     SourceVersionRef,
 )
-from core.model_management_types import ExecutionSnapshot
+from core.model_management_types import ExecutionSnapshot, ModelTurnProtocolError
 from services.agent_service import leaf_agent
 from services.agent_service.leaf_agent import (
     LEAF_ATTRIBUTION_UNAVAILABLE,
     LEAF_BINDING_REVISION_STALE,
     LEAF_BINDING_REVISION_UNAVAILABLE,
+    LEAF_DEADLINE_EXHAUSTED,
     LEAF_EMPTY_RESULT,
     LEAF_INPUT_DIGEST_MISSING,
     LEAF_MODEL_FAILED,
+    LEAF_MODEL_PROTOCOL_FAILED,
     LEAF_MODEL_REF_UNAVAILABLE,
     LEAF_POLICY_DENIED,
     LEAF_PREDECESSOR_ARTIFACT_UNAVAILABLE,
     LEAF_RESULT_SAVE_FAILED,
     LEAF_ROLE_PROMPT_UNAVAILABLE,
+    LEAF_TIMEOUT_UNAVAILABLE,
     LEAF_TOOL_SETUP_FAILED,
     build_leaf_agent_runner,
     run_leaf_agent,
@@ -91,8 +107,13 @@ def _context(
     )
 
 
-def _binding() -> LeafModelBinding:
-    return LeafModelBinding(executor=cast(Any, object()), snapshot=_SNAPSHOT, binding={})
+def _binding(*, deadline: float | None = None) -> LeafModelBinding:
+    return LeafModelBinding(
+        executor=cast(Any, object()),
+        snapshot=_SNAPSHOT,
+        binding={},
+        deadline=time.monotonic() + 60.0 if deadline is None else deadline,
+    )
 
 
 class _Facts:
@@ -175,17 +196,31 @@ class _RunResult:
         return self._messages
 
 
+class _FakeStream:
+    def __init__(self, events: list[Any]) -> None:
+        self._events = events
+
+    def __aiter__(self) -> Any:
+        async def _iterate() -> Any:
+            for event in self._events:
+                yield event
+
+        return _iterate()
+
+
 class _FakeAgent:
     instances: list[_FakeAgent] = []
     output: str = "研究结论"
     outputs: list[Any] | None = None
     messages: list[Any] = [ModelResponse([], model_name="provider-model-1")]
     error: Exception | None = None
+    handler_events: list[Any] | None = None
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self.args = args
         self.kwargs = kwargs
         self.run_calls = 0
+        self.run_kwargs: list[dict[str, Any]] = []
         type(self).instances.append(self)
 
     async def run(
@@ -195,12 +230,21 @@ class _FakeAgent:
         deps: Any,
         message_history: list[Any] | None = None,
         deferred_tool_results: Any = None,
+        model_settings: Any = None,
+        timeout: float | None = None,
+        event_stream_handler: Any = None,
     ) -> _RunResult:
         self.run_calls += 1
         self.prompt = prompt
         self.deps = deps
         self.message_history = message_history
         self.deferred_tool_results = deferred_tool_results
+        self.run_kwargs.append(
+            {"model_settings": model_settings, "timeout": timeout, "event_stream_handler": event_stream_handler}
+        )
+        handler_events = type(self).handler_events
+        if event_stream_handler is not None and handler_events is not None:
+            await event_stream_handler(None, _FakeStream(list(handler_events)))
         error = type(self).error
         if error is not None:
             raise error
@@ -215,6 +259,7 @@ def _fake_agent(monkeypatch: pytest.MonkeyPatch) -> type[_FakeAgent]:
     _FakeAgent.outputs = None
     _FakeAgent.messages = [ModelResponse([], model_name="provider-model-1")]
     _FakeAgent.error = None
+    _FakeAgent.handler_events = None
     monkeypatch.setattr(leaf_agent, "Agent", _FakeAgent)
     # 角色 Prompt 读取默认走设置页（同步配置 IO）：单元测试以替身冻结，避免读真实配置。
     monkeypatch.setattr(
@@ -477,6 +522,118 @@ class TestRunLeafAgentFailures:
         assert dao.drafts == []
 
 
+class TestLeafDeadlineAndPublicEvents:
+    """T-03：真实期限 / 公开事件回调 / 截断与收尾未核如实失败（R21）。"""
+
+    async def test_missing_verified_deadline_fails_without_outbound(self, _fake_agent: type[_FakeAgent]) -> None:
+        dao = _Dao()
+
+        outcome = await run_leaf_agent(_model(), _context(), _binding(deadline=0.0), dao=dao)
+
+        assert outcome.state == "failed"
+        assert outcome.error_code == LEAF_TIMEOUT_UNAVAILABLE
+        assert _fake_agent.instances == []
+        assert dao.drafts == []
+
+    async def test_expired_deadline_fails_without_outbound(self, _fake_agent: type[_FakeAgent]) -> None:
+        dao = _Dao()
+
+        outcome = await run_leaf_agent(_model(), _context(), _binding(deadline=time.monotonic() - 1.0), dao=dao)
+
+        assert outcome.state == "failed"
+        assert outcome.error_code == LEAF_DEADLINE_EXHAUSTED
+        assert _fake_agent.instances == []
+        assert dao.drafts == []
+
+    async def test_run_gets_frozen_remaining_timeout(self, _fake_agent: type[_FakeAgent]) -> None:
+        dao = _Dao()
+
+        await run_leaf_agent(_model(), _context(), _binding(), dao=dao)
+
+        run_kwargs = _fake_agent.instances[0].run_kwargs[0]
+        timeout = cast(float, run_kwargs["timeout"])
+        assert 0 < timeout <= 60.0
+        assert run_kwargs["model_settings"] == {"timeout": timeout}
+        assert run_kwargs["event_stream_handler"] is None
+
+    async def test_run_timed_out_maps_to_deadline_exhausted(self, _fake_agent: type[_FakeAgent]) -> None:
+        _fake_agent.error = RunTimedOut("timed out")
+        dao = _Dao()
+
+        outcome = await run_leaf_agent(_model(), _context(), _binding(), dao=dao)
+
+        assert outcome.state == "failed"
+        assert outcome.error_code == LEAF_DEADLINE_EXHAUSTED
+        assert dao.drafts == []
+
+    async def test_protocol_failure_maps_to_model_protocol_failed(self, _fake_agent: type[_FakeAgent]) -> None:
+        _fake_agent.error = ModelTurnProtocolError("invalid_field", "$.finish_reason")
+        dao = _Dao()
+
+        outcome = await run_leaf_agent(_model(), _context(), _binding(), dao=dao)
+
+        assert outcome.state == "failed"
+        assert outcome.error_code == LEAF_MODEL_PROTOCOL_FAILED
+        assert dao.drafts == []
+
+    async def test_public_events_are_governed_and_isolated(self, _fake_agent: type[_FakeAgent]) -> None:
+        _fake_agent.handler_events = [
+            PartStartEvent(index=0, part=TextPart(content="首片")),
+            PartDeltaEvent(index=0, delta=TextPartDelta(content_delta="续写")),
+            FunctionToolCallEvent(
+                part=ToolCallPart(tool_name="web_search", args={"query": "secret"}, tool_call_id="call-1")
+            ),
+            FinalResultEvent(tool_name=None, tool_call_id=None),
+        ]
+        dao = _Dao()
+        seen: list[Any] = []
+
+        def _sink(event: Any) -> None:
+            seen.append(event)
+            if event.kind == "tool_call":
+                raise RuntimeError("observer failed")
+
+        outcome = await run_leaf_agent(_model(), _context(), _binding(), dao=dao, on_event=_sink)
+
+        assert outcome.state == "complete"
+        assert dao.drafts[0].body_text == "研究结论"
+        assert [event.kind for event in seen] == ["text_delta", "text_delta", "tool_call", "finish"]
+        assert [event.sequence for event in seen] == [1, 2, 3, 4]
+        assert seen[0].text_delta == "首片"
+        assert seen[1].text_delta == "续写"
+        assert seen[2].tool_name == "web_search"
+        assert seen[2].text_delta is None
+        assert _fake_agent.instances[0].run_kwargs[0]["event_stream_handler"] is not None
+
+    async def test_waitable_event_sink_is_awaited(self, _fake_agent: type[_FakeAgent]) -> None:
+        _fake_agent.handler_events = [
+            PartStartEvent(index=0, part=TextPart(content="a")),
+            FinalResultEvent(tool_name=None, tool_call_id=None),
+        ]
+        dao = _Dao()
+        awaited: list[str] = []
+
+        async def _sink(event: Any) -> None:
+            await asyncio.sleep(0)
+            awaited.append(event.kind)
+
+        outcome = await run_leaf_agent(_model(), _context(), _binding(), dao=dao, on_event=_sink)
+
+        assert outcome.state == "complete"
+        assert awaited == ["text_delta", "finish"]
+
+    async def test_event_sink_cancellation_propagates(self, _fake_agent: type[_FakeAgent]) -> None:
+        _fake_agent.handler_events = [FinalResultEvent(tool_name=None, tool_call_id=None)]
+        dao = _Dao()
+
+        def _cancel(_event: Any) -> None:
+            raise asyncio.CancelledError()
+
+        with pytest.raises(asyncio.CancelledError) as excinfo:
+            await run_leaf_agent(_model(), _context(), _binding(), dao=dao, on_event=_cancel)
+        assert type(excinfo.value) is asyncio.CancelledError
+
+
 class TestBuildLeafAgentRunner:
     async def test_runner_without_dao_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(leaf_agent, "_resolve_agent_dao", lambda _dao: None)
@@ -519,6 +676,30 @@ class TestLeafToolLoop:
         assert runtime.calls == [{"tool_name": "search", "arguments": {"query": "x"}, "tool_call_id": "call-1"}]
         assert dao.drafts[0].unknown_operation_refs == ("op-1",)
         assert _fake_agent.instances[0].kwargs["tools"] == ()
+
+    async def test_each_tool_round_uses_frozen_remaining_deadline(self, _fake_agent: type[_FakeAgent]) -> None:
+        runtime = _ToolRuntimeStub(_ToolCallOutcome(_ToolCallState.COMPLETED, "ok", "op-1"))
+        _fake_agent.outputs = [
+            DeferredToolRequests(calls=[ToolCallPart(tool_name="search", args={"query": "x"}, tool_call_id="call-1")]),
+            "研究结论",
+        ]
+        dao = _Dao()
+
+        outcome = await run_leaf_agent(
+            _model(),
+            _context(),
+            _binding(),
+            dao=dao,
+            tool_runtime_factory=lambda scope: runtime,  # type: ignore[arg-type,return-value]
+        )
+
+        assert outcome.state == "complete"
+        per_turn = _fake_agent.instances[0].run_kwargs
+        assert len(per_turn) == 2
+        for kwargs in per_turn:
+            timeout = cast(float, kwargs["timeout"])
+            assert 0 < timeout <= 60.0
+            assert kwargs["model_settings"] == {"timeout": timeout}
 
     async def test_runtime_setup_failure_is_zero_outbound(self, _fake_agent: type[_FakeAgent]) -> None:
         def _boom(scope: Any) -> Any:
@@ -587,12 +768,18 @@ class TestSavedRolePromptSource:
             executor=cast(Any, object()),
             snapshot=_SNAPSHOT,
             binding={"data_consent": {"connection_id": "conn-1"}},
+            deadline=time.monotonic() + 60.0,
         )
 
         assert leaf_agent._authorized_connection_id(binding) == "conn-1"
 
     @pytest.mark.parametrize("binding", [{}, {"data_consent": {}}, {"data_consent": {"connection_id": ""}}])
     def test_authorized_connection_id_absent_or_blank_is_none(self, binding: dict[str, Any]) -> None:
-        model_binding = LeafModelBinding(executor=cast(Any, object()), snapshot=_SNAPSHOT, binding=binding)
+        model_binding = LeafModelBinding(
+            executor=cast(Any, object()),
+            snapshot=_SNAPSHOT,
+            binding=binding,
+            deadline=time.monotonic() + 60.0,
+        )
 
         assert leaf_agent._authorized_connection_id(model_binding) is None

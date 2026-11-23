@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 from types import SimpleNamespace
 from typing import Any
 
@@ -40,11 +42,14 @@ from services.agent_service.leaf_runtime import (
     AdmissionCountingToolExecutor,
     DaoLeafTicketGate,
     FrozenLaneBinding,
+    LeafDeadlineExhaustedError,
+    LeafDeadlineUnavailableError,
     LeafRuntimeWiring,
     build_actual_input_binder,
     default_leaf_runtime,
     install_leaf_runtime,
     leaf_call_identity,
+    require_leaf_turn_timeout,
     resolve_agent_model_binding,
     resolve_comparison_lane_freeze,
     resolve_leaf_data_consent,
@@ -212,6 +217,40 @@ class _FakeDao:
 
 
 class TestResolveAgentModelBinding:
+    async def test_binding_carries_frozen_absolute_deadline(self) -> None:
+        """T-03：绑定携带派发冻结路由总时限换算的绝对期限（不臆造默认值）。"""
+
+        before = asyncio.get_running_loop().time()
+        resolved = await resolve_agent_model_binding(_context())
+
+        assert resolved.deadline >= before + 30.0
+        assert resolved.deadline <= asyncio.get_running_loop().time() + 30.0
+        assert require_leaf_turn_timeout(resolved) > 0
+
+    async def test_missing_route_timeout_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def _resolve(_scenario_id: str) -> ScenarioDispatch:
+            return dataclasses.replace(_dispatch(), total_timeout_seconds=0.0)
+
+        monkeypatch.setattr("services.ai_service.scenario_dispatch.resolve_executor", _resolve)
+        with pytest.raises(ValueError) as excinfo:
+            await resolve_agent_model_binding(_context())
+        assert "total_timeout_seconds" in str(excinfo.value)
+
+    async def test_turn_timeout_rejects_unverifiable_deadline(self) -> None:
+        resolved = await resolve_agent_model_binding(_context())
+        with pytest.raises(LeafDeadlineUnavailableError) as zero_exc:
+            require_leaf_turn_timeout(dataclasses.replace(resolved, deadline=0.0))
+        assert "verified absolute deadline" in str(zero_exc.value)
+        with pytest.raises(LeafDeadlineUnavailableError) as nan_exc:
+            require_leaf_turn_timeout(dataclasses.replace(resolved, deadline=float("nan")))
+        assert "verified absolute deadline" in str(nan_exc.value)
+
+    async def test_turn_timeout_rejects_exhausted_deadline(self) -> None:
+        resolved = await resolve_agent_model_binding(_context())
+        with pytest.raises(LeafDeadlineExhaustedError) as excinfo:
+            require_leaf_turn_timeout(dataclasses.replace(resolved, deadline=asyncio.get_running_loop().time() - 1.0))
+        assert "exhausted" in str(excinfo.value)
+
     async def test_no_provider_requires_consent_without_data_consent(self) -> None:
         resolved = await resolve_agent_model_binding(_context())
         assert resolved.binding["require_data_consent"] is True

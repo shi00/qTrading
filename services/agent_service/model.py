@@ -587,10 +587,16 @@ class _TurnChannel:
 
 @dataclass
 class GatewayStreamedResponse(StreamedResponse):
-    """聊天回合流响应（B-02-4）：``ChatStreamEvent`` → SDK 流事件穷举分发。"""
+    """聊天回合流响应（B-02-4）：``ChatStreamEvent`` → SDK 流事件穷举分发。
+
+    ``deadline`` 为请求冻结的绝对期限（单调时钟秒）：收尾（``close_stream``）以它
+    为界，超出仍无法确认生产任务收敛即如实失败——不把「未核收尾」当成干净关闭
+    （R21）。
+    """
 
     channel: _TurnChannel
     model_call_id: str
+    deadline: float | None = None
     _timestamp: datetime = field(default_factory=lambda: datetime.now(UTC), init=False)
     # 声明计量追踪选择（SDK StreamedResponse._usage_received 契约：供应商可省略
     # usage 的流以 False 默认声明此字段选择加入——流结束未上报任何 usage 时，
@@ -601,6 +607,16 @@ class GatewayStreamedResponse(StreamedResponse):
 
     @property
     def model_name(self) -> str:
+        """终态可得时回报真实模型名（与非流路径 ``response.actual_model`` 一致）。
+
+        SDK 在 ``get()`` 时以本属性构造最终 ``ModelResponse``；流式消费（公开事件
+        回调）据此沿真实模型身份保存归属，不把绑定别名当成真实模型（R21）。
+        """
+
+        outcome = self.channel.outcome
+        response = outcome.response if outcome is not None else None
+        if response is not None and response.actual_model:
+            return response.actual_model
         return BOUND_MODEL_ALIAS
 
     @property
@@ -700,16 +716,35 @@ class GatewayStreamedResponse(StreamedResponse):
             if response is not None:
                 raise UnexpectedModelBehavior(f"chat turn refused by provider: {response.refusal}", response.refusal)
             raise UnexpectedModelBehavior(f"chat turn failed: {outcome.error_code}", outcome.partial_text)
+        # 截断流（通道干净结束但从未收到 finish 事件）不得当作成功回合：无终止
+        # 确认即「未核收尾」，外层结果与账本须按失败收敛（R21，不静默截断）。
+        if self.finish_reason is None:
+            raise ModelTurnProtocolError("invalid_field", "$.finish_reason")
 
     async def close_stream(self) -> None:
         """消费取消路径（AgentStream.cancel）：中止生产任务并 join。
 
         生产任务取消沿 Executor F19 受限清理收敛后传播 CancelledError（R2）；
-        未投递错误就地抛出。
+        未投递错误就地抛出。收尾以请求冻结期限为界：期限已过或 join 超时仍无法
+        确认收敛 → 抛 ``ModelTurnProtocolError``（未核收尾，不返回成功）。
         """
-        if self.channel.producer is not None and not self.channel.producer.done():
-            self.channel.producer.cancel()
-        await self.channel.join()
+        producer = self.channel.producer
+        if producer is None or producer.done():
+            await self.channel.join()
+            return
+        remaining: float | None = None
+        if self.deadline is not None:
+            remaining = float(self.deadline) - asyncio.get_running_loop().time()
+        producer.cancel()
+        if remaining is not None and remaining <= 0:
+            raise ModelTurnProtocolError("unconfirmed_close", "$.stream.close")
+        if remaining is None:
+            await self.channel.join()
+            return
+        try:
+            await asyncio.wait_for(self.channel.join(), timeout=remaining)
+        except TimeoutError:
+            raise ModelTurnProtocolError("unconfirmed_close", "$.stream.close") from None
 
 
 class GatewayModel(Model):
@@ -839,6 +874,7 @@ class GatewayModel(Model):
             channel=channel,
             model_call_id=request.model_call_id,
             model_request_parameters=params,
+            deadline=request.deadline,
         )
         producer = asyncio.create_task(self._run_turn(request, streamed))
         channel.producer = producer
