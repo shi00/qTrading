@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -158,3 +159,72 @@ class TestDeriveSnapshotCostState:
             )
             == COST_STATE_UNKNOWN
         )
+
+    def test_partial_attempts_never_mark_known(self) -> None:
+        """仅查到部分调用（1/2）时已计价子集不能证明整体费用已知（R21）。"""
+        assert (
+            AgentDao._derive_snapshot_cost_state(
+                ledger_refs=("inv-1",),
+                declared_attempts=("a1",),
+                attempt_costs=(Decimal("1.0"),),
+                observed_attempt_ids=("a1",),
+                has_active_reservation=False,
+                model_attempt_count=2,
+            )
+            == COST_STATE_UNKNOWN
+        )
+
+
+class _StubResultRows:
+    def __init__(self, rows: list) -> None:
+        self._rows = rows
+
+    def all(self) -> list:
+        return self._rows
+
+
+class _StubConn:
+    """按预设结果序列返回的只读连接桩（无真实 SQL 语义）。"""
+
+    def __init__(self, results: list) -> None:
+        self._results = list(results)
+
+    async def execute(self, statement: object, *_args: object, **_kwargs: object) -> _StubResultRows:
+        return _StubResultRows(self._results.pop(0))
+
+
+class TestSnapshotCostStateCoverage:
+    """快照费用限制须报出覆盖缺口，不得以部分 attempt 冒充已知（R21）。"""
+
+    @pytest.mark.asyncio
+    async def test_partial_attempts_report_coverage_gap(self) -> None:
+        dao = AgentDao(None)
+        conn = _StubConn(
+            [
+                [SimpleNamespace(invocation_id="inv-1", attempt_refs=["a1"])],
+                [SimpleNamespace(attempt_id="a1", invocation_id="inv-1", cost_cny=Decimal("1.0"))],
+                [],
+            ]
+        )
+        state, limitations = await dao._snapshot_cost_state(
+            conn, user_scope="user-1", execution_id="exec-1", model_attempt_count=2
+        )
+        assert state == COST_STATE_UNKNOWN
+        assert [limitation.code for limitation in limitations] == ["cost_unknown"]
+        assert "仅覆盖 1/2" in limitations[0].message
+
+    @pytest.mark.asyncio
+    async def test_full_coverage_unknown_keeps_reference_message(self) -> None:
+        dao = AgentDao(None)
+        conn = _StubConn(
+            [
+                [SimpleNamespace(invocation_id="inv-1", attempt_refs=None)],
+                [],
+                [],
+            ]
+        )
+        state, limitations = await dao._snapshot_cost_state(
+            conn, user_scope="user-1", execution_id="exec-1", model_attempt_count=0
+        )
+        assert state == COST_STATE_UNKNOWN
+        assert "原账本无可计价引用" in limitations[0].message
