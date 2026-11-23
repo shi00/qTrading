@@ -1,7 +1,8 @@
 """E-03-3 Skill 包四阈值预检、脚本 0 执行与失败保旧版单元测试。
 
 覆盖：D02 四阈值（归档 16MiB / 展开 64MiB / 1024 对象 / 10 秒）在解压前执行、
-包内路径逃逸拒绝、脚本仅作数据不执行、版本不可覆盖、失败保持旧版本可读。
+目录来源按展开体积（非 ZIP 归档体积）判定、包内路径逃逸拒绝、脚本仅作数据不执行、
+版本不可覆盖、失败保持旧版本可读。
 """
 
 from __future__ import annotations
@@ -16,10 +17,12 @@ from core.agent_types import (
     SKILL_MAX_ARCHIVE_BYTES,
     SKILL_MAX_OBJECTS,
     AgentValidationError,
+    SkillBudget,
     SkillVersionRef,
 )
 from services.agent_service.skills import (
     ManagedSkillStore,
+    inspect_skill_directory,
     inspect_skill_package,
     install_skill_version,
 )
@@ -89,6 +92,33 @@ class TestPreflightThresholds:
         with pytest.raises(AgentValidationError) as exc:
             inspect_skill_package(b"PK\x03\x04not-a-zip")
         assert exc.value.code == "invalid_skill_package"
+
+
+class TestDirectorySourceThresholds:
+    def test_directory_uses_expanded_limit_not_zip_archive_limit(self, tmp_path: Path) -> None:
+        # 目录无压缩：内容体积按展开上限（64MiB 语义）判定，不套用 ZIP 归档上限（16MiB）。
+        root = tmp_path / "skill"
+        root.mkdir()
+        (root / "SKILL.md").write_text("# ok", encoding="utf-8")
+        (root / "refs").mkdir()
+        (root / "refs" / "note.txt").write_text("x" * 40, encoding="utf-8")
+
+        inspection = inspect_skill_directory(
+            str(root), budget=SkillBudget(max_archive_bytes=10, max_expanded_bytes=1000)
+        )
+
+        assert inspection.source_kind == "directory"
+        assert inspection.total_expanded_bytes == 4 + 40
+
+    def test_directory_over_expanded_limit_rejected(self, tmp_path: Path) -> None:
+        root = tmp_path / "skill"
+        root.mkdir()
+        (root / "SKILL.md").write_text("# ok", encoding="utf-8")
+
+        with pytest.raises(AgentValidationError) as exc:
+            inspect_skill_directory(str(root), budget=SkillBudget(max_expanded_bytes=3))
+
+        assert exc.value.code == "skill_expanded_bytes_exceeded"
 
 
 class TestScriptsAreNeverExecuted:

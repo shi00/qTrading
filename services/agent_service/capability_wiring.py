@@ -16,6 +16,7 @@ from typing import Any, Final, Protocol
 from core.agent_types import AgentErrorCode, AgentServiceError, Mode
 from core.model_management_types import ExecutionSnapshot
 from services.agent_service.capabilities import ResearchBoundary, ResearchBoundaryPolicy
+from services.ai_service.token_budget import OUTPUT_RESERVE_TOKENS
 
 __all__ = [
     "BOUNDARY_HOST_WIRED",
@@ -24,6 +25,7 @@ __all__ = [
     "build_leaf_boundary",
     "build_research_boundary",
     "resolve_leaf_context_window",
+    "resolve_leaf_context_windows",
 ]
 
 #: 边界能力是否已有生产宿主（叶 Agent）消费；生产宿主见模块说明。
@@ -58,6 +60,8 @@ class DaoResearchBoundaryPolicyProvider:
     context_window_tokens: int | None
     estimated_input_tokens: int | None = None
     candidate_context_windows: tuple[int, ...] = ()
+    #: 输出预留 token（按真实授权模型的响应预算），窗口门比较「输入 + 预留」。
+    output_reserve_tokens: int = 0
 
     async def __call__(self, ctx: Any) -> ResearchBoundaryPolicy:
         deps = getattr(ctx, "deps", None)
@@ -78,6 +82,7 @@ class DaoResearchBoundaryPolicyProvider:
             context_window_tokens=self.context_window_tokens,
             estimated_input_tokens=self.estimated_input_tokens,
             candidate_context_windows=self.candidate_context_windows,
+            output_reserve_tokens=self.output_reserve_tokens,
         )
 
 
@@ -87,45 +92,70 @@ def build_research_boundary(provider: DaoResearchBoundaryPolicyProvider) -> Rese
     return ResearchBoundary(policy_provider=provider)
 
 
-def resolve_leaf_context_window(snapshot: ExecutionSnapshot, *, scenario_id: str) -> int | None:
-    """解析叶运行所用首候选连接的上下文窗口（D9）。
+def resolve_leaf_context_windows(
+    snapshot: ExecutionSnapshot, *, scenario_id: str, connection_id: str | None = None
+) -> tuple[int | None, tuple[int, ...]]:
+    """解析叶运行所用连接的上下文窗口与其余候选窗口（D9 / I47）。
 
-    路径：``routes[scenario_id].candidates[0].connection_id`` →
-    ``connections[connection_id].context_window``。路由/候选/连接/窗口任一缺失或
-    非法 → ``None``：由能力按「窗口未知拒绝放行」处理（R21），不猜默认窗口。
+    路径：``routes[scenario_id].candidates[*].connection_id`` →
+    ``connections[connection_id].context_window``。
+
+    - ``connection_id`` 给定时取该连接（调用方传**真实授权连接**，如资料许可绑定
+      的 connection）；缺省取用户序首候选；
+    - 返回值首项为选定连接的窗口；第二项为路由内**其余**候选的可用窗口，供
+      边界判定取最严者（候选回退不得以更大窗口放行）；
+    - 路由/候选/连接/窗口任一缺失或非法 → 首项 ``None``：由能力按「窗口未知
+      拒绝放行」处理（R21），不猜默认窗口；``connection_id`` 不在本路由候选内
+      同样 ``None``（授权连接与场景路由不一致即无法核定）。
     """
 
     if not isinstance(scenario_id, str) or not scenario_id:
-        return None
+        return None, ()
     route = next(
         (item for item in snapshot.routes if isinstance(item, Mapping) and item.get("scenario_id") == scenario_id),
         None,
     )
     if route is None:
-        return None
+        return None, ()
     candidates = route.get("candidates")
     if not isinstance(candidates, Sequence) or isinstance(candidates, (str, bytes)) or not candidates:
-        return None
-    first = candidates[0]
-    if not isinstance(first, Mapping):
-        return None
-    connection_id = first.get("connection_id")
-    if not isinstance(connection_id, str) or not connection_id:
-        return None
-    connection = next(
-        (
-            item
-            for item in snapshot.connections
-            if isinstance(item, Mapping) and item.get("connection_id") == connection_id
-        ),
-        None,
-    )
-    if connection is None:
-        return None
-    window = connection.get("context_window")
-    if isinstance(window, bool) or not isinstance(window, int) or window < 1:
-        return None
-    return window
+        return None, ()
+    candidate_ids: list[str] = []
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        value = candidate.get("connection_id")
+        if isinstance(value, str) and value:
+            candidate_ids.append(value)
+    if not candidate_ids:
+        return None, ()
+    chosen = connection_id or candidate_ids[0]
+    if chosen not in candidate_ids:
+        return None, ()
+    windows: dict[str, int] = {}
+    for candidate_id in candidate_ids:
+        connection = next(
+            (
+                item
+                for item in snapshot.connections
+                if isinstance(item, Mapping) and item.get("connection_id") == candidate_id
+            ),
+            None,
+        )
+        if connection is None:
+            continue
+        window = connection.get("context_window")
+        if isinstance(window, bool) or not isinstance(window, int) or window < 1:
+            continue
+        windows[candidate_id] = window
+    return windows.get(chosen), tuple(window for key, window in windows.items() if key != chosen)
+
+
+def resolve_leaf_context_window(snapshot: ExecutionSnapshot, *, scenario_id: str) -> int | None:
+    """解析叶运行所用首候选连接的上下文窗口（D9；兼容入口，等价于
+    :func:`resolve_leaf_context_windows` 的首项）。"""
+
+    return resolve_leaf_context_windows(snapshot, scenario_id=scenario_id)[0]
 
 
 def build_leaf_boundary(
@@ -133,14 +163,25 @@ def build_leaf_boundary(
     *,
     snapshot: ExecutionSnapshot,
     scenario_id: str,
+    connection_id: str | None = None,
 ) -> ResearchBoundary:
-    """叶 Agent 的生产边界：执行模式 + 空工具集 + 首候选连接窗口（D9）。"""
+    """叶 Agent 的生产边界：执行模式 + 空工具集 + 授权连接窗口 + 输出预留（D9）。
 
+    ``connection_id`` 为派发时冻结的真实授权连接（缺省取首候选）；路由其余候选
+    的窗口一并交给边界取最严者，``OUTPUT_RESERVE_TOKENS`` 从窗口预算中预留，
+    不把整窗当可用输入。
+    """
+
+    window, candidate_windows = resolve_leaf_context_windows(
+        snapshot, scenario_id=scenario_id, connection_id=connection_id
+    )
     provider = DaoResearchBoundaryPolicyProvider(
         dao=dao,
         mode=Mode.EXECUTE,
         allowed_tool_names=frozenset(),
-        context_window_tokens=resolve_leaf_context_window(snapshot, scenario_id=scenario_id),
+        context_window_tokens=window,
         estimated_input_tokens=None,
+        candidate_context_windows=candidate_windows,
+        output_reserve_tokens=OUTPUT_RESERVE_TOKENS,
     )
     return build_research_boundary(provider)

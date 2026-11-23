@@ -341,7 +341,9 @@ class ResearchBoundaryPolicy:
       与路由内其余候选的可用窗口；判定取所有可用窗口中最严者（I47）。本候选
       窗口未知（``None``）即无法核定，拒绝放行——不能用其它候选窗口替代；
     - ``estimated_input_tokens``：外部估计输入；``None`` 表示外部无法核定——
-      由能力按最终请求全输入自测兜底，不用测试字节数代替。
+      由能力按最终请求全输入自测兜底，不用测试字节数代替；
+    - ``output_reserve_tokens``：本轮必须为模型输出预留的 token（按真实授权模型
+      的响应预算）；窗口门判定的是「输入 + 输出预留」，不把整窗都当作可用输入。
     """
 
     mode: Mode
@@ -351,6 +353,7 @@ class ResearchBoundaryPolicy:
     context_window_tokens: int | None
     estimated_input_tokens: int | None
     candidate_context_windows: tuple[int, ...] = ()
+    output_reserve_tokens: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.mode, Mode):
@@ -361,6 +364,9 @@ class ResearchBoundaryPolicy:
                 continue
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive int or None")
+        reserve = self.output_reserve_tokens
+        if isinstance(reserve, bool) or not isinstance(reserve, int) or reserve < 0:
+            raise ValueError("output_reserve_tokens must be a non-negative int")
         for value in self.candidate_context_windows:
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError("candidate_context_windows entries must be positive ints")
@@ -447,7 +453,9 @@ def evaluate_research_boundary(
     """返回阻断原因；``None`` 表示未触发阻断（不代表授权已通过）。
 
     ``measured_input_tokens`` 为按最终请求全输入自测的下限；与外部估计取较大者，
-    外部低估不能放宽闸门（I47）。窗口取所有候选可用窗口中最严者。
+    外部低估不能放宽闸门（I47）。窗口取所有候选可用窗口中最严者；比较的是
+    「输入下限 + 输出预留」与窗口，预留为 0 只表示调用方未声明输出预算，不代表
+    整窗可用作输入。
     """
 
     if policy.active_source_keys & policy.disabled_source_keys:
@@ -458,7 +466,7 @@ def evaluate_research_boundary(
     window = policy.strictest_context_window_tokens()
     if window is None or not estimates:
         return "window_unknown"
-    if max(estimates) > window:
+    if max(estimates) + policy.output_reserve_tokens > window:
         return "context_window_exceeded"
     return None
 
@@ -515,6 +523,7 @@ class ResearchBoundary(AbstractCapability[Any]):
             raise AgentServiceError(
                 AgentErrorCode.POLICY_DENIED,
                 f"context window exceeded: estimated={max(estimates)} "
+                f"+output_reserve={policy.output_reserve_tokens} "
                 f"window={policy.strictest_context_window_tokens()}",
                 "research_boundary",
             )

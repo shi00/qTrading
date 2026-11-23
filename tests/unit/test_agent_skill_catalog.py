@@ -330,6 +330,74 @@ class TestImportLifecycle:
         if staging_root.exists():
             assert not list(staging_root.iterdir())
 
+    async def test_publish_after_deadline_compensates_and_reports_timeout(self, tmp_path: Path) -> None:
+        # 发布已完成但越过 10 秒边界：不得留下无主版本，也不得登记成功。
+        store = ManagedSkillStore(str(tmp_path / "skills"))
+        dao = FakeCatalogDao()
+        now = [0.0]
+        original = store.publish_package
+
+        def spy(*args: object, **kwargs: object):
+            result = original(*args, **kwargs)  # type: ignore[arg-type]  # 测试透传发布参数
+            now[0] = 11.0  # 发布完成时已越过 10 秒边界
+            return result
+
+        store.publish_package = spy  # type: ignore[method-assign]  # 测试注入发布探针
+        service = SkillCatalogService(
+            store,
+            dao,
+            blocking_runner=lambda func, *args: asyncio.to_thread(func, *args),
+            budget=SkillBudget(max_preflight_seconds=10.0),
+            clock=lambda: now[0],
+        )
+
+        with pytest.raises(AgentServiceError) as exc:
+            await _import(service, _package())
+
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        assert "skill_time_exceeded" in str(exc.value)
+        assert dao.assets == {}
+        assert not any((tmp_path / "skills").rglob("SKILL.md"))
+
+    async def test_registration_timeout_removes_unregistered_version(self, tmp_path: Path) -> None:
+        store = ManagedSkillStore(str(tmp_path / "skills"))
+        dao = _SlowRegisterDao()
+
+        service = SkillCatalogService(
+            store,
+            dao,
+            blocking_runner=lambda func, *args: asyncio.to_thread(func, *args),
+            budget=SkillBudget(max_preflight_seconds=1.0),
+        )
+
+        with pytest.raises(AgentServiceError) as exc:
+            await _import(service, _package())
+
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        assert "skill_time_exceeded" in str(exc.value)
+        assert dao.assets == {}
+        assert not any((tmp_path / "skills").rglob("SKILL.md"))
+
+    async def test_registration_timeout_keeps_committed_version(self, tmp_path: Path) -> None:
+        # 登记事务已提交、等待回执超时：核实已登记即保旧，不误删（R21「不知道≠已回滚」）。
+        store = ManagedSkillStore(str(tmp_path / "skills"))
+        dao = _SlowRegisterDao(commit_before_wait=True)
+
+        service = SkillCatalogService(
+            store,
+            dao,
+            blocking_runner=lambda func, *args: asyncio.to_thread(func, *args),
+            budget=SkillBudget(max_preflight_seconds=1.0),
+        )
+
+        with pytest.raises(AgentServiceError) as exc:
+            await _import(service, _package())
+
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        assert "skill_time_exceeded" in str(exc.value)
+        assert len(dao.assets) == 1
+        assert any((tmp_path / "skills").rglob("SKILL.md"))
+
 
 class _WorkerBlocker:
     """worker 阻塞哨兵：模拟「waiter 已放弃、worker 仍在跑」。"""
@@ -358,6 +426,25 @@ class _BlockingRegisterDao(FakeCatalogDao):
         if self.block_registration:
             self.register_entered.set()
             await asyncio.sleep(60)
+        return await super().register_skill_asset(request)
+
+
+class _SlowRegisterDao(FakeCatalogDao):
+    """登记慢于边界：可在「已提交后等回执」或「提交前」两种窗口超时。"""
+
+    def __init__(self, *, commit_before_wait: bool = False) -> None:
+        super().__init__()
+        self.commit_before_wait = commit_before_wait
+        self.register_entered = False
+
+    async def register_skill_asset(self, request: SkillAssetRegistration) -> SkillAssetReceipt:
+        if self.commit_before_wait:
+            receipt = await super().register_skill_asset(request)
+            self.register_entered = True
+            await asyncio.sleep(5)
+            return receipt
+        self.register_entered = True
+        await asyncio.sleep(5)
         return await super().register_skill_asset(request)
 
 

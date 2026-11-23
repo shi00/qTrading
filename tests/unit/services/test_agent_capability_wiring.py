@@ -1,8 +1,10 @@
 """叶边界生产装配（I65）：窗口解析 + 执行模式空工具集 + 宿主已接线事实。
 
-- 窗口只取 ``agent_research`` 首候选连接的 ``context_window``；路由/候选/连接/窗口
-  任一缺失或非法 → ``None``（由能力拒绝放行，不猜默认窗口，R21）；
+- 窗口缺省取 ``agent_research`` 首候选连接的 ``context_window``；传入真实授权连接
+  时取该连接，并把其余候选窗口一并交给边界取最严者；路由/候选/连接/窗口任一缺失或
+  非法 → ``None``（由能力拒绝放行，不猜默认窗口，R21）；
 - 窗口未知时 ``evaluate_research_boundary`` 明确返回 ``window_unknown``；
+- 叶边界为模型输出预留 ``OUTPUT_RESERVE_TOKENS``（输入+预留与窗口比较）；
 - ``BOUNDARY_HOST_WIRED`` 如实为 ``True``（生产消费方 = ``leaf_agent``）。
 """
 
@@ -20,8 +22,10 @@ from services.agent_service.capability_wiring import (
     BOUNDARY_HOST_WIRED,
     build_leaf_boundary,
     resolve_leaf_context_window,
+    resolve_leaf_context_windows,
 )
 from services.agent_service.leaf_agent import LeafAgentDeps
+from services.ai_service.token_budget import OUTPUT_RESERVE_TOKENS
 
 pytestmark = pytest.mark.unit
 
@@ -80,6 +84,45 @@ class TestResolveLeafContextWindow:
 
     def test_blank_scenario_id_returns_none(self) -> None:
         assert resolve_leaf_context_window(_snapshot(), scenario_id="") is None
+
+
+class TestResolveLeafContextWindows:
+    def test_authorized_connection_window_with_other_candidates(self) -> None:
+        snapshot = _snapshot(
+            routes=(
+                {
+                    "scenario_id": "agent_research",
+                    "candidates": ({"connection_id": "conn-1"}, {"connection_id": "conn-2"}),
+                },
+            ),
+            connections=(
+                {"connection_id": "conn-1", "context_window": 65_536},
+                {"connection_id": "conn-2", "context_window": 8192},
+            ),
+        )
+
+        window, others = resolve_leaf_context_windows(snapshot, scenario_id="agent_research", connection_id="conn-2")
+
+        assert window == 8192
+        assert others == (65_536,)
+
+    def test_authorized_connection_outside_route_is_unknown(self) -> None:
+        window, others = resolve_leaf_context_windows(
+            _snapshot(), scenario_id="agent_research", connection_id="conn-other"
+        )
+
+        assert window is None
+        assert others == ()
+
+    async def test_boundary_reserves_output_tokens(self) -> None:
+        dao = _Dao()
+        boundary = build_leaf_boundary(dao, snapshot=_snapshot(), scenario_id="agent_research")
+
+        policy = await boundary.policy_provider(cast(Any, SimpleNamespace(deps=_deps())))
+        assert policy.output_reserve_tokens == OUTPUT_RESERVE_TOKENS
+        allowed = 8192 - OUTPUT_RESERVE_TOKENS
+        assert evaluate_research_boundary(policy, measured_input_tokens=allowed) is None
+        assert evaluate_research_boundary(policy, measured_input_tokens=allowed + 1) == "context_window_exceeded"
 
 
 class TestBuildLeafBoundary:

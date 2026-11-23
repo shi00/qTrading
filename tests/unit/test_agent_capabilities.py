@@ -187,6 +187,19 @@ class TestResearchBoundaryDecision:
         assert evaluate_research_boundary(policy, measured_input_tokens=500) is None
         assert evaluate_research_boundary(policy, measured_input_tokens=1001) == "context_window_exceeded"
 
+    def test_output_reserve_is_subtracted_from_window(self) -> None:
+        # 输出预留计入窗口预算：赢余只够输入、不够输出时同样阻断（不留整窗给输入）。
+        policy = _policy(context_window_tokens=1000, estimated_input_tokens=900, output_reserve_tokens=200)
+        assert evaluate_research_boundary(policy) == "context_window_exceeded"
+        within = _policy(context_window_tokens=1000, estimated_input_tokens=800, output_reserve_tokens=200)
+        assert evaluate_research_boundary(within) is None
+
+    @pytest.mark.parametrize("reserve", [-1, True, 1.5])
+    def test_invalid_output_reserve_rejected(self, reserve: Any) -> None:
+        with pytest.raises(ValueError) as exc:
+            _policy(output_reserve_tokens=reserve)
+        assert "output_reserve_tokens" in str(exc.value)
+
 
 class TestResearchBoundaryCapability:
     @pytest.mark.asyncio

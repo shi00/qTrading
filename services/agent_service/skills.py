@@ -2,8 +2,9 @@
 
 合同：
 - 四阈值（归档 16MiB / 展开 64MiB / 1024 对象 / 10 秒）在解压前执行，恰等通过；
-  目录来源逐条流式枚举、入账即判定（超一即停），且无压缩故以文件尺寸总和作原件体积
-  按 16MiB 同口径保护；
+  目录来源逐条流式枚举、入账即判定（超一即停）。目录无压缩，「归档体积」上限
+  （压缩包体积）不适用于目录：目录按文件尺寸总和走展开体积上限（64MiB），
+  不与 ZIP 归档上限混用；
 - 包内路径逃逸（``..`` / 绝对路径 / 盘符 / 反斜杠）拒绝；重复名/加密包拒绝；
 - 声明展开字节与实际读出字节都计量（防止中央目录谎报）；
 - 根目录恰好一个 ``SKILL.md``：缺失/嵌套/多候选拒绝并提示拆包（F12）；
@@ -558,9 +559,10 @@ def inspect_skill_directory(
     """本地目录预检：与 ZIP 统一计量；符号链接/特殊文件拒绝，读取按同句柄最终路径核验。
 
     目录按 ``os.scandir`` 逐条流式枚举，条目入账（重名/冲突 + 对象数含隐含目录）即判定，
-    超限立即停止，不再枚举剩余条目；目录无压缩，文件尺寸总和即原件体积，按 ZIP 的
-    16MiB 同口径保护（对同一内容严于压缩后体积，方向保守）。``checkpoint`` 在每个
-    目录/条目与每个读取块之前调用，供合作取消中断长段。
+    超限立即停止，不再枚举剩余条目；目录无压缩，文件尺寸总和即展开体积，按
+    ``max_expanded_bytes``（64MiB）判定——**不**套用只约束压缩包体积的
+    ``max_archive_bytes``（16MiB），否则未压缩目录的内容上限与同一内容的 ZIP
+    不一致。``checkpoint`` 在每个目录/条目与每个读取块之前调用，供合作取消中断长段。
     """
 
     from services.agent_service.skill_workspace import ReadOnlyWorkspace
@@ -599,8 +601,8 @@ def inspect_skill_directory(
                         declared += child.stat(follow_symlinks=False).st_size
                     except OSError as exc:
                         raise AgentValidationError("invalid_skill_package", f"$.skill.package.entry[{rel}]") from exc
-                    # 目录无压缩：原件体积 = 文件尺寸总和，与 ZIP 16MiB 同口径判定。
-                    budget.enforce_archive_bytes(declared)
+                    # 目录无压缩：文件尺寸总和即展开体积，按展开上限逐条判定（超一即停）。
+                    budget.enforce_expanded_bytes(declared)
         except OSError as exc:
             raise AgentValidationError("invalid_skill_package", "$.skill.package") from exc
     entries.sort(key=lambda entry: entry[0])
@@ -1210,7 +1212,9 @@ class SkillCatalogService:
         """预检（ZIP/目录统一计量）→ 同名判定 → （发布 + 登记）。
 
         预检、前台解析与暂存共用同一 10 秒预算；解析与暂存都在受管线程执行，
-        不在事件循环线程同步阻塞（R16）。同内容返回未变化；不同内容默认需确认。
+        不在事件循环线程同步阻塞（R16）。**发布与登记同样受该边界约束**：暂存逐块、
+        发布前、登记前与登记等待都按剩余预算判定，越界即报 ``skill_time_exceeded``
+        并按归属与登记事实补偿，不留无主版本。同内容返回未变化；不同内容默认需确认。
 
         取消语义：预检/解析/暂存经同一操作票据合作取消；waiter 取消或超时后等待
         worker 退出（确认不到则显式标 ``UNKNOWN``）；已发生的替换按归属撤销，
@@ -1353,25 +1357,39 @@ class SkillCatalogService:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
         except OSError as exc:
             raise AgentServiceError(AgentErrorCode.PERSISTENCE_UNAVAILABLE, "skill publish failed", identity) from exc
+        remaining = deadline - self._clock()
+        if remaining <= 0:
+            # 发布已完成但已越过 10 秒处理边界：本次发布按归属与登记事实补偿后再报超时，
+            # 不把超时后的版本留在受管目录里（无主产物）。
+            await self._compensate_unregistered(ticket)
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "skill_time_exceeded", identity)
         try:
-            await self._dao.register_skill_asset(
-                SkillAssetRegistration(
-                    user_scope=request.user_scope,
-                    skill_id=skill_id,
-                    version=ref.version,
-                    display_name=manifest.name,
-                    content_digest=content_digest,
-                    normalized_name=normalized_name,
-                    license_id=manifest.license_id,
-                    archive_digest=inspection.archive_digest,
-                    file_count=len(inspection.files),
-                    expanded_bytes=inspection.total_expanded_bytes,
-                    source_kind=inspection.source_kind,
-                    dependencies=manifest.dependencies,
-                    missing_dependencies=missing_dependencies,
-                    ignored_behavioral_fields=manifest.ignored_behavioral_fields,
-                )
+            await asyncio.wait_for(
+                self._dao.register_skill_asset(
+                    SkillAssetRegistration(
+                        user_scope=request.user_scope,
+                        skill_id=skill_id,
+                        version=ref.version,
+                        display_name=manifest.name,
+                        content_digest=content_digest,
+                        normalized_name=normalized_name,
+                        license_id=manifest.license_id,
+                        archive_digest=inspection.archive_digest,
+                        file_count=len(inspection.files),
+                        expanded_bytes=inspection.total_expanded_bytes,
+                        source_kind=inspection.source_kind,
+                        dependencies=manifest.dependencies,
+                        missing_dependencies=missing_dependencies,
+                        ignored_behavioral_fields=manifest.ignored_behavioral_fields,
+                    )
+                ),
+                timeout=remaining,
             )
+        except TimeoutError as exc:
+            # 登记等待已超边界：事务可能已提交也可能未提交 → 先核事实（已登记则保旧），
+            # 只对「本次创建且确认未登记」补偿删除，不把未知当已回滚（R21）。
+            await self._compensate_unregistered(ticket)
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "skill_time_exceeded", identity) from exc
         except BaseException:
             # 登记未确认（含回执丢失）：先核事实，只有「本次创建且确认未登记」才补偿删除。
             await self._compensate_unregistered(ticket)
