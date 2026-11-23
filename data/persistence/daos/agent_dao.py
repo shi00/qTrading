@@ -1549,27 +1549,27 @@ class AgentDao(BaseDao):
     # C-02-3：首派发绑定 / 答复生命周期 / 精确许可 CAS / 队列修订
     # ------------------------------------------------------------------
 
-    async def read_command(self, ref: CommandRef, *, user_scope: str, target_id: str | None = None) -> CommandReceipt:
+    async def read_command(self, ref: CommandRef, *, user_scope: str, target_id: str) -> CommandReceipt:
         """查命令原事实（§4.2 ``read_command``）：只读保存/投递/消费，不生成新决定。
 
         语义（§4.1/§5.1/INV-06）：
 
         - ``ref.user_scope`` 必须等于调用上下文 ``user_scope``——不因知道命令键而
           放行其他用户域（§4.1「由注入的可信调用上下文提供，不能相信 payload」）；
-        - **身份前置过滤**（检视 D20）：候选行先按引用可用的非 target 身份缩小——
-          ``expected_revision``，以及存行链到根/比较路 execution 时的意图键
-          （``source_module`` / ``business_request_id``）——再判是否仍多行；只有
-          「按 ref 全部可用身份过滤后仍多行」才算真歧义并拒绝。存储 PK 为
+        - **准确 target 是必需身份**（检视 T-07）：``CommandRef`` 刻意不携带 target
+          （target 由各命令类型自身载荷承载），存储 PK 为
           ``stable_id("command",[user_scope, exact_target_id, client_command_id])``，
-          同一命令键在不同合法 target 下本就合法并存，不得先按命令键多行即拒。叶
-          execution 不存意图键，不做无依据的比对（不为凑唯一性而伪造比对）；
-        - 调用方若已知准确 target，可传 ``target_id`` 直接定位该 target 下的命令
-          记录：``CommandRef`` 刻意不携带 target（target 由各命令类型自身载荷承载），
-          同一 ``command_id`` 在不同 target 下是不同记录。传入的 target 只用于缩小
-          候选，不匹配即 0 行 → ``INPUT_INVALID``，不放宽任何安全性；
-        - 用户域内按调用方命令键查：0 行 → ``INPUT_INVALID``（不区分「不存在」与
-          「属于他人」）；命中的存行须与引用同源，不符 → ``INPUT_INVALID``，回执
-          不得回显与存行矛盾的引用；
+          同一命令键/预期版在不同 target 下是不同记录。调用方必须给出准确
+          ``target_id``；缺失或为空即 ``INPUT_INVALID``，**不按命令键在同域内回退**
+          到另一 target 的记录（只按 ``expected_revision`` + 意图键过滤时，同一
+          用户域内另一 target 的同键命令会冒认原命令回执）；
+        - **身份前置过滤**（检视 D20）：候选行再按引用可用的非 target 身份缩小——
+          ``expected_revision``，以及存行链到根/比较路 execution 时的意图键
+          （``source_module`` / ``business_request_id``）。叶 execution 不存意图键，
+          不做无依据的比对（不为凑唯一性而伪造比对）；
+        - 用户域内按「准确 target + 调用方命令键」查：0 行 → ``INPUT_INVALID``
+          （不区分「不存在」与「属于他人」）；命中的存行须与引用同源，不符 →
+          ``INPUT_INVALID``，回执不得回显与存行矛盾的引用；
         - 存储状态/错误码不在冻结枚举内 → ``OPERATION_UNKNOWN``（fail-closed，
           R21：坏事实不得被读成确定的保存/投递/消费）；
         - ``next_action`` 为 None：本方法只回报已存事实，下一步由调用方按命令类型
@@ -1582,8 +1582,7 @@ class AgentDao(BaseDao):
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "user_scope must be non-empty text", identity)
         if ref.user_scope != user_scope:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command ref outside caller user scope", identity)
-        if target_id is not None:
-            _require_text_field(target_id, "target_id", identity)
+        _require_text_field(target_id, "target_id", identity)
         try:
             encode_command_ref(ref)
         except AgentValidationError as exc:
@@ -1591,10 +1590,12 @@ class AgentDao(BaseDao):
 
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
-        # 命令键（+ 可选准确 target）是候选集；身份条件随后追加（检视 D20）。
-        base_where = [AgentCommand.user_scope == user_scope, AgentCommand.client_command_id == ref.command_id]
-        if target_id is not None:
-            base_where.append(AgentCommand.target_id == target_id)
+        # 准确 target + 命令键是候选集；身份条件随后追加（检视 D20/T-07）。
+        base_where = [
+            AgentCommand.user_scope == user_scope,
+            AgentCommand.client_command_id == ref.command_id,
+            AgentCommand.target_id == target_id,
+        ]
         # 意图键前置条件：存行链到根/比较路 execution 时必须同源；叶 execution 的
         # 意图键为 NULL（无权威事实），不做无依据的比对。
         identity_where = [
@@ -1635,7 +1636,7 @@ class AgentDao(BaseDao):
             )
             rows = (await conn.execute(candidates.where(*identity_where))).all()
             if not rows:
-                # 诊断路径：只按命令键（+ 可选准确 target）回看，区分「不存在」与
+                # 诊断路径：只按「准确 target + 命令键」回看，区分「不存在」与
                 # 「身份不符」；不为身份不符回显任何存行状态。
                 stored = (await conn.execute(candidates)).all()
                 if not stored:
@@ -1648,8 +1649,7 @@ class AgentDao(BaseDao):
                     f"command ref does not match stored command{detail}",
                     identity,
                 )
-        if len(rows) > 1:
-            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command ref is ambiguous across targets", identity)
+        # 准确 target 下 (user_scope, target_id, client_command_id) 至多一行。
         row = rows[0]
         try:
             commit_state = CommitState(row.commit_state)
@@ -3124,6 +3124,13 @@ class AgentDao(BaseDao):
         因此「修订先提交后旧载荷绑定」不成立：旧载荷只能重读新版后重新派发，而已
         有有效轮时 ``revise_queued`` 同样拒绝，两端以同一有效输入版头竞争。
 
+        **版号与冻结正文整体核对**（检视 T-07）：版号相等之后，``frozen_manifest``
+        （父 workflow 载荷）必须携带派发侧冻结身份 ``binding_identity``，且其
+        ``expected_input_revision`` 必须等于该权威有效输入版；正文的
+        ``execution_id`` / ``round_id`` 与冻结身份 ``user_scope`` / ``session_id``
+        必须等于本次绑定身份。正文按另一版/轮冻结、身份不符或缺失冻结身份都零
+        派发（不把「正确版号配旧冻结正文」当新版绑定落库）。
+
         锁序（§5.4 第 4 条）：先持 execution 行锁，再锁其 session 分配序号；
         session/execution 事件水位均 GREATEST 单调推进（R22）。
         """
@@ -3289,6 +3296,42 @@ class AgentDao(BaseDao):
                 raise AgentServiceError(
                     AgentErrorCode.REVISION_CONFLICT,
                     "expected input revision does not match latest effective input revision",
+                    identity,
+                )
+            # 5c. 冻结正文核对（检视 T-07）：版号相等还不够——冻结正文（父 workflow
+            #     载荷）自带派发侧冻结身份 ``binding_identity``，其版本标记必须与
+            #     本次绑定版一致，且执行/轮次/用户域/会话必须同源。否则「正确版号 +
+            #     旧版冻结正文」会被当作新版绑定落库（版号与正文脱钩，R21）。缺失或
+            #     不可解析即 fail-closed（不猜正文属于哪一版）。
+            try:
+                frozen_body = decode_json_doc(request.frozen_manifest)
+            except AgentValidationError as exc:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID, f"frozen manifest is not valid JSON: {exc.code}", identity
+                ) from exc
+            binding_identity = frozen_body.get("binding_identity") if isinstance(frozen_body, dict) else None
+            if not isinstance(frozen_body, dict) or not isinstance(binding_identity, dict):
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "frozen manifest does not carry binding identity",
+                    identity,
+                )
+            body_revision = binding_identity.get("expected_input_revision")
+            if not isinstance(body_revision, int) or isinstance(body_revision, bool) or body_revision != input_revision:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_CONFLICT,
+                    "frozen manifest was frozen for another input revision",
+                    identity,
+                )
+            if (
+                frozen_body.get("execution_id") != request.execution_id
+                or frozen_body.get("round_id") != round_id
+                or binding_identity.get("user_scope") != request.user_scope
+                or binding_identity.get("session_id") != request.session_id
+            ):
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_CONFLICT,
+                    "frozen manifest binding identity does not match execution/round",
                     identity,
                 )
             # 6. 序号分配（持锁下 max+1，起点 1：首个执行事件 ``execution_seq=1``、
@@ -5022,7 +5065,10 @@ class AgentDao(BaseDao):
                         source_version="1",
                         input_digest=existing_command.input_digest,
                         input_revision=existing_command.input_revision,
-                        execution_revision=exec_row.revision,
+                        # 原回执 CAS 令牌 = 本命令产生的版本（expected+1），不得取当前
+                        # 头 exec_row.revision：后续修订已推进到更新版本时，重放旧命令
+                        # 会回一个不属于它的新令牌（检视 T-07）。
+                        execution_revision=existing_command.expected_revision + 1,
                         session_seq=event_row.session_seq,
                     )
                 raise AgentServiceError(
@@ -13300,6 +13346,9 @@ class AgentDao(BaseDao):
           否则 ``INPUT_INVALID``；归档目标先取消归档（``INPUT_INVALID``）；
         - 源 CAS（``source_kind=session_draft``）：源版必须匹配；调用方 payload
           必须与源会话存储的草稿逐字节规范相等（``INPUT_CONFLICT``），空源拒绝；
+          该版已作为某次受理的提交基线（已发送）→ ``REVISION_CONFLICT``：发送与
+          移入在同一稿版上只允许一个胜者，已发送内容不得再复制到其他会话（检视
+          T-07；保存新稿版后可再转移）；
         - 源 claim：本命令行同事务写 ``transfer_source_*`` + ``claimed=true``，
           源键部分唯一索引拒第二个转移（保护后冲突/unknown 也保留 claim，不因
           只读 phase 判断）。``source_kind=business_preparation`` 时本库无源行，
@@ -13449,6 +13498,30 @@ class AgentDao(BaseDao):
                         "transfer payload does not match source draft",
                         identity,
                     )
+                # 4b. 已发送版本不得再转移（检视 T-07）：本版草稿已作为某次受理的
+                #     提交基线（submit 命令行同会话、expected_revision 同值且已提交）
+                #     时，同版移入会把已发送内容再复制到其他会话。发送与移入在同版
+                #     上只允许一个胜者，这里 fail-closed 拒绝；保存新稿版后可再转移
+                #     （新版本才是新的未发送内容）。
+                sent_submit = (
+                    await conn.execute(
+                        sa.select(AgentCommand.command_record_id)
+                        .where(
+                            AgentCommand.user_scope == user_scope,
+                            AgentCommand.target_id == command.source_id,
+                            AgentCommand.command_kind == "submit",
+                            AgentCommand.expected_revision == int(source.draft_revision),
+                            AgentCommand.commit_state == CommitState.COMMITTED.value,
+                        )
+                        .limit(1)
+                    )
+                ).first()
+                if sent_submit is not None:
+                    raise AgentServiceError(
+                        AgentErrorCode.REVISION_CONFLICT,
+                        "source draft revision was already submitted; save a new draft before transfer",
+                        identity,
+                    )
 
             now = datetime.now(UTC)
             target_next = int(target.draft_revision) + 1
@@ -13563,22 +13636,19 @@ class AgentDao(BaseDao):
             return receipt
 
     async def read_draft_transfer(
-        self, ref: CommandRef, *, user_scope: str, target_session_id: str | None = None
+        self, ref: CommandRef, *, user_scope: str, target_session_id: str
     ) -> DraftTransferReceipt:
         """只查原转移回执（§4.2 ``read_draft_transfer``）：零移动、零发送。
 
         - ``ref.user_scope`` 必须等于可信调用上下文（§4.1）；
-        - **身份前置过滤**（检视 D20）：候选行先按引用可用的非 target 身份缩小——
-          命令类型 ``draft_transfer`` 与 ``expected_revision``（即
-          ``expected_target_draft_revision``）——再判是否仍多行；只有过滤后仍多行
-          才算真歧义并拒绝，不得先按命令键多行即拒；
-        - 调用方若已知准确目标会话，可传 ``target_session_id`` 直接定位该 target 下
-          的转移记录（存储 PK 为
-          ``stable_id("command",[user_scope, target_session_id, client_command_id])``）：
-          转移命令行自身带准确 target，而 ``CommandRef`` 刻意不携带 target（target
-          由各命令类型自身载荷承载），故由调用方按需显式给出；传入的 target 只用于
-          缩小候选，不匹配即 0 行 → ``INPUT_INVALID``；
-        - 0 行 / 真歧义 / 非 ``draft_transfer`` 命令 / 预期版不符 → ``INPUT_INVALID``
+        - **准确目标会话是必需身份**（检视 T-07）：存储 PK 为
+          ``stable_id("command",[user_scope, target_session_id, client_command_id])``，
+          同一命令键/预期版在不同目标会话下是不同记录。调用方必须给出准确
+          ``target_session_id``；缺失或为空即 ``INPUT_INVALID``，不按命令键在同域内
+          回退到另一目标会话的转移记录；
+        - **身份前置过滤**（检视 D20）：候选行再按命令类型 ``draft_transfer`` 与
+          ``expected_revision``（即 ``expected_target_draft_revision``）缩小；
+        - 0 行 / 非 ``draft_transfer`` 命令 / 预期版不符 → ``INPUT_INVALID``
           （不把别的命令回执当转移）；
         - 存行回执缺失或不在冻结枚举内 → ``OPERATION_UNKNOWN``（fail-closed，
           unknown 不从界面猜归属，R21/INV-07）；
@@ -13591,8 +13661,7 @@ class AgentDao(BaseDao):
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "user_scope must be non-empty text", identity)
         if ref.user_scope != user_scope:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command ref outside caller user scope", identity)
-        if target_session_id is not None:
-            _require_text_field(target_session_id, "target_session_id", identity)
+        _require_text_field(target_session_id, "target_session_id", identity)
         try:
             encode_command_ref(ref)
         except AgentValidationError as exc:
@@ -13600,9 +13669,11 @@ class AgentDao(BaseDao):
 
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
-        base_where = [AgentCommand.user_scope == user_scope, AgentCommand.client_command_id == ref.command_id]
-        if target_session_id is not None:
-            base_where.append(AgentCommand.target_id == target_session_id)
+        base_where = [
+            AgentCommand.user_scope == user_scope,
+            AgentCommand.client_command_id == ref.command_id,
+            AgentCommand.target_id == target_session_id,
+        ]
         async with engine.connect() as conn:
             candidates = sa.select(
                 AgentCommand.command_kind,
@@ -13618,7 +13689,7 @@ class AgentDao(BaseDao):
                 )
             ).all()
             if not rows:
-                # 诊断路径：只按命令键（+ 可选准确 target）回看，区分「不存在」、
+                # 诊断路径：只按「准确目标会话 + 命令键」回看，区分「不存在」、
                 # 「非转移命令」与「预期版不符」；不回显任何存行状态。
                 stored = (await conn.execute(candidates)).all()
                 if not stored:
@@ -13630,8 +13701,7 @@ class AgentDao(BaseDao):
                     "command ref does not match stored transfer: expected_revision",
                     identity,
                 )
-        if len(rows) > 1:
-            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command ref is ambiguous across targets", identity)
+        # 准确目标会话下 (user_scope, target_id, client_command_id) 至多一行。
         row = rows[0]
         if row.receipt_payload is None:
             raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "original transfer receipt unavailable", identity)

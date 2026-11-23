@@ -50,6 +50,7 @@ from core.agent_types import (
     SaveAnswerRequest,
     ToolGrantState,
     decode_research_event,
+    derive_round_id,
     encode_research_event,
     frozen_command_input_digest,
     json_doc,
@@ -137,19 +138,50 @@ def _request(user_scope: str = "u1", session_id: str = "s1", text: str = "研究
     return AcceptRequest(**values)
 
 
+def _frozen_body(
+    receipt: SubmissionReceipt,
+    *,
+    user_scope: str = "u1",
+    session_id: str = "s1",
+    workflow_id: str | None = None,
+    expected_input_revision: int = 1,
+) -> str:
+    """父 workflow 冻结载荷：自带派发侧冻结身份（``bind_actual_input`` 整体核对）。"""
+
+    return json_doc(
+        {
+            "payload_version": 2,
+            "execution_id": receipt.execution_id,
+            "round_id": derive_round_id(
+                user_scope=user_scope,
+                execution_id=receipt.execution_id,
+                workflow_id=workflow_id or receipt.workflow_id,
+            ),
+            "binding_identity": {
+                "user_scope": user_scope,
+                "session_id": session_id,
+                "workflow_code_version": "wcv-1",
+                "run_epoch": 1,
+                "expected_input_revision": expected_input_revision,
+            },
+        }
+    )
+
+
 def _bind_request(
     receipt: SubmissionReceipt, user_scope: str = "u1", session_id: str = "s1", **overrides
 ) -> BindActualInputRequest:
+    workflow_id = overrides.get("workflow_id", receipt.workflow_id)
     values: dict = {
         "user_scope": user_scope,
         "session_id": session_id,
         "execution_id": receipt.execution_id,
         "node_id": "root",
-        "workflow_id": receipt.workflow_id,
+        "workflow_id": workflow_id,
         "workflow_code_version": "wcv-1",
         "run_epoch": 1,
         "expected_input_revision": 1,
-        "frozen_manifest": json_doc({"schema_version": 1, "kind": "frozen_manifest"}),
+        "frozen_manifest": _frozen_body(receipt, user_scope=user_scope, session_id=session_id, workflow_id=workflow_id),
         "actual_input": json_doc({"schema_version": 1, "kind": "actual_input"}),
     }
     values.update(overrides)
@@ -511,7 +543,11 @@ class TestBindActualInput:
         engine = create_test_engine(real_embedded_pg.url)
         rev = await dao.revise_queued(_revise_request(receipt, expected=1))
 
-        bind = await dao.bind_actual_input(_bind_request(receipt, expected_input_revision=2))
+        bind = await dao.bind_actual_input(
+            _bind_request(
+                receipt, expected_input_revision=2, frozen_manifest=_frozen_body(receipt, expected_input_revision=2)
+            )
+        )
 
         assert rev.input_revision == 2
         assert bind.input_revision == 2
@@ -559,6 +595,70 @@ class TestBindActualInput:
             ).one()
         assert state.current_round_id is None
         assert state.revision == rev.execution_revision
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_bind_revision_matched_with_stale_frozen_body_conflicts(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        """T-07：版号正确但冻结正文是旧版 → INPUT_CONFLICT，零新事实（版号+正文整体核对）。"""
+        dao, receipt = await _accept_only(real_embedded_pg)
+        engine = create_test_engine(real_embedded_pg.url)
+        rev = await dao.revise_queued(_revise_request(receipt, expected=1))
+        before = {t: await _count(engine, t) for t in _COUNT_TABLES}
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.bind_actual_input(
+                _bind_request(receipt, expected_input_revision=2, frozen_manifest=_frozen_body(receipt))
+            )
+
+        assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
+        assert "frozen for another input revision" in excinfo.value.sanitized_message
+        after = {t: await _count(engine, t) for t in _COUNT_TABLES}
+        assert after == before
+        async with engine.connect() as conn:
+            state = (
+                await conn.execute(
+                    sa.select(AgentExecution.current_round_id, AgentExecution.revision).where(
+                        AgentExecution.execution_id == receipt.execution_id
+                    )
+                )
+            ).one()
+        assert state.current_round_id is None
+        assert state.revision == rev.execution_revision
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_bind_frozen_body_without_binding_identity_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        """T-07：冻结正文缺派发侧冻结身份 → INPUT_INVALID，零新事实（不猜属于哪一版）。"""
+        dao, receipt = await _accept_only(real_embedded_pg)
+        engine = create_test_engine(real_embedded_pg.url)
+        before = {t: await _count(engine, t) for t in _COUNT_TABLES}
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.bind_actual_input(
+                _bind_request(receipt, frozen_manifest=json_doc({"schema_version": 1, "kind": "frozen_manifest"}))
+            )
+
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "binding identity" in excinfo.value.sanitized_message
+        after = {t: await _count(engine, t) for t in _COUNT_TABLES}
+        assert after == before
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_bind_invalid_frozen_manifest_json_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        """T-07：冻结正文不是合法 JSON → INPUT_INVALID，零新事实（不按字符串直写落库）。"""
+        dao, receipt = await _accept_only(real_embedded_pg)
+        engine = create_test_engine(real_embedded_pg.url)
+        before = {t: await _count(engine, t) for t in _COUNT_TABLES}
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.bind_actual_input(_bind_request(receipt, frozen_manifest="{not json"))
+
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        after = {t: await _count(engine, t) for t in _COUNT_TABLES}
+        assert after == before
         await engine.dispose()
 
     @pytest.mark.asyncio(loop_scope="session")
@@ -1370,7 +1470,11 @@ class TestReviseQueued:
         dao, receipt = await _accept_only(real_embedded_pg)
         engine = create_test_engine(real_embedded_pg.url)
         first = await dao.revise_queued(_revise_request(receipt, expected=1))
-        bind = await dao.bind_actual_input(_bind_request(receipt, expected_input_revision=2))
+        bind = await dao.bind_actual_input(
+            _bind_request(
+                receipt, expected_input_revision=2, frozen_manifest=_frozen_body(receipt, expected_input_revision=2)
+            )
+        )
         assert first.input_revision == 2 and bind.input_revision == 2
         before = {t: await _count(engine, t) for t in _COUNT_TABLES}
 
@@ -1383,6 +1487,28 @@ class TestReviseQueued:
         await engine.dispose()
 
     @pytest.mark.asyncio(loop_scope="session")
+    async def test_revise_replay_returns_original_cas_token_not_new_head(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        """T-07：旧修订重放回原 CAS 令牌（expected+1），不混入后续修订推进的新头版本。"""
+        dao, receipt = await _accept_only(real_embedded_pg)
+        engine = create_test_engine(real_embedded_pg.url)
+        first = await dao.revise_queued(_revise_request(receipt, expected=1))
+        second = await dao.revise_queued(
+            _revise_request(receipt, client_command_id="rev-2", expected=2, text="再改一次")
+        )
+        assert (first.execution_revision, second.execution_revision) == (2, 3)
+        before = {t: await _count(engine, t) for t in _COUNT_TABLES}
+
+        replay = await dao.revise_queued(_revise_request(receipt, expected=1))
+
+        assert replay == first
+        assert replay.execution_revision == 2
+        assert replay.execution_revision != second.execution_revision
+        after = {t: await _count(engine, t) for t in _COUNT_TABLES}
+        assert after == before
+        await engine.dispose()
+
     async def test_revise_replay_same_key_same_input_zero_new_facts(self, real_embedded_pg: ConnectionInfo) -> None:
         dao, receipt = await _accept_only(real_embedded_pg)
         engine = create_test_engine(real_embedded_pg.url)

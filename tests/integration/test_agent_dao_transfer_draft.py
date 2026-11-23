@@ -28,6 +28,7 @@ from alembic import command
 from sqlalchemy import insert, select, text, update
 
 from core.agent_types import (
+    AcceptRequest,
     AgentErrorCode,
     AgentServiceError,
     CommandRef,
@@ -41,6 +42,7 @@ from core.agent_types import (
     DraftTransferReceipt,
     DraftTransferSourceKind,
     Mode,
+    Purpose,
     SendableOwner,
     SourceKind,
     SourceVersionRef,
@@ -573,6 +575,72 @@ class TestTransferDraftSessionDraft:
         assert source.draft_transfer_ref is None
         assert source.draft_payload["text"] == "移入之后的新草稿"
 
+    async def test_sent_same_revision_cannot_transfer_until_new_draft(self, real_embedded_pg: ConnectionInfo) -> None:
+        """T-07：已发送（同版受理）草稿不得同版转移；保存新稿版后才可转移。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, session_id="s1")
+        await _seed_session(dao, session_id="s2")
+        payload = _payload()
+        sent_revision = await _save_source_draft(dao, payload)
+        await dao.accept_request(
+            AcceptRequest(
+                user_scope=_USER,
+                session_id="s1",
+                source_module="ui",
+                business_request_id="req-send-1",
+                client_command_id="client-send-1",
+                expected_revision=sent_revision,
+                node_id="root",
+                workflow_id="wf-send-1",
+                mode=Mode.DISCUSS,
+                purpose=Purpose.CONCEPT,
+                text=payload.text,
+                manifest_payload=json_doc(
+                    {
+                        "schema_version": 1,
+                        "source_module": "ui",
+                        "business_request_id": "req-send-1",
+                        "mode": "discuss",
+                        "purpose": "concept",
+                        "text": payload.text,
+                    }
+                ),
+                source_display_name="用户消息",
+            )
+        )
+        source_before = await _session_row(real_embedded_pg.url, "s1")
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.transfer_draft(_transfer(payload=payload, expected_source=sent_revision))
+        _expect_error(excinfo, AgentErrorCode.REVISION_CONFLICT)
+        assert "already submitted" in excinfo.value.sanitized_message
+        source_after = await _session_row(real_embedded_pg.url, "s1")
+        assert source_after.draft_revision == source_before.draft_revision
+        assert source_after.draft_payload == source_before.draft_payload
+        assert await _command_rows(real_embedded_pg.url) == []
+        assert (await _session_row(real_embedded_pg.url, "s2")).draft_payload is None
+
+        new_payload = _payload(text="发送之后的新草稿")
+        new_receipt = await dao.save_draft(
+            DraftSaveCommand(
+                command=CommandRef(
+                    user_scope=_USER,
+                    source_module="ui",
+                    business_request_id="req-save",
+                    command_id="cmd-save-2",
+                    expected_revision=sent_revision,
+                ),
+                session_id="s1",
+                expected_draft_revision=sent_revision,
+                payload=new_payload,
+            )
+        )
+        transfer = await dao.transfer_draft(
+            _transfer(payload=new_payload, expected_source=new_receipt.draft_revision, command_id="cmd-t2")
+        )
+        assert transfer.phase is DraftTransferPhase.COMPLETED
+
     async def test_concurrent_same_source_revision_single_winner(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, session_id="s1")
@@ -668,7 +736,7 @@ class TestReadDraftTransfer:
         await _save_source_draft(dao, payload)
         receipt = await dao.transfer_draft(_transfer(payload=payload))
 
-        assert await dao.read_draft_transfer(_ref(), user_scope=_USER) == receipt
+        assert await dao.read_draft_transfer(_ref(), user_scope=_USER, target_session_id="s2") == receipt
 
     async def _two_transfers_same_key(self, dao: AgentDao) -> tuple[DraftTransferReceipt, DraftTransferReceipt]:
         """同一命令键向两个合法 target 各转移一次（检视 D20 场景种子）。"""
@@ -697,15 +765,27 @@ class TestReadDraftTransfer:
             == second
         )
 
-    async def test_same_key_identical_target_revision_is_ambiguous(self, real_embedded_pg: ConnectionInfo) -> None:
-        """无准确 target 且身份（类型/预期版）过滤后仍多行 → 真歧义，拒绝静默择一。"""
+    async def test_empty_target_session_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        """T-07：无准确目标会话（空值）即拒绝，不按命令键在同域内回退到另一目标。"""
 
         dao = await _setup(real_embedded_pg.url)
         await self._two_transfers_same_key(dao)
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.read_draft_transfer(_ref("cmd-dup", expected=1), user_scope=_USER)
-        assert "ambiguous" in excinfo.value.sanitized_message
+            await dao.read_draft_transfer(_ref("cmd-dup", expected=1), user_scope=_USER, target_session_id="")
+        _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
+        assert "target_session_id must be non-empty text" in excinfo.value.sanitized_message
+
+    async def test_exact_target_does_not_match_other_target_record(self, real_embedded_pg: ConnectionInfo) -> None:
+        """T-07：准确目标会话下的同键记录缺失即 not found，不回同域另一目标的转移。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await self._two_transfers_same_key(dao)
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.read_draft_transfer(_ref("cmd-dup", expected=1), user_scope=_USER, target_session_id="s5")
+        _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
+        assert "not found in user scope" in excinfo.value.sanitized_message
 
     async def test_reads_back_after_restart_with_new_dao(self, real_embedded_pg: ConnectionInfo) -> None:
         """丢回执/重启：新 DAO/新连接按准确 target 仍查回原回执。"""
@@ -744,12 +824,12 @@ class TestReadDraftTransfer:
             ).all()
         assert len(stored) == 1
         assert replayed == first
-        assert await dao.read_draft_transfer(_ref(), user_scope=_USER) == first
+        assert await dao.read_draft_transfer(_ref(), user_scope=_USER, target_session_id="s2") == first
 
     async def test_unknown_command_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.read_draft_transfer(_ref("missing"), user_scope=_USER)
+            await dao.read_draft_transfer(_ref("missing"), user_scope=_USER, target_session_id="s2")
         _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
 
     async def test_non_transfer_command_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
@@ -758,13 +838,13 @@ class TestReadDraftTransfer:
         await _save_source_draft(dao, _payload(), command_id="cmd-save-1")
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.read_draft_transfer(_ref("cmd-save-1", expected=1), user_scope=_USER)
+            await dao.read_draft_transfer(_ref("cmd-save-1", expected=1), user_scope=_USER, target_session_id="s1")
         _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
 
     async def test_other_user_scope_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.read_draft_transfer(_ref(), user_scope="u2")
+            await dao.read_draft_transfer(_ref(), user_scope="u2", target_session_id="s2")
         _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
 
     async def test_corrupt_receipt_reads_as_unknown(self, real_embedded_pg: ConnectionInfo) -> None:
@@ -783,5 +863,5 @@ class TestReadDraftTransfer:
             )
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.read_draft_transfer(_ref(), user_scope=_USER)
+            await dao.read_draft_transfer(_ref(), user_scope=_USER, target_session_id="s2")
         _expect_error(excinfo, AgentErrorCode.OPERATION_UNKNOWN)

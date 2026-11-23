@@ -130,7 +130,7 @@ class TestReadCommandFacts:
         await _seed_session(dao, "u1", "s1")
         accepted = await dao.accept_request(_request())
 
-        receipt = await dao.read_command(_ref(), user_scope="u1")
+        receipt = await dao.read_command(_ref(), user_scope="u1", target_id="s1")
 
         assert receipt.command == _ref()
         assert receipt.target_id == "s1"
@@ -151,7 +151,7 @@ class TestReadCommandFacts:
         await dao.accept_request(_request())
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.read_command(_ref(), user_scope="u2")
+            await dao.read_command(_ref(), user_scope="u2", target_id="s1")
         assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
         await dao.engine.dispose()  # type: ignore[union-attr]
 
@@ -162,7 +162,7 @@ class TestReadCommandFacts:
         await dao.accept_request(_request())
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.read_command(_ref(user_scope="u1"), user_scope="u2")
+            await dao.read_command(_ref(user_scope="u1"), user_scope="u2", target_id="s1")
         assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
         assert "outside caller user scope" in excinfo.value.sanitized_message
         await dao.engine.dispose()  # type: ignore[union-attr]
@@ -173,7 +173,7 @@ class TestReadCommandFacts:
         await _seed_session(dao, "u1", "s1")
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.read_command(_ref(client_command_id="missing"), user_scope="u1")
+            await dao.read_command(_ref(client_command_id="missing"), user_scope="u1", target_id="s1")
         assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
         assert "not found in user scope" in excinfo.value.sanitized_message
         await dao.engine.dispose()  # type: ignore[union-attr]
@@ -187,7 +187,7 @@ class TestReadCommandFacts:
         await dao.accept_request(_request())
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.read_command(_ref(source_module="other"), user_scope="u1")
+            await dao.read_command(_ref(source_module="other"), user_scope="u1", target_id="s1")
         assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
         assert "does not match stored command" in excinfo.value.sanitized_message
         assert "source_module" in excinfo.value.sanitized_message
@@ -200,7 +200,7 @@ class TestReadCommandFacts:
         await dao.accept_request(_request())
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.read_command(_ref(business_request_id="req-9"), user_scope="u1")
+            await dao.read_command(_ref(business_request_id="req-9"), user_scope="u1", target_id="s1")
         assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
         assert "does not match stored command" in excinfo.value.sanitized_message
         assert "business_request_id" in excinfo.value.sanitized_message
@@ -215,7 +215,7 @@ class TestReadCommandFacts:
         await dao.accept_request(_request())
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.read_command(_ref(expected_revision=5), user_scope="u1")
+            await dao.read_command(_ref(expected_revision=5), user_scope="u1", target_id="s1")
         assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
         assert "does not match stored command" in excinfo.value.sanitized_message
         assert "expected_revision" in excinfo.value.sanitized_message
@@ -252,15 +252,15 @@ class TestReadCommandFacts:
             expected_revision=2,
         )
 
-        receipt = await dao.read_command(ref, user_scope="u1")
+        receipt = await dao.read_command(ref, user_scope="u1", target_id="s1")
 
         assert receipt.command == ref
         assert receipt.current_revision == 1
         await dao.engine.dispose()  # type: ignore[union-attr]
 
     @pytest.mark.asyncio(loop_scope="session")
-    async def test_same_key_across_targets_resolved_by_intent_identity(self, real_embedded_pg: ConnectionInfo) -> None:
-        """同一命令键在不同合法 target 下并存：按意图键各自查回，不误判歧义（D20）。"""
+    async def test_same_key_across_targets_resolved_by_exact_target(self, real_embedded_pg: ConnectionInfo) -> None:
+        """同一命令键在不同合法 target 下并存：按准确 target 各自查回（D20/T-07）。"""
 
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, "u1", "s1")
@@ -268,8 +268,8 @@ class TestReadCommandFacts:
         await dao.accept_request(_request(session_id="s1"))
         await dao.accept_request(_request(session_id="s2", business_request_id="req-2"))
 
-        first = await dao.read_command(_ref(business_request_id="req-1"), user_scope="u1")
-        second = await dao.read_command(_ref(business_request_id="req-2"), user_scope="u1")
+        first = await dao.read_command(_ref(business_request_id="req-1"), user_scope="u1", target_id="s1")
+        second = await dao.read_command(_ref(business_request_id="req-2"), user_scope="u1", target_id="s2")
 
         assert first.target_id == "s1"
         assert second.target_id == "s2"
@@ -287,8 +287,8 @@ class TestReadCommandFacts:
         await dao.engine.dispose()  # type: ignore[union-attr]
 
         restarted = AgentDao(create_test_engine(real_embedded_pg.url))
-        first = await restarted.read_command(_ref(business_request_id="req-1"), user_scope="u1")
-        second = await restarted.read_command(_ref(business_request_id="req-2"), user_scope="u1")
+        first = await restarted.read_command(_ref(business_request_id="req-1"), user_scope="u1", target_id="s1")
+        second = await restarted.read_command(_ref(business_request_id="req-2"), user_scope="u1", target_id="s2")
 
         assert first.target_id == "s1"
         assert second.target_id == "s2"
@@ -303,7 +303,7 @@ class TestReadCommandFacts:
         accepted = await dao.accept_request(_request())
         await dao.accept_request(_request())
 
-        receipt = await dao.read_command(_ref(), user_scope="u1")
+        receipt = await dao.read_command(_ref(), user_scope="u1", target_id="s1")
 
         async with dao.engine.connect() as conn:  # type: ignore[union-attr]
             stored = (
@@ -321,8 +321,8 @@ class TestReadCommandFacts:
         await dao.engine.dispose()  # type: ignore[union-attr]
 
     @pytest.mark.asyncio(loop_scope="session")
-    async def test_identical_identity_across_targets_is_ambiguous(self, real_embedded_pg: ConnectionInfo) -> None:
-        """按 ref 全部可用身份过滤后仍多行 → 真歧义，拒绝静默择一。"""
+    async def test_exact_target_never_falls_back_to_other_target(self, real_embedded_pg: ConnectionInfo) -> None:
+        """T-07：准确 target 下无该命令即 not found，不回同域另一 target 的同键记录。"""
 
         dao = await _setup(real_embedded_pg.url)
         async with dao.engine.begin() as conn:  # type: ignore[union-attr]
@@ -343,14 +343,16 @@ class TestReadCommandFacts:
                 )
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.read_command(_ref(client_command_id="client-dup", expected_revision=2), user_scope="u1")
+            await dao.read_command(
+                _ref(client_command_id="client-dup", expected_revision=2), user_scope="u1", target_id="s3"
+            )
         assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
-        assert "ambiguous" in excinfo.value.sanitized_message
+        assert "not found in user scope" in excinfo.value.sanitized_message
         await dao.engine.dispose()  # type: ignore[union-attr]
 
     @pytest.mark.asyncio(loop_scope="session")
-    async def test_exact_target_resolves_residual_ambiguity(self, real_embedded_pg: ConnectionInfo) -> None:
-        """已知准确 target 时按该 target 下的命令记录定位（存储 PK 维度）。"""
+    async def test_exact_target_selects_that_targets_record(self, real_embedded_pg: ConnectionInfo) -> None:
+        """准确 target 下按存储 PK 定位该 target 的记录（不跨 target 择一，T-07）。"""
 
         dao = await _setup(real_embedded_pg.url)
         async with dao.engine.begin() as conn:  # type: ignore[union-attr]
@@ -386,6 +388,6 @@ class TestReadCommandFacts:
             await conn.execute(sa.text("UPDATE agent_command SET error_code = 'BOGUS'"))
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.read_command(_ref(), user_scope="u1")
+            await dao.read_command(_ref(), user_scope="u1", target_id="s1")
         assert excinfo.value.code is AgentErrorCode.OPERATION_UNKNOWN
         await dao.engine.dispose()  # type: ignore[union-attr]
