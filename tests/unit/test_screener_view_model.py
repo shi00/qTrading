@@ -952,6 +952,70 @@ class TestScreenerViewModelRunStrategy:
         assert passed_params == {**test_params, "global_config": {"exclude_st": True}}
 
     @pytest.mark.asyncio
+    async def test_run_strategy_reuses_batch_identity_as_run_id(self, vm):
+        """F34/AC23：实时保存沿用批次预存身份（stock_batch_ + 32 hex，44 字符）。
+
+        批次身份由 AIStrategyMixin 在 filter(context) 内写入 ``_ai_operation_id``；
+        保存必须原样透传（与 ai_invocation.run_id 同源），不得截断成 16 字符。
+        """
+        analysis_date = datetime.date(2024, 12, 27)
+        batch_run_id = "stock_batch_" + "b" * 32
+        assert len(batch_run_id) == 44
+        result_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "name": ["平安银行"],
+                "close": [10.5],
+                "pct_chg": [2.5],
+                "ai_score": [85],
+                "ai_reason": ["test"],
+                "thinking": ["test"],
+            }
+        )
+
+        mock_strategy = MagicMock()
+        mock_strategy.name = "test_strategy"
+        mock_strategy.name_key = "strategy_value_name"
+
+        async def _filter(context):
+            context["_ai_operation_id"] = batch_run_id
+            return result_df
+
+        mock_strategy.filter = _filter
+        vm.strategy_mgr.get_strategy = MagicMock(return_value=mock_strategy)
+        vm.data_processor.get_strategy_data = AsyncMock(
+            return_value={
+                "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}),
+                "trade_date": analysis_date,
+            }
+        )
+
+        submitted_coro = []
+
+        def mock_submit_task(
+            name,
+            task_type,
+            coroutine_factory,
+            cancellable=False,
+            unique_key=None,
+            **kwargs,
+        ):
+            submitted_coro.append(coroutine_factory(task_id="test_task_id"))
+            return "test_task_id"
+
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager") as mock_tm:
+            mock_tm.return_value.update_progress = MagicMock()
+            mock_tm.return_value.submit_task = mock_submit_task
+            await vm.run_strategy("test_strategy", save_results=True)
+
+        for coro in submitted_coro:
+            await coro
+
+        vm.review_mgr.save_results.assert_called_once()
+        passed_run_id = vm.review_mgr.save_results.call_args.kwargs.get("run_id")
+        assert passed_run_id == batch_run_id
+
+    @pytest.mark.asyncio
     async def test_save_results_stores_i18n_key(self, vm):
         """R.3.1: save_results 应存储 strategy.name_key (i18n key) 而非 I18n.get(name_key) 翻译字符串。
 

@@ -152,8 +152,13 @@ async def test_daily_update_logic_handles_dataframe_result_without_bool_error(
 
 
 @pytest.mark.asyncio
-async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch):
-    """夜间预测任务应将 context.trade_date 透传到 save_results，并生成唯一 run_id。"""
+@pytest.mark.parametrize("batch_identity", [None, "stock_batch_" + "c" * 32])
+async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch, batch_identity):
+    """夜间预测任务应将 context.trade_date 透传到 save_results。
+
+    F34/AC23：AI 批次已预存身份（``stock_batch_<32 hex>``，44 字符）时原样复用为
+    run_id（与账本费用链同源）；无身份时回退 16 字符唯一 id。
+    """
     import utils.scheduler_service as sched_mod
 
     sched_mod.SchedulerService._reset_singleton()
@@ -222,6 +227,8 @@ async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch)
     class _FakeStrategy:
         async def filter(self, context):
             assert context["trade_date"] == "20260423"
+            if batch_identity is not None:
+                context["_ai_operation_id"] = batch_identity
             return pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"]})
 
     monkeypatch.setattr("services.scheduled_jobs.nightly_prediction.DataProcessor", _FakeProcessor)
@@ -244,7 +251,10 @@ async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch)
     assert holder["saved"][0] == "strategy_ai_nightly_name"
     assert holder["saved"][1] == "20260423"
     assert holder["saved"][2] is not None, "save_results should receive a non-None run_id"
-    assert len(holder["saved"][2]) == 16, f"run_id should be 16 chars, got {len(holder['saved'][2])}"
+    if batch_identity is None:
+        assert len(holder["saved"][2]) == 16, f"fallback run_id should be 16 chars, got {len(holder['saved'][2])}"
+    else:
+        assert holder["saved"][2] == batch_identity, "batch identity must pass through unchanged"
 
 
 @pytest.mark.asyncio
