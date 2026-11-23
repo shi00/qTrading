@@ -13,6 +13,7 @@
 | ID | 一句话含义 | 来源轮次 | 落地位置 | 状态 |
 |----|-----------|---------|---------|------|
 | P1-01 | 宪法绝对规则与已批准例外必须集中登记，例外唯一注册入口 | 文档体系检视 P1 系列 | [exceptions.yml](./exceptions.yml) | 使用中 |
+| P1-02 | 首问受理、主回合成环与已确认计划派发准入（讨论/计划零研究派发，缺配置 fail-closed） | 本地检视报告（gitignored） | [main_turn.py](../../services/agent_service/main_turn.py) | 使用中 |
 | P2-03 | 架构守护范围：import-linter 契约（layers + 补充 forbidden） + AST 静态测试互补 | 文档体系检视 P2 系列 | [docs/architecture/overview.md](../architecture/overview.md#41-分层架构) §4.1 | 使用中 |
 | P2-06 | 受检 markdown 递归发现 + 显式排除清单（_build_doc_excludes） | 文档体系检视 P2 系列 | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
 | P2-07 | 治理文档元数据统一格式（owner/ruleset_version/review_triggers/canonical_for） | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) / [AGENTS.md](../../AGENTS.md) 元数据块 | 使用中 |
