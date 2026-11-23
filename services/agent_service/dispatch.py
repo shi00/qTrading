@@ -46,9 +46,14 @@ NOT_COMMITTED: Final[str] = "not_committed"
 MODE_RESEARCH_DISABLED: Final[str] = "mode_research_disabled"
 #: 零派发原因：计划准入无角色能力策略来源（不以提案自述能力自授权，R2-I09）。
 PLAN_ADMISSION_UNCONFIGURED: Final[str] = "plan_admission_unconfigured"
+#: 零派发原因：角色能力来源读取失败（如实记录脱敏原因，不伪造准入策略）。
+CAPABILITY_POLICY_UNAVAILABLE: Final[str] = "capability_policy_unavailable"
 
 #: 计划来源端口：``(user_scope, execution_id) -> 已保存计划版``；不可得返回 None。
 PlanSpecProvider = Callable[[str, str], Awaitable[PlanSpecProposal | None]]
+#: 角色能力来源端口：``(user_scope, execution_id) -> 本次请求冻结的手选策略``。
+#: 返回 ``None`` 表示不可判定（未选择/无绑定角色），派发 fail-closed。
+RoleCapabilityProvider = Callable[[str, str], Awaitable[Mapping[str, AbstractSet[str]] | None]]
 
 #: 父 workflow 启动端口（同步宿主入口须由实现经受管线程，不堵 UI，R16）。
 RootWorkflowSubmitter = Callable[[str, dict[str, Any]], Awaitable[None]]
@@ -89,12 +94,14 @@ class ResearchDispatcher:
         plan_provider: PlanSpecProvider | None = None,
         read_result: RootWorkflowResultReader | None = None,
         role_capabilities: Mapping[str, AbstractSet[str]] | None = None,
+        capability_provider: RoleCapabilityProvider | None = None,
     ) -> None:
         self._gate = gate
         self._submit = submit
         self._plan_provider = plan_provider
         self._read_result = read_result
         self._role_capabilities = role_capabilities
+        self._capability_provider = capability_provider
 
     async def dispatch(
         self, receipt: SubmissionReceipt, *, user_scope: str, mode: Mode | None = None
@@ -169,7 +176,7 @@ class ResearchDispatcher:
             execution_id=execution_id,
             workflow_id=receipt.workflow_id,
         )
-        if self._role_capabilities is None:
+        if self._role_capabilities is None and self._capability_provider is None:
             # 无角色能力策略即无准入判据：不以提案自述能力自授权（R2-I09）。
             logger.warning(
                 "[ResearchDispatch] plan admission policy missing, zero dispatch (execution=%s workflow=%s)",
@@ -177,16 +184,30 @@ class ResearchDispatcher:
                 receipt.workflow_id,
             )
             return DispatchOutcome(execution_id, receipt.workflow_id, False, PLAN_ADMISSION_UNCONFIGURED)
+        policy, policy_error = await self._resolve_role_capabilities(user_scope, execution_id)
+        if policy is None:
+            logger.warning(
+                "[ResearchDispatch] plan admission policy unavailable, zero dispatch (execution=%s workflow=%s): %s",
+                execution_id,
+                receipt.workflow_id,
+                policy_error or PLAN_ADMISSION_UNCONFIGURED,
+            )
+            return DispatchOutcome(
+                execution_id,
+                receipt.workflow_id,
+                False,
+                policy_error or PLAN_ADMISSION_UNCONFIGURED,
+            )
         try:
             plan_digest = plan_spec_digest(plan)
             # 派发前准入：计划版绑定 + 任务依赖图/角色/能力校验（非法图零派发）。
-            admit_research_plan(plan, plan_digest=plan_digest, role_capabilities=self._role_capabilities)
+            admit_research_plan(plan, plan_digest=plan_digest, role_capabilities=policy)
             payload = build_research_payload(
                 plan,
                 execution_id=execution_id,
                 round_id=round_id,
                 plan_digest=plan_digest,
-                role_capabilities=self._role_capabilities,
+                role_capabilities=policy,
             )
         except Exception as exc:
             logger.warning(
@@ -209,6 +230,28 @@ class ResearchDispatcher:
             )
             return DispatchOutcome(execution_id, receipt.workflow_id, False, f"submit_failed:{type(exc).__name__}")
         return DispatchOutcome(execution_id, receipt.workflow_id, True, None, round_id)
+
+    async def _resolve_role_capabilities(
+        self, user_scope: str, execution_id: str
+    ) -> tuple[Mapping[str, AbstractSet[str]] | None, str | None]:
+        """按请求解析角色能力策略：优先逐请求来源，回退构造期静态映射。
+
+        逐请求来源抛错时返回 ``(None, 原因)``（零派发）；``CancelledError`` 原样
+        传播（R2）。不做「读取失败即视为无限制」的降级（R21）。
+        """
+
+        provider = self._capability_provider
+        if provider is None:
+            return self._role_capabilities, None
+        try:
+            policy = await provider(user_scope, execution_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return None, f"{CAPABILITY_POLICY_UNAVAILABLE}:{type(exc).__name__}"
+        if policy is None:
+            return None, None
+        return policy, None
 
     async def read_result(self, workflow_id: str) -> ResearchWorkflowResult:
         """读回派发结果的持久事实（原生状态 + 成功输出）；未接线即显式拒绝。"""

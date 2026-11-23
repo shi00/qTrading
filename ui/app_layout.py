@@ -47,6 +47,7 @@ from ui.viewmodels.nav_badge_view_model import NavBadgeViewModel
 from ui.viewmodels.research_observer_view_model import (
     LOCAL_DESKTOP_USER_SCOPE,
     resolve_agent_research_service,
+    resolve_main_turn_intake,
     shared_research_observer,
 )
 from ui.views.backtest_view import BacktestView
@@ -421,11 +422,13 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
 
     # --- P02: 壳层公共研究观察层（跨页共享 VM；观察不控制执行） ---
     research_service, research_unavailable_key = resolve_agent_research_service(agent_wiring)
+    main_turn_intake = resolve_main_turn_intake(agent_wiring)
     research_state, research_vm = use_viewmodel(
         factory=lambda: shared_research_observer(
             research_service,
             user_scope=str(getattr(agent_wiring, "user_scope", LOCAL_DESKTOP_USER_SCOPE)),
             unavailable_reason_key=research_unavailable_key,
+            intake=main_turn_intake,
         )
     )
     research_open, set_research_open = ft.use_state(False)
@@ -520,6 +523,20 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         if page is not None and current.available and current.session_id is not None:
             revision = current.session_draft_revision or None
             page.run_task(research_vm.load_draft, current.session_id, revision)
+
+    def _send_first_question() -> None:
+        """首问发送（异步调度；事件处理器内不做同步 IO，R16）。"""
+
+        page = _get_page()
+        if page is not None and research_vm.state.composer_available:
+            page.run_task(research_vm.send_first_question)
+
+    def _start_confirmed_plan() -> None:
+        """开始已审计划（异步调度；零派发时由 VM 如实展示原因）。"""
+
+        page = _get_page()
+        if page is not None and research_vm.state.composer_available:
+            page.run_task(research_vm.start_confirmed_plan)
 
     def _submit_decision(decision_id: str, execution_id: str, round_id: str) -> None:
         """统一决定提交入口（旧 Dialog 打开/他人占用时拒绝，不排队、不伪造）。
@@ -883,6 +900,10 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             on_select_execution=_select_execution,
             on_load_artifact=_load_artifact,
             on_load_draft=_load_draft,
+            on_composer_text=research_vm.set_composer_text,
+            on_composer_mode=research_vm.set_composer_mode,
+            on_send=_send_first_question,
+            on_start_plan=_start_confirmed_plan,
         )
         if research_open
         else None

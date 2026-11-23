@@ -294,7 +294,7 @@ def _find_button(panel: ft.Container, label: str) -> ft.TextButton:
 
 def _find_field(panel: ft.Container) -> ft.TextField:
     for control in _iter_controls(panel):
-        if isinstance(control, ft.TextField):
+        if isinstance(control, ft.TextField) and str(control.key).startswith("agent_research_answer_"):
             return control
     raise AssertionError("未找到答复输入框")
 
@@ -1069,7 +1069,11 @@ def _answer_fields(panel: ft.Container) -> dict[str, ft.TextField]:
 
     fields: dict[str, ft.TextField] = {}
     for control in _iter_controls(panel):
-        if isinstance(control, ft.TextField) and control.key is not None:
+        if (
+            isinstance(control, ft.TextField)
+            and control.key is not None
+            and str(control.key).startswith("agent_research_answer_")
+        ):
             fields[str(control.key)] = control
     return fields
 

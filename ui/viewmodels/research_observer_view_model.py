@@ -22,9 +22,10 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any, Final, Protocol, cast
 from core.agent_types import (
     AnswerReceipt,
     ArtifactReadQuery,
@@ -33,11 +34,13 @@ from core.agent_types import (
     HistoryPage,
     HistoryQuery,
     HistoryRoundSelection,
+    Mode,
     SaveAnswerRequest,
     SessionRead,
     SessionReadQuery,
     json_doc,
 )
+from services.agent_service.main_turn import MainTurnIntakeResult, PlanReference
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 
 #: 桌面单用户域（与 app.agent_wiring 的默认 user_scope 保持一致；UI 层不 import app）。
@@ -51,6 +54,33 @@ _QUESTION_KEYS = ("question", "prompt", "text", "title", "label", "description")
 
 UNAVAILABLE_NOT_WIRED = "agent_research_not_wired"
 UNAVAILABLE_NOT_READY = "agent_research_not_ready"
+
+#: 首问可选模式（三值；直答是循环动作，不作为第四模式）。
+COMPOSER_MODES: Final[tuple[str, ...]] = ("discuss", "plan", "execute")
+#: 缺省模式：执行（F21 默认执行）。
+DEFAULT_COMPOSER_MODE: Final[str] = "execute"
+
+
+class MainTurnIntakePort(Protocol):
+    """首问/开始计划受理端口（组合根注入；UI 不 import app）。"""
+
+    async def start_question(
+        self,
+        text: str,
+        *,
+        mode: Mode,
+        session_id: str | None = None,
+        session_title: str | None = None,
+        expected_revision: int | None = None,
+    ) -> MainTurnIntakeResult: ...
+
+    async def start_plan(
+        self,
+        reference: PlanReference,
+        *,
+        session_id: str,
+        expected_revision: int,
+    ) -> MainTurnIntakeResult: ...
 
 
 class AgentResearchService(Protocol):
@@ -151,6 +181,15 @@ class SessionDraftView:
 
 
 @dataclass(frozen=True)
+class PlanStepView:
+    """计划预览步骤（只读投影；``depends_on`` 原样保留，不补默认依赖）。"""
+
+    step_id: str
+    content: str
+    depends_on: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class PendingDecision:
     """必要决定的只读投影（展示用；不回显完整授权参数）。
 
@@ -209,6 +248,21 @@ class ResearchObserverState:
     session_draft: SessionDraftView | None = None
     draft_pending: bool = False
     draft_error_code: str | None = None
+    #: 首问/计划（F01/F21）：输入正文、模式、提交中与错误 key 均为 UI 纯状态。
+    composer_available: bool = False
+    composer_text: str = ""
+    composer_mode: str = DEFAULT_COMPOSER_MODE
+    composer_pending: bool = False
+    composer_error_key: str | None = None
+    #: 最近一次受理的派发事实：``submitted=False`` 的 ``reason``（讨论/计划为零派发，
+    #: 属预期，不当作错误；执行模式零派发如实展示原因，不伪造成已启动）。
+    last_dispatch_reason: str | None = None
+    #: 主回合直答（讨论/执行直答）；为空表示尚未产生或未接线，不以占位文本伪装。
+    last_answer_text: str = ""
+    plan_steps: tuple[PlanStepView, ...] = ()
+    plan_reference: tuple[str, int] | None = None
+    plan_pending: bool = False
+    plan_error_key: str | None = None
 
     def draft_for(self, decision_id: str) -> str:
         """读取某决定的答复草稿（收起/重渲染后仍在）。"""
@@ -488,9 +542,11 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         *,
         user_scope: str = LOCAL_DESKTOP_USER_SCOPE,
         unavailable_reason_key: str = UNAVAILABLE_NOT_WIRED,
+        intake: MainTurnIntakePort | None = None,
     ) -> None:
         self._service = service
         self._user_scope = user_scope
+        self._intake = intake
         self._session_key: int | None = id(service) if service is not None else None
         # 原始首读投影：展开/收起/选中只重算展示，不重复读取、不触碰执行。
         self._raw_executions: tuple[Any, ...] = ()
@@ -499,6 +555,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         self._state = ResearchObserverState(
             available=service is not None,
             unavailable_reason_key=unavailable_reason_key if service is None else "",
+            composer_available=service is not None and intake is not None,
         )
         self._init_mixin_fields()
 
@@ -741,6 +798,157 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             return
         self._set_state(draft_pending=False, session_draft=_session_draft_view(read))
 
+    def set_composer_text(self, text: str) -> None:
+        """记录首问正文（纯状态；收起观察层不清稿）。"""
+
+        self._set_state(composer_text=text)
+
+    def set_composer_mode(self, mode: str) -> None:
+        """记录用户选择的模式（只接受三值；未知值不改写当前模式）。"""
+
+        if mode in COMPOSER_MODES:
+            self._set_state(composer_mode=mode)
+
+    async def send_first_question(self) -> None:
+        """发送首问：经注入的受理端口创建会话/受理（讨论/计划零派发属预期）。
+
+        未接线受理端口时如实给出不可用 key（R21），不伪造已发送；取消继续传播
+        （R2）；空正文不提交。
+        """
+
+        intake = self._intake
+        if intake is None or not self._state.composer_available:
+            self._set_state(composer_error_key=self._state.unavailable_reason_key or UNAVAILABLE_NOT_WIRED)
+            return
+        text = self._state.composer_text.strip()
+        if not text:
+            self._set_state(composer_error_key="agent_research_empty_draft")
+            return
+        if self._state.composer_pending:
+            return
+        self._track_inflight_cancellable()
+        self._set_state(composer_pending=True, composer_error_key=None, last_dispatch_reason=None)
+        try:
+            result = await intake.start_question(
+                text,
+                mode=Mode(self._state.composer_mode),
+                session_id=self._state.session_id,
+                expected_revision=(self._state.session_draft_revision if self._state.session_id is not None else 0),
+            )
+        except asyncio.CancelledError:
+            self._set_state(composer_pending=False)
+            raise
+        except Exception as e:
+            self._set_state(composer_pending=False, composer_error_key=self._error_code(e))
+            return
+        main_turn = getattr(result, "main_turn", None)
+        changes: dict[str, Any] = {"composer_pending": False, "composer_text": ""}
+        if main_turn is None:
+            changes["last_dispatch_reason"] = self._dispatch_reason(result)
+        else:
+            loop_outcome = getattr(main_turn, "outcome", None)
+            answer = getattr(getattr(loop_outcome, "result", None), "body_text", "")
+            changes["last_answer_text"] = answer if isinstance(answer, str) else ""
+            changes["last_dispatch_reason"] = None
+            reference = getattr(main_turn, "plan_reference", None)
+            if reference is not None:
+                changes["plan_reference"] = (reference.execution_id, reference.plan_revision)
+        self._set_state(**changes)
+        reference = changes.get("plan_reference")
+        if isinstance(reference, tuple) and len(reference) == 2:
+            # 计划已保存：按界面呈现的版本读回步骤，避免与可执行计划错版。
+            await self.load_plan_preview(reference[0], reference[1])
+        if self._service is not None and self._state.available:
+            await self.refresh()
+
+    async def start_confirmed_plan(self) -> None:
+        """开始已审计划：按界面呈现的计划版发起新执行意图（新意图排队）。
+
+        只使用当前呈现的计划引用与稿版：计划引用缺失即拒绝（不猜「最新计划」）；
+        稿版推进导致 CAS 冲突时原样给出错误码。
+        """
+
+        intake = self._intake
+        if intake is None or not self._state.composer_available:
+            self._set_state(composer_error_key=self._state.unavailable_reason_key or UNAVAILABLE_NOT_WIRED)
+            return
+        reference = self._state.plan_reference
+        session_id = self._state.session_id
+        if reference is None:
+            self._set_state(composer_error_key="agent_research_plan_missing")
+            return
+        if session_id is None:
+            self._set_state(composer_error_key="agent_research_no_session")
+            return
+        if self._state.composer_pending:
+            return
+        self._track_inflight_cancellable()
+        self._set_state(composer_pending=True, composer_error_key=None, last_dispatch_reason=None)
+        try:
+            result = await intake.start_plan(
+                PlanReference(execution_id=reference[0], plan_revision=reference[1]),
+                session_id=session_id,
+                expected_revision=self._state.session_draft_revision,
+            )
+        except asyncio.CancelledError:
+            self._set_state(composer_pending=False)
+            raise
+        except Exception as e:
+            self._set_state(composer_pending=False, composer_error_key=self._error_code(e))
+            return
+        self._set_state(composer_pending=False, last_dispatch_reason=self._dispatch_reason(result))
+        # 已成功投递即消费本次计划引用，避免重复点击排队同一计划版（失败保留可重试）。
+        dispatch = getattr(result, "dispatch", None)
+        if dispatch is not None and getattr(dispatch, "submitted", False):
+            self._set_state(plan_reference=None)
+
+    async def load_plan_preview(self, execution_id: str, plan_revision: int) -> None:
+        """读取已保存计划版并投影为预览步骤（只读；读取失败不展示空计划）。"""
+
+        service = self._service
+        reader = getattr(service, "read_plan", None) if service is not None else None
+        if not callable(reader):
+            self._set_state(plan_error_key=UNAVAILABLE_NOT_WIRED, plan_steps=())
+            return
+        if self._state.plan_pending:
+            return
+        read_plan = cast(Callable[..., Awaitable[Any]], reader)
+        self._track_inflight_cancellable()
+        self._set_state(plan_pending=True, plan_error_key=None)
+        try:
+            proposal = await read_plan(
+                user_scope=self._user_scope,
+                execution_id=execution_id,
+                plan_revision=plan_revision,
+            )
+        except asyncio.CancelledError:
+            self._set_state(plan_pending=False)
+            raise
+        except Exception as e:
+            self._set_state(plan_pending=False, plan_error_key=self._error_code(e))
+            return
+        steps = tuple(
+            PlanStepView(step_id=item.id, content=item.content, depends_on=tuple(item.depends_on))
+            for item in proposal.items
+        )
+        self._set_state(
+            plan_pending=False,
+            plan_steps=steps,
+            plan_reference=(execution_id, plan_revision),
+        )
+
+    @staticmethod
+    def _dispatch_reason(result: Any) -> str | None:
+        """受理结果的派发事实：已派发为 None；未接线/零派发如实返回原因。"""
+
+        dispatch = getattr(result, "dispatch", None)
+        if dispatch is None:
+            return UNAVAILABLE_NOT_WIRED
+        if getattr(dispatch, "submitted", False):
+            return None
+        reason = getattr(dispatch, "reason", None)
+        return reason if isinstance(reason, str) and reason else "agent_research_dispatch_zero"
+
     def _projection_changes(self, *, selected: str | None, collapsed: tuple[str, ...]) -> dict[str, Any]:
         """按观察位置重算树/消息/成果（纯函数投影，不发任何请求）。"""
 
@@ -842,17 +1050,24 @@ def shared_research_observer(
     *,
     user_scope: str = LOCAL_DESKTOP_USER_SCOPE,
     unavailable_reason_key: str = UNAVAILABLE_NOT_WIRED,
+    intake: MainTurnIntakePort | None = None,
 ) -> ResearchObserverViewModel:
-    """取本会话共享的观察层 VM（同一 facade 复用；facade 变化或已销毁则重建）。"""
+    """取本会话共享的观察层 VM（同一 facade/受理端口复用；变化或已销毁则重建）。"""
 
     global _shared_vm
     session_key = id(service) if service is not None else None
-    if _shared_vm is None or _shared_vm.disposed or _shared_vm._session_key != session_key:
+    if (
+        _shared_vm is None
+        or _shared_vm.disposed
+        or _shared_vm._session_key != session_key
+        or _shared_vm._intake is not intake
+    ):
         stale = _shared_vm
         _shared_vm = ResearchObserverViewModel(
             service,
             user_scope=user_scope,
             unavailable_reason_key=unavailable_reason_key,
+            intake=intake,
         )
         if stale is not None and not stale.disposed:
             stale.dispose()
@@ -884,3 +1099,18 @@ def resolve_agent_research_service(agent_wiring: Any | None) -> tuple[AgentResea
     if not bool(getattr(agent_wiring, "ready", False)):
         return None, UNAVAILABLE_NOT_READY
     return service, ""
+
+
+def resolve_main_turn_intake(agent_wiring: Any | None) -> MainTurnIntakePort | None:
+    """从组合根解析首问/开始计划受理端口；未就绪/未接线返回 ``None``（不伪造）。"""
+
+    if agent_wiring is None or not bool(getattr(agent_wiring, "ready", False)):
+        return None
+    intake = getattr(agent_wiring, "intake", None)
+    if intake is None:
+        return None
+    start_question = getattr(intake, "start_question", None)
+    start_plan = getattr(intake, "start_plan", None)
+    if not callable(start_question) or not callable(start_plan):
+        return None
+    return cast(MainTurnIntakePort, intake)

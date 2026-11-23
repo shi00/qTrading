@@ -1,0 +1,751 @@
+"""P1-02 主回合/计划/角色能力生产闭环单测（零外部 IO）。"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from typing import Any, cast
+
+import pytest
+
+from core.agent_types import (
+    AgentErrorCode,
+    AgentServiceError,
+    AgentValidationError,
+    CommandRef,
+    CommitState,
+    Mode,
+    PlanItemSnapshot,
+    PlanNodeSpec,
+    PlanProposal,
+    PlanSpecProposal,
+    Purpose,
+    ResearchResult,
+    ResearchResultDraft,
+    SessionAction,
+    SubmissionReceipt,
+    json_doc,
+)
+from services.agent_service.dispatch import (
+    CAPABILITY_POLICY_UNAVAILABLE,
+    PLAN_ADMISSION_UNCONFIGURED,
+    ResearchDispatcher,
+)
+from services.agent_service.loop import (
+    DelegationRequest,
+    DelegationResult,
+    DelegationScope,
+    LoopAction,
+    LoopIdentity,
+    ResearchResultProducer,
+    ToolCall,
+    TurnContext,
+    TurnDecision,
+)
+from services.agent_service.main_turn import (
+    FrozenSelectionPolicy,
+    MainTurnIntake,
+    MainTurnRequest,
+    MainTurnRunner,
+    PlanReference,
+    build_plan_spec_provider,
+    build_role_capability_provider,
+    decode_plan_reference,
+    derive_frozen_selection_policy,
+    plan_spec_from_proposal,
+    plan_steps_from_structured_fields,
+)
+
+_IDENTITY = LoopIdentity(
+    user_scope="u1",
+    session_id="s1",
+    execution_id="execution-1",
+    round_id="round-1",
+    node_id="root",
+    input_revision=1,
+    actual_input_digest="a" * 64,
+    actual_model_ref="model-ref",
+)
+
+
+# ---------------------------------------------------------------------------
+# 冻结手选集合 → 角色能力
+# ---------------------------------------------------------------------------
+
+
+def _manifest(**overrides: Any) -> str:
+    base: dict[str, Any] = {
+        "schema_version": 1,
+        "text": "研究问题",
+        "mode": "execute",
+        "purpose": "concept",
+        "cutoff": None,
+        "source_refs": [],
+        "role_prompt_refs": [["researcher", "v1"]],
+        "skill_refs": [["skill-a", "2"]],
+        "mcp_scope_digest": None,
+    }
+    base.update(overrides)
+    return json_doc(base)
+
+
+def test_policy_derives_role_and_skill_capability() -> None:
+    policy = derive_frozen_selection_policy(_manifest())
+
+    assert policy is not None
+    assert policy.role_key == "researcher"
+    assert policy.capabilities == frozenset({"skill:skill-a@2"})
+
+
+def test_policy_includes_mcp_scope_digest_as_capability() -> None:
+    policy = derive_frozen_selection_policy(_manifest(skill_refs=[], mcp_scope_digest="d" * 16))
+
+    assert policy is not None
+    assert policy.role_key == "researcher"
+    assert policy.capabilities == frozenset({f"mcp_scope:{'d' * 16}"})
+
+
+def test_policy_empty_selection_is_fail_closed() -> None:
+    assert derive_frozen_selection_policy(_manifest(skill_refs=[])) is None
+    assert derive_frozen_selection_policy(_manifest(role_prompt_refs=[])) is None
+
+
+def test_policy_multiple_roles_is_ambiguous() -> None:
+    manifest = _manifest(role_prompt_refs=[["researcher", "v1"], ["analyst", "v1"]])
+
+    assert derive_frozen_selection_policy(manifest) is None
+
+
+def test_policy_reads_comparison_shared_section() -> None:
+    manifest = json_doc(
+        {
+            "schema_version": 1,
+            "shared": {
+                "text": "q",
+                "mode": "execute",
+                "purpose": "concept",
+                "cutoff": None,
+                "source_refs": [],
+                "role_prompt_refs": [["researcher", "v1"]],
+                "skill_refs": [["skill-a", "2"]],
+                "mcp_scope_digest": None,
+            },
+        }
+    )
+
+    policy = derive_frozen_selection_policy(manifest)
+
+    assert policy is not None
+    assert policy.role_key == "researcher"
+    assert policy.capabilities == frozenset({"skill:skill-a@2"})
+
+
+def test_policy_rejects_malformed_ref_pairs() -> None:
+    with pytest.raises(AgentValidationError) as excinfo:
+        derive_frozen_selection_policy(_manifest(skill_refs=[["only-id"]]))
+
+    assert excinfo.value.code == "invalid_type"
+    assert excinfo.value.field_path.endswith("skill_refs[0]")
+
+
+# ---------------------------------------------------------------------------
+# 计划来源 / 计划引用 / 可执行节点表映射
+# ---------------------------------------------------------------------------
+
+
+def test_decode_plan_reference_absent_returns_none() -> None:
+    assert decode_plan_reference(_manifest()) is None
+
+
+def test_decode_plan_reference_accepts_valid_reference() -> None:
+    reference = decode_plan_reference(_manifest(plan_ref={"execution_id": "execution-0", "plan_revision": 2}))
+
+    assert reference == PlanReference(execution_id="execution-0", plan_revision=2)
+
+
+@pytest.mark.parametrize(
+    "plan_ref",
+    [
+        "not-a-dict",
+        {"execution_id": "", "plan_revision": 1},
+        {"execution_id": "e", "plan_revision": 0},
+        {"execution_id": "e", "plan_revision": True},
+        {"execution_id": "e", "plan_revision": 1, "extra": 1},
+    ],
+)
+def test_decode_plan_reference_rejects_invalid(plan_ref: Any) -> None:
+    with pytest.raises(AgentValidationError) as excinfo:
+        decode_plan_reference(_manifest(plan_ref=plan_ref))
+
+    assert excinfo.value.code in {
+        "invalid_type",
+        "invalid_value",
+        "invalid_revision",
+        "invalid_keys_unknown",
+    }
+    assert "$.manifest_payload.plan_ref" in excinfo.value.field_path
+
+
+def _policy() -> FrozenSelectionPolicy:
+    return FrozenSelectionPolicy(role_key="researcher", capabilities=frozenset({"skill:skill-a@2"}))
+
+
+def _proposal() -> PlanProposal:
+    return PlanProposal(
+        execution_id="execution-0",
+        plan_revision=1,
+        items=(
+            PlanItemSnapshot(
+                id="step-1",
+                content="读取行情",
+                status="pending",
+                active_form="读取行情",
+                parent_id=None,
+                depends_on=(),
+            ),
+            PlanItemSnapshot(
+                id="step-2",
+                content="汇总结论",
+                status="pending",
+                active_form="汇总结论",
+                parent_id=None,
+                depends_on=("step-1",),
+            ),
+        ),
+    )
+
+
+def test_plan_spec_maps_steps_to_nodes_with_frozen_policy() -> None:
+    spec = plan_spec_from_proposal(_proposal(), _policy())
+
+    assert [node.node_id for node in spec.nodes] == ["step-1", "step-2"]
+    assert [node.target for node in spec.nodes] == ["读取行情", "汇总结论"]
+    assert spec.nodes[1].depends_on == ("step-1",)
+    for node in spec.nodes:
+        assert node.role_key == "researcher"
+        assert node.capabilities == ("skill:skill-a@2",)
+
+
+def test_plan_spec_rejects_empty_target() -> None:
+    proposal = PlanProposal(
+        execution_id="e",
+        plan_revision=1,
+        items=(
+            PlanItemSnapshot(
+                id="step-1",
+                content="",
+                status="pending",
+                active_form="x",
+                parent_id=None,
+                depends_on=(),
+            ),
+        ),
+    )
+
+    with pytest.raises(AgentValidationError) as excinfo:
+        plan_spec_from_proposal(proposal, _policy())
+
+    assert excinfo.value.code == "invalid_value"
+    assert excinfo.value.field_path == "$.plan_proposal.items[0].content"
+
+
+def test_plan_steps_from_structured_fields_roundtrip() -> None:
+    steps = plan_steps_from_structured_fields(
+        json_doc({"steps": [{"id": "s1", "content": "步骤一", "depends_on": []}]})
+    )
+
+    assert steps is not None
+    assert steps[0].id == "s1"
+    assert steps[0].content == "步骤一"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"steps": [{"id": "s1", "content": "x", "depends_on": [], "extra": 1}]},
+        {"steps": [{"id": "", "content": "x", "depends_on": []}]},
+        {"steps": "nope"},
+        {"other": []},
+    ],
+)
+def test_plan_steps_reject_unexpected_shapes(payload: dict[str, Any]) -> None:
+    with pytest.raises(AgentValidationError) as excinfo:
+        plan_steps_from_structured_fields(json_doc(payload))
+
+    assert excinfo.value.code in {"invalid_keys_unknown", "invalid_type", "invalid_value"}
+
+
+class _ManifestDao:
+    def __init__(self, manifest: str | None, proposal: PlanProposal | None = None) -> None:
+        self._manifest = manifest
+        self._proposal = proposal
+
+    async def read_authoritative_manifest(self, *, user_scope: str, execution_id: str) -> str | None:
+        return self._manifest
+
+    async def read_plan_proposal(
+        self, *, user_scope: str, execution_id: str, plan_revision: int
+    ) -> PlanProposal | None:
+        return self._proposal
+
+
+@pytest.mark.asyncio
+async def test_plan_provider_reads_confirmed_version_and_maps() -> None:
+    dao = _ManifestDao(_manifest(plan_ref={"execution_id": "execution-0", "plan_revision": 1}), _proposal())
+
+    spec = await build_plan_spec_provider(dao)("u1", "execution-1")
+
+    assert spec is not None
+    assert [node.node_id for node in spec.nodes] == ["step-1", "step-2"]
+    assert [node.target for node in spec.nodes] == ["读取行情", "汇总结论"]
+
+
+@pytest.mark.asyncio
+async def test_plan_provider_returns_none_without_reference_or_proposal() -> None:
+    assert await build_plan_spec_provider(_ManifestDao(_manifest()))("u1", "e") is None
+    no_plan = _ManifestDao(_manifest(plan_ref={"execution_id": "e0", "plan_revision": 1}), None)
+    assert await build_plan_spec_provider(no_plan)("u1", "e") is None
+    assert await build_plan_spec_provider(_ManifestDao(None))("u1", "e") is None
+
+
+@pytest.mark.asyncio
+async def test_capability_provider_fail_closed_without_selection() -> None:
+    assert await build_role_capability_provider(_ManifestDao(None))("u1", "e") is None
+    assert await build_role_capability_provider(_ManifestDao(_manifest(skill_refs=[])))("u1", "e") is None
+    policy = await build_role_capability_provider(_ManifestDao(_manifest()))("u1", "e")
+    assert policy == {"researcher": frozenset({"skill:skill-a@2"})}
+
+
+# ---------------------------------------------------------------------------
+# 唯一循环：讨论/计划零研究动作
+# ---------------------------------------------------------------------------
+
+
+class _Store:
+    def __init__(self) -> None:
+        self.drafts: list[ResearchResultDraft] = []
+
+    async def save_research_result(self, draft: ResearchResultDraft) -> ResearchResult:
+        self.drafts.append(draft)
+        return ResearchResult.from_draft(draft, artifact_id="artifact-1", artifact_version=1)
+
+
+class _ScriptedTurn:
+    def __init__(self, decisions: list[TurnDecision]) -> None:
+        self._decisions = decisions
+        self.contexts: list[TurnContext] = []
+
+    async def __call__(self, context: TurnContext) -> TurnDecision:
+        self.contexts.append(context)
+        return self._decisions.pop(0)
+
+
+class _RecordingTools:
+    def __init__(self) -> None:
+        self.calls: list[ToolCall] = []
+
+    async def __call__(self, call: ToolCall) -> str:
+        self.calls.append(call)
+        return "tool-ok"
+
+
+class _RecordingDelegate:
+    def __init__(self) -> None:
+        self.calls: list[tuple[DelegationRequest, DelegationScope]] = []
+
+    async def __call__(self, request: DelegationRequest, scope: DelegationScope) -> DelegationResult:
+        self.calls.append((request, scope))
+        return DelegationResult(node_id=request.node_id, state="complete", summary="ok")
+
+
+class _PlanStore:
+    def __init__(self) -> None:
+        self.items: list[Any] = []
+        self.revision = 0
+
+    async def set_items(self, items: list[Any]) -> None:
+        self.items = items
+        self.revision = 1
+
+
+@pytest.mark.asyncio
+async def test_discuss_turn_answers_with_zero_tools_and_zero_delegation() -> None:
+    tools = _RecordingTools()
+    delegate = _RecordingDelegate()
+    runner = MainTurnRunner(
+        producer=ResearchResultProducer(_Store()),
+        tools=tools,
+        delegate=delegate,
+    )
+    request = MainTurnRequest(
+        identity=_IDENTITY, mode=Mode.DISCUSS, prompt_text="研究问题", read_tool_names=frozenset({"read_source"})
+    )
+    turn = _ScriptedTurn([TurnDecision(action=LoopAction.ANSWER, text="直接回答")])
+
+    outcome = await runner.run(request, turn=turn)
+
+    assert outcome.outcome.result.body_text == "直接回答"
+    assert outcome.plan_reference is None
+    assert tools.calls == []
+    assert delegate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_discuss_turn_rejects_delegation_without_calling_delegate() -> None:
+    delegate = _RecordingDelegate()
+    runner = MainTurnRunner(producer=ResearchResultProducer(_Store()), delegate=delegate)
+    request = MainTurnRequest(identity=_IDENTITY, mode=Mode.DISCUSS, prompt_text="研究问题")
+    turn = _ScriptedTurn(
+        [
+            TurnDecision(
+                action=LoopAction.DELEGATE,
+                delegation=DelegationRequest(node_id="leaf-1", target="t", role_key="researcher"),
+            )
+        ]
+    )
+
+    with pytest.raises(AgentServiceError) as excinfo:
+        await runner.run(request, turn=turn)
+
+    assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+    assert delegate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_plan_turn_saves_readable_plan_and_returns_reference() -> None:
+    store = _PlanStore()
+    runner = MainTurnRunner(
+        producer=ResearchResultProducer(_Store()),
+        plan_store_factory=lambda _identity: store,
+    )
+    request = MainTurnRequest(identity=_IDENTITY, mode=Mode.PLAN, prompt_text="研究问题")
+    turn = _ScriptedTurn(
+        [
+            TurnDecision(
+                action=LoopAction.PLAN,
+                text="计划正文",
+                structured_fields=json_doc({"steps": [{"id": "s1", "content": "步骤一", "depends_on": []}]}),
+            )
+        ]
+    )
+
+    outcome = await runner.run(request, turn=turn)
+
+    assert outcome.plan_reference == PlanReference(execution_id="execution-1", plan_revision=1)
+    assert len(store.items) == 1
+
+
+@pytest.mark.asyncio
+async def test_plan_turn_without_structured_steps_has_no_reference() -> None:
+    store = _PlanStore()
+    runner = MainTurnRunner(
+        producer=ResearchResultProducer(_Store()),
+        plan_store_factory=lambda _identity: store,
+    )
+    request = MainTurnRequest(identity=_IDENTITY, mode=Mode.PLAN, prompt_text="研究问题")
+    turn = _ScriptedTurn([TurnDecision(action=LoopAction.PLAN, text="只有正文")])
+
+    outcome = await runner.run(request, turn=turn)
+
+    assert outcome.plan_reference is None
+    assert store.items == []
+
+
+# ---------------------------------------------------------------------------
+# 派发准入：逐请求能力来源 / 非法图零执行
+# ---------------------------------------------------------------------------
+
+
+class _Gate:
+    def dispatch_closed(self) -> bool:
+        return False
+
+    def close_dispatch(self) -> bool:
+        return True
+
+
+def _receipt() -> SubmissionReceipt:
+    command = CommandRef(
+        user_scope="u1",
+        source_module="ui",
+        business_request_id="b1",
+        command_id="c1",
+        expected_revision=0,
+    )
+    return SubmissionReceipt(
+        command=command,
+        command_record_id="record-1",
+        session_id="s1",
+        execution_id="execution-1",
+        workflow_id="workflow-1",
+        intent_digest="f" * 64,
+        commit_state=CommitState.COMMITTED,
+        verified_at="2026-01-01T00:00:00.000000Z",
+        next_action=None,
+    )
+
+
+def _spec(*, cyclic: bool = False) -> PlanSpecProposal:
+    nodes = (
+        PlanNodeSpec(
+            node_id="n1",
+            target="t1",
+            role_key="researcher",
+            depends_on=("n2",) if cyclic else (),
+            capabilities=("skill:skill-a@2",),
+        ),
+        PlanNodeSpec(
+            node_id="n2",
+            target="t2",
+            role_key="researcher",
+            depends_on=("n1",) if cyclic else (),
+            capabilities=("skill:skill-a@2",),
+        ),
+    )
+    return PlanSpecProposal(nodes=nodes)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_uses_per_request_capability_provider() -> None:
+    submitted: list[str] = []
+
+    async def _submit(workflow_id: str, payload: dict[str, Any]) -> None:
+        submitted.append(workflow_id)
+
+    async def _plan(user_scope: str, execution_id: str) -> PlanSpecProposal:
+        return _spec()
+
+    async def _caps(user_scope: str, execution_id: str) -> dict[str, frozenset[str]]:
+        return {"researcher": frozenset({"skill:skill-a@2"})}
+
+    dispatcher = ResearchDispatcher(
+        gate=_Gate(),
+        submit=_submit,
+        plan_provider=_plan,
+        capability_provider=_caps,
+    )
+
+    outcome = await dispatcher.dispatch(_receipt(), user_scope="u1", mode=Mode.EXECUTE)
+
+    assert outcome.submitted is True
+    assert submitted == ["workflow-1"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_zero_when_capability_provider_returns_none() -> None:
+    submitted: list[str] = []
+
+    async def _submit(workflow_id: str, payload: dict[str, Any]) -> None:
+        submitted.append(workflow_id)
+
+    async def _plan(user_scope: str, execution_id: str) -> PlanSpecProposal:
+        return _spec()
+
+    async def _caps(user_scope: str, execution_id: str) -> None:
+        return None
+
+    dispatcher = ResearchDispatcher(
+        gate=_Gate(),
+        submit=_submit,
+        plan_provider=_plan,
+        capability_provider=_caps,
+    )
+
+    outcome = await dispatcher.dispatch(_receipt(), user_scope="u1", mode=Mode.EXECUTE)
+
+    assert outcome.submitted is False
+    assert outcome.reason == PLAN_ADMISSION_UNCONFIGURED
+    assert submitted == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_zero_when_capability_provider_fails() -> None:
+    async def _submit(workflow_id: str, payload: dict[str, Any]) -> None:
+        raise AssertionError("must not submit")
+
+    async def _plan(user_scope: str, execution_id: str) -> PlanSpecProposal:
+        return _spec()
+
+    async def _caps(user_scope: str, execution_id: str) -> None:
+        raise RuntimeError("ledger down")
+
+    dispatcher = ResearchDispatcher(
+        gate=_Gate(),
+        submit=_submit,
+        plan_provider=_plan,
+        capability_provider=_caps,
+    )
+
+    outcome = await dispatcher.dispatch(_receipt(), user_scope="u1", mode=Mode.EXECUTE)
+
+    assert outcome.submitted is False
+    assert outcome.reason == f"{CAPABILITY_POLICY_UNAVAILABLE}:RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_zero_on_invalid_plan_graph() -> None:
+    async def _submit(workflow_id: str, payload: dict[str, Any]) -> None:
+        raise AssertionError("must not submit")
+
+    async def _plan(user_scope: str, execution_id: str) -> PlanSpecProposal:
+        return _spec(cyclic=True)
+
+    async def _caps(user_scope: str, execution_id: str) -> dict[str, frozenset[str]]:
+        return {"researcher": frozenset({"skill:skill-a@2"})}
+
+    dispatcher = ResearchDispatcher(
+        gate=_Gate(),
+        submit=_submit,
+        plan_provider=_plan,
+        capability_provider=_caps,
+    )
+
+    outcome = await dispatcher.dispatch(_receipt(), user_scope="u1", mode=Mode.EXECUTE)
+
+    assert outcome.submitted is False
+    assert outcome.reason is not None and outcome.reason.startswith("plan_invalid:")
+
+
+# ---------------------------------------------------------------------------
+# 受理入口：首问 / 开始已审计划
+# ---------------------------------------------------------------------------
+
+
+class _IntakeFacade:
+    def __init__(self, receipt: SubmissionReceipt) -> None:
+        self.sessions: list[Any] = []
+        self.requests: list[Any] = []
+        self._receipt = receipt
+
+    async def change_session(self, command: Any) -> Any:
+        self.sessions.append(command)
+        return cast(Any, object())
+
+    async def submit_and_dispatch(self, request: Any, *, command: Any) -> Any:
+        self.requests.append(request)
+        return SimpleNamespace(receipt=self._receipt, dispatch=None)
+
+
+def _intake_receipt() -> SubmissionReceipt:
+    return _receipt()
+
+
+@pytest.mark.asyncio
+async def test_intake_first_question_creates_session_and_submits_frozen_manifest() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    intake = MainTurnIntake(facade, manifest_reader=_ManifestDao(None), user_scope="u1")
+
+    result = await intake.start_question("研究一下银行股", mode=Mode.DISCUSS)
+
+    assert result.session_id == facade.requests[0].session_id
+    assert len(facade.sessions) == 1
+    assert facade.sessions[0].action is SessionAction.CREATE
+    request = facade.requests[0]
+    assert request.mode is Mode.DISCUSS
+    assert request.purpose is Purpose.CONCEPT
+    assert request.expected_revision == 0
+    policy = derive_frozen_selection_policy(request.manifest_payload)
+    assert policy is None  # 首问无手选集合 → 执行 fail-closed
+
+
+@pytest.mark.asyncio
+async def test_intake_start_plan_preserves_frozen_input_and_adds_reference() -> None:
+    source = _manifest(plan_ref=None)
+    facade = _IntakeFacade(_intake_receipt())
+    intake = MainTurnIntake(facade, manifest_reader=_ManifestDao(source), user_scope="u1")
+
+    await intake.start_plan(
+        PlanReference(execution_id="execution-0", plan_revision=3), session_id="s1", expected_revision=4
+    )
+
+    request = facade.requests[0]
+    assert request.mode is Mode.EXECUTE
+    assert request.session_id == "s1"
+    assert request.expected_revision == 4
+    assert request.text == "研究问题"
+    reference = decode_plan_reference(request.manifest_payload)
+    assert reference == PlanReference(execution_id="execution-0", plan_revision=3)
+    policy = derive_frozen_selection_policy(request.manifest_payload)
+    assert policy is not None and policy.role_key == "researcher"
+
+
+@pytest.mark.asyncio
+async def test_intake_start_plan_refuses_without_source_manifest() -> None:
+    intake = MainTurnIntake(_IntakeFacade(_intake_receipt()), manifest_reader=_ManifestDao(None), user_scope="u1")
+
+    with pytest.raises(AgentServiceError) as excinfo:
+        await intake.start_plan(
+            PlanReference(execution_id="missing", plan_revision=1), session_id="s1", expected_revision=0
+        )
+
+    assert excinfo.value.code is AgentErrorCode.OPERATION_UNKNOWN
+
+
+class _MainTurnRunnerStub:
+    def __init__(self, plan_reference: PlanReference | None = None) -> None:
+        self.requests: list[MainTurnRequest] = []
+        self._plan_reference = plan_reference
+
+    async def run(self, request: MainTurnRequest, *, turn: Any = None) -> Any:
+        self.requests.append(request)
+        return SimpleNamespace(
+            outcome=SimpleNamespace(result=SimpleNamespace(body_text="主回合回答")),
+            plan_reference=self._plan_reference,
+        )
+
+
+@pytest.mark.asyncio
+async def test_intake_plan_runs_production_main_turn_and_returns_reference() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    runner = _MainTurnRunnerStub(plan_reference=PlanReference(execution_id="execution-1", plan_revision=1))
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+    )
+
+    result = await intake.start_question("研究银行股", mode=Mode.PLAN)
+
+    request = runner.requests[0]
+    assert request.mode is Mode.PLAN
+    assert request.prompt_text == "研究银行股"
+    assert request.identity.execution_id == "execution-1"
+    assert request.identity.input_revision == 1
+    assert len(request.identity.actual_input_digest) == 64
+    assert result.main_turn is not None
+    assert result.plan_reference == PlanReference(execution_id="execution-1", plan_revision=1)
+
+
+@pytest.mark.asyncio
+async def test_intake_discuss_runs_main_turn_and_returns_answer() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    runner = _MainTurnRunnerStub()
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+    )
+
+    result = await intake.start_question("解释一下量价背离", mode=Mode.DISCUSS)
+
+    assert runner.requests[0].mode is Mode.DISCUSS
+    assert result.main_turn is not None
+    assert result.main_turn.outcome.result.body_text == "主回合回答"
+
+
+@pytest.mark.asyncio
+async def test_intake_execute_does_not_run_main_turn() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    runner = _MainTurnRunnerStub()
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+    )
+
+    result = await intake.start_question("执行研究", mode=Mode.EXECUTE)
+
+    assert runner.requests == []
+    assert result.main_turn is None

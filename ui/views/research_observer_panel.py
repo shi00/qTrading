@@ -19,9 +19,11 @@ import flet as ft
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.research_observer_view_model import (
+    COMPOSER_MODES,
     ExecutionNodeView,
     LoadedArtifactBody,
     PendingDecision,
+    PlanStepView,
     ResearchObserverState,
     SessionArtifactView,
     SessionDraftView,
@@ -30,11 +32,31 @@ from ui.viewmodels.research_observer_view_model import (
 
 PANEL_WIDTH = 340
 
+
+def _ignore_text(_value: str) -> None:
+    """缺省回调（未传入首问回调时不绑定动作，不伪造发送）。"""
+
+
+def _ignore_mode(_value: str) -> None:
+    """缺省模式回调（未知即不改变模式）。"""
+
+
+def _ignore_click() -> None:
+    """缺省点击回调（无注入即无动作）。"""
+
+
 _ROLE_KEYS = {
     "user": "agent_research_role_user",
     "assistant": "agent_research_role_assistant",
     "tool": "agent_research_role_tool",
     "public_status": "agent_research_role_public_status",
+}
+
+#: 首问模式文案（三值；直答不是第四模式）。
+_MODE_LABEL_KEYS = {
+    "discuss": "agent_research_mode_discuss",
+    "plan": "agent_research_mode_plan",
+    "execute": "agent_research_mode_execute",
 }
 
 #: 服务端正文不可用原因的已知映射；未知原因按原始码展示（未知即未知，不猜语义）。
@@ -60,6 +82,188 @@ def _section_title(key: str) -> ft.Text:
         weight=ft.FontWeight.BOLD,
         color=AppColors.TEXT_PRIMARY,
     )
+
+
+def _build_composer(
+    state: ResearchObserverState,
+    *,
+    on_composer_text: Callable[[str], None],
+    on_composer_mode: Callable[[str], None],
+    on_send: Callable[[], None],
+) -> ft.Control:
+    """首问输入区：正文 + 模式 + 发送（发送只经注入回调，组件不拼装服务请求）。
+
+    讨论/计划同样经受理落库；执行零派发时由 ``last_dispatch_reason`` 如实展示
+    原因（不把「未派发」显示成「已启动」）。
+    """
+
+    rows: list[ft.Control] = [_section_title("agent_research_composer")]
+    if not state.composer_available:
+        rows.append(
+            ft.Text(
+                I18n.get("agent_research_composer_unavailable"),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.TEXT_HINT,
+            )
+        )
+    rows.append(
+        ft.TextField(
+            # 输入态跟随首问草稿本身，而不是面板位置。
+            key="agent_research_composer_input",
+            value=state.composer_text,
+            label=I18n.get("agent_research_composer_label"),
+            hint_text=I18n.get("agent_research_composer_hint"),
+            multiline=True,
+            min_lines=1,
+            max_lines=4,
+            text_size=AppStyles.FONT_SIZE_BODY_SM,
+            disabled=not state.composer_available or state.composer_pending,
+            on_change=lambda e: on_composer_text(e.control.value or ""),
+        )
+    )
+    mode_row: list[ft.Control] = []
+    for mode in COMPOSER_MODES:
+        selected = state.composer_mode == mode
+        button_cls = ft.FilledButton if selected else ft.OutlinedButton
+        mode_row.append(
+            button_cls(
+                content=ft.Text(
+                    I18n.get(_MODE_LABEL_KEYS[mode]),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                ),
+                disabled=not state.composer_available or state.composer_pending,
+                on_click=lambda _e, value=mode: on_composer_mode(value),
+            )
+        )
+    rows.append(ft.Row(mode_row, spacing=AppStyles.SPACING_XS, wrap=True))
+    send_label = "agent_research_sending" if state.composer_pending else "agent_research_send"
+    rows.append(
+        ft.Row(
+            [
+                ft.FilledButton(
+                    content=ft.Text(I18n.get(send_label), size=AppStyles.FONT_SIZE_BODY_SM),
+                    disabled=not state.composer_available or state.composer_pending,
+                    on_click=lambda _e: on_send(),
+                )
+            ],
+            alignment=ft.MainAxisAlignment.END,
+        )
+    )
+    if state.composer_error_key:
+        rows.append(
+            ft.Text(
+                I18n.get(state.composer_error_key),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.ERROR,
+            )
+        )
+    if state.last_dispatch_reason:
+        rows.append(
+            ft.Text(
+                I18n.get("agent_research_dispatch_reason_fmt").format(reason=state.last_dispatch_reason),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.TEXT_HINT,
+            )
+        )
+    return ft.Container(
+        content=ft.Column(rows, spacing=AppStyles.SPACING_XS),
+        padding=AppStyles.SPACING_SM,
+        bgcolor=AppColors.BACKGROUND,
+        border_radius=4,
+        border=ft.Border.all(1, AppColors.BORDER),
+    )
+
+
+def _build_answer_preview(state: ResearchObserverState) -> ft.Control:
+    """主回合直答展示：只显示真实产出，不占位、不伪装已取数。"""
+
+    return ft.Container(
+        content=ft.Column(
+            [
+                _section_title("agent_research_answer_preview"),
+                ft.Text(
+                    state.last_answer_text,
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=AppColors.TEXT_PRIMARY,
+                    selectable=True,
+                ),
+            ],
+            spacing=AppStyles.SPACING_XS,
+        ),
+        padding=AppStyles.SPACING_SM,
+        bgcolor=AppColors.BACKGROUND,
+        border_radius=4,
+        border=ft.Border.all(1, AppColors.BORDER),
+    )
+
+
+def _build_plan_preview(state: ResearchObserverState, *, on_start_plan: Callable[[], None]) -> ft.Control | None:
+    """计划预览与「开始这份计划」：无计划引用时不显示启动入口（不猜最新计划）。"""
+
+    if not (state.plan_steps or state.plan_pending or state.plan_error_key or state.plan_reference):
+        return None
+    rows: list[ft.Control] = [_section_title("agent_research_plan_preview")]
+    if state.plan_pending:
+        rows.append(ft.ProgressRing(width=16, height=16, stroke_width=2))
+    if state.plan_error_key:
+        rows.append(
+            ft.Text(
+                I18n.get(state.plan_error_key),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.ERROR,
+            )
+        )
+    if not state.plan_steps and not state.plan_pending:
+        rows.append(
+            ft.Text(
+                I18n.get("agent_research_plan_empty"),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.TEXT_HINT,
+            )
+        )
+    for index, step in enumerate(state.plan_steps, start=1):
+        rows.append(_build_plan_step_row(index, step))
+    if state.plan_reference is not None:
+        rows.append(
+            ft.Row(
+                [
+                    ft.FilledButton(
+                        content=ft.Text(I18n.get("agent_research_start_plan"), size=AppStyles.FONT_SIZE_BODY_SM),
+                        disabled=state.composer_pending,
+                        on_click=lambda _e: on_start_plan(),
+                    )
+                ],
+                alignment=ft.MainAxisAlignment.END,
+            )
+        )
+    return ft.Container(
+        content=ft.Column(rows, spacing=AppStyles.SPACING_XS),
+        padding=AppStyles.SPACING_SM,
+        bgcolor=AppColors.BACKGROUND,
+        border_radius=4,
+        border=ft.Border.all(1, AppColors.BORDER),
+    )
+
+
+def _build_plan_step_row(index: int, step: PlanStepView) -> ft.Control:
+    """单个计划步骤：序号 + 正文 + 显式依赖（无依赖不补默认）。"""
+
+    rows: list[ft.Control] = [
+        ft.Text(
+            f"{index}. {step.content}",
+            size=AppStyles.FONT_SIZE_BODY_SM,
+            color=AppColors.TEXT_PRIMARY,
+        )
+    ]
+    if step.depends_on:
+        rows.append(
+            ft.Text(
+                I18n.get("agent_research_plan_depends_fmt").format(depends=", ".join(step.depends_on)),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.TEXT_HINT,
+            )
+        )
+    return ft.Column(rows, spacing=AppStyles.SPACING_XS)
 
 
 def _build_message_row(message: SessionMessageView) -> ft.Control:
@@ -435,8 +639,12 @@ def _build_body(
     on_select_execution: Callable[[str | None], None],
     on_load_artifact: Callable[[str, int, str, str], None],
     on_load_draft: Callable[[], None],
+    on_composer_text: Callable[[str], None],
+    on_composer_mode: Callable[[str], None],
+    on_send: Callable[[], None],
+    on_start_plan: Callable[[], None],
 ) -> ft.Control:
-    """面板主体：主会话 / 子任务树 / 成果 / 待处理决定（未知如实显示，不伪造数据）。"""
+    """面板主体：首问 / 计划预览 / 主会话 / 子任务树 / 成果 / 待处理决定。"""
 
     if not state.available:
         return ft.Text(
@@ -444,7 +652,19 @@ def _build_body(
             size=AppStyles.FONT_SIZE_CAPTION,
             color=AppColors.TEXT_HINT,
         )
-    rows: list[ft.Control] = []
+    rows: list[ft.Control] = [
+        _build_composer(
+            state,
+            on_composer_text=on_composer_text,
+            on_composer_mode=on_composer_mode,
+            on_send=on_send,
+        )
+    ]
+    preview = _build_plan_preview(state, on_start_plan=on_start_plan)
+    if preview is not None:
+        rows.append(preview)
+    if state.last_answer_text:
+        rows.append(_build_answer_preview(state))
     if state.loading:
         rows.append(ft.ProgressRing(width=16, height=16, stroke_width=2))
     if state.error_key:
@@ -707,6 +927,10 @@ def ResearchObserverPanel(
     on_select_execution: Callable[[str | None], None],
     on_load_artifact: Callable[[str, int, str, str], None],
     on_load_draft: Callable[[], None],
+    on_composer_text: Callable[[str], None] = _ignore_text,
+    on_composer_mode: Callable[[str], None] = _ignore_mode,
+    on_send: Callable[[], None] = _ignore_click,
+    on_start_plan: Callable[[], None] = _ignore_click,
 ) -> ft.Container:
     """非模态研究观察层（右侧公共区；收起只隐藏，不卸载业务页、不清草稿）。"""
 
@@ -752,6 +976,10 @@ def ResearchObserverPanel(
             on_select_execution=on_select_execution,
             on_load_artifact=on_load_artifact,
             on_load_draft=on_load_draft,
+            on_composer_text=on_composer_text,
+            on_composer_mode=on_composer_mode,
+            on_send=on_send,
+            on_start_plan=on_start_plan,
         )
     )
     return ft.Container(

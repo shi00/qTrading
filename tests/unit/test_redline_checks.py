@@ -1808,7 +1808,9 @@ class TestGBKEncodingCompatibility:
             capture_output=True,
             env=env,
             cwd=ROOT,
-            timeout=60,
+            # 超时只守护「脚本能跑完」，不是性能断言：全仓库 AST 扫描在 2 核 Windows
+            # runner 上已接近 60s，留足余量，避免把机器抖动误判为编码回归。
+            timeout=180,
             check=False,
         )
         # 退出码符合检查结果（当前代码库应通过所有检查，退出码为 0）

@@ -12613,6 +12613,28 @@ class AgentDao(BaseDao):
             return None
         return _decode_plan_proposal_row(head, execution_id=execution_id, identity=identity)
 
+    async def read_authoritative_manifest(self, *, user_scope: str, execution_id: str) -> str | None:
+        """读取执行权威受理 manifest；不可得返回 ``None``（不猜、不补默认）。
+
+        权威版与 ``bind_actual_input`` / 来源登记同口径（``input_revision`` 最大
+        的受理/修订输入）。行缺失由 :meth:`_authoritative_input_command` 抛
+        ``OPERATION_UNKNOWN``（事实不可读，R21）；清理已清空正文时返回 ``None``。
+        """
+
+        self._check_engine()
+        identity = f"{user_scope}/{execution_id}"
+        _require_text_field(user_scope, "user_scope", identity)
+        _require_text_field(execution_id, "execution_id", identity)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            _revision, payload = await self._authoritative_input_command(
+                conn, user_scope=user_scope, execution_id=execution_id, identity=identity
+            )
+        if isinstance(payload, str) and payload:
+            return payload
+        return None
+
     async def save_plan_proposal(
         self,
         *,
