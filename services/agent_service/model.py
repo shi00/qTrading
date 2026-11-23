@@ -185,6 +185,12 @@ def _map_request_parts(message: ModelRequest, path: str) -> tuple[list[str], lis
     - ToolReturnPart / RetryPromptPart：tool_call_id 严格配对映射为 tool 角色；
       RetryPromptPart 无 tool_call_id（输出校验重试反馈）映射为 user 文本；
     - 未知 part：ModelTurnProtocolError（zero outbound，不裁剪 R21）。
+
+    ``ChatMessage.metadata`` 保留给**资料谱系**（执行器闭包校验按
+    ``source_kind`` / ``source_id`` / ``source_version`` 三元组解析），工具协议
+    字段（``tool_name`` 等）不得写入：工具结果的事实由 ``tool_call_id`` 配对承载，
+    ``tool_name`` 冗余；写入即被闭包解析判为不合法来源，阻断正常工具后续轮
+    （T-04）。
     """
     instructions: list[str] = []
     messages: list[ChatMessage] = []
@@ -220,7 +226,7 @@ def _map_request_parts(message: ModelRequest, path: str) -> tuple[list[str], lis
                     # BinaryContent 等非文本内容：明确拒绝，不静默降级为图片
                     raise _reject_part(part, f"{part_path}.user_prompt.content")
                 messages.append(ChatMessage(role="user", content_parts=(TextContentPart(text=text),)))
-            case ToolReturnPart(tool_call_id=call_id, content=content, tool_name=name):
+            case ToolReturnPart(tool_call_id=call_id, content=content):
                 if not call_id:
                     raise ModelTurnProtocolError("invalid_field", f"{part_path}.tool_return.tool_call_id")
                 messages.append(
@@ -228,10 +234,9 @@ def _map_request_parts(message: ModelRequest, path: str) -> tuple[list[str], lis
                         role="tool",
                         content_parts=_tool_content_parts(_content_to_text(content, part_path)),
                         tool_call_id=call_id,
-                        metadata={"tool_name": name} if name else {},
                     )
                 )
-            case RetryPromptPart(content=content, tool_call_id=call_id, tool_name=name):
+            case RetryPromptPart(content=content, tool_call_id=call_id):
                 text = _content_to_text(content, part_path)
                 if call_id:
                     messages.append(
@@ -239,7 +244,6 @@ def _map_request_parts(message: ModelRequest, path: str) -> tuple[list[str], lis
                             role="tool",
                             content_parts=_tool_content_parts(text),
                             tool_call_id=call_id,
-                            metadata={"tool_name": name} if name else {},
                         )
                     )
                 else:

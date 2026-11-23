@@ -407,6 +407,26 @@ class TestSubmitTerminal:
         dao.settle_attempt_usage.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_insert_if_missing_passes_through(self):
+        """T-04：严格路径终态不得由结算补写 attempt 行——标志透传 DAO。"""
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        record = AttemptTerminalRecord(
+            attempt_id="att-1",
+            invocation_id="inv-1",
+            status="failed",
+            usage=None,
+            error_code="incompatible",
+            duration_ms=1.0,
+            reservation_id="res-1",
+            metadata={"connection_id": "conn-remote", "month": "202610", "retry_index": 0},
+            insert_if_missing=False,
+        )
+        outcome = await recorder.submit_terminal(record)
+        assert outcome == PersistenceOutcome(persisted=True, error_code=None)
+        assert dao.settle_attempt_usage.await_args.kwargs["insert_if_missing"] is False
+
+    @pytest.mark.asyncio
     async def test_unavailable_when_dao_provider_returns_none(self):
         recorder = UsageRecorder(dao_provider=lambda: None)
         recorder.observe_usage(_observation("att-1"))

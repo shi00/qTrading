@@ -858,15 +858,34 @@ class TestGuards:
         assert "budget dispatch forbidden" in decision.reason
 
     @pytest.mark.asyncio
-    async def test_usage_only_persistence_lost_zero_egress(self):
-        """必需登记失败 0 出站（DD SQ-02/F27，取代旧 D5 进程内降级派发）：
-        usage_only 在 begin_attempt persisted=False 时零出站明确失败，
-        出站无账本事实背书不得继续。"""
+    async def test_usage_only_registration_lost_keeps_legacy_degradation(self):
+        """T-04（旧业务兼容）：旧直推链 usage_only 无预留、无账本副作用可收敛——
+        ``begin_attempt`` 未确认时维持 M08 之前的进程内降级派发；共有的必需登记
+        强制门不得把新闻等旧链的 usage_only 语义改成零出站（费用型预留仍
+        fail-closed，见下）。"""
         adapter = _adapter_ok()
         recorder = _recorder_mock(persisted=False)
         executor = _executor(adapter, recorder, validate=_validator_ok)
         result = await executor.execute(
             _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+        # 降级派发：外发照常（该次无 attempt 行，账本不可用即费用事实不可达）
+        adapter.invoke.assert_awaited_once()
+        assert result.status == "succeeded"
+        terminal = recorder.submit_terminal.await_args.args[0]
+        assert terminal.insert_if_missing is True  # 旧直推链保持既有补记语义
+
+    @pytest.mark.asyncio
+    async def test_fee_registration_lost_zero_egress(self):
+        """费用型预留已派发而 ``begin_attempt`` 未确认：零出站并中断遍历。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        recorder.begin_attempt = AsyncMock(
+            return_value=PersistenceOutcome(persisted=False, error_code="DB_UNAVAILABLE")
+        )
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(), _snapshot((_fee_candidate(0, "conn-remote"),), (_priced_conn(),)), _validator_ok
         )
         adapter.invoke.assert_not_awaited()
         assert result.status == "failed"

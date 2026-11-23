@@ -1157,6 +1157,7 @@ class AIUsageDao(BaseDao):
         text_count: int | None = None,
         usage_window_expires_at: datetime.datetime | None = None,
         usage_fingerprint: str | None = None,
+        insert_if_missing: bool = True,
     ) -> bool:
         """终态落账：attempt 修订单调推进，差额整体计入月汇总（两 scope）。
 
@@ -1205,6 +1206,11 @@ class AIUsageDao(BaseDao):
         ``dict[str, Any]`` metadata 传入 float，``Decimal(float)`` 二进制全长
         展开入 numeric 列）。负值拒绝：成本非负；负 delta 仅应来自同 attempt
         迟到修订差值（本方法内部按差额计算，不在入参侧构造）。
+
+        ``insert_if_missing``（T-04）：``False`` = attempt 行缺失时**不补写**
+        行、不计费，仅将 ``reservation_id`` 指向的活跃预留转换为 ``settled``
+        （该次尝试未 begin，事实就是「无尝试、零消费」）；无 ``reservation_id``
+        时返回 False（无可收敛事实）。默认 ``True`` 保持既有 F23 补记语义。
         """
         self._check_engine(context="ai_usage.settle_attempt_usage")
         # R05 D3：金额契约校验 + float→str 归一化（先于事务，坏输入零 DB 副作用）
@@ -1241,6 +1247,18 @@ class AIUsageDao(BaseDao):
                 # attempt 行缺失（mark_dispatched 从未落库）：有活跃预留背书才插终态
                 # （F23 fencing：无背书 = 失权 owner 凭空造账路径，拒绝并返回 False；
                 # 预算口径由预留自身占用兜底，人工经未确认详情处置）
+                if not insert_if_missing:
+                    # T-04：严格路径未 begin 的失败——不得以预留背书补写 attempt
+                    # 行；仅转换该预留（settled，零消费事实），不计费、不建行。
+                    if reservation_id is None:
+                        return False
+                    await self._settle_reservation(
+                        conn,
+                        invocation_id=invocation_id,
+                        reservation_id=reservation_id,
+                        attempt_id=attempt_id,
+                    )
+                    return True
                 invocation_first = bool(
                     (
                         await conn.execute(

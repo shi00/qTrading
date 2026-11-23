@@ -697,6 +697,40 @@ class TestSettleReservationTransition:
         assert trans_params["reservation_id"] == "res-1"
 
     @pytest.mark.asyncio
+    async def test_insert_if_missing_false_converts_reservation_without_attempt_row(self):
+        """T-04：严格路径未 begin 的失败——缺行时不补写 attempt 行、不计费，
+        仅将预留转换为 settled（零消费事实；严格登记只能由 begin_attempt 写入）。"""
+        # 序列：lock → SELECT FOR UPDATE(None) → 预留转换(1)
+        conn = _CaptureConn(results=[None, None, 1])
+        dao = _dao(conn)
+        result = await dao.settle_attempt_usage(
+            **_settle_kwargs(
+                status="failed",
+                usage=None,
+                usage_revision=1,
+                cost_cny=None,
+                reservation_id="res-1",
+                insert_if_missing=False,
+            )
+        )
+        assert result is True
+        assert len(conn.calls) == 3  # noqa: weak-assertion 语句数即语义：lock/SELECT/预留转换
+        assert "UPDATE ai_invocation" in conn.calls[2][0]
+        assert all("INSERT INTO" not in sql for sql, _ in conn.calls)  # 无 attempt 行、无月汇总
+
+    @pytest.mark.asyncio
+    async def test_insert_if_missing_false_without_reservation_has_no_ledger_effect(self):
+        """T-04：strict 未 begin 且无预留 → 无可收敛事实，返回 False（零写账）。"""
+        conn = _CaptureConn(results=[None, None])
+        dao = _dao(conn)
+        result = await dao.settle_attempt_usage(
+            **_settle_kwargs(status="failed", usage=None, usage_revision=1, cost_cny=None, insert_if_missing=False)
+        )
+        assert result is False
+        assert len(conn.calls) == 2  # noqa: weak-assertion 语句数即语义：仅 lock + SELECT
+        assert all("UPDATE ai_invocation" not in sql for sql, _ in conn.calls)
+
+    @pytest.mark.asyncio
     async def test_stale_revision_skips_reservation_transition(self):
         """旧修订（本次无推进）不触发预留转换：预留已在前次成功结算时转换（幂等）。"""
         conn = _CaptureConn(results=[None, (3, Decimal("0.02"), "succeeded", False)])

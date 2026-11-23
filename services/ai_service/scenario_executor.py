@@ -66,7 +66,9 @@ usage → 结算），入口差异经 :class:`_AttemptPolicy` 参数化：
   # 设计正本冻结。 upgrade: D 系列 workflow 接线冻结触发语义时经 binding 显式携带。
 - **§6.4-5 已公开分片后失败**：任一真实事件送达调用方（on_event 之前即置位，
   保守口径）后失败——保 partial/unknown 及原 attempt，不重试不换候选（不换
-  模型拼接）；未公开分片前的失败沿冻结候选策略处理（与旧链一致）；
+  模型拼接）；无公开分片的瞬态外发失败按「费用未知」收敛（终态 cancelled +
+  OUTBOUND_UNCONFIRMED、预留不按失败释放、settlement=unknown），不自动重试
+  不换候选（T-04：提供方是否已处理不可证明，如「失败零费用」即伪造账目）；
 - **拒绝不换候选规避**（DD §10.1）：``finish_reason="refused"`` 的完整回合以
   failed 终态 + 完整 response 承载并中断候选遍历（halt），禁止换候选绕过；
   用量已观测不丢弃（R21）；
@@ -79,7 +81,10 @@ usage → 结算），入口差异经 :class:`_AttemptPolicy` 参数化：
   ``authorize_data_attempt``——连接授权 + 绑定一致核 + 源 claim 串成同一门；
   deny / unknown / owner 能力缺失 / 核权异常一律零出站（不进 reserve、不
   mark_dispatched、不外发），原因随候选决策记录（R21 不静默）并中断遍历。
-  未携带该键时不改变既有链路（旧直推入口政策不变）。
+  许可绑定**本次实际派发目标**（T-04）：派发候选的连接 / 版本 / 目的地指纹 /
+  用途与受理冻结许可任一不等即零出站（consent_target_mismatch），不得把某候选
+  连接的许可与另一候选的调用拼合；未携带该键时不改变既有链路（旧直推入口
+  政策不变）。
 """
 
 from __future__ import annotations
@@ -280,6 +285,11 @@ _DATA_OPERATION_SCOPE_KEYS: Final[tuple[str, ...]] = ("execution_id", "round_id"
 _DATA_CONSENT_REQUIRED: Final[str] = "data_consent_required"
 _SOURCE_CLOSURE_UNVERIFIABLE: Final[str] = "source_closure_unverifiable"
 _SOURCE_CLOSURE_MISMATCH: Final[str] = "source_closure_mismatch"
+#: 资料许可必须绑定**本次实际派发目标**（T-04）：连接 / 目的地 / 用途任一与受理
+#: 冻结的许可不一致即零出站——不得把某候选的许可与另一候选的调用拼合。
+_CONSENT_TARGET_MISMATCH: Final[str] = "consent_target_mismatch"
+#: 首片前外发失败：提供方是否已处理不可证明 → 费用未知（T-04）。
+_OUTBOUND_UNCONFIRMED_ERROR_CODE: Final[str] = "OUTBOUND_UNCONFIRMED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -527,7 +537,8 @@ class ScenarioExecutor:
           封装，text/tool/prompted → 无），不把裸 schema 透传给 LiteLLM，路由与
           业务 final 校验不在本入口（§6.1，由调用方承载）；
         - **§6.4-5**：任一真实事件送达调用方后失败——保 partial/unknown 及原
-          attempt，不重试不换候选（不换模型拼接）；未公开分片前沿冻结候选策略；
+          attempt，不重试不换候选（不换模型拼接）；无公开分片的瞬态外发失败按
+          「费用未知」收敛（OUTBOUND_UNCONFIRMED，不重试不换候选，T-04）；
         - **拒绝不换候选规避**（DD §10.1）：refused 完整回合以 failed 终态 +
           完整 response 承载并中断遍历，用量已观测不丢弃（R21）；
         - **终态**：transport 与 settlement 两维分离（INV-07）；取消沿共享 F19
@@ -619,6 +630,9 @@ class ScenarioExecutor:
             # M08：Agent 聊天回合严格路径——必需登记（reserve / mark_dispatched /
             # begin_attempt）逐项 fail-closed，不回退进程内派发身份。
             strict_required_registration=True,
+            # T-04：无公开分片的瞬态外发失败不证明提供方未处理——按未确认记账
+            # 且不自动重试（费用未知不得伪装为「失败零费用」）。
+            unconfirmed_outbound=lambda error: not exposure.exposed and _classify_adapter_failure(error) == "transient",
         )
         result = await self._execute_traversal(identity, snapshot, policy)
         candidate = result.candidate
@@ -1191,22 +1205,33 @@ class ScenarioExecutor:
             # 许可为 operation 级事实，切换候选无济 → halt（首次失败后撤用，后续
             # 重试/备用同样零出站）。
             if policy.data_authorization is not None:
-                # M15：操作冻结的连接版本不得被快照里的同 ID 替身顶替——同一
-                # 连接 ID 版本不等即版本切换瞬间的瞬态竞态，零出站并中断遍历
-                # （不回退到其他候选），不得按策略拒绝或按当前版本放行。
+                # T-04：许可必须绑定**本次实际派发目标**——冻结许可的连接 / 版本 /
+                # 目的地指纹 / 用途与正在派发的候选逐项相等，否则零出站并中断遍历
+                # （许可为 operation 级事实，切换候选不能借道；不得把某候选连接的
+                # 许可与另一候选的调用拼合）。
                 frozen = policy.data_authorization
-                if (
-                    connection.connection_id == frozen.connection_id
-                    and connection.connection_revision != frozen.connection_revision
-                ):
-                    last_reason = "connection revision changed (transient)"
+                dispatch_target = str(cand.get("target_fingerprint") or "")
+                dispatch_purpose = str(cand.get("purpose") or "")
+                mismatch_detail: str | None = None
+                mismatch_reason = _CONSENT_TARGET_MISMATCH
+                if connection.connection_id != frozen.connection_id:
+                    mismatch_detail = f"connection {connection.connection_id} != {frozen.connection_id}"
+                elif connection.connection_revision != frozen.connection_revision:
+                    # M15：同一连接 ID 但版本不等 = 版本切换瞬间的瞬态竞态——
+                    # 瞬态拒绝（零出站不回退其他候选），原因与既有语义一致。
+                    mismatch_detail = "connection revision"
+                    mismatch_reason = "connection revision changed (transient)"
+                elif dispatch_target != frozen.target_fingerprint:
+                    mismatch_detail = "target_fingerprint"
+                elif dispatch_purpose != frozen.purpose:
+                    mismatch_detail = "purpose"
+                if mismatch_detail is not None:
+                    last_reason = mismatch_reason
                     logger.warning(
-                        "[ScenarioExecutor] frozen connection revision mismatch, zero outbound "
-                        "(task=%s, connection=%s, frozen=%s, snapshot=%s)",
+                        "[ScenarioExecutor] consent target does not match dispatched candidate (%s), "
+                        "zero outbound (task=%s)",
+                        mismatch_detail,
                         identity.task_id,
-                        connection.connection_id,
-                        frozen.connection_revision,
-                        connection.connection_revision,
                     )
                     return _CandidateOutcome(
                         status="failed",
@@ -1423,9 +1448,11 @@ class ScenarioExecutor:
                 except Exception as e:
                     reason = f"authorize failed: {type(e).__name__}"
                     if reservation_id is not None:
-                        # F16：预留已绑定派发（dispatched）而授权失败——无 attempt 行，
-                        # 提交 failed 终态经活跃预留背书补记（F23）并转换预留 settled，
-                        # 不留悬挂占用；usage_only（无预留）不补记，维持既有零副作用
+                        # F16：预留已绑定派发（dispatched）而授权失败——本尝试尚未
+                        # begin。T-04：严格路径（Agent 聊天回合）的严格登记只能由
+                        # ``begin_attempt`` 显式写入，不得由预算结算「顺带补写」
+                        # attempt 行——终态仅转换预留（settled），不插行、不记用量；
+                        # 旧直推链保持既有补记语义。
                         await self._submit_failed_terminal(
                             identity,
                             attempt_id,
@@ -1434,6 +1461,7 @@ class ScenarioExecutor:
                             metadata=attempt_metadata,
                             ledger=ledger,
                             duration_ms=_elapsed_ms(clock, attempt_started_at),
+                            insert_if_missing=not policy.strict_required_registration,
                         )
                     return _CandidateOutcome(
                         status="failed",
@@ -1452,7 +1480,8 @@ class ScenarioExecutor:
                 if not compatibility.compatible:
                     last_reason = f"incompatible: {compatibility.reason}"
                     if reservation_id is not None:
-                        # 本次尝试已预留 / 派发，失败终态即时收敛（结算该次预留）
+                        # 本次尝试已预留 / 派发，失败终态即时收敛（结算该次预留）；
+                        # T-04：严格路径同样不靠结算补写 attempt 行（未 begin）。
                         await self._submit_failed_terminal(
                             identity,
                             attempt_id,
@@ -1461,6 +1490,7 @@ class ScenarioExecutor:
                             metadata=attempt_metadata,
                             ledger=ledger,
                             duration_ms=_elapsed_ms(clock, attempt_started_at),
+                            insert_if_missing=not policy.strict_required_registration,
                         )
                     # C12：原自管循环 break 语义等价——结束本候选，返回失败终态
                     # （不重试；Tenacity 对成功返回值直接透传）。M08：携带该次
@@ -1505,36 +1535,48 @@ class ScenarioExecutor:
                     owner_epoch=owner_epoch,
                 )
                 if not begin_outcome.persisted:
-                    # 必需登记失败（DD SQ-02 / F27「必需记录失败 0 出站」）：账本不可用 /
-                    # 超时 / owner 失权均为 invocation 级事实，切换候选无济——本尝试零
-                    # 出站并明确失败；有活跃预留时提交 failed 终态经 F23 背书补记并转换
-                    # settled（不留悬挂占用）；usage_only（无预留）无账本副作用可收敛，
-                    # 维持零补记。与费用型预留 / 派发失败处置一致，中断整个候选遍历。
                     reason = f"attempt registration unavailable: {begin_outcome.error_code}"
-                    logger.warning(
-                        "[ScenarioExecutor] required attempt registration failed (%s), zero outbound (task=%s)",
-                        begin_outcome.error_code,
-                        identity.task_id,
-                    )
-                    if reservation_id is not None:
-                        await self._submit_failed_terminal(
-                            identity,
-                            attempt_id,
-                            reason,
-                            reservation_id,
-                            metadata=attempt_metadata,
-                            ledger=ledger,
-                            duration_ms=_elapsed_ms(clock, attempt_started_at),
+                    if reservation_id is None and not policy.strict_required_registration:
+                        # T-04（旧业务兼容）：旧直推链 usage_only 无预留、无账本副作用
+                        # 可收敛——维持 M08 之前的既有降级（进程内继续派发，账本不可用
+                        # 时该次无 attempt 行，费用事实不可达）；严格路径（Agent 聊天
+                        # 回合）与费用型预留仍按必需登记失败零出站。
+                        logger.warning(
+                            "[ScenarioExecutor] attempt row unavailable (%s), continuing in-memory "
+                            "execution (legacy usage_only, task=%s)",
+                            begin_outcome.error_code,
+                            identity.task_id,
                         )
-                    return _CandidateOutcome(
-                        status="failed",
-                        decision_hint="rejected",
-                        reason=reason,
-                        outputs=(),
-                        usages=(),
-                        halt_candidates=True,
-                        attempt_id=attempt_id,
-                    )
+                    else:
+                        # 必需登记失败（DD SQ-02 / F27「必需记录失败 0 出站」）：账本不可用 /
+                        # 超时 / owner 失权均为 invocation 级事实，切换候选无济——本尝试零
+                        # 出站并明确失败；有活跃预留时提交 failed 终态转换预留 settled（不留
+                        # 悬挂占用）；T-04：严格路径不靠结算补写 attempt 行（未 begin）。
+                        logger.warning(
+                            "[ScenarioExecutor] required attempt registration failed (%s), zero outbound (task=%s)",
+                            begin_outcome.error_code,
+                            identity.task_id,
+                        )
+                        if reservation_id is not None:
+                            await self._submit_failed_terminal(
+                                identity,
+                                attempt_id,
+                                reason,
+                                reservation_id,
+                                metadata=attempt_metadata,
+                                ledger=ledger,
+                                duration_ms=_elapsed_ms(clock, attempt_started_at),
+                                insert_if_missing=not policy.strict_required_registration,
+                            )
+                        return _CandidateOutcome(
+                            status="failed",
+                            decision_hint="rejected",
+                            reason=reason,
+                            outputs=(),
+                            usages=(),
+                            halt_candidates=True,
+                            attempt_id=attempt_id,
+                        )
 
                 # F19②：外发事实起点（await 表达式即视为外发已发起，此后取消时
                 # 无法证明是否已被上游消费）
@@ -1566,6 +1608,42 @@ class ScenarioExecutor:
                         return _CandidateOutcome(
                             status="failed",
                             decision_hint="rejected",
+                            reason=last_reason,
+                            outputs=(),
+                            usages=(),
+                            halt_candidates=True,
+                            attempt_id=attempt_id,
+                        )
+                    if policy.unconfirmed_outbound is not None and policy.unconfirmed_outbound(e):
+                        # T-04：外发已发起、提供方是否处理不可证明（无公开分片的瞬态
+                        # 失败）——费用未知不得按「失败零费用」释放：终态不带预留 ID
+                        # （预留留 dispatched，租约到期转 held_unconfirmed 待人工处置），
+                        # 且不自动重试（失败事实如实记账，不伪装成可重试的零消费失败）。
+                        last_reason = _OUTBOUND_UNCONFIRMED_ERROR_CODE
+                        ledger.cost_unknown = True  # 结算投影 unknown（费用无法证明）
+                        logger.warning(
+                            "[ScenarioExecutor] outbound unconfirmed (%s), attempt recorded as unknown "
+                            "and not retried (task=%s)",
+                            type(e).__name__,
+                            identity.task_id,
+                        )
+                        await self._submit_terminal_logged(
+                            _terminal_record(
+                                identity,
+                                attempt_id,
+                                usage=None,
+                                actual_model=None,
+                                status="cancelled",
+                                error_code=last_reason,
+                                reservation_id=None,
+                                metadata=dict(attempt_metadata),
+                                duration_ms=_elapsed_ms(clock, attempt_started_at),
+                            ),
+                            ledger,
+                        )
+                        return _CandidateOutcome(
+                            status="failed",
+                            decision_hint="failed",
                             reason=last_reason,
                             outputs=(),
                             usages=(),
@@ -1789,12 +1867,15 @@ class ScenarioExecutor:
         metadata: dict[str, Any],
         ledger: _AttemptLedgerState,
         duration_ms: float | None = None,
+        insert_if_missing: bool = True,
     ) -> None:
         """失败尝试终态落账（§6.2 步骤 5「Executor 收敛错误并提交终态」）。
 
         用量缺失由 Recorder 标 unavailable（R21）；落账失败不阻断切换流程。
         F16：预留 ID 贯穿终态——非 None 时结算经 F22 预留转换 / F23 活跃预留
         背书补记收敛预留，不留悬挂占用；None（usage_only / 无预留）行为不变。
+        T-04：``insert_if_missing=False``（严格路径未 begin 的失败）只转换预留，
+        不得由结算补写 attempt 行——严格登记必须经 ``begin_attempt`` 显式写入。
         F18/F19：终态携带派发时点固化的审计元数据（归属月 / retry_index /
         连接身份），经 ledger 登记在途引用——提交被取消打断时由取消边界幂等
         重提交（F19 受限清理）。F34：``duration_ms`` 为该次尝试真实耗时
@@ -1811,6 +1892,7 @@ class ScenarioExecutor:
                 reservation_id=reservation_id,
                 metadata=dict(metadata),
                 duration_ms=duration_ms,
+                insert_if_missing=insert_if_missing,
             ),
             ledger,
         )
@@ -2276,6 +2358,9 @@ class _AttemptPolicy:
     - ``strict_required_registration``：Agent 聊天回合必需登记严格策略（M08）——
       reserve / mark_dispatched / begin_attempt 任一未确认即零出站；默认 False
       保持旧直推链既有 usage_only 降级行为不变。
+    - ``unconfirmed_outbound``：外发已开始、提供方是否处理不可证明的失败判据
+      （T-04，chat 入口在无公开分片时给出）——命中即按「费用未知」提交终态且
+      不释放预留（不自动重试），默认 None 保持旧直推链既有重试策略。
     """
 
     invoke: Callable[[_EntryAdapter, ResolvedConnection, AttemptContext], Awaitable[Any]]
@@ -2285,6 +2370,7 @@ class _AttemptPolicy:
     capability_check: Callable[[ResolvedConnection, _ConnectionEligibility], str | None] | None = None
     data_authorization: DataAttemptAuthorization | None = None
     strict_required_registration: bool = False
+    unconfirmed_outbound: Callable[[Exception], bool] | None = None
     #: I43：无许可即拒绝（agent research 叶链 fail-closed，零外发）。
     require_data_consent: bool = False
     #: I43：operation 归属作用域（设置时每次模型调用先 ``ensure_model_operation``，
@@ -2338,10 +2424,13 @@ class _AttemptTrail:
 def _settlement_state(ledger: _AttemptLedgerState | None) -> ChatTurnSettlementState | None:
     """结算事实投影（ChatTurnOutcome.settlement_state）：``concluded`` →
     settled；``submitted``（终态已提交、持久化未确认，F20 重放承接）→ deferred；
-    无账目事实 → None。``unknown``（收费无法证明）仅由取消路径 F19
-    held_unconfirmed 语义承载——取消传播不产出 outcome，该值供类型完备性。"""
+    无账目事实 → None。``cost_unknown``（T-04 未确认外发）→ unknown（收费无法
+    证明，不得伪装已结算）；取消路径 F19 held_unconfirmed 同义（取消传播不产出
+    outcome）。"""
     if ledger is None:
         return None
+    if ledger.cost_unknown:
+        return "unknown"
     if ledger.concluded:
         return "settled"
     if ledger.submitted:
@@ -2588,7 +2677,9 @@ class _AttemptLedgerState:
     已持久化，此后取消无需再收敛该尝试（与 pending 互斥维护：持久化即清空）；
     ``submitted``（B-02-3）：终态已提交（持久化未确认时由 F20 重放队列承接）——
     结算事实投影依据（concluded → settled / submitted 未 concluded → deferred /
-    均无 → 无账目事实）；``committed_rank``（M08）：已持久化终态的状态序
+    均无 → 无账目事实）；``cost_unknown``（T-04）：该尝试外发已发起而失败、
+    提供方是否处理不可证明——投影为 unknown（费用未知，不得伪装已结算）；
+    ``committed_rank``（M08）：已持久化终态的状态序
     （见 ``_TERMINAL_STATUS_RANK``，单调不减），用于让重复 / 乱序的迟到写回
     幂等且不覆盖较新事实。
     """
@@ -2597,6 +2688,7 @@ class _AttemptLedgerState:
     concluded: bool = False
     submitted: bool = False
     committed_rank: int | None = None
+    cost_unknown: bool = False
 
 
 def _observation_from(
@@ -2627,6 +2719,7 @@ def _terminal_record(
     reservation_id: str | None = None,
     metadata: dict[str, Any] | None = None,
     duration_ms: float | None = None,
+    insert_if_missing: bool = True,
 ) -> Any:
     from services.ai_service.usage_recorder import AttemptTerminalRecord
 
@@ -2639,6 +2732,7 @@ def _terminal_record(
         duration_ms=duration_ms,
         reservation_id=reservation_id,
         metadata=metadata,
+        insert_if_missing=insert_if_missing,
     )
 
 

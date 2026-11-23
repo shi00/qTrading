@@ -386,6 +386,10 @@ class TestBuildChatTurnRequest:
         assert isinstance(part2, TextContentPart)
         assert json.loads(part2.text) == {"a": 1, "b": "中"}
         assert request.messages[3].tool_call_id == "c2"
+        # T-04：metadata 只承载资料谱系，工具协议字段（tool_name）不得写入——
+        # 否则执行器闭包解析把它判为不合法来源并阻断正常工具后续轮
+        assert request.messages[2].metadata == {}
+        assert request.messages[3].metadata == {}
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
