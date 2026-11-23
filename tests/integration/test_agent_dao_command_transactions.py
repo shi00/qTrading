@@ -73,6 +73,9 @@ from tests._helpers import create_test_engine, make_alembic_cfg
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedded_real]
 
+#: claim 携带的连接身份稳定键须与停用门键同源（``stable_key()`` 含配置版本）。
+_GRANT_SERVICE_KEY = MCPServiceIdentity(service_id="svc-1", config_version=1).stable_key()
+
 
 async def _reset_schema(url: str) -> None:
     engine = create_test_engine(url)
@@ -180,7 +183,7 @@ def _grant_request(
     schema_digest: str | None = "b" * 64,
     audit_scope_digest: str | None = "c" * 64,
     boundary_digest: str | None = "d" * 64,
-    mcp_service_key: str | None = "svc-1:1",
+    mcp_service_key: str | None = _GRANT_SERVICE_KEY,
 ) -> GrantRevisionRequest:
     return GrantRevisionRequest(
         user_scope=user_scope,
@@ -261,9 +264,9 @@ async def _seed_decision(
         "decision_kind": "tool_grant",
         "presentation_batch_seq": 1,
         # P1-10：派发认领核本次人答消费、有效期与授权摘要（来源边界持久认领）。
-        # 这里直接 seed「答复已消费」的事实，等价于走 建 pending → 写答复 →
-        # consume_answer 激活 granted 后的持久状态（claim 只读这些事实）。
-        "answer_consumed_at": datetime.now(UTC),
+        # 工具许可（带 grant_id）直接 seed「答复已消费」的事实，等价于走 建 pending
+        # → 写答复 → consume_answer 激活 granted 后的持久状态（claim 只读这些事实）。
+        # 普通问答决定不预置消费事实，保持「未答」语义供答复生命周期用例断言。
         "expires_at": datetime.now(UTC) + timedelta(hours=1),
         "question_payload": {
             "schema_digest": "b" * 64,
@@ -272,6 +275,8 @@ async def _seed_decision(
         },
     }
     values.update(overrides)
+    if values.get("grant_id") is not None:
+        values.setdefault("answer_consumed_at", datetime.now(UTC))
     _SEEDED_DECISION_SCOPE[values["decision_id"]] = (values["execution_id"], values["round_id"])
     async with dao.engine.begin() as conn:  # type: ignore[union-attr]
         await conn.execute(insert(AgentDecision).values(**values))
