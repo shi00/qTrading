@@ -49,6 +49,7 @@ from services.agent_service.attachments import (
     AttachmentWorkerError,
     SubprocessAttachmentWorker,
     detect_attachment_kind,
+    worker_command,
 )
 
 _NS = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
@@ -2627,3 +2628,159 @@ class TestWorkerLifecycle:
         with pytest.raises(AttachmentParseError) as exc:
             _parse(AttachmentKind.PNG, b"\x89PNG\r\n\x1a\n")
         assert exc.value.code == "invalid_structure"
+
+
+# ---------------------------------------------------------------------------
+# T-12：附件与交付兼容（类型证据 / 跨表秩序 / 不可定位表 / PDF 超时 / 冻结入口）
+# ---------------------------------------------------------------------------
+
+_SST_ERROR_LOOKALIKE = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    f'<sst {_NS} count="1" uniqueCount="1"><si><t>#N/A</t></si></sst>'
+)
+
+
+def _shared_string_sheet(value_index: int = 0) -> bytes:
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        f'<worksheet {_NS}><sheetData><row r="1"><c r="A1" t="s"><v>{value_index}</v></c>'
+        "</row></sheetData></worksheet>"
+    ).encode()
+
+
+class TestAttachmentCompatibility:
+    """T-12：显式文本与错误值、跨表秩序、不可定位表、PDF 超时、冻结 EXE 入口。"""
+
+    def test_text_error_lookalike_stays_string(self) -> None:
+        # 显式文本 "#N/A"（t="s"）是字符串；错误值只认 XML t="e" / openpyxl data_type="e"。
+        data = _rewrite_xlsx(
+            _xlsx_bytes(shared_strings=_SST_ERROR_LOOKALIKE),
+            replace={"xl/worksheets/sheet1.xml": _shared_string_sheet()},
+        )
+        cell = _xlsx_cells(_parse(AttachmentKind.XLSX, data))["A1"]
+        assert cell["value"]["raw_type"] == "string"
+        assert cell["value"]["lexeme"] == "#N/A"
+        assert cell["value"]["xml_type"] == "s"
+
+    def test_interleaved_cross_sheet_rows_are_rejected(self) -> None:
+        # S1 1—2、S2 1—1、S1 3—3：块顺序与 read_ranges 原子顺序无法同时如实表达，明确拒绝。
+        selection = Selection(
+            kind="limited",
+            ranges=(
+                RowsRange(kind="rows", sheet="S1", start=1, end=2),
+                RowsRange(kind="rows", sheet="S2", start=1, end=1),
+                RowsRange(kind="rows", sheet="S1", start=3, end=3),
+            ),
+        )
+        with pytest.raises(AttachmentParseError) as exc:
+            _parse(AttachmentKind.XLSX, _xlsx_bytes(sheets=2), selection)
+        assert exc.value.code == "invalid_selection"
+
+    def test_contiguous_cross_sheet_rows_keep_block_and_atom_order(self) -> None:
+        # 每表的选择段必须在选择中连续：块顺序与原子顺序一致，正文与范围不冲突。
+        selection = Selection(
+            kind="limited",
+            ranges=(
+                RowsRange(kind="rows", sheet="S1", start=1, end=2),
+                RowsRange(kind="rows", sheet="S2", start=1, end=1),
+            ),
+        )
+        parsed = _parse(AttachmentKind.XLSX, _xlsx_bytes(sheets=2), selection)
+        assert [json.loads(block)["sheet"] for block in parsed.blocks] == ["S1", "S2"]
+        assert [atom["sheet"] for atom in parsed.read_ranges] == ["S1", "S2"]
+        _assert_selected_range_contract(selection, parsed)
+
+    def test_missing_worksheet_part_is_rejected_for_all_selection(self) -> None:
+        # workbook 声明 S2 但容器缺其部件：不能读也不能证明为空，全选不得报完整读取。
+        data = _rewrite_xlsx(_xlsx_bytes(sheets=2), drop=frozenset({"xl/worksheets/sheet2.xml"}))
+        with pytest.raises(AttachmentParseError) as exc:
+            _parse(AttachmentKind.XLSX, data)
+        assert exc.value.code == "invalid_structure"
+
+    def test_missing_worksheet_part_keeps_selected_sheet_readable(self) -> None:
+        data = _rewrite_xlsx(_xlsx_bytes(sheets=2), drop=frozenset({"xl/worksheets/sheet2.xml"}))
+        selection = Selection(kind="limited", ranges=(SheetsRange(kind="sheets", names=("S1",)),))
+        parsed = _parse(AttachmentKind.XLSX, data, selection)
+        assert parsed.read_state is ReadState.READY
+        assert parsed.stats["sheets"] == 1
+        assert parsed.stats["rows"] == 3
+        _assert_selected_range_contract(selection, parsed)
+
+    def test_rows_absent_inside_range_are_verified_blank(self) -> None:
+        # 行 2 在 worksheet XML 中不存在（不是被跳过）：范围已读、块只列真实存在的行。
+        sparse = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            f'<worksheet {_NS}><sheetData><row r="1"><c r="A1"><v>1</v></c></row>'
+            '<row r="3"><c r="A3"><v>3</v></c></row></sheetData></worksheet>'
+        ).encode()
+        data = _rewrite_xlsx(_xlsx_bytes(), replace={"xl/worksheets/sheet1.xml": sparse})
+        selection = Selection(kind="limited", ranges=(RowsRange(kind="rows", sheet="S1", start=1, end=3),))
+        parsed = _parse(AttachmentKind.XLSX, data, selection)
+        assert parsed.read_ranges == [to_wire_dict(selection.ranges[0])]
+        assert parsed.unread_ranges == []
+        assert _rows_of_blocks(parsed) == [1, 3]
+        _assert_selected_range_contract(selection, parsed)
+
+    def test_pdf_timeout_keeps_completed_pages_readable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 超时保住本次范围：已完成页记已读、未开始页记未读，不整份丢弃也不冒充全读。
+        monkeypatch.setattr(PageObject, "extract_text", lambda self, *args, **kwargs: "hello")
+        ticks = iter([0.0, 0.0, 100.0])
+        monkeypatch.setattr(attachment_worker.time, "monotonic", lambda: next(ticks, 100.0))
+        selection = Selection(kind="limited", ranges=(PagesRange(kind="pages", start=1, end=3),))
+        parsed = parse_attachment(
+            kind=AttachmentKind.PDF,
+            data=_pdf_bytes(3),
+            selection=selection,
+            budget=AttachmentBudget(),
+            deadline=10.0,
+            timeout_s=30.0,
+        )
+        assert parsed.read_state is ReadState.PARTIAL
+        assert parsed.read_ranges == [{"kind": "pages", "start": 1, "end": 2}]
+        assert parsed.unread_ranges == [{"kind": "pages", "start": 3, "end": 3}]
+        assert [item["code"] for item in parsed.limitations] == ["extract_timeout"]
+        _assert_selected_range_contract(selection, parsed)
+
+    def test_pdf_expired_deadline_marks_all_pages_unread(self) -> None:
+        selection = Selection(kind="limited", ranges=(PagesRange(kind="pages", start=1, end=3),))
+        parsed = parse_attachment(
+            kind=AttachmentKind.PDF,
+            data=_pdf_bytes(3),
+            selection=selection,
+            budget=AttachmentBudget(),
+            deadline=time.monotonic() - 1.0,
+            timeout_s=30.0,
+        )
+        assert parsed.read_state is ReadState.PARTIAL
+        assert parsed.coverage == "limited"
+        assert parsed.read_ranges == []
+        assert parsed.unread_ranges == [to_wire_dict(selection.ranges[0])]
+        assert [item["code"] for item in parsed.limitations] == ["extract_timeout"]
+        _assert_selected_range_contract(selection, parsed)
+
+    def test_worker_command_uses_module_entry_in_source_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delattr(sys, "frozen", raising=False)
+        assert worker_command() == (sys.executable, "-m", "services.agent_service.attachment_worker")
+
+    def test_worker_command_uses_single_executable_in_frozen_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 冻结 EXE 里 sys.executable 是应用本身：-m 不可用，改用同一入口的 worker 子命令。
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        assert worker_command() == (sys.executable, attachment_worker.ATTACHMENT_WORKER_FLAG)
+
+    def test_frozen_entry_dispatches_attachment_worker(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import main as app_entry
+
+        calls: list[str] = []
+
+        def _fake_worker_main() -> int:
+            calls.append("worker")
+            return 0
+
+        # main.py 为保持首帧最小 import 用字面量判定，此处守护与 worker 常量一致。
+        monkeypatch.setattr(attachment_worker, "main", _fake_worker_main)
+        monkeypatch.setattr(sys, "argv", ["AStockScreener.exe", attachment_worker.ATTACHMENT_WORKER_FLAG])
+        with pytest.raises(SystemExit) as exc:
+            app_entry.main()
+        assert exc.value.code == 0
+        assert calls == ["worker"]
+        assert attachment_worker.ATTACHMENT_WORKER_FLAG == "--attachment-worker"
