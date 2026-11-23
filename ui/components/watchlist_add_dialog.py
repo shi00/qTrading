@@ -90,7 +90,7 @@ def WatchlistAddDialog(
     existing_note: ExistingNoteState = _EMPTY_NOTE_STATE,
     on_search: Callable[[str], None] | None = None,
     on_load_existing_note: Callable[[str], None] | None = None,
-    on_add: Callable[[str, str, str], None] | None = None,
+    on_add: Callable[[str, str, str, str], None] | None = None,
     on_close: Callable[[], None] | None = None,
 ) -> ft.Container:
     """「添加关注」对话框组件 (issue #433).
@@ -105,7 +105,8 @@ def WatchlistAddDialog(
             ``ts_code`` 不匹配当前选中时视为未读取，重新读取而非猜测)。
         on_search: 触发搜索回调 (keyword)。
         on_load_existing_note: 按 ts_code 读取旧备注回调 (父级调度 VM 命令, R16)。
-        on_add: 确认添加回调 (ts_code, stock_name, note)。
+        on_add: 确认添加回调 (ts_code, stock_name, note, expected_note)；``expected_note``
+            为用户确认时看到的原备注（未关注/无备注为空串），供持久化层 CAS 复核并发覆盖。
         on_close: 取消/关闭回调。
     """
     ft.use_state(get_observable_state)
@@ -173,11 +174,20 @@ def WatchlistAddDialog(
             on_load_existing_note(row.ts_code)
 
     def _submit() -> None:
-        """真正提交写入（同帧重复点击只提交一次）。"""
+        """真正提交写入（同帧重复点击只提交一次）。
+
+        R2-I13：写入必须携带用户确认时看到的原备注，供持久化层做 CAS 复核；
+        原备注尚未读取时失败关闭（先读取，不写）。
+        """
         if on_add is None or submit_lock.current:
             return
+        if note_info is None or note_info.status != "loaded":
+            if on_load_existing_note is not None and selected_ts_code:
+                on_load_existing_note(selected_ts_code)
+            return
+        expected_note = (note_info.note or "").strip()
         submit_lock.current = True
-        on_add(selected_ts_code, selected_name, note.strip())
+        on_add(selected_ts_code, selected_name, note.strip(), expected_note)
 
     def _on_confirm(_e: ft.ControlEvent) -> None:
         """确认添加：先确保已读取旧备注，必要时进入「替换原备注」二次确认。

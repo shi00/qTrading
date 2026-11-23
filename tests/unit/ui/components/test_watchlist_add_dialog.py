@@ -215,7 +215,7 @@ class TestExistingNoteConfirmation:
         _select_first_result(component, page)
         _set_note(component, page, "  新备注  ")
         _click_confirm(component, page)
-        on_add.assert_called_once_with(_TS_CODE, _STOCK_NAME, "新备注")
+        on_add.assert_called_once_with(_TS_CODE, _STOCK_NAME, "新备注", "")
         assert "watchlist_note_replace_title" not in _texts(page)
         run_unmount_effects(component)
 
@@ -243,7 +243,7 @@ class TestExistingNoteConfirmation:
         _set_note(component, page, "新备注")
         _click_confirm(component, page)
         _click_by_text(component, page, "watchlist_note_replace_confirm")
-        on_add.assert_called_once_with(_TS_CODE, _STOCK_NAME, "新备注")
+        on_add.assert_called_once_with(_TS_CODE, _STOCK_NAME, "新备注", "旧备注")
         run_unmount_effects(component)
 
     def test_back_to_edit_keeps_original_content(self, mock_i18n_state, mock_app_colors_state) -> None:
@@ -275,7 +275,24 @@ class TestExistingNoteConfirmation:
         _select_first_result(component, page)
         _set_note(component, page, "重点")
         _click_confirm(component, page)
-        on_add.assert_called_once_with(_TS_CODE, _STOCK_NAME, "重点")
+        on_add.assert_called_once_with(_TS_CODE, _STOCK_NAME, "重点", "重点")
+        run_unmount_effects(component)
+
+    def test_unread_existing_note_blocks_write_and_reloads(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """原备注尚未读到（失败态）：确认不得写入，改为重试读取（R21 fail-closed）。"""
+        on_add = MagicMock()
+        on_load = MagicMock()
+        component, page = _mount_add(
+            existing_note=ExistingNoteState(ts_code=_TS_CODE, status="failed"),
+            on_add=on_add,
+            on_load_existing_note=on_load,
+        )
+        _select_first_result(component, page)
+        on_load.reset_mock()
+        _set_note(component, page, "新备注")
+        _click_confirm(component, page)
+        on_add.assert_not_called()
+        on_load.assert_called_once_with(_TS_CODE)
         run_unmount_effects(component)
 
     def test_read_failure_blocks_write_and_retries(self, mock_i18n_state, mock_app_colors_state) -> None:
@@ -337,5 +354,5 @@ class TestExistingNoteConfirmation:
         assert callable(confirm.on_click)
         confirm.on_click(MagicMock())  # type: ignore[call-issue]  # [reason: Flet on_click Union 含 0 参分支]
         confirm.on_click(MagicMock())  # type: ignore[call-issue]  # [reason: 同帧第二次点击验证提交锁]
-        on_add.assert_called_once_with(_TS_CODE, _STOCK_NAME, "")
+        on_add.assert_called_once_with(_TS_CODE, _STOCK_NAME, "", "")
         run_unmount_effects(component)

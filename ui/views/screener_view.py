@@ -2935,7 +2935,12 @@ def ScreenerView(
         写到旧策略的方案下。
         """
         try:
-            await vm.save_preset(name, strategy, params)
+            saved = await vm.save_preset(name, strategy, params)
+            if not saved:
+                # R21：配置层拒写（并发修改/锁失败等）不得提示成功
+                if page := _get_page():
+                    _show_toast(page, I18n.get("screener_preset_save_refused"), "error")
+                return
             if vm.state.selected_strategy == strategy:
                 await vm.refresh_presets(strategy)
                 set_preset_selected(name)

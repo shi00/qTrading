@@ -1077,7 +1077,7 @@ class TestPresetManagement:
             mock_tpm = mock_tpm_cls.return_value
             mock_tpm.run_async = AsyncMock(return_value=True)
 
-            await vm.save_preset("保守型", "value_strategy", {"pe": 15})
+            assert await vm.save_preset("保守型", "value_strategy", {"pe": 15}) is True
 
         mock_tpm.run_async.assert_awaited_once_with(
             TaskType.IO,
@@ -1086,6 +1086,15 @@ class TestPresetManagement:
             "保守型",
             {"pe": 15},
         )
+
+    @pytest.mark.asyncio
+    async def test_save_preset_returns_false_when_config_refuses_write(self, vm):
+        """配置层拒写时如实返回 False（R21：调用方不得提示成功）。"""
+        from unittest.mock import AsyncMock
+
+        with patch("ui.viewmodels.strategy_meta_mixin.ThreadPoolManager") as mock_tpm_cls:
+            mock_tpm_cls.return_value.run_async = AsyncMock(return_value=False)
+            assert await vm.save_preset("保守型", "value_strategy", {"pe": 15}) is False
 
     def test_load_preset_returns_params_when_exists(self, vm):
         """load_preset 命中预设时返回参数 dict."""

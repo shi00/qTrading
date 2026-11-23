@@ -104,6 +104,18 @@ class _FakeWatchlistViewModel:
         self.method_calls.append(("add_to_watchlist", {"ts_code": ts_code, "stock_name": stock_name, "note": note}))
         return self.add_result
 
+    async def add_to_watchlist_checked(
+        self,
+        ts_code: str,
+        stock_name: str,
+        note: str | None,
+        *,
+        expected_note: str,
+    ) -> WatchlistMutationResult:
+        """R2-I13: CAS 写路径；记录与 add_to_watchlist 同口径供现有断言复用。"""
+        self.method_calls.append(("add_to_watchlist", {"ts_code": ts_code, "stock_name": stock_name, "note": note}))
+        return self.add_result
+
     async def search_stocks(self, keyword: str) -> None:
         self.method_calls.append(("search_stocks", {"keyword": keyword}))
 
@@ -1401,10 +1413,10 @@ class TestWatchlistViewAddCallback:
         on_add = callbacks["on_add"]
         on_add("000001.SZ", "平安银行", "重点")
         assert page.run_task.call_args is not None
-        # 第一个参数是 _do_add 闭包 (async), 后续为 (ts_code, stock_name, note)
+        # 第一个参数是 _do_add 闭包 (async), 后续为 (ts_code, stock_name, note, expected_note)
         handler = page.run_task.call_args.args[0]
         assert handler.__name__ == "_do_add"
-        assert page.run_task.call_args.args[1:] == ("000001.SZ", "平安银行", "重点")
+        assert page.run_task.call_args.args[1:] == ("000001.SZ", "平安银行", "重点", "")
 
     def test_do_add_success_calls_vm_and_toast(
         self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
@@ -1445,15 +1457,37 @@ class TestWatchlistViewAddCallback:
             mock_watchlist_vm.method_calls
         )
 
+    def test_do_add_conflict_keeps_dialog_and_reloads_note(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """并发变化（conflict）：不关闭对话框、不清理搜索，重读最新原备注并告警。"""
+        mock_watchlist_vm.add_result = WatchlistMutationResult("conflict", Message("watchlist_note_conflict", {}))
+        page, _ = self._render_with_add_dialog(
+            mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+        )
+        toast_calls: list[tuple[str, str]] = []
+        page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
+        page.toast.show.side_effect = lambda msg, msg_type="info": toast_calls.append((msg, msg_type))
+        page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
+        callbacks = mock_watchlist_vm.captured_add_callbacks
+        assert "on_add" in callbacks
+        callbacks["on_add"]("000001.SZ", "平安银行", "重点", "旧备注")
+        assert any("watchlist_note_conflict" in msg for msg, kind in toast_calls if kind == "warning")
+        assert ("load_existing_note", {"ts_code": "000001.SZ"}) in mock_watchlist_vm.method_calls
+        assert ("clear_search", {}) not in mock_watchlist_vm.method_calls
+        assert any("watchlist_added" in msg for msg, _ in toast_calls) is False
+
     def test_do_add_cancelled_error_propagates(
         self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
     ):
         """R2 红线：CancelledError 必须 raise（不吞没）。"""
 
-        async def _raise_cancelled(ts_code: str, stock_name: str, note: str | None = None) -> None:
+        async def _raise_cancelled(
+            ts_code: str, stock_name: str, note: str | None = None, *, expected_note: str = ""
+        ) -> None:
             raise asyncio.CancelledError()
 
-        mock_watchlist_vm.add_to_watchlist = _raise_cancelled  # type: ignore[assignment]
+        mock_watchlist_vm.add_to_watchlist_checked = _raise_cancelled  # type: ignore[assignment]
 
         page, _ = self._render_with_add_dialog(
             mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
@@ -1470,10 +1504,12 @@ class TestWatchlistViewAddCallback:
     ):
         """普通异常应显示错误 toast（不 crash）。"""
 
-        async def _raise_exc(ts_code: str, stock_name: str, note: str | None = None) -> None:
+        async def _raise_exc(
+            ts_code: str, stock_name: str, note: str | None = None, *, expected_note: str = ""
+        ) -> None:
             raise RuntimeError("add failed")
 
-        mock_watchlist_vm.add_to_watchlist = _raise_exc  # type: ignore[assignment]
+        mock_watchlist_vm.add_to_watchlist_checked = _raise_exc  # type: ignore[assignment]
 
         page, _ = self._render_with_add_dialog(
             mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state

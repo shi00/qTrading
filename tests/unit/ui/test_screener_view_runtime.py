@@ -488,9 +488,10 @@ class _FakeScreenerViewModel:
         self._set_state(strategy_params={**self._state.strategy_params, **store[name]})
         return True
 
-    async def save_preset(self, name: str, strategy_key: str, params: dict) -> None:
+    async def save_preset(self, name: str, strategy_key: str, params: dict) -> bool:
         self.method_calls.append(f"save_preset:{strategy_key}:{name}")
         self._preset_store(strategy_key)[name] = dict(params)
+        return True
 
     async def delete_preset(self, name: str, strategy_key: str) -> bool:
         self.method_calls.append(f"delete_preset:{strategy_key}:{name}")
@@ -4618,6 +4619,30 @@ class TestStrategyPresetEntry:
         ]
         assert saved_calls, "保存成功提示须经 i18n 渲染"
         assert saved_calls[-1].kwargs.get("name") == "新方案"
+
+    def test_save_preset_refused_reports_error_and_does_not_claim_success(self, screener_view_with_params_env) -> None:
+        """配置层拒写（返回 False）→ 如实报错，不刷新、不提示成功（R21）。"""
+        env = screener_view_with_params_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+
+        async def _refuse(name: str, strategy_key: str, params: dict) -> bool:
+            fake_vm.method_calls.append(f"save_preset:{strategy_key}:{name}")
+            return False
+
+        fake_vm.save_preset = _refuse
+        _rerender(env)
+        self._type_name(env, "拒写方案")
+
+        page.run_task.reset_mock()
+        page.toast.show.reset_mock()
+        _invoke(self._button(env, "screener_preset_save").on_click, _make_event())
+        self._run_last_task(env)
+
+        assert "refresh_presets:value" not in fake_vm.method_calls
+        page.toast.show.assert_called_once_with(
+            "i18n[screener_preset_save_refused]", "error", action_text=None, on_action=None
+        )
 
     def test_duplicate_save_requires_confirmation_then_overwrites(self, screener_view_with_params_env) -> None:
         """重名保存 → 先展示旧参数与替换影响；确认后才写盘."""

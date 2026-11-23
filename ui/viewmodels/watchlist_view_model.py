@@ -20,6 +20,7 @@ from typing import Any, Literal
 import pandas as pd
 
 from data.cache.cache_manager import CacheManager
+from data.persistence.daos.watchlist_dao import WatchlistNoteConflictError
 from services.stock_detail_service import StockDetailService, StockQuote
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
@@ -59,16 +60,18 @@ class StockSearchRow:
 class WatchlistMutationResult:
     """自选股增删结果（F01 局部返回类型，不扩展为全系统 Result 框架）。
 
-    ``status`` 语义（三态区分「写入」与「刷新」两类事实）：
+    ``status`` 语义（四态区分「写入」与「刷新」两类事实）：
     - ``failed``：持久化写入本身失败，列表未刷新，**不得**提示成功；
+    - ``conflict``：写入前原备注已被并发修改，本次未写入（R21 fail-closed），
+      不得关闭对话框或提示成功，需用户核对最新原备注后重试；
     - ``applied``：写入成功且列表刷新成功；
     - ``applied_refresh_failed``：写入成功但列表刷新失败（数据已落库，需提示手动刷新）。
 
-    ``message`` 仅在 ``failed`` 时给出，只含 i18n key 与安全参数，不携带原始 DB 异常字符串。
+    ``message`` 仅在 ``failed`` / ``conflict`` 时给出，只含 i18n key 与安全参数，不携带原始 DB 异常字符串。
     ``CancelledError`` 不编码为上述状态，仍向上抛出（R2）。
     """
 
-    status: Literal["failed", "applied", "applied_refresh_failed"]
+    status: Literal["failed", "conflict", "applied", "applied_refresh_failed"]
     message: Message | None = None
 
 
@@ -203,6 +206,34 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
             raise
         except Exception as e:
             message = _handle_error(e, "add_to_watchlist", self, write_state=False)
+            return WatchlistMutationResult("failed", message)
+        refreshed = await self.load_watchlist()
+        return WatchlistMutationResult("applied" if refreshed else "applied_refresh_failed")
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    async def add_to_watchlist_checked(
+        self,
+        ts_code: str,
+        stock_name: str,
+        note: str | None,
+        *,
+        expected_note: str,
+    ) -> WatchlistMutationResult:
+        """按写入前原备注 CAS 加入关注（R2-I13 / R21：并发变化即拒写）。
+
+        ``expected_note`` 为对话框展示给用户确认的原备注（未关注/无备注为空串）。
+        持久化层比较失败时不写入并抛冲突，本方法映射为 ``conflict`` ——
+        不刷新列表、不提示成功，由 View 保持对话框并提示核对最新备注。
+        """
+
+        try:
+            await self.cache.add_to_watchlist_checked(ts_code, stock_name, note, expected_note=expected_note)
+        except asyncio.CancelledError:
+            raise
+        except WatchlistNoteConflictError:
+            return WatchlistMutationResult("conflict", Message("watchlist_note_conflict", {}))
+        except Exception as e:
+            message = _handle_error(e, "add_to_watchlist_checked", self, write_state=False)
             return WatchlistMutationResult("failed", message)
         refreshed = await self.load_watchlist()
         return WatchlistMutationResult("applied" if refreshed else "applied_refresh_failed")

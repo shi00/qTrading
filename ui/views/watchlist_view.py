@@ -259,9 +259,9 @@ def WatchlistView(
             _show_mutation_toast(page, result, success_key="watchlist_removed", failure_key="watchlist_remove_failed")
 
     # --- 添加关注 (issue #433) ---
-    async def _do_add(ts_code: str, stock_name: str, note: str) -> None:
+    async def _do_add(ts_code: str, stock_name: str, note: str, expected_note: str = "") -> None:
         try:
-            result = await vm.add_to_watchlist(ts_code, stock_name, note or None)
+            result = await vm.add_to_watchlist_checked(ts_code, stock_name, note or None, expected_note=expected_note)
         except asyncio.CancelledError:
             set_add_submitting(False)
             raise
@@ -272,16 +272,23 @@ def WatchlistView(
         page = _get_page()
         if page is None:
             return
+        # 并发变化（原备注已被改写）：本次未写入，保持对话框并重读最新原备注，不提示成功。
+        if result is not None and result.status == "conflict":
+            if result.message is not None:
+                _show_toast(page, I18n.get(result.message.key, **result.message.params), "warning")
+            await vm.load_existing_note(ts_code)
+            return
         # 写入成功（含刷新失败都已在库中）才关闭对话框并清理搜索；写失败保持对话框与草稿。
         if result is not None and result.status != "failed":
             set_add_dialog_open(False)
             await vm.clear_search()
         _show_mutation_toast(page, result, success_key="watchlist_added", failure_key="watchlist_add_failed")
 
-    def _on_add(ts_code: str, stock_name: str, note: str) -> None:
+    def _on_add(ts_code: str, stock_name: str, note: str, expected_note: str = "") -> None:
         """WatchlistAddDialog on_add: 调度 _do_add 执行添加（结果驱动关闭/反馈）。
 
         F01: 不在提交前关闭对话框；提交中禁止重复确认。写失败由 _do_add 保持对话框，成功才关闭。
+        R2-I13: ``expected_note`` 为用户确认时看到的原备注，写路径以 CAS 复核并发覆盖。
         """
         if add_submitting:
             return
@@ -289,7 +296,7 @@ def WatchlistView(
         if page is None:
             return
         set_add_submitting(True)
-        page.run_task(_do_add, ts_code, stock_name, note)
+        page.run_task(_do_add, ts_code, stock_name, note, expected_note)
 
     def _on_add_search(keyword: str) -> None:
         """WatchlistAddDialog on_search: run_task 调度 VM.search_stocks (R16)。"""

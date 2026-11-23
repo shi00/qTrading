@@ -32,6 +32,24 @@ _PIN_ORIGIN_SQL = (
     "UPDATE watchlist SET added_trade_date = $2, added_price = $3 WHERE ts_code = $1 AND added_trade_date IS NULL"
 )
 
+# R2-I13 / R21：按写入前原备注 CAS（BTRIM 归一化，与 UI 展示口径一致）。
+# 影响 0 行且行不存在时方可插入；仍为 0 行即并发变化，拒写且不覆盖原值。
+_WATCHLIST_NOTE_CAS_UPDATE_SQL = (
+    "UPDATE watchlist SET stock_name = $2, note = $3 WHERE ts_code = $1 AND COALESCE(BTRIM(note), '') = $4"
+)
+_WATCHLIST_INSERT_IF_ABSENT_SQL = (
+    "INSERT INTO watchlist (ts_code, stock_name, note) "
+    "SELECT $1, $2, $3 WHERE NOT EXISTS (SELECT 1 FROM watchlist WHERE ts_code = $1)"
+)
+
+
+class WatchlistNoteConflictError(RuntimeError):
+    """写入前原备注已变化（并发覆盖）：本次未写入，原备注保持不变（R21 fail-closed）。"""
+
+    def __init__(self, ts_code: str) -> None:
+        super().__init__(f"watchlist note changed since read: {ts_code}")
+        self.ts_code = ts_code
+
 
 class WatchlistDao(BaseDao):
     """DAO for watchlist table (用户关注列表)."""
@@ -63,6 +81,42 @@ class WatchlistDao(BaseDao):
             _WATCHLIST_COLUMNS,
             pk_columns=_WATCHLIST_PK,
         )
+        origin = await self._latest_quote(ts_code)
+        if origin is not None:
+            await self._write_db(_PIN_ORIGIN_SQL, (ts_code, origin[0], origin[1]))
+        return written
+
+    async def add_to_watchlist_checked(
+        self,
+        ts_code: str,
+        stock_name: str,
+        note: str | None = None,
+        *,
+        expected_note: str,
+    ) -> int:
+        """按写入前原备注 CAS 写入关注（R2-I13 / R21：不匹配即拒写）。
+
+        ``expected_note`` 为调用方写入前读到的原备注（未关注 / 无备注传空串）。
+        先在 BTRIM 归一化口径下条件 UPDATE；影响 0 行时仅在该股票不存在时
+        INSERT，仍为 0 行即视为并发变化 → 抛 ``WatchlistNoteConflictError``，
+        本次不写入、原备注保持不变，绝不以成功收尾。
+        """
+
+        expected = (expected_note or "").strip()
+        async with self._guarded_begin() as conn:
+            updated = await conn.exec_driver_sql(
+                _WATCHLIST_NOTE_CAS_UPDATE_SQL,
+                (ts_code, stock_name, note, expected),
+            )
+            written = int(updated.rowcount or 0)
+            if written == 0:
+                inserted = await conn.exec_driver_sql(
+                    _WATCHLIST_INSERT_IF_ABSENT_SQL,
+                    (ts_code, stock_name, note),
+                )
+                written = int(inserted.rowcount or 0)
+        if written != 1:
+            raise WatchlistNoteConflictError(ts_code)
         origin = await self._latest_quote(ts_code)
         if origin is not None:
             await self._write_db(_PIN_ORIGIN_SQL, (ts_code, origin[0], origin[1]))
