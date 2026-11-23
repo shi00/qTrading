@@ -33,6 +33,7 @@ from pydantic_ai.messages import ModelResponse
 from core.agent_types import (
     AgentErrorCode,
     AgentServiceError,
+    ArtifactReadQuery,
     ResearchResult,
     ResearchResultDraft,
     is_digest,
@@ -40,6 +41,7 @@ from core.agent_types import (
 from services.agent_service.capability_wiring import build_leaf_boundary
 from services.agent_service.leaf_runtime import (
     AGENT_RESEARCH_SCENARIO_ID,
+    AdmissionCountingToolExecutor,
     LeafAgentRunner,
     LeafExecutionContext,
     LeafModelBinding,
@@ -54,11 +56,14 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "LEAF_AGENT_NAME",
     "LEAF_ATTRIBUTION_UNAVAILABLE",
+    "LEAF_BINDING_REVISION_STALE",
+    "LEAF_BINDING_REVISION_UNAVAILABLE",
     "LEAF_EMPTY_RESULT",
     "LEAF_INPUT_DIGEST_MISSING",
     "LEAF_MODEL_FAILED",
     "LEAF_MODEL_REF_UNAVAILABLE",
     "LEAF_POLICY_DENIED",
+    "LEAF_PREDECESSOR_ARTIFACT_UNAVAILABLE",
     "LEAF_RESULT_KIND",
     "LEAF_RESULT_SAVE_FAILED",
     "LEAF_ROLE_PROMPT_KEY",
@@ -88,6 +93,9 @@ LEAF_ROLE_PROMPT_KEY: Final[str] = "sub"
 #: 失败码（NodeOutcome.error_code；稳定前缀 ``leaf_*``）。
 LEAF_INPUT_DIGEST_MISSING: Final[str] = "leaf_input_digest_missing"
 LEAF_ATTRIBUTION_UNAVAILABLE: Final[str] = "leaf_attribution_unavailable"
+LEAF_BINDING_REVISION_UNAVAILABLE: Final[str] = "leaf_binding_revision_unavailable"
+LEAF_BINDING_REVISION_STALE: Final[str] = "leaf_binding_revision_stale"
+LEAF_PREDECESSOR_ARTIFACT_UNAVAILABLE: Final[str] = "leaf_predecessor_artifact_unavailable"
 LEAF_MODEL_REF_UNAVAILABLE: Final[str] = "leaf_model_ref_unavailable"
 LEAF_EMPTY_RESULT: Final[str] = "leaf_empty_result"
 LEAF_MODEL_FAILED: Final[str] = "leaf_model_failed"
@@ -209,10 +217,58 @@ async def _resolve_role_prompt(reader: RolePromptReader | None) -> RolePromptIde
     return await ThreadPoolManager().run_async(TaskType.IO, _read_saved_role_prompt, LEAF_ROLE_PROMPT_KEY)
 
 
-def _leaf_prompt(context: LeafExecutionContext) -> str:
-    """叶用户提示（只含节点目标，不注入未获准的历史或无关会话）。"""
+def _leaf_prompt(context: LeafExecutionContext, predecessor_summaries: tuple[str, ...] = ()) -> str:
+    """叶用户提示：节点目标 + 已核定前置成果摘要（不注入未获历史或无关会话）。"""
 
-    return f"请完成研究节点目标：{context.node.target}"
+    prompt = f"请完成研究节点目标：{context.node.target}"
+    if predecessor_summaries:
+        prompt += "\n\n已核定的前置成果摘要：\n" + "\n".join(predecessor_summaries)
+    return prompt
+
+
+def _split_artifact_ref(artifact_ref: str) -> tuple[str, int]:
+    """``artifact_id@version`` → 精确身份；形状不符即拒绝（不猜版本）。"""
+
+    artifact_id, _, version_text = artifact_ref.partition("@")
+    if not artifact_id or not version_text.isdigit():
+        raise ValueError("predecessor artifact ref is not 'artifact_id@version'")
+    return artifact_id, int(version_text)
+
+
+async def _read_predecessor_artifacts(
+    dao: Any, context: LeafExecutionContext, facts: LeafAttributionFacts
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """读取并核对本轮前置成果（同名轮次/同输入版/正文可用）。
+
+    任一前置不可读、跨执行/轮次/会话、输入版不一致或正文不可用即抛错——叶零
+    外发（不以后继无前置成果的猜测继续，R21）。返回 ``(引用表, 摘要表)``。
+    """
+
+    refs: list[str] = []
+    summaries: list[str] = []
+    for node_id, artifact_ref in context.predecessor_artifacts:
+        artifact_id, artifact_version = _split_artifact_ref(artifact_ref)
+        read = await dao.read_artifact(
+            ArtifactReadQuery(
+                artifact_id=artifact_id,
+                artifact_version=artifact_version,
+                execution_id=context.execution_id,
+                round_id=context.round_id,
+            ),
+            user_scope=facts.user_scope,
+        )
+        if (
+            read.session_id != facts.session_id
+            or read.execution_id != context.execution_id
+            or read.round_id != context.round_id
+            or read.input_revision != facts.input_revision
+            or not read.body_available
+        ):
+            raise ValueError(f"predecessor artifact unavailable for node {node_id}")
+        refs.append(artifact_ref)
+        if read.summary:
+            summaries.append(f"[{node_id}] {read.summary}")
+    return tuple(refs), tuple(summaries)
 
 
 def _actual_model_ref(result: Any) -> str | None:
@@ -323,6 +379,35 @@ async def run_leaf_agent(
         )
         return _failed(context, LEAF_ATTRIBUTION_UNAVAILABLE)
 
+    # 应用轮次核对：父冻结的输入版必须与权威事实一致（不一致 = 旧载荷/错轮次）。
+    if context.input_revision is None:
+        logger.warning(
+            "[LeafAgent] binding input revision missing, leaf fails without outbound (execution=%s node=%s)",
+            context.execution_id,
+            context.node.node_id,
+        )
+        return _failed(context, LEAF_BINDING_REVISION_UNAVAILABLE)
+    if facts.input_revision != context.input_revision:
+        logger.warning(
+            "[LeafAgent] binding input revision stale, leaf fails without outbound (execution=%s node=%s)",
+            context.execution_id,
+            context.node.node_id,
+        )
+        return _failed(context, LEAF_BINDING_REVISION_STALE)
+
+    try:
+        parent_artifact_refs, predecessor_summaries = await _read_predecessor_artifacts(dao, context, facts)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning(
+            "[LeafAgent] predecessor artifacts unavailable: %s (execution=%s node=%s)",
+            type(e).__name__,
+            context.execution_id,
+            context.node.node_id,
+        )
+        return _failed(context, LEAF_PREDECESSOR_ARTIFACT_UNAVAILABLE)
+
     boundary = build_leaf_boundary(
         dao,
         snapshot=binding.snapshot,
@@ -372,13 +457,17 @@ async def run_leaf_agent(
     unknown_operation_refs: tuple[str, ...] = ()
     try:
         if tool_runtime is None:
-            result = await agent.run(_leaf_prompt(context), deps=deps)
+            result = await agent.run(_leaf_prompt(context, predecessor_summaries), deps=deps)
         else:
             loop_result = await run_agent_tool_loop(
                 agent,
-                _leaf_prompt(context),
+                _leaf_prompt(context, predecessor_summaries),
                 deps=deps,
-                ports=ToolLoopPorts(executor=tool_runtime),
+                ports=ToolLoopPorts(
+                    executor=AdmissionCountingToolExecutor(
+                        tool_runtime, dao=dao, user_scope=facts.user_scope, execution_id=context.execution_id
+                    )
+                ),
             )
             result = loop_result.run_result
             unknown_operation_refs = loop_result.unknown_operation_refs
@@ -453,7 +542,7 @@ async def run_leaf_agent(
         unknown_operation_refs=unknown_operation_refs,
         ledger_refs=(),
         plan_version=None,
-        parent_artifact_refs=(),
+        parent_artifact_refs=parent_artifact_refs,
         source_refs=context.node.source_refs,
     )
     try:

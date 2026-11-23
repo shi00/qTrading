@@ -80,7 +80,7 @@ def __init__(self, *, config=None, clock=None):
 
 > R15 人工评审对照基准。新增/移除单例时同步更新本清单。
 
-**注册单例（`@register_singleton`，22 个）**：
+**注册单例（`@register_singleton`，24 个）**：
 
 | 类名 | 模块路径 | 职责 |
 |------|---------|------|
@@ -106,6 +106,8 @@ def __init__(self, *, config=None, clock=None):
 | `WriteQuality` | `data/persistence/write_quality.py` | 表级写入质量门控（coerce 比例/行数跟踪），支撑 DAT-03 写入侧质量降级 |
 | `EgressAudit` | `utils/egress_audit.py` | LLM 云端外发元数据集中审计（SEC-03；JSONL 唯一事实源 + 会话计数 + recent 缓冲 + 单例写锁） |
 | `LeafRuntimeRegistry` | `services/agent_service/workflows.py` | Agent 叶执行器登记（D-02：组装期注入、未登记明确拒绝；`_reset_singleton` 清空登记，测试自动隔离） |
+| `ActualInputBinderRegistry` | `services/agent_service/workflows.py` | 父实际输入绑定器登记（P1-07：组装期注入、未登记即 `actual_input_binding_unavailable` 父零叶派发；`_reset_singleton` 清空登记，测试自动隔离） |
+| `LeafTicketGateRegistry` | `services/agent_service/workflows.py` | 叶资源票据门登记（P1-07：组装期注入、未登记即 `leaf_ticket_gate_unavailable` 父零叶派发；`_reset_singleton` 清空登记，测试自动隔离） |
 
 **非注册单例（无 `@register_singleton`，但事实单例）**：
 

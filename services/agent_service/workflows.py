@@ -31,16 +31,19 @@ workflow/step 名称一经发布即稳定标识，重命名等同新版本；载
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Awaitable, Callable, Mapping, Set as AbstractSet
-from dataclasses import dataclass, field
-from typing import Any, Final, NoReturn
+from dataclasses import dataclass, field, replace
+from typing import Any, Final, NoReturn, Protocol
 
 from dbos import DBOS, SetWorkflowID, WorkflowSerializationFormat, WorkflowStatus, WorkflowStatusString
 
 from core.agent_types import (
     DISPLAY_STATES,
     PLAN_SPEC_VERSION,
+    AgentErrorCode,
+    AgentServiceError,
     AgentValidationError,
     PlanNodeSpec,
     PlanSpecProposal,
@@ -51,6 +54,7 @@ from core.agent_types import (
     plan_node_digest,
     plan_spec_digest,
     require_identity,
+    stable_id,
     validate_plan_spec_proposal,
 )
 from utils.singleton_registry import register_singleton
@@ -69,6 +73,11 @@ LEAF_EXECUTE_STEP_NAME: Final[str] = "agent_leaf_execute"
 LEAF_OBSERVE_STEP_NAME: Final[str] = "agent_leaf_observe"
 #: 计划准入 step 稳定名（父 workflow 的首个检查点：校验并记录计划版 + 实际输入清单）。
 PLAN_ADMIT_STEP_NAME: Final[str] = "agent_plan_admit"
+#: 实际输入绑定 step 稳定名（父 workflow 在派发任何叶之前建立应用轮次并冻结输入版）。
+ACTUAL_INPUT_BIND_STEP_NAME: Final[str] = "agent_actual_input_bind"
+#: 叶资源票据认领/释放 step 稳定名（树级额度闭环：认领容量后才启动叶）。
+LEAF_TICKET_CLAIM_STEP_NAME: Final[str] = "agent_leaf_ticket_claim"
+LEAF_TICKET_RELEASE_STEP_NAME: Final[str] = "agent_leaf_ticket_release"
 
 #: 载荷结构版本（进入封闭校验；跨版本恢复前须核对兼容矩阵 §8.4）。
 PAYLOAD_VERSION: Final[int] = 1
@@ -99,14 +108,20 @@ _RESEARCH_PAYLOAD_KEYS: Final = frozenset({"payload_version", "execution_id", "r
 #: 父载荷兼容扩展键（缺省语义见各解码器）：重试轮保留前置、角色能力策略、
 #: 输入版本指纹。缺省不放开任意键。
 _RESEARCH_PAYLOAD_OPTIONAL_KEYS: Final = frozenset(
-    {"preserved_outcomes", "role_capabilities", "input_version_digest", "preserved_input_manifest"}
+    {
+        "preserved_outcomes",
+        "role_capabilities",
+        "input_version_digest",
+        "preserved_input_manifest",
+        "binding_identity",
+    }
 )
 _LEAF_PAYLOAD_KEYS: Final = frozenset({"payload_version", "execution_id", "round_id", "plan_digest", "node"})
-#: 叶载荷兼容扩展键：本次采用的前置输入指纹（R2-I09；缺省表示未记录）。
-_LEAF_PAYLOAD_OPTIONAL_KEYS: Final = frozenset({"input_digest"})
+#: 叶载荷兼容扩展键：采用的输入指纹、叶持久身份、应用轮次输入版、已验证前置成果引用。
+_LEAF_PAYLOAD_OPTIONAL_KEYS: Final = frozenset({"input_digest", "leaf_id", "input_revision", "predecessor_artifacts"})
 _NODE_OUTCOME_KEYS: Final = frozenset({"node_id", "state", "error_code", "artifact_ref"})
-#: 叶结果兼容扩展键：该叶实际采用的输入指纹（缺省 = 未报告，不伪造）。
-_NODE_OUTCOME_OPTIONAL_KEYS: Final = frozenset({"input_digest"})
+#: 叶结果兼容扩展键：该叶实际采用的输入指纹（缺省 = 未报告，不伪造）、实际退出是否已核。
+_NODE_OUTCOME_OPTIONAL_KEYS: Final = frozenset({"input_digest", "exit_verified"})
 
 #: 叶状态语义分类（值域 = 冻结的 display_state 15 值，不自造词表）。
 _SUCCESS_STATES: Final[frozenset[str]] = frozenset({"complete"})
@@ -190,6 +205,14 @@ def _require_payload_version(value: Mapping[str, object], path: str) -> int:
     return version
 
 
+def _require_positive_int(value: object, path: str) -> int:
+    """正整数身份（版本/代次下限 1；布尔不算整数，不冒充已绑定）。"""
+
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        _fail("invalid_range", path)
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class NodeOutcome:
     """叶终态事实（一条叶执行的可核对结果；状态取冻结 display_state 值）。
@@ -197,6 +220,8 @@ class NodeOutcome:
     ``error_code``/``artifact_ref``/``input_digest`` 缺失以 ``None`` 表示（不填充
     业务合法值，R21）。``input_digest`` 为该叶**实际采用**的输入指纹（R2-I09）：
     有值时才可作为「仍适用」证据被重试轮复用；未报告不得推断为同一输入。
+    ``exit_verified`` 表示叶执行的实际退出是否已被核对（有落盘执行记录或成功
+    返回）；未核退出不得被当作已结束（票据保持占用，见 :class:`LeafTicketLease`）。
     """
 
     node_id: str
@@ -204,6 +229,7 @@ class NodeOutcome:
     error_code: str | None = None
     artifact_ref: str | None = None
     input_digest: str | None = None
+    exit_verified: bool = True
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -212,6 +238,7 @@ class NodeOutcome:
             "error_code": self.error_code,
             "artifact_ref": self.artifact_ref,
             "input_digest": self.input_digest,
+            "exit_verified": self.exit_verified,
         }
 
 
@@ -225,6 +252,14 @@ def _opt_digest_or_none(value: object, path: str) -> str | None:
     if value is None:
         return None
     return _require_digest(value, path)
+
+
+def _require_bool_default_true(value: object, path: str) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, bool):
+        _fail("invalid_type", path)
+    return value
 
 
 def decode_node_outcome(value: object, path: str = "$.node_outcome") -> NodeOutcome:
@@ -242,6 +277,7 @@ def decode_node_outcome(value: object, path: str = "$.node_outcome") -> NodeOutc
         error_code=_opt_str_or_none(value["error_code"], f"{path}.error_code"),
         artifact_ref=_opt_str_or_none(value["artifact_ref"], f"{path}.artifact_ref"),
         input_digest=_opt_digest_or_none(value.get("input_digest"), f"{path}.input_digest"),
+        exit_verified=_require_bool_default_true(value.get("exit_verified"), f"{path}.exit_verified"),
     )
 
 
@@ -252,11 +288,17 @@ def build_leaf_payload(
     plan_digest: str,
     node: PlanNodeSpec,
     input_digest: str | None = None,
+    leaf_id: str | None = None,
+    input_revision: int | None = None,
+    predecessor_artifacts: tuple[tuple[str, str], ...] = (),
 ) -> dict[str, Any]:
-    """构造叶 workflow 载荷（PORTABLE JSON 可序列化；封闭键 + 可选输入指纹）。
+    """构造叶 workflow 载荷（PORTABLE JSON 可序列化；封闭键 + 可选身份扩展）。
 
     ``input_digest`` 为父在准入清单中为该节点确定的前置输入指纹：叶据此执行
     并在终态事实中回报，缺失时不写入键（不以占位值冒充已记录）。
+    ``leaf_id``/``input_revision`` 为父绑定应用轮次后冻结的叶身份与输入版；
+    ``predecessor_artifacts`` 为父核定的本轮前置成果引用（``node_id → ref``），
+    叶读取并核对后才可外发。
     """
 
     payload: dict[str, Any] = {
@@ -268,7 +310,21 @@ def build_leaf_payload(
     }
     if input_digest is not None:
         payload["input_digest"] = _require_digest(input_digest, "$.input_digest")
+    if leaf_id is not None:
+        payload["leaf_id"] = _require_str(leaf_id, "$.leaf_id")
+    if input_revision is not None:
+        payload["input_revision"] = _require_positive_int(input_revision, "$.input_revision")
+    if predecessor_artifacts:
+        payload["predecessor_artifacts"] = [_artifact_ref_wire(ref) for ref in predecessor_artifacts]
     return payload
+
+
+def _artifact_ref_wire(ref: tuple[str, str]) -> list[str]:
+    node_id, artifact_ref = ref
+    return [
+        _require_str(node_id, "$.predecessor_artifacts.node_id"),
+        _require_str(artifact_ref, "$.predecessor_artifacts.artifact_ref"),
+    ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,7 +332,10 @@ class LeafExecutionContext:
     """叶执行上下文（身份三元组 + 节点 + 采用的输入指纹；不靠隐式全局）。
 
     轮次进入上下文是重试轮隔离的前提：新轮新身份，不复用旧轮成果。
-    ``input_digest`` 为父准入清单确定的输入版本指纹（缺省 = 未记录，不推断）。
+    ``input_digest`` 为父准入清单确定的输入版本指纹（缺省 = 未记录，不推断）；
+    ``leaf_id`` 为父绑定的叶持久身份（缺省 = 旧载荷，叶按三元组派生核对）；
+    ``input_revision`` 为父冻结的应用轮次输入版（缺省 = 未绑定，叶零外发）；
+    ``predecessor_artifacts`` 为父核定的本轮前置成果引用（``node_id → ref``）。
     """
 
     execution_id: str
@@ -284,21 +343,65 @@ class LeafExecutionContext:
     plan_digest: str
     node: PlanNodeSpec
     input_digest: str | None = None
+    leaf_id: str | None = None
+    input_revision: int | None = None
+    predecessor_artifacts: tuple[tuple[str, str], ...] = ()
+
+
+def _decode_predecessor_artifacts(value: object, path: str) -> tuple[tuple[str, str], ...]:
+    """严格解码前置成果引用表（节点唯一；引用为非空文本；缺省为空）。"""
+
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        _fail("invalid_type", path)
+    refs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(value):
+        item_path = f"{path}[{index}]"
+        if not isinstance(item, list) or len(item) != 2:
+            _fail("invalid_type", item_path)
+        node_id = _require_str(item[0], f"{item_path}.node_id")
+        if node_id in seen:
+            _fail("duplicate_node", f"{item_path}.node_id")
+        seen.add(node_id)
+        refs.append((node_id, _require_str(item[1], f"{item_path}.artifact_ref")))
+    return tuple(refs)
 
 
 def decode_leaf_payload(value: object, path: str = "$.leaf_payload") -> LeafExecutionContext:
-    """严格解码叶载荷为 :class:`LeafExecutionContext`。"""
+    """严格解码叶载荷为 :class:`LeafExecutionContext`。
+
+    ``leaf_id`` 出现时必须等于按三元组派生的稳定叶身份（父绑定身份不得与
+    载荷身份脱钩）；``input_revision`` 出现时必须为正整数。
+    """
 
     if not isinstance(value, dict):
         _fail("invalid_type", path)
     _require_keys_with_optional(value, _LEAF_PAYLOAD_KEYS, _LEAF_PAYLOAD_OPTIONAL_KEYS, path)
     _require_payload_version(value, path)
+    execution_id = _require_str(value["execution_id"], f"{path}.execution_id")
+    round_id = _require_str(value["round_id"], f"{path}.round_id")
+    node = decode_plan_node_spec(value["node"], f"{path}.node")
+    leaf_id = _opt_str_or_none(value.get("leaf_id"), f"{path}.leaf_id")
+    if leaf_id is not None and leaf_id != leaf_workflow_id(
+        execution_id=execution_id, round_id=round_id, node_id=node.node_id
+    ):
+        _fail("leaf_id_mismatch", f"{path}.leaf_id")
+    raw_revision = value.get("input_revision")
     return LeafExecutionContext(
-        execution_id=_require_str(value["execution_id"], f"{path}.execution_id"),
-        round_id=_require_str(value["round_id"], f"{path}.round_id"),
+        execution_id=execution_id,
+        round_id=round_id,
         plan_digest=_require_digest(value["plan_digest"], f"{path}.plan_digest"),
-        node=decode_plan_node_spec(value["node"], f"{path}.node"),
+        node=node,
         input_digest=_opt_digest_or_none(value.get("input_digest"), f"{path}.input_digest"),
+        leaf_id=leaf_id,
+        input_revision=(
+            None if raw_revision is None else _require_positive_int(raw_revision, f"{path}.input_revision")
+        ),
+        predecessor_artifacts=_decode_predecessor_artifacts(
+            value.get("predecessor_artifacts"), f"{path}.predecessor_artifacts"
+        ),
     )
 
 
@@ -319,6 +422,53 @@ def leaf_workflow_id(*, execution_id: str, round_id: str, node_id: str) -> str:
     return "agent_leaf:" + ":".join((_escape(execution_id), _escape(round_id), _escape(node_id)))
 
 
+_BINDING_IDENTITY_KEYS: Final = frozenset(
+    {"user_scope", "session_id", "workflow_code_version", "run_epoch", "expected_input_revision"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ParentBindIdentity:
+    """派发侧冻结的应用轮次身份（父 workflow 建立真实轮次的唯一来源）。
+
+    父载荷本身只带 execution/round/计划，**不得**自造用户域或输入版；本结构由
+    派发侧在受理后随载荷冻结，父据此调用 :func:`record_actual_input_binding`
+    建立 ``agent_round``（叶归属读取才可能成功）。
+    """
+
+    user_scope: str
+    session_id: str
+    workflow_code_version: str
+    run_epoch: int
+    expected_input_revision: int
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "user_scope": self.user_scope,
+            "session_id": self.session_id,
+            "workflow_code_version": self.workflow_code_version,
+            "run_epoch": self.run_epoch,
+            "expected_input_revision": self.expected_input_revision,
+        }
+
+
+def decode_binding_identity(value: object, path: str = "$.binding_identity") -> ParentBindIdentity:
+    """严格解码派发侧冻结身份（全键必填、禁额外键、版本/代次下限 1）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_exact_keys(value, _BINDING_IDENTITY_KEYS, path)
+    return ParentBindIdentity(
+        user_scope=_require_str(value["user_scope"], f"{path}.user_scope"),
+        session_id=_require_str(value["session_id"], f"{path}.session_id"),
+        workflow_code_version=_require_str(value["workflow_code_version"], f"{path}.workflow_code_version"),
+        run_epoch=_require_positive_int(value["run_epoch"], f"{path}.run_epoch"),
+        expected_input_revision=_require_positive_int(
+            value["expected_input_revision"], f"{path}.expected_input_revision"
+        ),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ResearchPayload:
     """父载荷完整解码结果（严格封闭；可选兼容键缺省以 ``None``/空元组表示）。
@@ -326,6 +476,7 @@ class ResearchPayload:
     ``role_capabilities`` 为本次准入使用的角色 → 允许能力键策略（派发侧随载荷
     冻结，避免工作流侧无策略来源时默认放行）；``input_version_digest`` 为本次
     执行所依据的输入版本指纹（缺省 = 未核定，不作「仍适用」证据，R2-I09）。
+    ``binding_identity`` 为派发侧冻结的应用轮次身份（缺省 = 未接线，父零派发）。
     """
 
     execution_id: str
@@ -336,6 +487,7 @@ class ResearchPayload:
     role_capabilities: Mapping[str, frozenset[str]] | None
     input_version_digest: str | None
     preserved_input_manifest: Mapping[str, str] | None
+    binding_identity: ParentBindIdentity | None
 
 
 def _decode_digest_map(value: object, path: str) -> dict[str, str]:
@@ -405,6 +557,11 @@ def decode_research_payload_full(value: object, path: str = "$.research_payload"
             None
             if raw_input_manifest is None
             else _decode_digest_map(raw_input_manifest, f"{path}.preserved_input_manifest")
+        ),
+        binding_identity=(
+            None
+            if value.get("binding_identity") is None
+            else decode_binding_identity(value["binding_identity"], f"{path}.binding_identity")
         ),
     )
 
@@ -698,6 +855,369 @@ async def record_plan_admission(admission: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# 实际输入绑定（应用轮次 + 准确前置身身份；父派发任何叶之前的强制检查点）
+# ---------------------------------------------------------------------------
+
+_BINDING_KEYS: Final = frozenset({"execution_id", "round_id", "plan_digest", "input_revision", "owner_epoch", "leaves"})
+_BINDING_LEAF_KEYS: Final = frozenset({"node_id", "leaf_id", "input_digest"})
+
+
+def _canonical_json(payload: object) -> str:
+    """规范 JSON 文本（键序稳定、无空白；冻结输入由 DAO 视作 CanonicalJson）。"""
+
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False)
+
+
+def leaf_ticket_slot_id(execution_id: str, round_id: str, node_id: str) -> str:
+    """叶票据稳定身份（同执行/轮次/节点幂等重放；已释放不得复用）。"""
+
+    return stable_id(
+        "leaf_ticket",
+        [
+            _require_str(execution_id, "$.leaf_ticket.execution_id"),
+            _require_str(round_id, "$.leaf_ticket.round_id"),
+            _require_str(node_id, "$.leaf_ticket.node_id"),
+        ],
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class LeafIdentity:
+    """一张叶的冻结派发身份：节点 + 持久叶 workflow 身份 + 采用的输入指纹。"""
+
+    node_id: str
+    leaf_id: str
+    input_digest: str
+
+    def to_wire(self) -> dict[str, str]:
+        return {"node_id": self.node_id, "leaf_id": self.leaf_id, "input_digest": self.input_digest}
+
+
+@dataclass(frozen=True, slots=True)
+class ActualInputBinding:
+    """父绑定的实际输入事实（应用轮次 + 每叶身份；叶派发前必须冻结）。
+
+    ``input_revision`` 为 DAO 建立的有效输入版（叶据此核对归属事实未过期）；
+    ``owner_epoch`` 为执行代次（票据认领/释放的权威身份）。``leaves`` 覆盖
+    本次准入清单可派发的全部节点（无输入指纹的节点不进入清单，由调度器阻断）。
+    """
+
+    execution_id: str
+    round_id: str
+    plan_digest: str
+    input_revision: int
+    owner_epoch: int
+    leaves: tuple[LeafIdentity, ...]
+
+    def leaf(self, node_id: str) -> LeafIdentity | None:
+        for leaf in self.leaves:
+            if leaf.node_id == node_id:
+                return leaf
+        return None
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "execution_id": self.execution_id,
+            "round_id": self.round_id,
+            "plan_digest": self.plan_digest,
+            "input_revision": self.input_revision,
+            "owner_epoch": self.owner_epoch,
+            "leaves": [leaf.to_wire() for leaf in self.leaves],
+        }
+
+
+def decode_actual_input_binding(value: object, path: str = "$.actual_input_binding") -> ActualInputBinding:
+    """严格解码实际输入绑定（全键必填、叶节点唯一、身份下限 1）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_exact_keys(value, _BINDING_KEYS, path)
+    raw_leaves = value["leaves"]
+    if not isinstance(raw_leaves, list):
+        _fail("invalid_type", f"{path}.leaves")
+    leaves: list[LeafIdentity] = []
+    seen: set[str] = set()
+    for index, raw_leaf in enumerate(raw_leaves):
+        leaf_path = f"{path}.leaves[{index}]"
+        if not isinstance(raw_leaf, dict):
+            _fail("invalid_type", leaf_path)
+        _require_exact_keys(raw_leaf, _BINDING_LEAF_KEYS, leaf_path)
+        node_id = _require_str(raw_leaf["node_id"], f"{leaf_path}.node_id")
+        if node_id in seen:
+            _fail("duplicate_node", f"{leaf_path}.node_id")
+        seen.add(node_id)
+        leaves.append(
+            LeafIdentity(
+                node_id=node_id,
+                leaf_id=_require_str(raw_leaf["leaf_id"], f"{leaf_path}.leaf_id"),
+                input_digest=_require_digest(raw_leaf["input_digest"], f"{leaf_path}.input_digest"),
+            )
+        )
+    return ActualInputBinding(
+        execution_id=_require_str(value["execution_id"], f"{path}.execution_id"),
+        round_id=_require_str(value["round_id"], f"{path}.round_id"),
+        plan_digest=_require_digest(value["plan_digest"], f"{path}.plan_digest"),
+        input_revision=_require_positive_int(value["input_revision"], f"{path}.input_revision"),
+        owner_epoch=_require_positive_int(value["owner_epoch"], f"{path}.owner_epoch"),
+        leaves=tuple(leaves),
+    )
+
+
+def validate_actual_input_binding(
+    binding: ActualInputBinding,
+    *,
+    execution_id: str,
+    round_id: str,
+    plan_digest: str,
+    plan: PlanSpecProposal,
+    manifest: ActualInputManifest,
+) -> None:
+    """核对绑定与本次计划/轮次/准入清单一致（否则父零派发）。
+
+    - 身份三元组与计划版必须相等（绑定不得跨执行/轮次/计划版冒充）；
+    - 叶集合必须恰好覆盖准入清单记录的全部节点（无重复、无遗漏、无多余）；
+    - 每张叶的 ``leaf_id`` 必须等于按三元组派生的稳定身份、输入指纹等于清单；
+    - 其余计划节点（清单未记录 = 输入不可核）不进入绑定，由调度器阻断其派发。
+    """
+
+    if binding.execution_id != execution_id:
+        _fail("binding_execution_mismatch", "$.actual_input_binding.execution_id")
+    if binding.round_id != round_id:
+        _fail("binding_round_mismatch", "$.actual_input_binding.round_id")
+    if binding.plan_digest != plan_digest:
+        _fail("binding_plan_mismatch", "$.actual_input_binding.plan_digest")
+    expected = {record.node_id: record.input_digest for record in manifest.nodes}
+    bound = {leaf.node_id: leaf for leaf in binding.leaves}
+    if set(bound) != set(expected):
+        _fail("binding_coverage_mismatch", "$.actual_input_binding.leaves")
+    plan_nodes = {node.node_id for node in plan.nodes}
+    for node_id, leaf in bound.items():
+        if node_id not in plan_nodes:
+            _fail("binding_unknown_node", f"$.actual_input_binding.leaves[{node_id}]")
+        if leaf.input_digest != expected[node_id]:
+            _fail("binding_input_mismatch", f"$.actual_input_binding.leaves[{node_id}].input_digest")
+        if leaf.leaf_id != leaf_workflow_id(execution_id=execution_id, round_id=round_id, node_id=node_id):
+            _fail("binding_leaf_identity_mismatch", f"$.actual_input_binding.leaves[{node_id}].leaf_id")
+
+
+#: 父绑定请求 wire 的边界键（由父按载荷 + 派发侧身份构造，PORTABLE JSON）。
+_PARENT_BIND_REQUEST_KEYS: Final = frozenset(
+    {
+        "user_scope",
+        "session_id",
+        "execution_id",
+        "round_id",
+        "plan_digest",
+        "workflow_id",
+        "workflow_code_version",
+        "run_epoch",
+        "expected_input_revision",
+        "frozen_manifest",
+        "actual_input",
+        "input_digests",
+    }
+)
+
+
+def build_parent_bind_request(
+    identity: ParentBindIdentity,
+    *,
+    execution_id: str,
+    round_id: str,
+    plan_digest: str,
+    workflow_id: str,
+    frozen_manifest: str,
+    actual_input: str,
+    input_digests: Mapping[str, str],
+) -> dict[str, Any]:
+    """构造父绑定请求 wire（派发侧身份 + 父冻结的载荷/实际输入清单）。"""
+
+    return {
+        "user_scope": _require_str(identity.user_scope, "$.binding_identity.user_scope"),
+        "session_id": _require_str(identity.session_id, "$.binding_identity.session_id"),
+        "execution_id": _require_str(execution_id, "$.execution_id"),
+        "round_id": _require_str(round_id, "$.round_id"),
+        "plan_digest": _require_digest(plan_digest, "$.plan_digest"),
+        "workflow_id": _require_str(workflow_id, "$.workflow_id"),
+        "workflow_code_version": _require_str(
+            identity.workflow_code_version, "$.binding_identity.workflow_code_version"
+        ),
+        "run_epoch": _require_positive_int(identity.run_epoch, "$.binding_identity.run_epoch"),
+        "expected_input_revision": _require_positive_int(
+            identity.expected_input_revision, "$.binding_identity.expected_input_revision"
+        ),
+        "frozen_manifest": _require_str(frozen_manifest, "$.frozen_manifest"),
+        "actual_input": _require_str(actual_input, "$.actual_input"),
+        "input_digests": {
+            _require_str(node_id, "$.input_digests.node_id"): _require_digest(digest, f"$.input_digests.{node_id}")
+            for node_id, digest in input_digests.items()
+        },
+    }
+
+
+#: 父绑定器：接收绑定请求 wire，返回实际输入绑定 wire（生产为 DAO 适配）。
+ActualInputBinder = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+
+
+@register_singleton
+class ActualInputBinderRegistry:
+    """父实际输入绑定器登记表（组装期注入；未登记 = 父零派发，fail-closed）。"""
+
+    _instance: ActualInputBinder | None = None
+
+    @classmethod
+    def install(cls, binder: ActualInputBinder) -> None:
+        if not callable(binder):
+            raise TypeError("actual input binder must be callable")
+        cls._instance = binder
+
+    @classmethod
+    def require(cls) -> ActualInputBinder:
+        binder = cls._instance
+        if binder is None:
+            raise RuntimeError("actual_input_binding_unavailable (assemble agent runtime first)")
+        return binder
+
+    @classmethod
+    def _reset_singleton(cls) -> None:
+        cls._instance = None
+
+
+@DBOS.step(name=ACTUAL_INPUT_BIND_STEP_NAME)
+async def record_actual_input_binding(request: dict[str, Any]) -> dict[str, Any]:
+    """实际输入绑定检查点（父首个叶派发前的强制 step）。
+
+    以单个 step 记录输出：应用轮次、输入版、执行代次与每叶身份随原生执行记录
+    持久化，重放按记录还原；绑定失败即父零叶派发（不以缺轮次推进）。
+    """
+
+    if not isinstance(request, dict):
+        _fail("invalid_type", "$.bind_request")
+    _require_exact_keys(request, _PARENT_BIND_REQUEST_KEYS, "$.bind_request")
+    binder = ActualInputBinderRegistry.require()
+    return decode_actual_input_binding(await binder(request)).to_wire()
+
+
+# ---------------------------------------------------------------------------
+# 叶资源票据门（树级额度闭环：认领容量后才启动叶，退出核对后才释放）
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class LeafTicketLease:
+    """一张叶资源票据的落定身份（释放必须完整匹配，不用旧 owner）。"""
+
+    slot_id: str
+    user_scope: str
+    execution_id: str
+    node_id: str
+    owner_epoch: int
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "slot_id": self.slot_id,
+            "user_scope": self.user_scope,
+            "execution_id": self.execution_id,
+            "node_id": self.node_id,
+            "owner_epoch": self.owner_epoch,
+        }
+
+
+class LeafTicketGate(Protocol):
+    """叶资源票据端口（生产为 ``AgentDao.claim_resource``/``release_resource``）。
+
+    未接线即父零派发：树级额度是安全不变量，缺票据不放行任何叶。
+    """
+
+    async def claim(self, *, execution_id: str, round_id: str, node_id: str) -> LeafTicketLease | None: ...
+
+    async def release(self, lease: LeafTicketLease, *, exit_verified: bool) -> None: ...
+
+
+@register_singleton
+class LeafTicketGateRegistry:
+    """叶票据门登记表（组装期注入；未登记 = 父零派发，fail-closed）。"""
+
+    _instance: LeafTicketGate | None = None
+
+    @classmethod
+    def install(cls, gate: LeafTicketGate) -> None:
+        if gate is None:
+            raise TypeError("leaf ticket gate must not be None")
+        cls._instance = gate
+
+    @classmethod
+    def require(cls) -> LeafTicketGate:
+        gate = cls._instance
+        if gate is None:
+            raise RuntimeError("leaf_ticket_gate_unavailable (assemble agent runtime first)")
+        return gate
+
+    @classmethod
+    def _reset_singleton(cls) -> None:
+        cls._instance = None
+
+
+_TICKET_CLAIM_KEYS: Final = frozenset({"execution_id", "round_id", "node_id", "owner_epoch"})
+_TICKET_RELEASE_KEYS: Final = frozenset(
+    {"slot_id", "user_scope", "execution_id", "node_id", "owner_epoch", "exit_verified"}
+)
+
+
+@DBOS.step(name=LEAF_TICKET_CLAIM_STEP_NAME)
+async def claim_leaf_ticket(request: dict[str, Any]) -> dict[str, Any]:
+    """叶票据认领 step：返回 ``{"lease": {...} | None, "reason": str | None}``。
+
+    ``lease`` 为空表示容量/策略受阻（原因随结果记录）；父据此阻断该节点而不
+    启动叶（不借超限派发冒充已推进）。登记缺失即 fail-closed（RuntimeError）。
+    """
+
+    if not isinstance(request, dict):
+        _fail("invalid_type", "$.ticket_claim")
+    _require_exact_keys(request, _TICKET_CLAIM_KEYS, "$.ticket_claim")
+    execution_id = _require_str(request["execution_id"], "$.ticket_claim.execution_id")
+    round_id = _require_str(request["round_id"], "$.ticket_claim.round_id")
+    node_id = _require_str(request["node_id"], "$.ticket_claim.node_id")
+    _require_positive_int(request["owner_epoch"], "$.ticket_claim.owner_epoch")
+    gate = LeafTicketGateRegistry.require()
+    try:
+        lease = await gate.claim(execution_id=execution_id, round_id=round_id, node_id=node_id)
+    except AgentServiceError as exc:
+        if exc.code is AgentErrorCode.BUDGET_BLOCKED:
+            return {"lease": None, "reason": "budget_blocked"}
+        if exc.code is AgentErrorCode.POLICY_DENIED:
+            return {"lease": None, "reason": "policy_denied"}
+        raise
+    return {"lease": None if lease is None else lease.to_wire(), "reason": None if lease is not None else "unavailable"}
+
+
+@DBOS.step(name=LEAF_TICKET_RELEASE_STEP_NAME)
+async def release_leaf_ticket(request: dict[str, Any]) -> bool:
+    """叶票据释放 step：按 ``exit_verified`` 决定是否真正放空容量。
+
+    未核退出（``exit_verified=False``）时保持占用、返回 ``False``——不以未知
+    结果回收树级额度。登记缺失即 fail-closed（RuntimeError）。
+    """
+
+    if not isinstance(request, dict):
+        _fail("invalid_type", "$.ticket_release")
+    _require_exact_keys(request, _TICKET_RELEASE_KEYS, "$.ticket_release")
+    lease = LeafTicketLease(
+        slot_id=_require_str(request["slot_id"], "$.ticket_release.slot_id"),
+        user_scope=_require_str(request["user_scope"], "$.ticket_release.user_scope"),
+        execution_id=_require_str(request["execution_id"], "$.ticket_release.execution_id"),
+        node_id=_require_str(request["node_id"], "$.ticket_release.node_id"),
+        owner_epoch=_require_positive_int(request["owner_epoch"], "$.ticket_release.owner_epoch"),
+    )
+    exit_verified = request["exit_verified"]
+    if not isinstance(exit_verified, bool):
+        _fail("invalid_type", "$.ticket_release.exit_verified")
+    gate = LeafTicketGateRegistry.require()
+    await gate.release(lease, exit_verified=exit_verified)
+    return exit_verified
+
+
+# ---------------------------------------------------------------------------
 # 汇总（只报叶事实，不宣称目标覆盖）
 # ---------------------------------------------------------------------------
 
@@ -872,12 +1392,49 @@ class LeafDagScheduler:
             if expected is not None:
                 self._adopted[node_id] = expected
 
-    def record(self, outcome: NodeOutcome) -> None:
-        """登记叶终态事实；非成功终态递归阻塞其下游。
+    def block(self, node_id: str, reason: str) -> None:
+        """显式阻断未启动节点（票据受阻/前置成果缺失等），并逐层阻断其下游。
+
+        已启动节点不得事后阻断（其事实由叶回报决定，不覆盖）；同一节点保留
+        首次阻断原因（不覆盖已记录的确定原因）。
+        """
+
+        self.node(node_id)
+        if node_id in self._started:
+            _fail("node_already_started", f"$.nodes[{node_id}]")
+        if node_id in self._blocked:
+            return
+        self._blocked[node_id] = _require_str(reason, "$.block_reason")
+        self._block_dependents(node_id, f"blocked_by:{node_id}")
+
+    def predecessor_artifacts(self, node_id: str) -> tuple[tuple[str, str], ...] | None:
+        """本轮已成功前置的成果引用（``node_id → artifact_ref``）；不可核即 ``None``。
+
+        只取**本轮**已启动并要求成功前置的成果：任一前置缺少 ``artifact_ref``
+        即返回 ``None``（父不得以无成果前置启动后继）。重试轮保留前置属旧轮
+        成果，其轮次不在本轮载荷内，不在此处返回（由保留事实承载）。
+        """
+
+        node = self.node(node_id)
+        refs: list[tuple[str, str]] = []
+        for dependency in node.depends_on:
+            outcome = self._outcomes.get(dependency)
+            if outcome is None:
+                continue
+            if outcome.state not in _SUCCESS_STATES or outcome.artifact_ref is None:
+                return None
+            refs.append((dependency, outcome.artifact_ref))
+        return tuple(refs)
+
+    def record(self, outcome: NodeOutcome) -> bool:
+        """登记叶终态事实；返回是否为新事实（幂等重复事实返回 ``False``）。
+
+        非成功终态递归阻塞其下游。
 
         终态单调（同类 F07「迟到 running 不覆终态」）：已登记成功/阻塞/结案未知
         终态后再记任何事实都属冲突（迟到/重复事实不得把收敛翻回未收敛，也不得
-        复活已结案的 ``closed_unknown``，F10）。
+        复活已结案的 ``closed_unknown``，F10）。非终态重复事实不刷新进度（父据此
+        累计无进展观察，不因同一未知事实空转）。
 
         有准入清单时核该叶回报的输入指纹：成功但指纹与清单不符（输入已变）时
         阻断其全部下游（``upstream_input_changed:<node_id>``），不使其成果被下游
@@ -890,16 +1447,19 @@ class LeafDagScheduler:
         existing = self._outcomes.get(outcome.node_id)
         if existing is not None and existing.state in _TERMINAL_STATES:
             if existing == outcome:
-                return  # 幂等：同一终态事实重复登记（观察重投）不视为冲突
+                return False  # 幂等：同一终态事实重复登记（观察重投）不视为冲突
             _fail("node_outcome_conflict", f"$.outcomes[{outcome.node_id}]")
+        if existing is not None and existing == outcome:
+            return False
         self._outcomes[outcome.node_id] = outcome
         if outcome.state in _BLOCKING_STATES | _CLOSED_UNKNOWN_STATES:
             self._block_dependents(outcome.node_id, f"upstream_{outcome.state}:{outcome.node_id}")
-            return
+            return True
         if outcome.state in _SUCCESS_STATES and self._expected is not None:
             expected = self._expected.get(outcome.node_id)
             if expected is not None and outcome.input_digest is not None and outcome.input_digest != expected:
                 self._block_dependents(outcome.node_id, f"upstream_input_changed:{outcome.node_id}")
+        return True
 
     def _block_dependents(self, node_id: str, reason: str) -> None:
         for dependent in self._dependents.get(node_id, ()):
@@ -962,8 +1522,11 @@ class LeafDagScheduler:
 LeafRunner = Callable[[LeafExecutionContext], Awaitable[NodeOutcome]]
 """叶执行器（装配期登记；接收身份上下文与节点，据此保存叶事实）。"""
 
-LeafStart = Callable[[PlanNodeSpec], Awaitable[str]]
+LeafStart = Callable[[PlanNodeSpec, tuple[tuple[str, str], ...]], Awaitable[str]]
 """启动就绪叶，返回观察键（DBOS 内为子 workflow ID）。
+
+第二个参数为本轮已核定前置成果引用 ``(node_id, artifact_ref)``（叶据此读取并
+核对前置成果，缺失时父不启动该叶）。
 
 **必须由父 workflow 协程按计划顺序调用**（不得包进并发任务）：启动记录按
 父体内操作序号（``parent_fid``）匹配重放；并发启动会让序号随真实时序漂移，
@@ -982,6 +1545,17 @@ LeafWaitCheckpoint = Callable[[], Awaitable[bool]]
 
 生产实现为 :func:`wait_next_observation_window`（DBOS 持久 sleep，崩溃恢复时
 跳过已完成睡眠）；纯逻辑调用可不提供，此时预算耗尽即结束本批次。
+"""
+
+LeafTicketClaim = Callable[[PlanNodeSpec], Awaitable[str | None]]
+"""启动叶前的票据认领：返回阻断原因（``None`` = 已认领可启动）。
+
+生产实现为 :func:`claim_leaf_ticket` 的父协程包装（DBOS step 记录）；缺失/
+受阻即阻断节点，不以超限派发冒充已推进。
+"""
+
+LeafTicketRelease = Callable[[PlanNodeSpec, bool], Awaitable[None]]
+"""叶终态后的票据释放：第二参数为实际退出是否已核（未核保持占用）。
 """
 
 
@@ -1007,6 +1581,8 @@ async def drive_leaf_dag(
     preserved_expected: Mapping[str, str] | None = None,
     idle_observation_limit: int | None = None,
     wait_checkpoint: LeafWaitCheckpoint | None = None,
+    claim_leaf: LeafTicketClaim | None = None,
+    release_leaf: LeafTicketRelease | None = None,
 ) -> PlanRunSummary:
     """事件驱动推进一层叶 DAG，返回叶事实汇总。
 
@@ -1035,8 +1611,22 @@ async def drive_leaf_dag(
     idle_observations = 0
     while True:
         for node_id in scheduler.ready():
+            node = scheduler.node(node_id)
+            if manifest is not None and manifest.digest_for(node_id) is None:
+                # 输入指纹不可核（清单未记录）的节点不得派发：其叶无法回报可核输入。
+                scheduler.block(node_id, f"input_manifest_unresolved:{node_id}")
+                continue
+            if claim_leaf is not None:
+                blocked_reason = await claim_leaf(node)
+                if blocked_reason is not None:
+                    scheduler.block(node_id, blocked_reason)
+                    continue
+            predecessor_artifacts = scheduler.predecessor_artifacts(node_id)
+            if predecessor_artifacts is None:
+                scheduler.block(node_id, f"predecessor_artifact_missing:{node_id}")
+                continue
             scheduler.start(node_id)
-            running[node_id] = await start_leaf(scheduler.node(node_id))
+            running[node_id] = await start_leaf(node, predecessor_artifacts)
         if scheduler.converged():
             break
         if not running:
@@ -1053,17 +1643,39 @@ async def drive_leaf_dag(
                 idle_observations = 0
                 if not await wait_checkpoint():
                     break
-                continue
             continue
-        idle_observations = 0
+        progressed = False
+        new_terminal_facts: list[tuple[str, NodeOutcome]] = []
         for node_id, outcome in facts.items():
-            if running.pop(node_id, None) is None:
+            if node_id not in running:
                 # 未启动节点的完成事实：不得计入本轮成果（身份核验）
                 _fail("outcome_unknown_node", f"$.outcomes[{node_id}]")
             if outcome.node_id != node_id:
                 # 错归属结果不得记到本节点（身份核验，DD §4.1）
                 _fail("outcome_identity_mismatch", f"$.outcomes[{node_id}].node_id")
-            scheduler.record(outcome)
+            if scheduler.record(outcome):
+                progressed = True
+                if outcome.state in _TERMINAL_STATES:
+                    new_terminal_facts.append((node_id, outcome))
+        for node_id, outcome in new_terminal_facts:
+            running.pop(node_id, None)
+            if release_leaf is not None:
+                # 已核退出才放空容量；未核退出（unknown）保持占用（树级额度闭环）。
+                await release_leaf(scheduler.node(node_id), outcome.exit_verified)
+        if progressed:
+            idle_observations = 0
+            continue
+        # 仅观察到已登记的非终态事实：无新进展。无持久等待接续者时结束本批次
+        # （不空转）；有接续者则计入无进展预算，耗尽后持久等待再观察。
+        if idle_observation_limit is None:
+            break
+        idle_observations += 1
+        if idle_observations >= idle_observation_limit:
+            if wait_checkpoint is None:
+                break
+            idle_observations = 0
+            if not await wait_checkpoint():
+                break
     return scheduler.summary()
 
 
@@ -1165,10 +1777,12 @@ def _terminal_outcome(
       投影（含 ``partial``），不被 ``ended``/``failed`` 覆盖。
 
     - ``SUCCESS``：返回值必须是本节点的封闭终态 wire（身份核验）；
-    - 有落盘成果：直接投影该成果；
+    - 有落盘成果：直接投影该成果（实际退出已核）；
     - ``ERROR`` / 恢复耗尽：``failed``（通用错误码，明细留在 DBOS 状态，R9）；
-    - ``CANCELLED``：已有执行记录但无成果（step 报错）→ ``failed``；无任何执行
-      记录（如启动隔离取消）→ ``ended``，成果覆盖未知，不用空成果冒充；
+    - ``CANCELLED``：已有执行记录但无成果（step 报错）→ ``failed``（退出已核）；
+      无任何执行记录（如启动隔离取消）→ ``unknown`` + ``exit_verified=False``：
+      执行已结束但成果不可知，**不得**报成 ``ended``（把未核退出伪装成正常结束），
+      父保持观察、票据保持占用（树级额度不因未知放空）；
     - 其余（PENDING/ENQUEUED/DELAYED）：非终态，不参与收敛。
     """
 
@@ -1176,12 +1790,12 @@ def _terminal_outcome(
         outcome = decode_node_outcome(output, f"$.children[{node_id}].output")
         if outcome.node_id != node_id:
             _fail("outcome_identity_mismatch", f"$.children[{node_id}].output.node_id")
-        return outcome
+        return replace(outcome, exit_verified=True)
     if state in _LEAF_EVIDENCE_STATUSES and step_output is not None:
         outcome = decode_node_outcome(step_output, f"$.children[{node_id}].step_output")
         if outcome.node_id != node_id:
             _fail("outcome_identity_mismatch", f"$.children[{node_id}].step_output.node_id")
-        return outcome
+        return replace(outcome, exit_verified=True)
     if state == WorkflowStatusString.ERROR.value:
         return NodeOutcome(node_id=node_id, state="failed", error_code="leaf_workflow_error")
     if state == WorkflowStatusString.MAX_RECOVERY_ATTEMPTS_EXCEEDED.value:
@@ -1189,7 +1803,13 @@ def _terminal_outcome(
     if state == WorkflowStatusString.CANCELLED.value:
         if executed:
             return NodeOutcome(node_id=node_id, state="failed", error_code="leaf_workflow_error")
-        return NodeOutcome(node_id=node_id, state="ended", error_code="leaf_workflow_cancelled")
+        # 无执行记录不能证明实际退出：报未知（非终态）而非 ended，票据不放空。
+        return NodeOutcome(
+            node_id=node_id,
+            state="unknown",
+            error_code="leaf_workflow_exit_unverified",
+            exit_verified=False,
+        )
     return None
 
 
@@ -1269,22 +1889,83 @@ async def run_research_workflow(payload: dict[str, Any]) -> dict[str, Any]:
     await record_plan_admission(admission.to_wire())
     execution_id = decoded.execution_id
     round_id = decoded.round_id
+    identity = decoded.binding_identity
+    if identity is None:
+        # 未冻结应用轮次身份即无可建立的轮次：父零叶派发（不伪造轮次、不裸派发）。
+        raise RuntimeError("actual_input_binding_unavailable (binding identity not dispatched)")
+    input_digests = {record.node_id: record.input_digest for record in admission.manifest.nodes}
+    workflow_id = DBOS.workflow_id
+    if not workflow_id:
+        raise RuntimeError("actual_input_binding_unavailable (workflow identity missing)")
+    binding = decode_actual_input_binding(
+        await record_actual_input_binding(
+            build_parent_bind_request(
+                identity,
+                execution_id=execution_id,
+                round_id=round_id,
+                plan_digest=admission.plan_digest,
+                workflow_id=workflow_id,
+                frozen_manifest=_canonical_json(payload),
+                actual_input=_canonical_json(admission.to_wire()),
+                input_digests=input_digests,
+            )
+        )
+    )
+    validate_actual_input_binding(
+        binding,
+        execution_id=execution_id,
+        round_id=round_id,
+        plan_digest=admission.plan_digest,
+        plan=decoded.plan,
+        manifest=admission.manifest,
+    )
     idle_limit = max(1, round(CHILD_OBSERVE_TIMEOUT_SEC / OBSERVE_SLICE_SEC))
+    leases: dict[str, dict[str, Any]] = {}
 
-    async def start_leaf(node: PlanNodeSpec) -> str:
+    async def start_leaf(node: PlanNodeSpec, predecessor_artifacts: tuple[tuple[str, str], ...]) -> str:
+        leaf = binding.leaf(node.node_id)
+        if leaf is None:
+            # 绑定未覆盖该节点：父不启动（无轮次身份/输入版的叶不得派发）。
+            _fail("actual_input_binding_incomplete", f"$.actual_input_binding.leaves[{node.node_id}]")
         leaf_payload = build_leaf_payload(
             execution_id=execution_id,
             round_id=round_id,
             plan_digest=admission.plan_digest,
             node=node,
-            input_digest=admission.manifest.digest_for(node.node_id),
+            input_digest=leaf.input_digest,
+            leaf_id=leaf.leaf_id,
+            input_revision=binding.input_revision,
+            predecessor_artifacts=predecessor_artifacts,
         )
         with SetWorkflowID(
-            leaf_workflow_id(execution_id=execution_id, round_id=round_id, node_id=node.node_id),
+            leaf.leaf_id,
             workflow_id_reuse_policy="return-existing",
         ):
             handle = await DBOS.start_workflow_async(run_leaf_workflow, leaf_payload)
         return handle.get_workflow_id()
+
+    async def claim_leaf(node: PlanNodeSpec) -> str | None:
+        wire = await claim_leaf_ticket(
+            {
+                "execution_id": execution_id,
+                "round_id": round_id,
+                "node_id": node.node_id,
+                "owner_epoch": binding.owner_epoch,
+            }
+        )
+        lease = wire.get("lease")
+        if lease is None:
+            return f"leaf_ticket_blocked:{wire.get('reason') or 'unavailable'}"
+        # 保留票据的准确归属（owner_epoch 以认领回执为准，释放必须完整匹配）。
+        leases[node.node_id] = lease
+        return None
+
+    async def release_leaf(node: PlanNodeSpec, exit_verified: bool) -> None:
+        lease = leases.pop(node.node_id, None)
+        if lease is None:
+            # 无认领回执即无释放身份：fail-loud，不构造虚假释放。
+            raise RuntimeError("leaf_ticket_release_without_lease")
+        await release_leaf_ticket({**lease, "exit_verified": exit_verified})
 
     async def observe_leaves(children: tuple[tuple[str, str], ...]) -> dict[str, NodeOutcome]:
         wires = await observe_leaf_children(
@@ -1306,6 +1987,8 @@ async def run_research_workflow(payload: dict[str, Any]) -> dict[str, Any]:
         preserved_expected=admission.preserved_expected,
         idle_observation_limit=idle_limit,
         wait_checkpoint=wait_next_observation_window,
+        claim_leaf=claim_leaf,
+        release_leaf=release_leaf,
     )
     return summary.to_wire()
 
@@ -1334,6 +2017,7 @@ def build_research_payload(
     role_capabilities: Mapping[str, AbstractSet[str]] | None = None,
     input_version_digest: str | None = None,
     preserved_input_manifest: Mapping[str, str] | None = None,
+    binding_identity: ParentBindIdentity | None = None,
 ) -> dict[str, Any]:
     """构造父 workflow 载荷（与保存的计划版同源内容；PORTABLE JSON 可序列化）。
 
@@ -1342,6 +2026,7 @@ def build_research_payload(
     ``role_capabilities`` 为本次准入的角色能力策略（写入载荷供工作流入口复核；
     缺省不写键，入口按无策略 fail-closed）。``input_version_digest`` 为输入版本
     指纹（缺省不写键，表示未核定，不作「仍适用」证据，R2-I09）。
+    ``binding_identity`` 为派发侧冻结的应用轮次身份（缺省不写键，父零叶派发）。
     """
 
     if not plan.nodes:
@@ -1366,6 +2051,10 @@ def build_research_payload(
             )
             for node_id, digest in preserved_input_manifest.items()
         }
+    if binding_identity is not None:
+        payload["binding_identity"] = decode_binding_identity(
+            binding_identity.to_wire(), "$.binding_identity"
+        ).to_wire()
     return payload
 
 
@@ -1468,6 +2157,7 @@ def build_retry_payload(
     preserved_outcomes: tuple[NodeOutcome, ...],
     role_capabilities: Mapping[str, AbstractSet[str]] | None = None,
     input_version_digest: str | None = None,
+    binding_identity: ParentBindIdentity | None = None,
 ) -> tuple[dict[str, Any], RetryScope]:
     """构造重试轮父载荷：``nodes`` 为范围内节点，``preserved_outcomes`` 为旧轮
     成功前置。
@@ -1514,38 +2204,56 @@ def build_retry_payload(
         role_capabilities=role_capabilities,
         input_version_digest=input_version_digest,
         preserved_input_manifest=expected or None,
+        binding_identity=binding_identity,
     )
     return payload, scope
 
 
 __all__ = [
+    "ACTUAL_INPUT_BIND_STEP_NAME",
     "IDLE_WAIT_INTERVAL_SEC",
     "LEAF_EXECUTE_STEP_NAME",
     "LEAF_OBSERVE_STEP_NAME",
+    "LEAF_TICKET_CLAIM_STEP_NAME",
+    "LEAF_TICKET_RELEASE_STEP_NAME",
     "LEAF_WORKFLOW_NAME",
     "PAYLOAD_VERSION",
     "PLAN_ADMIT_STEP_NAME",
     "RESEARCH_WORKFLOW_NAME",
+    "ActualInputBinder",
+    "ActualInputBinderRegistry",
+    "ActualInputBinding",
     "ActualInputManifest",
     "LeafDagScheduler",
     "LeafExecutionContext",
+    "LeafIdentity",
     "LeafObserve",
     "LeafRunner",
     "LeafRuntimeRegistry",
     "LeafStart",
+    "LeafTicketClaim",
+    "LeafTicketGate",
+    "LeafTicketGateRegistry",
+    "LeafTicketLease",
+    "LeafTicketRelease",
     "LeafWaitCheckpoint",
     "NodeInputRecord",
     "NodeOutcome",
+    "ParentBindIdentity",
     "PlanAdmission",
     "PlanRunSummary",
     "ResearchPayload",
     "RetryScope",
     "admit_research_plan",
     "build_leaf_payload",
+    "build_parent_bind_request",
     "build_research_payload",
     "build_retry_payload",
+    "claim_leaf_ticket",
     "compute_actual_input_manifest",
     "compute_retry_scope",
+    "decode_actual_input_binding",
+    "decode_binding_identity",
     "decode_leaf_payload",
     "decode_node_outcome",
     "decode_plan_admission",
@@ -1553,11 +2261,15 @@ __all__ = [
     "decode_research_payload_full",
     "drive_leaf_dag",
     "execute_leaf_step",
+    "leaf_ticket_slot_id",
     "leaf_workflow_id",
     "observe_leaf_children",
+    "record_actual_input_binding",
     "record_plan_admission",
+    "release_leaf_ticket",
     "run_leaf_workflow",
     "run_research_workflow",
     "submit_research_workflow",
+    "validate_actual_input_binding",
     "wait_next_observation_window",
 ]

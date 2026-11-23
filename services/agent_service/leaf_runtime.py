@@ -24,7 +24,7 @@ import functools
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Final, cast
+from typing import Any, Final, Protocol, cast
 
 from core.model_management_types import ExecutionSnapshot
 from pydantic_ai.profiles import ModelProfile
@@ -32,10 +32,18 @@ from pydantic_ai.profiles import ModelProfile
 from services.agent_service.model import ChatTurnExecutor, GatewayModel, derive_model_call_id
 from services.agent_service.tool_runtime import ToolRuntimeFactory
 from services.agent_service.workflows import (
+    ActualInputBinder,
+    ActualInputBinderRegistry,
+    ActualInputBinding,
     LeafExecutionContext,
+    LeafIdentity,
     LeafRunner,
     LeafRuntimeRegistry,
+    LeafTicketGate,
+    LeafTicketGateRegistry,
+    LeafTicketLease,
     NodeOutcome,
+    leaf_ticket_slot_id,
     leaf_workflow_id,
 )
 
@@ -82,6 +90,204 @@ class LeafRuntimeWiring:
     data_consent_provider: DataConsentProvider | None = None
     #: 工具 runtime 工厂（缺省 ``None`` = 零工具；MCP 管理器未装配前不伪造已接线）。
     tool_runtime_factory: ToolRuntimeFactory | None = None
+    #: 父实际输入绑定器（缺省不接线 = 父零叶派发；建立真实应用轮次）。
+    actual_input_binder: ActualInputBinder | None = None
+    #: 叶资源票据门（缺省不接线 = 父零叶派发；树级额度闭环）。
+    leaf_ticket_gate: LeafTicketGate | None = None
+    #: 共享 DAO（逐回合模型/工具额度计数用；缺省不计数——生产必须提供）。
+    dao: Any | None = None
+
+
+#: 逐回合出口额度计数的 DAO 最小面（生产为 ``AgentDao``）。
+class _UsageDao(Protocol):
+    async def admit_usage(self, request: Any) -> Any: ...
+
+    async def read_leaf_dispatch_facts(self, execution_id: str, round_id: str) -> Any: ...
+
+
+class AdmissionCountingExecutor:
+    """模型回合执行器包装：每次真实调用前先经 ``admit_usage`` 计数（R2-I33）。
+
+    记账失败（``BUDGET_BLOCKED`` 等）原样传播，被拒回合不发起模型外发；用户域
+    在首次调用时从权威叶派发事实读取并缓存（不信任载荷自报）。
+    """
+
+    def __init__(self, executor: ChatTurnExecutor, *, dao: _UsageDao, execution_id: str, round_id: str) -> None:
+        self._executor = executor
+        self._dao = dao
+        self._execution_id = execution_id
+        self._round_id = round_id
+        self._user_scope: str | None = None
+
+    async def _require_user_scope(self) -> str:
+        if self._user_scope is None:
+            facts = await self._dao.read_leaf_dispatch_facts(self._execution_id, self._round_id)
+            self._user_scope = str(facts.user_scope)
+        return self._user_scope
+
+    async def execute_chat_turn(
+        self, request: Any, snapshot: Any, *, binding: Mapping[str, Any], on_event: Any = None
+    ) -> Any:
+        from core.agent_types import UsageAdmissionRequest
+
+        user_scope = await self._require_user_scope()
+        await self._dao.admit_usage(
+            UsageAdmissionRequest(user_scope=user_scope, execution_id=self._execution_id, model_attempts=1)
+        )
+        return await self._executor.execute_chat_turn(request, snapshot, binding=binding, on_event=on_event)
+
+
+class AdmissionCountingToolExecutor:
+    """工具执行包装：每次真实调用前先经 ``admit_usage`` 计数（R2-I33）。
+
+    计数发生在决定/派发之前；被拒调用不产生任何工具外发。
+    """
+
+    def __init__(self, executor: Any, *, dao: _UsageDao, user_scope: str, execution_id: str) -> None:
+        self._executor = executor
+        self._dao = dao
+        self._user_scope = user_scope
+        self._execution_id = execution_id
+
+    async def execute(self, *, tool_name: str, arguments: dict[str, Any], tool_call_id: str) -> Any:
+        from core.agent_types import UsageAdmissionRequest
+
+        await self._dao.admit_usage(
+            UsageAdmissionRequest(user_scope=self._user_scope, execution_id=self._execution_id, tool_calls=1)
+        )
+        return await self._executor.execute(tool_name=tool_name, arguments=arguments, tool_call_id=tool_call_id)
+
+
+def _require_bind_text(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"actual input binding request field '{name}' must be non-empty text")
+    return value
+
+
+def build_actual_input_binder(dao: Any) -> ActualInputBinder:
+    """DAO 适配的父实际输入绑定器：建立应用轮次并冻结每叶身份与输入版。
+
+    ``round_id`` 必须等于按 ``user_scope+execution+workflow`` 派生的轮次身份；
+    回执输入版必须等于派发侧冻结的期望版（CAS 由 DAO 行锁保证）。任一不符即
+    抛错 → 父零叶派发（不伪造轮次）。
+    """
+
+    async def _binder(request: dict[str, Any]) -> dict[str, Any]:
+        from core.agent_types import BindActualInputRequest, derive_round_id
+
+        user_scope = _require_bind_text(request.get("user_scope"), "user_scope")
+        session_id = _require_bind_text(request.get("session_id"), "session_id")
+        execution_id = _require_bind_text(request.get("execution_id"), "execution_id")
+        round_id = _require_bind_text(request.get("round_id"), "round_id")
+        plan_digest = _require_bind_text(request.get("plan_digest"), "plan_digest")
+        workflow_id = _require_bind_text(request.get("workflow_id"), "workflow_id")
+        workflow_code_version = _require_bind_text(request.get("workflow_code_version"), "workflow_code_version")
+        run_epoch = request.get("run_epoch")
+        expected_input_revision = request.get("expected_input_revision")
+        if not isinstance(run_epoch, int) or isinstance(run_epoch, bool) or run_epoch < 1:
+            raise ValueError("actual input binding request 'run_epoch' must be a positive int")
+        if (
+            not isinstance(expected_input_revision, int)
+            or isinstance(expected_input_revision, bool)
+            or expected_input_revision < 1
+        ):
+            raise ValueError("actual input binding request 'expected_input_revision' must be a positive int")
+        derived = derive_round_id(user_scope=user_scope, execution_id=execution_id, workflow_id=workflow_id)
+        if derived != round_id:
+            raise ValueError("actual input binding round identity does not match workflow identity")
+        raw_digests = request.get("input_digests")
+        if not isinstance(raw_digests, Mapping) or not raw_digests:
+            raise ValueError("actual input binding request 'input_digests' must be a non-empty map")
+        input_digests = {str(node_id): str(digest) for node_id, digest in raw_digests.items()}
+        receipt = await dao.bind_actual_input(
+            BindActualInputRequest(
+                user_scope=user_scope,
+                session_id=session_id,
+                execution_id=execution_id,
+                node_id=min(input_digests),
+                workflow_id=workflow_id,
+                workflow_code_version=workflow_code_version,
+                run_epoch=run_epoch,
+                expected_input_revision=expected_input_revision,
+                frozen_manifest=_require_bind_text(request.get("frozen_manifest"), "frozen_manifest"),
+                actual_input=_require_bind_text(request.get("actual_input"), "actual_input"),
+            )
+        )
+        if receipt.round_id != round_id:
+            raise ValueError("bound round id does not match dispatched round")
+        if receipt.input_revision != expected_input_revision:
+            raise ValueError("bound input revision does not match dispatched revision")
+        facts = await dao.read_leaf_dispatch_facts(execution_id, round_id)
+        if int(facts.input_revision) != int(receipt.input_revision):
+            raise ValueError("leaf dispatch facts input revision does not match binding")
+        return ActualInputBinding(
+            execution_id=execution_id,
+            round_id=round_id,
+            plan_digest=plan_digest,
+            input_revision=int(receipt.input_revision),
+            owner_epoch=int(facts.owner_epoch),
+            leaves=tuple(
+                LeafIdentity(
+                    node_id=node_id,
+                    leaf_id=leaf_workflow_id(execution_id=execution_id, round_id=round_id, node_id=node_id),
+                    input_digest=digest,
+                )
+                for node_id, digest in sorted(input_digests.items())
+            ),
+        ).to_wire()
+
+    return _binder
+
+
+class DaoLeafTicketGate:
+    """``AgentDao.claim_resource``/``release_resource`` 的票据门适配。"""
+
+    def __init__(self, dao: Any) -> None:
+        self._dao = dao
+
+    async def claim(self, *, execution_id: str, round_id: str, node_id: str) -> LeafTicketLease | None:
+        from core.agent_types import ResourceClaimRequest, ResourceSlotKind
+
+        facts = await self._dao.read_leaf_dispatch_facts(execution_id, round_id)
+        ticket = await self._dao.claim_resource(
+            ResourceClaimRequest(
+                user_scope=facts.user_scope,
+                slot_id=leaf_ticket_slot_id(execution_id, round_id, node_id),
+                slot_kind=ResourceSlotKind.LEAF,
+                execution_id=execution_id,
+                node_id=node_id,
+                round_id=round_id,
+                owner_epoch=int(facts.owner_epoch),
+                operation_refs=None,
+            )
+        )
+        return LeafTicketLease(
+            slot_id=ticket.slot_id,
+            user_scope=facts.user_scope,
+            execution_id=execution_id,
+            node_id=node_id,
+            owner_epoch=int(ticket.owner_epoch),
+        )
+
+    async def release(self, lease: LeafTicketLease, *, exit_verified: bool) -> None:
+        from core.agent_types import ResourceReleaseRequest
+
+        await self._dao.release_resource(
+            ResourceReleaseRequest(
+                user_scope=lease.user_scope,
+                slot_id=lease.slot_id,
+                execution_id=lease.execution_id,
+                node_id=lease.node_id,
+                owner_epoch=lease.owner_epoch,
+                exit_verified=exit_verified,
+            )
+        )
+
+
+def build_leaf_ticket_gate(dao: Any) -> LeafTicketGate:
+    """DAO 适配的叶票据门（树级额度闭环）。"""
+
+    return DaoLeafTicketGate(dao)
 
 
 async def resolve_leaf_data_consent(
@@ -252,6 +458,9 @@ def default_leaf_runtime(
         agent_runner=build_leaf_agent_runner(dao, tool_runtime_factory=tool_runtime_factory),
         data_consent_provider=provider,
         tool_runtime_factory=tool_runtime_factory,
+        actual_input_binder=None if dao is None else build_actual_input_binder(dao),
+        leaf_ticket_gate=None if dao is None else build_leaf_ticket_gate(dao),
+        dao=dao,
     )
 
 
@@ -265,11 +474,24 @@ def leaf_call_identity(context: LeafExecutionContext) -> str:
     )
 
 
-def build_gateway_model(context: LeafExecutionContext, binding: LeafModelBinding) -> GatewayModel:
-    """GatewayModel 工厂：模型桥身份只由叶持久执行身份派生（禁随机身份）。"""
+def build_gateway_model(
+    context: LeafExecutionContext, binding: LeafModelBinding, *, dao: Any | None = None
+) -> GatewayModel:
+    """GatewayModel 工厂：模型桥身份只由叶持久执行身份派生（禁随机身份）。
 
+    提供 ``dao`` 时把执行器包上逐回合额度准入（真实模型调用前先计数）；未提供
+    则不计数（仅供纯装配/单测构造，生产组合根始终提供 DAO）。
+    """
+
+    executor: ChatTurnExecutor = (
+        binding.executor
+        if dao is None
+        else AdmissionCountingExecutor(
+            binding.executor, dao=dao, execution_id=context.execution_id, round_id=context.round_id
+        )
+    )
     return GatewayModel(
-        binding.executor,
+        executor,
         binding.binding,
         binding.snapshot,
         tool_schema_version=binding.tool_schema_version,
@@ -278,22 +500,36 @@ def build_gateway_model(context: LeafExecutionContext, binding: LeafModelBinding
     )
 
 
-def build_leaf_runner(*, model_binding: ModelBindingResolver, agent_runner: LeafAgentRunner) -> LeafRunner:
+def build_leaf_runner(
+    *, model_binding: ModelBindingResolver, agent_runner: LeafAgentRunner, dao: Any | None = None
+) -> LeafRunner:
     """组合叶 runner：解析冻结绑定 → 构造模型桥 → 交叶 Agent 主体。"""
 
     async def _run(context: LeafExecutionContext) -> NodeOutcome:
         resolved = await model_binding(context)
-        model = build_gateway_model(context, resolved)
+        model = build_gateway_model(context, resolved, dao=dao)
         return await agent_runner(model, context, resolved)
 
     return _run
 
 
 def install_leaf_runtime(wiring: LeafRuntimeWiring | None = None) -> None:
-    """在生产组合根安装叶 runner（重复安装以最后一次为准，单实例契约）。"""
+    """在生产组合根安装叶 runner 与父绑定/票据门（重复安装以最后一次为准）。
+
+    未提供绑定器/票据门则不登记对应单例：父 workflow 在派发前 ``require``
+    失败并零叶派发（fail-closed，不以缺轮次/缺额度推进）。
+    """
 
     runtime = wiring or default_leaf_runtime()
     LeafRuntimeRegistry.install(
-        build_leaf_runner(model_binding=runtime.model_binding, agent_runner=runtime.agent_runner)
+        build_leaf_runner(
+            model_binding=runtime.model_binding,
+            agent_runner=runtime.agent_runner,
+            dao=runtime.dao,
+        )
     )
+    if runtime.actual_input_binder is not None:
+        ActualInputBinderRegistry.install(runtime.actual_input_binder)
+    if runtime.leaf_ticket_gate is not None:
+        LeafTicketGateRegistry.install(runtime.leaf_ticket_gate)
     logger.info("[LeafRuntime] leaf runner installed (call identity derived from leaf workflow id)")

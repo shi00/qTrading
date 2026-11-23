@@ -34,12 +34,15 @@ from core.agent_types import (
 )
 from core.model_management_types import ChatTurnOutcome, ChatTurnResponse, ExecutionSnapshot
 from services.agent_service.dispatch import (
+    BINDING_IDENTITY_MISMATCH,
+    BINDING_IDENTITY_UNAVAILABLE,
     DISPATCH_CLOSED,
     MODE_RESEARCH_DISABLED,
     NOT_COMMITTED,
     PLAN_UNAVAILABLE,
     ResearchDispatcher,
     ResearchWorkflowResult,
+    build_binding_identity_provider,
 )
 from services.agent_service.leaf_runtime import (
     LEAF_AGENT_UNAVAILABLE,
@@ -55,7 +58,9 @@ from services.agent_service.workflows import (
     LeafExecutionContext,
     LeafRuntimeRegistry,
     NodeOutcome,
+    ParentBindIdentity,
     decode_research_payload,
+    decode_research_payload_full,
     leaf_workflow_id,
 )
 
@@ -172,6 +177,7 @@ def _dispatcher(
     submit: Any,
     plan_provider: Any = None,
     read_result: Any = None,
+    binding_identity_provider: Any = None,
 ) -> ResearchDispatcher:
     async def _plan(user_scope: str, execution_id: str) -> PlanSpecProposal:
         assert (user_scope, execution_id) == (_USER_SCOPE, _EXECUTION_ID)
@@ -180,12 +186,23 @@ def _dispatcher(
     async def _read(workflow_id: str) -> ResearchWorkflowResult:
         return ResearchWorkflowResult(workflow_id=workflow_id, state="SUCCESS", output={"summary": "ok"})
 
+    async def _binding(user_scope: str, execution_id: str) -> ParentBindIdentity:
+        assert (user_scope, execution_id) == (_USER_SCOPE, _EXECUTION_ID)
+        return ParentBindIdentity(
+            user_scope=user_scope,
+            session_id="s1",
+            workflow_code_version="1.0.0",
+            run_epoch=1,
+            expected_input_revision=1,
+        )
+
     return ResearchDispatcher(
         gate=gate,
         submit=submit,
         plan_provider=_plan if plan_provider is None else plan_provider,
         read_result=_read if read_result is None else read_result,
         role_capabilities=_ROLE_CAPABILITIES,
+        binding_identity_provider=_binding if binding_identity_provider is None else binding_identity_provider,
     )
 
 
@@ -312,10 +329,125 @@ def test_dispatch_submits_and_reads_back_result() -> None:
     assert decoded_digest == plan_spec_digest(_PLAN)
     assert decoded_round_id == outcome.round_id
     assert preserved == ()
+    # 父载荷必须携带与 agent_actual_input_bind 一致的冻结身份（不再零派发）。
+    assert decode_research_payload_full(payload).binding_identity == ParentBindIdentity(
+        user_scope=_USER_SCOPE,
+        session_id="s1",
+        workflow_code_version="1.0.0",
+        run_epoch=1,
+        expected_input_revision=1,
+    )
 
     result = asyncio.run(dispatcher.read_result(_WORKFLOW_ID))
     assert result.state == "SUCCESS"
     assert result.output == {"summary": "ok"}
+
+
+def test_dispatch_without_binding_identity_provider_is_zero_dispatch() -> None:
+    """未接线绑定来源 → 零派发（不放宽成裸派发）。"""
+    submit = _RecordingSubmitter()
+    dispatcher = ResearchDispatcher(
+        gate=_FakeGate(closed=False),
+        submit=submit,
+        plan_provider=_default_plan,
+        read_result=_default_read,
+        role_capabilities=_ROLE_CAPABILITIES,
+    )
+
+    outcome = asyncio.run(dispatcher.dispatch(_receipt(), user_scope=_USER_SCOPE))
+
+    assert outcome.submitted is False
+    assert outcome.reason == BINDING_IDENTITY_UNAVAILABLE
+    assert submit.calls == []
+
+
+def test_dispatch_binding_identity_mismatch_is_zero_dispatch() -> None:
+    """绑定身份与受理会话不一致 → 零派发（不写入错身份）。"""
+
+    async def _wrong_session(user_scope: str, execution_id: str) -> ParentBindIdentity:
+        return ParentBindIdentity(
+            user_scope=user_scope,
+            session_id="other-session",
+            workflow_code_version="1.0.0",
+            run_epoch=1,
+            expected_input_revision=1,
+        )
+
+    submit = _RecordingSubmitter()
+    dispatcher = _dispatcher(gate=_FakeGate(closed=False), submit=submit, binding_identity_provider=_wrong_session)
+
+    outcome = asyncio.run(dispatcher.dispatch(_receipt(), user_scope=_USER_SCOPE))
+
+    assert outcome.submitted is False
+    assert outcome.reason == BINDING_IDENTITY_MISMATCH
+    assert submit.calls == []
+
+
+def test_binding_provider_reuses_round_binding_and_initialises_first_dispatch() -> None:
+    """已有轮次沿用原绑定；尚无轮次按受理契约给输入版/代次 1。"""
+
+    class _SnapshotDao:
+        def __init__(self, identity: Any) -> None:
+            self._identity = identity
+
+        async def get_execution_snapshot(self, execution_id: str, *, user_scope: str, limit: int) -> Any:
+            return type("_Snap", (), {"identity": self._identity})()
+
+    round_identity = type(
+        "_Identity",
+        (),
+        {
+            "user_scope": _USER_SCOPE,
+            "session_id": "s1",
+            "execution_id": _EXECUTION_ID,
+            "round_id": "round-1",
+            "input_revision": 3,
+            "run_epoch": 5,
+        },
+    )()
+    provider = build_binding_identity_provider(_SnapshotDao(round_identity), application_version="0.11.7")
+
+    async def _resolve() -> ParentBindIdentity | None:
+        return await provider(_USER_SCOPE, _EXECUTION_ID)
+
+    reused = asyncio.run(_resolve())
+    assert reused == ParentBindIdentity(
+        user_scope=_USER_SCOPE,
+        session_id="s1",
+        workflow_code_version="0.11.7",
+        run_epoch=5,
+        expected_input_revision=3,
+    )
+
+    queued_identity = type(
+        "_Identity",
+        (),
+        {
+            "user_scope": _USER_SCOPE,
+            "session_id": "s1",
+            "execution_id": _EXECUTION_ID,
+            "round_id": None,
+            "input_revision": None,
+            "run_epoch": None,
+        },
+    )()
+    provider = build_binding_identity_provider(_SnapshotDao(queued_identity), application_version="0.11.7")
+    initial = asyncio.run(_resolve())
+    assert initial == ParentBindIdentity(
+        user_scope=_USER_SCOPE,
+        session_id="s1",
+        workflow_code_version="0.11.7",
+        run_epoch=1,
+        expected_input_revision=1,
+    )
+
+
+async def _default_plan(user_scope: str, execution_id: str) -> PlanSpecProposal:
+    return _PLAN
+
+
+async def _default_read(workflow_id: str) -> ResearchWorkflowResult:
+    return ResearchWorkflowResult(workflow_id=workflow_id, state="SUCCESS", output={})
 
 
 def test_dispatch_closed_gate_is_zero_dispatch() -> None:

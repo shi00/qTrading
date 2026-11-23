@@ -31,7 +31,11 @@ from core.agent_types import (
     plan_spec_digest,
 )
 from services.agent_service.runtime import DispatchGate
-from services.agent_service.workflows import admit_research_plan, build_research_payload
+from services.agent_service.workflows import (
+    ParentBindIdentity,
+    admit_research_plan,
+    build_research_payload,
+)
 from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
@@ -48,12 +52,19 @@ MODE_RESEARCH_DISABLED: Final[str] = "mode_research_disabled"
 PLAN_ADMISSION_UNCONFIGURED: Final[str] = "plan_admission_unconfigured"
 #: 零派发原因：角色能力来源读取失败（如实记录脱敏原因，不伪造准入策略）。
 CAPABILITY_POLICY_UNAVAILABLE: Final[str] = "capability_policy_unavailable"
+#: 零派发原因：应用轮次绑定身份不可得（未接线/执行不存在/事实不可读）。
+BINDING_IDENTITY_UNAVAILABLE: Final[str] = "binding_identity_unavailable"
+#: 零派发原因：绑定身份与受理回执不一致（会话/用户域不符，不得写入错身份）。
+BINDING_IDENTITY_MISMATCH: Final[str] = "binding_identity_mismatch"
 
 #: 计划来源端口：``(user_scope, execution_id) -> 已保存计划版``；不可得返回 None。
 PlanSpecProvider = Callable[[str, str], Awaitable[PlanSpecProposal | None]]
 #: 角色能力来源端口：``(user_scope, execution_id) -> 本次请求冻结的手选策略``。
 #: 返回 ``None`` 表示不可判定（未选择/无绑定角色），派发 fail-closed。
 RoleCapabilityProvider = Callable[[str, str], Awaitable[Mapping[str, AbstractSet[str]] | None]]
+#: 应用轮次绑定身份来源端口：``(user_scope, execution_id) -> 冻结身份``。
+#: 返回 ``None`` 表示权威事实不存在/不可核，派发 fail-closed（零叶派发）。
+BindingIdentityProvider = Callable[[str, str], Awaitable[ParentBindIdentity | None]]
 
 #: 父 workflow 启动端口（同步宿主入口须由实现经受管线程，不堵 UI，R16）。
 RootWorkflowSubmitter = Callable[[str, dict[str, Any]], Awaitable[None]]
@@ -95,6 +106,7 @@ class ResearchDispatcher:
         read_result: RootWorkflowResultReader | None = None,
         role_capabilities: Mapping[str, AbstractSet[str]] | None = None,
         capability_provider: RoleCapabilityProvider | None = None,
+        binding_identity_provider: BindingIdentityProvider | None = None,
     ) -> None:
         self._gate = gate
         self._submit = submit
@@ -102,6 +114,7 @@ class ResearchDispatcher:
         self._read_result = read_result
         self._role_capabilities = role_capabilities
         self._capability_provider = capability_provider
+        self._binding_identity_provider = binding_identity_provider
 
     async def dispatch(
         self, receipt: SubmissionReceipt, *, user_scope: str, mode: Mode | None = None
@@ -198,6 +211,20 @@ class ResearchDispatcher:
                 False,
                 policy_error or PLAN_ADMISSION_UNCONFIGURED,
             )
+        binding_identity, binding_error = await self._resolve_binding_identity(user_scope, execution_id, receipt)
+        if binding_identity is None:
+            logger.warning(
+                "[ResearchDispatch] binding identity unavailable, zero dispatch (execution=%s workflow=%s): %s",
+                execution_id,
+                receipt.workflow_id,
+                binding_error or BINDING_IDENTITY_UNAVAILABLE,
+            )
+            return DispatchOutcome(
+                execution_id,
+                receipt.workflow_id,
+                False,
+                binding_error or BINDING_IDENTITY_UNAVAILABLE,
+            )
         try:
             plan_digest = plan_spec_digest(plan)
             # 派发前准入：计划版绑定 + 任务依赖图/角色/能力校验（非法图零派发）。
@@ -208,6 +235,9 @@ class ResearchDispatcher:
                 round_id=round_id,
                 plan_digest=plan_digest,
                 role_capabilities=policy,
+                # 与 agent_actual_input_bind 一致的冻结身份：父 workflow 据此建立
+                # 真实轮次；缺身份时父零叶派发（fail-closed，不裸派发）。
+                binding_identity=binding_identity,
             )
         except Exception as exc:
             logger.warning(
@@ -253,6 +283,31 @@ class ResearchDispatcher:
             return None, None
         return policy, None
 
+    async def _resolve_binding_identity(
+        self, user_scope: str, execution_id: str, receipt: SubmissionReceipt
+    ) -> tuple[ParentBindIdentity | None, str | None]:
+        """解析应用轮次绑定身份：不可得/不一致即零派发（不写入错身份）。
+
+        身份必须同时满足「来源存在」与「与受理回执一致」：用户域等于本次派发
+        用户域、会话等于受理会话；任一不符返回 ``BINDING_IDENTITY_MISMATCH``，
+        不以调用方声称的身份覆盖权威事实。``CancelledError`` 原样传播（R2）。
+        """
+
+        provider = self._binding_identity_provider
+        if provider is None:
+            return None, BINDING_IDENTITY_UNAVAILABLE
+        try:
+            identity = await provider(user_scope, execution_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return None, f"{BINDING_IDENTITY_UNAVAILABLE}:{type(exc).__name__}"
+        if identity is None:
+            return None, BINDING_IDENTITY_UNAVAILABLE
+        if identity.user_scope != user_scope or identity.session_id != receipt.session_id:
+            return None, BINDING_IDENTITY_MISMATCH
+        return identity, None
+
     async def read_result(self, workflow_id: str) -> ResearchWorkflowResult:
         """读回派发结果的持久事实（原生状态 + 成功输出）；未接线即显式拒绝。"""
 
@@ -260,3 +315,53 @@ class ResearchDispatcher:
         if reader is None:
             raise RuntimeError("research workflow result reader not wired")
         return await reader(workflow_id)
+
+
+def build_binding_identity_provider(dao: Any, *, application_version: str) -> BindingIdentityProvider:
+    """生产应用轮次绑定身份来源：读权威执行快照，冻结会话/输入版/执行代次。
+
+    - **已有轮次**（重试/重放）：沿用原绑定——``run_epoch`` 与 ``input_revision``
+      取自该轮，不用当前请求覆盖（旧轮成果与归属身份保持同一）；
+    - **尚无轮次**（刚受理）：受理即输入版 1、执行代次 1（执行尚未建立轮次）；
+    - 用户域/执行身份/会话任一不符或事实不可读 → ``None``（派发零叶，fail-closed）。
+
+    ``application_version`` 为真实工作流代码版本（HANDOFF §8.3）；缺失即拒绝构造
+    （不以占位版本冒充可重放的代码版本）。
+    """
+
+    if not isinstance(application_version, str) or not application_version:
+        raise ValueError("application version is required for binding identity")
+    snapshot_dao = dao
+
+    async def _provider(user_scope: str, execution_id: str) -> ParentBindIdentity | None:
+        snapshot = await snapshot_dao.get_execution_snapshot(execution_id, user_scope=user_scope, limit=1)
+        identity = snapshot.identity
+        if identity.user_scope != user_scope or identity.execution_id != execution_id:
+            return None
+        if not identity.session_id:
+            return None
+        if identity.round_id is None:
+            expected_input_revision = 1
+            run_epoch = 1
+        else:
+            round_input_revision = identity.input_revision
+            round_run_epoch = identity.run_epoch
+            if (
+                not isinstance(round_input_revision, int)
+                or isinstance(round_input_revision, bool)
+                or round_input_revision < 1
+            ):
+                return None
+            if not isinstance(round_run_epoch, int) or isinstance(round_run_epoch, bool) or round_run_epoch < 1:
+                return None
+            expected_input_revision = round_input_revision
+            run_epoch = round_run_epoch
+        return ParentBindIdentity(
+            user_scope=user_scope,
+            session_id=identity.session_id,
+            workflow_code_version=application_version,
+            run_epoch=run_epoch,
+            expected_input_revision=expected_input_revision,
+        )
+
+    return _provider

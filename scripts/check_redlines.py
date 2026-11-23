@@ -1449,6 +1449,8 @@ _R16_SINGLETON_CLASSES = frozenset(
         "WriteQuality",
         "EgressAudit",
         "LeafRuntimeRegistry",
+        "ActualInputBinderRegistry",
+        "LeafTicketGateRegistry",
     }
 )
 

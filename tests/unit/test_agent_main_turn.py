@@ -30,6 +30,7 @@ from services.agent_service.dispatch import (
     PLAN_ADMISSION_UNCONFIGURED,
     ResearchDispatcher,
 )
+from services.agent_service.workflows import ParentBindIdentity
 from services.agent_service.loop import (
     DelegationRequest,
     DelegationResult,
@@ -463,6 +464,16 @@ class _Gate:
         return True
 
 
+async def _binding(user_scope: str, execution_id: str) -> ParentBindIdentity:
+    return ParentBindIdentity(
+        user_scope=user_scope,
+        session_id="s1",
+        workflow_code_version="1.0.0",
+        run_epoch=1,
+        expected_input_revision=1,
+    )
+
+
 def _receipt() -> SubmissionReceipt:
     command = CommandRef(
         user_scope="u1",
@@ -522,6 +533,7 @@ async def test_dispatch_uses_per_request_capability_provider() -> None:
         submit=_submit,
         plan_provider=_plan,
         capability_provider=_caps,
+        binding_identity_provider=_binding,
     )
 
     outcome = await dispatcher.dispatch(_receipt(), user_scope="u1", mode=Mode.EXECUTE)
@@ -597,6 +609,7 @@ async def test_dispatch_zero_on_invalid_plan_graph() -> None:
         submit=_submit,
         plan_provider=_plan,
         capability_provider=_caps,
+        binding_identity_provider=_binding,
     )
 
     outcome = await dispatcher.dispatch(_receipt(), user_scope="u1", mode=Mode.EXECUTE)

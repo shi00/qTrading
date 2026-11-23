@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -23,17 +24,28 @@ from core.agent_types import (
     DataConsentState,
     PlanNodeSpec,
     data_consent_source_scope_digest,
+    derive_round_id,
 )
 from core.model_management_types import ExecutionSnapshot
 from services.agent_service.leaf_runtime import (
+    AdmissionCountingExecutor,
+    AdmissionCountingToolExecutor,
+    DaoLeafTicketGate,
     LeafRuntimeWiring,
+    build_actual_input_binder,
     default_leaf_runtime,
+    install_leaf_runtime,
     leaf_call_identity,
     resolve_agent_model_binding,
     resolve_leaf_data_consent,
 )
 from services.agent_service.model import derive_model_call_id
-from services.agent_service.workflows import LeafExecutionContext
+from services.agent_service.workflows import (
+    ActualInputBinderRegistry,
+    LeafExecutionContext,
+    LeafTicketGateRegistry,
+    leaf_ticket_slot_id,
+)
 from services.ai_service.scenario_dispatch import ScenarioDispatch
 
 pytestmark = pytest.mark.unit
@@ -137,10 +149,14 @@ def _consent_payload(binding: DataConsentBinding, *, owner_epoch: int = 3, run_e
 
 
 class _Facts:
-    def __init__(self, user_scope: str = "user-1", owner_epoch: int = 3, run_epoch: int = 2) -> None:
+    def __init__(
+        self, user_scope: str = "user-1", owner_epoch: int = 3, run_epoch: int = 2, input_revision: int = 1
+    ) -> None:
         self.user_scope = user_scope
         self.owner_epoch = owner_epoch
         self.run_epoch = run_epoch
+        self.input_revision = input_revision
+        self.session_id = "session-1"
 
 
 class _Authority:
@@ -155,6 +171,11 @@ class _FakeDao:
         self.facts = facts or _Facts()
         self.authority = authority
         self.fact_calls = 0
+        self.bind_requests: list[Any] = []
+        self.claim_requests: list[Any] = []
+        self.release_requests: list[Any] = []
+        self.admissions: list[Any] = []
+        self.bind_receipt: Any | None = None
 
     async def read_leaf_dispatch_facts(self, execution_id: str, round_id: str) -> _Facts:
         self.fact_calls += 1
@@ -162,6 +183,22 @@ class _FakeDao:
 
     async def read_authoritative_data_consent(self, *, execution_id: str, round_id: str, node_id: str) -> Any | None:
         return self.authority
+
+    async def bind_actual_input(self, request: Any) -> Any:
+        self.bind_requests.append(request)
+        assert self.bind_receipt is not None
+        return self.bind_receipt
+
+    async def claim_resource(self, request: Any) -> Any:
+        self.claim_requests.append(request)
+        return SimpleNamespace(slot_id=request.slot_id, owner_epoch=request.owner_epoch)
+
+    async def release_resource(self, request: Any) -> None:
+        self.release_requests.append(request)
+
+    async def admit_usage(self, request: Any) -> Any:
+        self.admissions.append(request)
+        return SimpleNamespace(execution_id=request.execution_id)
 
 
 class TestResolveAgentModelBinding:
@@ -259,3 +296,129 @@ class TestResolveLeafDataConsent:
         with pytest.raises(ValueError) as excinfo:
             await resolve_leaf_data_consent(_context(), dao=dao)
         assert "scope does not match" in str(excinfo.value)
+
+
+class _CountingExecutor:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def execute_chat_turn(
+        self, request: Any, snapshot: Any, *, binding: dict[str, Any], on_event: Any = None
+    ) -> str:
+        self.calls += 1
+        return "ok"
+
+
+class _CountingToolRuntime:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def execute(self, *, tool_name: str, arguments: dict[str, Any], tool_call_id: str) -> str:
+        self.calls.append(tool_name)
+        return "tool-ok"
+
+
+class TestUsageAdmission:
+    async def test_model_turn_admitted_before_execution(self) -> None:
+        dao = _FakeDao()
+        executor = _CountingExecutor()
+        counting = AdmissionCountingExecutor(executor, dao=dao, execution_id="execution-1", round_id="round-1")
+
+        assert await counting.execute_chat_turn({}, _SNAPSHOT, binding={}) == "ok"
+        assert executor.calls == 1
+        assert len(dao.admissions) == 1
+        assert dao.admissions[0].model_attempts == 1
+        assert dao.admissions[0].user_scope == "user-1"
+
+    async def test_tool_call_admitted_before_execution(self) -> None:
+        dao = _FakeDao()
+        runtime = _CountingToolRuntime()
+        counting = AdmissionCountingToolExecutor(runtime, dao=dao, user_scope="user-1", execution_id="execution-1")
+
+        assert await counting.execute(tool_name="search", arguments={}, tool_call_id="call-1") == "tool-ok"
+        assert runtime.calls == ["search"]
+        assert dao.admissions[0].tool_calls == 1
+
+
+class TestActualInputBinder:
+    async def test_binds_round_and_freezes_leaf_identities(self) -> None:
+        dao = _FakeDao()
+        round_id = derive_round_id(user_scope="user-1", execution_id="execution-1", workflow_id="wf-1")
+        dao.bind_receipt = SimpleNamespace(round_id=round_id, input_revision=1)
+        binder = build_actual_input_binder(dao)
+        request = {
+            "user_scope": "user-1",
+            "session_id": "session-1",
+            "execution_id": "execution-1",
+            "round_id": round_id,
+            "plan_digest": "b" * 64,
+            "workflow_id": "wf-1",
+            "workflow_code_version": "1.0.0",
+            "run_epoch": 1,
+            "expected_input_revision": 1,
+            "frozen_manifest": "{}",
+            "actual_input": "{}",
+            "input_digests": {"n1": "1" * 64},
+        }
+
+        wire = await binder(request)
+
+        assert wire["input_revision"] == 1
+        assert wire["owner_epoch"] == 3
+        assert wire["leaves"][0]["node_id"] == "n1"
+        assert dao.bind_requests[0].node_id == "n1"
+
+    async def test_rejects_round_identity_mismatch(self) -> None:
+        dao = _FakeDao()
+        binder = build_actual_input_binder(dao)
+        request = {
+            "user_scope": "user-1",
+            "session_id": "session-1",
+            "execution_id": "execution-1",
+            "round_id": "round-other",
+            "plan_digest": "b" * 64,
+            "workflow_id": "wf-1",
+            "workflow_code_version": "1.0.0",
+            "run_epoch": 1,
+            "expected_input_revision": 1,
+            "frozen_manifest": "{}",
+            "actual_input": "{}",
+            "input_digests": {"n1": "1" * 64},
+        }
+        with pytest.raises(ValueError) as excinfo:
+            await binder(request)
+        assert "round identity" in str(excinfo.value)
+        assert dao.bind_requests == []
+
+
+class TestLeafTicketGate:
+    async def test_claim_and_release_use_dao_resources(self) -> None:
+        dao = _FakeDao()
+        gate = DaoLeafTicketGate(dao)
+
+        lease = await gate.claim(execution_id="execution-1", round_id="round-1", node_id="n1")
+        assert lease is not None
+        assert lease.slot_id == leaf_ticket_slot_id("execution-1", "round-1", "n1")
+        assert lease.user_scope == "user-1"
+        assert dao.claim_requests[0].slot_kind.value == "leaf"
+
+        await gate.release(lease, exit_verified=False)
+        assert dao.release_requests[0].exit_verified is False
+        assert dao.release_requests[0].slot_id == lease.slot_id
+
+
+class TestInstallLeafRuntime:
+    def test_install_registers_binder_and_ticket_gate(self) -> None:
+        dao = _FakeDao()
+        ActualInputBinderRegistry._reset_singleton()
+        LeafTicketGateRegistry._reset_singleton()
+        wiring = default_leaf_runtime(dao)
+        assert callable(wiring.actual_input_binder)
+        assert isinstance(wiring.leaf_ticket_gate, DaoLeafTicketGate)
+        try:
+            install_leaf_runtime(wiring)
+            assert ActualInputBinderRegistry.require() is wiring.actual_input_binder
+            assert LeafTicketGateRegistry.require() is wiring.leaf_ticket_gate
+        finally:
+            ActualInputBinderRegistry._reset_singleton()
+            LeafTicketGateRegistry._reset_singleton()

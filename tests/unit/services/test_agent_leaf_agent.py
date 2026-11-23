@@ -31,11 +31,14 @@ from core.model_management_types import ExecutionSnapshot
 from services.agent_service import leaf_agent
 from services.agent_service.leaf_agent import (
     LEAF_ATTRIBUTION_UNAVAILABLE,
+    LEAF_BINDING_REVISION_STALE,
+    LEAF_BINDING_REVISION_UNAVAILABLE,
     LEAF_EMPTY_RESULT,
     LEAF_INPUT_DIGEST_MISSING,
     LEAF_MODEL_FAILED,
     LEAF_MODEL_REF_UNAVAILABLE,
     LEAF_POLICY_DENIED,
+    LEAF_PREDECESSOR_ARTIFACT_UNAVAILABLE,
     LEAF_RESULT_SAVE_FAILED,
     LEAF_ROLE_PROMPT_UNAVAILABLE,
     LEAF_TOOL_SETUP_FAILED,
@@ -70,13 +73,21 @@ _SNAPSHOT = ExecutionSnapshot(
 )
 
 
-def _context(*, input_digest: str | None = _DIGEST, source_refs: tuple[Any, ...] = ()) -> LeafExecutionContext:
+def _context(
+    *,
+    input_digest: str | None = _DIGEST,
+    source_refs: tuple[Any, ...] = (),
+    input_revision: int | None = 2,
+    predecessor_artifacts: tuple[tuple[str, str], ...] = (),
+) -> LeafExecutionContext:
     return LeafExecutionContext(
         execution_id="execution-1",
         round_id="round-1",
         plan_digest="b" * 64,
         node=PlanNodeSpec(node_id="n1", target="梳理公司业务", role_key="analyst", source_refs=source_refs),
         input_digest=input_digest,
+        input_revision=input_revision,
+        predecessor_artifacts=predecessor_artifacts,
     )
 
 
@@ -93,6 +104,21 @@ class _Facts:
         self.input_revision = input_revision
 
 
+class _Artifact:
+    def __init__(self, **overrides: Any) -> None:
+        self.artifact_id = "art-pre"
+        self.artifact_version = 1
+        self.session_id = "session-1"
+        self.execution_id = "execution-1"
+        self.round_id = "round-1"
+        self.input_revision = 2
+        self.body_available = True
+        self.body_text = "前置成果正文"
+        self.summary = "前置摘要"
+        for key, value in overrides.items():
+            setattr(self, key, value)
+
+
 class _Dao:
     def __init__(
         self,
@@ -101,12 +127,15 @@ class _Dao:
         facts_error: Exception | None = None,
         save_result: Any = None,
         save_error: Exception | None = None,
+        artifacts: dict[str, Any] | None = None,
     ) -> None:
         self.facts = facts or _Facts()
         self.facts_error = facts_error
         self.save_result = save_result
         self.save_error = save_error
+        self.artifacts = artifacts or {}
         self.fact_calls = 0
+        self.artifact_queries: list[Any] = []
         self.drafts: list[Any] = []
 
     async def read_leaf_dispatch_facts(self, execution_id: str, round_id: str) -> Any:
@@ -114,6 +143,16 @@ class _Dao:
         if self.facts_error is not None:
             raise self.facts_error
         return self.facts
+
+    async def read_artifact(self, query: Any, *, user_scope: str) -> Any:
+        self.artifact_queries.append(query)
+        artifact = self.artifacts.get(query.artifact_id)
+        if artifact is None:
+            raise RuntimeError("artifact missing")
+        return artifact
+
+    async def admit_usage(self, request: Any) -> Any:
+        return SimpleNamespace(execution_id=request.execution_id)
 
     async def save_research_result(self, draft: Any) -> Any:
         self.drafts.append(draft)
@@ -294,6 +333,25 @@ class TestRunLeafAgentSuccess:
 
         assert dao.drafts[0].source_refs == (ref,)
 
+    async def test_predecessor_artifacts_are_read_and_saved_as_parent_refs(self, _fake_agent: type[_FakeAgent]) -> None:
+        dao = _Dao(artifacts={"art-pre": _Artifact()})
+
+        outcome = await run_leaf_agent(
+            _model(),
+            _context(predecessor_artifacts=(("a", "art-pre@1"),)),
+            _binding(),
+            dao=dao,
+        )
+
+        assert outcome.state == "complete"
+        assert len(dao.artifact_queries) == 1
+        assert dao.artifact_queries[0].artifact_id == "art-pre"
+        assert dao.artifact_queries[0].artifact_version == 1
+        assert dao.drafts[0].parent_artifact_refs == ("art-pre@1",)
+        prompt = _fake_agent.instances[0].prompt
+        assert prompt is not None
+        assert "前置摘要" in prompt
+
 
 class TestRunLeafAgentFailures:
     async def test_missing_input_digest_fails_before_facts_and_save(self, _fake_agent: type[_FakeAgent]) -> None:
@@ -385,6 +443,38 @@ class TestRunLeafAgentFailures:
         with pytest.raises(asyncio.CancelledError) as exc:
             await run_leaf_agent(_model(), _context(), _binding(), dao=dao)
         assert type(exc.value) is asyncio.CancelledError
+
+    async def test_missing_binding_revision_fails_without_outbound(self, _fake_agent: type[_FakeAgent]) -> None:
+        dao = _Dao()
+
+        outcome = await run_leaf_agent(_model(), _context(input_revision=None), _binding(), dao=dao)
+
+        assert outcome.state == "failed"
+        assert outcome.error_code == LEAF_BINDING_REVISION_UNAVAILABLE
+        assert _fake_agent.instances == []
+        assert dao.drafts == []
+
+    async def test_stale_binding_revision_fails_without_outbound(self, _fake_agent: type[_FakeAgent]) -> None:
+        dao = _Dao(facts=_Facts(input_revision=3))
+
+        outcome = await run_leaf_agent(_model(), _context(input_revision=2), _binding(), dao=dao)
+
+        assert outcome.state == "failed"
+        assert outcome.error_code == LEAF_BINDING_REVISION_STALE
+        assert _fake_agent.instances == []
+        assert dao.drafts == []
+
+    async def test_predecessor_artifact_unavailable_fails_without_outbound(self, _fake_agent: type[_FakeAgent]) -> None:
+        dao = _Dao(artifacts={"art-pre": _Artifact(body_available=False)})
+
+        outcome = await run_leaf_agent(
+            _model(), _context(predecessor_artifacts=(("a", "art-pre@1"),)), _binding(), dao=dao
+        )
+
+        assert outcome.state == "failed"
+        assert outcome.error_code == LEAF_PREDECESSOR_ARTIFACT_UNAVAILABLE
+        assert _fake_agent.instances == []
+        assert dao.drafts == []
 
 
 class TestBuildLeafAgentRunner:
