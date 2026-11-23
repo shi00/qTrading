@@ -1595,7 +1595,9 @@ async def test_residual_gate_and_cross_session_reference_share_fence(real_embedd
                     user_scope=_USER_SCOPE,
                     message_id=message_in,
                     session_id=session_in,
-                    execution_id=execution_in,
+                    # ck_agent_message_execution_round_pair / execution_seq_pair：
+                    # 无轮次事实的会话级消息两者同时为空。
+                    execution_id=None,
                     round_id=None,
                     event_id=f"evt-{message_in}",
                     session_seq=1,
