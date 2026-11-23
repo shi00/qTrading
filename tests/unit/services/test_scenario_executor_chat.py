@@ -210,6 +210,9 @@ def _recorder_mock(persisted: bool = True) -> MagicMock:
     recorder.submit_terminal = AsyncMock(
         return_value=PersistenceOutcome(persisted=persisted, error_code=None if persisted else "DB_UNAVAILABLE")
     )
+    recorder.record_operation_ledger_refs = AsyncMock(
+        return_value=PersistenceOutcome(persisted=persisted, error_code=None if persisted else "DB_UNAVAILABLE")
+    )
     return recorder
 
 
@@ -1478,6 +1481,37 @@ class TestAgentConsentRequiredAndClosure:
         assert ensure.await_count == 1  # 每次模型调用先备 operation
         assert ensure.await_args.kwargs["operation_id"] == "mc-1"
         assert authorize.await_args.args[0].operation_id == "mc-1"
+        # T-06：operation 行同时写回原账本引用（订单父请求 + 该次 attempt）
+        ledger_write = recorder.record_operation_ledger_refs.await_args
+        assert ledger_write.kwargs["operation_id"] == "mc-1"
+        assert ledger_write.kwargs["invocation_id"] == "mc-1"
+        assert ledger_write.kwargs["attempt_ids"] == (authorize.await_args.args[0].attempt_id,)
+
+    @pytest.mark.asyncio
+    async def test_ledger_refs_unwritable_denies_zero_outbound(self):
+        """T-06：引用写不进 operation 行 → 准备失败，零出站（不把无引用当无费用）。"""
+        adapter = _ScriptedChatAdapter([])
+        recorder = _recorder_mock()
+        recorder.record_operation_ledger_refs = AsyncMock(
+            return_value=PersistenceOutcome(persisted=False, error_code="OPERATION_ROW_MISSING")
+        )
+        executor = _executor(adapter, recorder)
+        executor._config_service.ensure_model_operation = AsyncMock()
+        executor._config_service.authorize_data_attempt = AsyncMock(
+            return_value=_data_receipt(DataAttemptOutcome.ALLOW)
+        )
+
+        outcome = await executor.execute_chat_turn(
+            _chat_request(),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            binding=_binding(data_consent=_data_consent(), data_operation_scope=_operation_scope()),
+        )
+
+        assert outcome.status == "failed"
+        assert "ledger refs unavailable: OPERATION_ROW_MISSING" in (outcome.error_code or "")
+        assert adapter.invoke_calls == []
+        recorder.try_reserve.assert_not_awaited()
+        recorder.mark_dispatched.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_revoked_consent_blocks_outbound_on_next_turn(self):

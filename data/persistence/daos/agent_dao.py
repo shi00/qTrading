@@ -7385,6 +7385,9 @@ class AgentDao(BaseDao):
             return COST_STATE_UNPRICED
         if has_active_reservation:
             return COST_STATE_RESERVED
+        if model_attempt_count > len(observed):
+            # 仅覆盖部分调用：已计价子集不能证明整体费用已知（R21）
+            return COST_STATE_UNKNOWN
         if attempt_costs:
             return COST_STATE_KNOWN
         return COST_STATE_UNKNOWN
@@ -7483,7 +7486,13 @@ class AgentDao(BaseDao):
         if cost_state == COST_STATE_UNPRICED:
             return cost_state, (RangeLimitation(code="cost_unpriced", message="存在未计价调用，费用未确认"),)
         if cost_state == COST_STATE_UNKNOWN:
-            return cost_state, (RangeLimitation(code="cost_unknown", message="调用费用未确认（原账本无可计价引用）"),)
+            covered = len({row.attempt_id for row in attempt_rows})
+            detail = (
+                f"仅覆盖 {covered}/{model_attempt_count} 次调用"
+                if model_attempt_count > covered
+                else "原账本无可计价引用"
+            )
+            return cost_state, (RangeLimitation(code="cost_unknown", message=f"调用费用未确认（{detail}）"),)
         return cost_state, ()
 
     def _snapshot_source_limitations(

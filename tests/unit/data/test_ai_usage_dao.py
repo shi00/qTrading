@@ -1233,6 +1233,80 @@ class TestReadRequestAttempts:
         assert "candidate_decisions" in decision_sql
         assert "'skipped'" in decision_sql
 
+    @pytest.mark.asyncio
+    async def test_records_carry_ledger_attempt_id(self):
+        """T-06 回归：组包必须携带 ``attempt_id``（费用投影按其索引已计价行）。
+
+        缺失时 ``read_cost_projection`` 把全部已计价 attempt 过滤为「未计价」，
+        已知费用退化为 None；跳过行无账本主键，保持 None 不虚构。
+        """
+        attempts = [
+            {
+                "attempt_id": "att-paid",
+                "task_id": "sentiment",
+                "candidate_index": 0,
+                "retry_index": 0,
+                "connection_id": "conn-1",
+                "status": "succeeded",
+                "error_code": None,
+                "actual_model": "glm-4",
+                "configured_model": "glm-4",
+                "duration_ms": 10.0,
+                "cost_cny": Decimal("0.30"),
+                "usage_status": "reported",
+                "input_total_tokens": 10,
+                "output_tokens": 5,
+            }
+        ]
+        conn = _QueueConn([_StubResult(rows=attempts), _StubResult(rows=[])])
+        out = await AIUsageDao.read_request_attempts(_dao(conn), invocation_id="inv-1")
+        assert out[0]["attempt_id"] == "att-paid"
+
+
+class TestRecordOperationLedgerRefs:
+    """T-06：模型 operation 行的原账本引用写回（行锁合并 + 缺行 fail-closed）。"""
+
+    @pytest.mark.asyncio
+    async def test_merges_existing_refs_under_row_lock(self):
+        conn = _CaptureConn(results=[("att-old",), 1])
+        dao = _dao(conn)
+        assert (
+            await dao.record_operation_ledger_refs(
+                user_scope="user-1",
+                operation_id="mc-1",
+                invocation_id="mc-1",
+                attempt_ids=("att-old", "att-new"),
+            )
+            is True
+        )
+        lock_sql, lock_params = conn.calls[0]
+        assert "FROM agent_operation" in lock_sql
+        assert "FOR UPDATE" in lock_sql
+        assert lock_params == {"user_scope": "user-1", "operation_id": "mc-1"}
+        update_sql, update_params = conn.calls[1]
+        assert "UPDATE agent_operation" in update_sql
+        assert update_params["invocation_id"] == "mc-1"
+        # 去重保序：既有引用不丢、重复 id 不重复写入
+        assert json.loads(update_params["attempt_refs"]) == ["att-old", "att-new"]
+
+    @pytest.mark.asyncio
+    async def test_missing_operation_row_returns_false_without_update(self):
+        conn = _QueueConn([_StubResult(one=None)])
+        dao = _dao(conn)
+        assert (
+            await dao.record_operation_ledger_refs(
+                user_scope="user-1", operation_id="mc-missing", invocation_id="mc-missing"
+            )
+            is False
+        )
+        # 无行即不写：只执行行锁读，未追加 UPDATE（不静默补建 operation 行）
+        lock_sql, lock_params = conn.calls[0]
+        assert "FROM agent_operation" in lock_sql
+        assert "FOR UPDATE" in lock_sql
+        assert "UPDATE agent_operation" not in lock_sql
+        assert lock_params == {"user_scope": "user-1", "operation_id": "mc-missing"}
+        assert [sql for sql, _ in conn.calls if "UPDATE agent_operation" in sql] == []
+
 
 class TestReadBudgetSummary:
     @pytest.mark.asyncio

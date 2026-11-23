@@ -345,6 +345,7 @@ async def _seed_ledger(
     attempt_id: str,
     cost_cny: str | None,
     reservation_state: str | None = None,
+    extra_attempt_ids: tuple[str, ...] = (),
 ) -> None:
     """原账本最小合法行（ai_invocation + ai_attempt），可选活跃预留。"""
 
@@ -363,22 +364,23 @@ async def _seed_ledger(
                 owner_lease_expires_at=datetime(2026, 6, 1, 12, 0, 0),
             )
         )
-        await conn.execute(
-            insert(AiAttempt).values(
-                attempt_id=attempt_id,
-                invocation_id=invocation_id,
-                task_id="task-1",
-                candidate_index=0,
-                retry_index=0,
-                connection_id="conn-1",
-                connection_revision=1,
-                adapter_kind="openai",
-                configured_model="model/main",
-                security_revision=1,
-                status="completed",
-                cost_cny=cost_cny,
+        for current_attempt_id in (attempt_id, *extra_attempt_ids):
+            await conn.execute(
+                insert(AiAttempt).values(
+                    attempt_id=current_attempt_id,
+                    invocation_id=invocation_id,
+                    task_id="task-1",
+                    candidate_index=0,
+                    retry_index=0,
+                    connection_id="conn-1",
+                    connection_revision=1,
+                    adapter_kind="openai",
+                    configured_model="model/main",
+                    security_revision=1,
+                    status="completed",
+                    cost_cny=cost_cny,
+                )
             )
-        )
 
 
 def _code_of(excinfo: pytest.ExceptionInfo[AgentServiceError]) -> AgentErrorCode:
@@ -563,7 +565,9 @@ class TestSnapshotCredibility:
             verification=VerificationState.PROGRAM_VERIFIED,
             invocation_id="inv-1",
         )
-        await _seed_ledger(dao, invocation_id="inv-1", attempt_id="att-1", cost_cny="1.25")
+        await _seed_ledger(
+            dao, invocation_id="inv-1", attempt_id="att-1", cost_cny="1.25", extra_attempt_ids=("att-1b",)
+        )
 
         snap = await dao.get_execution_snapshot(execution_id, user_scope=USER_SCOPE)
 
@@ -588,6 +592,27 @@ class TestSnapshotCredibility:
 
         assert snap.usage.cost_state == "unpriced"
         assert [limitation.code for limitation in snap.limitations] == ["cost_unpriced"]
+        assert snap.observation.reliable is False
+
+    async def test_partial_attempts_keep_cost_unknown_with_gap(self, real_embedded_pg) -> None:
+        """执行记录 2 次调用、账本只覆盖 1 次：不得标 known（R21）。"""
+        dao = await _setup(real_embedded_pg.url)
+        _, execution_id, round_id = await _seed_chain(dao)
+        assert round_id is not None
+        await _seed_snapshot_extras(
+            dao,
+            execution_id,
+            round_id,
+            verification=VerificationState.PROGRAM_VERIFIED,
+            invocation_id="inv-5",
+        )
+        await _seed_ledger(dao, invocation_id="inv-5", attempt_id="att-5", cost_cny="0.4")
+
+        snap = await dao.get_execution_snapshot(execution_id, user_scope=USER_SCOPE)
+
+        assert snap.usage.cost_state == "unknown"
+        assert [limitation.code for limitation in snap.limitations] == ["cost_unknown"]
+        assert "仅覆盖 1/2" in snap.limitations[0].message
         assert snap.observation.reliable is False
 
     async def test_active_reservation_marks_cost_reserved(self, real_embedded_pg) -> None:
@@ -620,7 +645,9 @@ class TestSnapshotCredibility:
         _, execution_id, round_id = await _seed_chain(dao)
         assert round_id is not None
         await _seed_snapshot_extras(dao, execution_id, round_id, invocation_id="inv-4")
-        await _seed_ledger(dao, invocation_id="inv-4", attempt_id="att-4", cost_cny="0.75")
+        await _seed_ledger(
+            dao, invocation_id="inv-4", attempt_id="att-4", cost_cny="0.75", extra_attempt_ids=("att-4b",)
+        )
 
         snap = await dao.get_execution_snapshot(execution_id, user_scope=USER_SCOPE)
 

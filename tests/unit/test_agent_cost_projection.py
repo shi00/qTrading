@@ -237,3 +237,92 @@ class TestCostProjectionContract:
             projection.known_cny = Decimal("1")  # type: ignore[misc]  # frozen dataclass 赋值拒绝
         assert "known_cny" in str(excinfo.value)
         assert projection.known_cny is None
+
+
+class _MappingsResult:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+
+    def mappings(self) -> Any:
+        rows = self._rows
+
+        class _Mappings:
+            def fetchall(self) -> list[dict[str, Any]]:
+                return list(rows)
+
+        return _Mappings()
+
+    def fetchone(self) -> Any:
+        return None
+
+
+class _QueuedConn:
+    def __init__(self, results: list[Any]) -> None:
+        self._results = list(results)
+
+    async def execute(self, _sql: Any, _params: Any = None) -> Any:
+        return self._results.pop(0)
+
+
+class _Transaction:
+    def __init__(self, conn: _QueuedConn) -> None:
+        self._conn = conn
+
+    async def __aenter__(self) -> _QueuedConn:
+        return self._conn
+
+    async def __aexit__(self, *_exc: object) -> bool:
+        return False
+
+
+class _Engine:
+    def __init__(self, conn: _QueuedConn) -> None:
+        self._conn = conn
+
+    def begin(self) -> _Transaction:
+        return _Transaction(self._conn)
+
+
+class TestLedgerRecordProjectionWiring:
+    """T-06 回归：请求页组包 → 费用投影的引用键必须一致（已计价行不被过滤）。"""
+
+    @pytest.mark.asyncio
+    async def test_priced_ledger_rows_reach_projection(self) -> None:
+        from data.persistence.daos.ai_usage_dao import AIUsageDao
+
+        conn = _QueuedConn(
+            [
+                _MappingsResult(
+                    [
+                        {
+                            "attempt_id": "att-paid",
+                            "task_id": "sentiment",
+                            "candidate_index": 0,
+                            "retry_index": 0,
+                            "connection_id": "conn-1",
+                            "status": "succeeded",
+                            "error_code": None,
+                            "actual_model": "glm-4",
+                            "configured_model": "glm-4",
+                            "duration_ms": 12.0,
+                            "cost_cny": Decimal("0.30"),
+                            "usage_status": "reported",
+                            "input_total_tokens": 10,
+                            "output_tokens": 5,
+                        }
+                    ]
+                ),
+                _MappingsResult([]),
+            ]
+        )
+        dao = AIUsageDao.__new__(AIUsageDao)
+        dao.engine = _Engine(conn)
+
+        records = await dao.read_request_attempts(invocation_id="inv-1")
+        projection = await _service(_FakeUsageDao(attempts={"inv-1": records})).read_cost_projection(
+            ledger_refs=["inv-1"]
+        )
+
+        assert projection.known_cny == Decimal("0.30")
+        assert projection.unpriced_attempts == 0
+        assert projection.attempt_refs == ("att-paid",)

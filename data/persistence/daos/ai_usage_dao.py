@@ -233,6 +233,25 @@ WHERE i.invocation_id = :invocation_id
 ORDER BY d->>'task_id', d->>'candidate_index', d->>'retry_index'
 """
 
+# 模型 operation 的原账本引用写回（T-06）。费用投影以 operation 行的
+# ``invocation_id`` / ``attempt_refs`` 反查 ai_invocation / ai_attempt；行锁内
+# 读现值 → 去重保序合并 → 整体写回（引用只追加不删除，重复调用幂等）。
+_LOCK_OPERATION_LEDGER_REFS_SQL: Final[str] = """
+SELECT attempt_refs
+FROM agent_operation
+WHERE user_scope = :user_scope AND operation_id = :operation_id
+FOR UPDATE
+"""
+
+_UPDATE_OPERATION_LEDGER_REFS_SQL: Final[str] = """
+UPDATE agent_operation
+SET invocation_id = :invocation_id,
+    attempt_refs = CAST(:attempt_refs AS jsonb),
+    updated_at = (now() AT TIME ZONE 'UTC'),
+    revision = revision + 1
+WHERE user_scope = :user_scope AND operation_id = :operation_id
+"""
+
 # 已知费用：月汇总 scenario scope 合计（NULL 表示无数据 → None，禁伪零，R21）。
 _MONTH_KNOWN_COST_SQL: Final[str] = """
 SELECT SUM(cost_cny)
@@ -1865,6 +1884,9 @@ class AIUsageDao(BaseDao):
                 {
                     "kind": "attempt",
                     "executed": True,
+                    # 账本主键：费用投影（read_cost_projection）按 attempt_id 索引
+                    # 已计价行，组包缺失会把全部已计价 attempt 过滤为未计价。
+                    "attempt_id": d.get("attempt_id"),
                     "task_id": d.get("task_id"),
                     "candidate_index": _to_int(d.get("candidate_index")),
                     "retry_index": _to_int(d.get("retry_index")),
@@ -1886,6 +1908,8 @@ class AIUsageDao(BaseDao):
                 {
                     "kind": "skipped",
                     "executed": False,
+                    # 跳过决策不建 attempt（§10.1）：无账本主键，保持 None 不虚构
+                    "attempt_id": None,
                     "task_id": d.get("task_id"),
                     "candidate_index": _to_int(d.get("candidate_index")),
                     "retry_index": _to_int(d.get("retry_index")),
@@ -1909,6 +1933,49 @@ class AIUsageDao(BaseDao):
             )
         )
         return records
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    async def record_operation_ledger_refs(
+        self,
+        *,
+        user_scope: str,
+        operation_id: str,
+        invocation_id: str,
+        attempt_ids: tuple[str, ...] = (),
+    ) -> bool:
+        """把模型 operation 行的原账本引用写回（T-06：费用投影引用落库）。
+
+        ``agent_operation.invocation_id`` / ``attempt_refs`` 是费用投影
+        （``AgentService.read_cost_projection``）引用原账本的唯一入口；模型
+        operation 行建立时二者为 NULL，投影因此读不到任何账本事实。本方法在
+        行锁内读现值、去重保序合并后整体写回——引用只追加不删除（乱序 / 重复
+        调用幂等），``revision`` 单调递进。
+
+        返回 ``True`` = operation 行已更新；``False`` = 无该 operation 行（调用方
+        必须 fail-closed，不得把「无引用」当成「无费用」，R21）。
+        """
+
+        self._check_engine(context="ai_usage.record_operation_ledger_refs")
+        params: dict[str, Any] = {"user_scope": user_scope, "operation_id": operation_id}
+        async with self._guarded_begin() as conn:
+            row = (await conn.execute(sa.text(_LOCK_OPERATION_LEDGER_REFS_SQL), params)).fetchone()
+            if row is None:
+                return False
+            # JSONB 列经驱动返回 list（非 list 的坏形状不猜测，按空集合继续合并）
+            existing = row[0] if isinstance(row[0], list) else []
+            merged = list(
+                dict.fromkeys(
+                    [
+                        *(item for item in existing if isinstance(item, str) and item),
+                        *(item for item in attempt_ids if isinstance(item, str) and item),
+                    ]
+                )
+            )
+            result = await conn.execute(
+                sa.text(_UPDATE_OPERATION_LEDGER_REFS_SQL),
+                {**params, "invocation_id": invocation_id, "attempt_refs": json.dumps(merged)},
+            )
+        return result.rowcount == 1
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def read_budget_summary(self, *, month: str) -> dict[str, Any]:
