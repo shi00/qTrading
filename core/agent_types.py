@@ -2072,6 +2072,9 @@ class SubmissionReceipt:
 
     ``commit_state`` 为受理事务三态；冲突走 INPUT_CONFLICT 错误路径不构成本
     回执。``intent_digest`` 为冻结 manifest 规范摘要，受理时点不变（INV-04）。
+    ``mode`` 为受理时冻结的权威模式：派发必须用它决定是否启动研究（拿本次请求
+    的模式会与受理权威值脱钩，P1-03）。历史回执无此键 → ``None``，调用方不得把
+    未知当相等（R21）。
     """
 
     command: CommandRef
@@ -2083,6 +2086,7 @@ class SubmissionReceipt:
     commit_state: CommitState
     verified_at: str
     next_action: str | None
+    mode: Mode | None = None
 
 
 _SUBMISSION_RECEIPT_KEYS: Final = frozenset(
@@ -2099,13 +2103,16 @@ _SUBMISSION_RECEIPT_KEYS: Final = frozenset(
     }
 )
 
+#: 可选键（向后兼容）：历史回执无 ``mode``，解码不伪造默认值。
+_SUBMISSION_RECEIPT_OPTIONAL_KEYS: Final = frozenset({"mode"})
+
 
 def decode_submission_receipt(value: object, path: str = "$.submission_receipt") -> SubmissionReceipt:
     """严格解码 SubmissionReceipt（丢回执/重启后查原回执，§3.3.2）。"""
 
     if not isinstance(value, dict):
         _fail("invalid_type", path)
-    _require_keys(value, _SUBMISSION_RECEIPT_KEYS, path)
+    _require_keys_with_optional(value, _SUBMISSION_RECEIPT_KEYS, _SUBMISSION_RECEIPT_OPTIONAL_KEYS, path)
     commit_raw = value["commit_state"]
     try:
         commit_state = CommitState(commit_raw)
@@ -2114,6 +2121,15 @@ def decode_submission_receipt(value: object, path: str = "$.submission_receipt")
     next_raw = value["next_action"]
     if next_raw is not None:
         _require_str(next_raw, f"{path}.next_action")
+    mode_raw = value.get("mode")
+    mode: Mode | None = None
+    if mode_raw is not None:
+        if not isinstance(mode_raw, str):
+            _fail("invalid_tag", f"{path}.mode")
+        try:
+            mode = Mode(mode_raw)
+        except ValueError:
+            _fail("invalid_tag", f"{path}.mode")
     return SubmissionReceipt(
         command=decode_command_ref(value["command"], f"{path}.command"),
         command_record_id=_require_str(value["command_record_id"], f"{path}.command_record_id"),
@@ -2124,13 +2140,14 @@ def decode_submission_receipt(value: object, path: str = "$.submission_receipt")
         commit_state=commit_state,
         verified_at=require_utc_timestamp(value["verified_at"], f"{path}.verified_at"),
         next_action=next_raw,
+        mode=mode,
     )
 
 
 def encode_submission_receipt(receipt: SubmissionReceipt) -> dict[str, Any]:
-    """SubmissionReceipt → wire dict（9 键全量）。"""
+    """SubmissionReceipt → wire dict（9 键全量 + 可选 ``mode``）。"""
 
-    return {
+    wire: dict[str, Any] = {
         "command": encode_command_ref(receipt.command),
         "command_record_id": _require_str(receipt.command_record_id, "$.command_record_id"),
         "session_id": _require_str(receipt.session_id, "$.session_id"),
@@ -2141,6 +2158,9 @@ def encode_submission_receipt(receipt: SubmissionReceipt) -> dict[str, Any]:
         "verified_at": require_utc_timestamp(receipt.verified_at, "$.verified_at"),
         "next_action": receipt.next_action,
     }
+    if receipt.mode is not None:
+        wire["mode"] = receipt.mode.value
+    return wire
 
 
 # ---------------------------------------------------------------------------
@@ -2354,6 +2374,34 @@ def frozen_manifest_inconsistency(request: AcceptRequest) -> str | None:
         if shared[field] != expected_values[field]:
             return f"$.manifest_payload.shared.{field}"
     return None
+
+
+def frozen_manifest_mode_purpose(manifest_payload: CanonicalJson) -> tuple[Mode | None, Purpose | None]:
+    """读出冻结 manifest 声明的模式/用途（顶层或比较组 ``shared`` 块，P1-03）。
+
+    历史意图行未单独落库 mode/purpose；旧摘要重放只能以此证明受理时的冻结值。
+    缺失或非法一律返回 ``None``（调用方不得把未知当相等，R21）。前置：manifest
+    已校验为规范 JSON 对象。
+    """
+
+    parsed = _require_canonical_manifest(manifest_payload)
+    shared = parsed.get("shared")
+    section = shared if isinstance(shared, dict) else parsed
+    mode: Mode | None = None
+    raw_mode = section.get("mode")
+    if isinstance(raw_mode, str):
+        try:
+            mode = Mode(raw_mode)
+        except ValueError:
+            mode = None
+    purpose: Purpose | None = None
+    raw_purpose = section.get("purpose")
+    if isinstance(raw_purpose, str):
+        try:
+            purpose = Purpose(raw_purpose)
+        except ValueError:
+            purpose = None
+    return mode, purpose
 
 
 def legacy_accept_intent_digest(manifest_payload: str) -> str:

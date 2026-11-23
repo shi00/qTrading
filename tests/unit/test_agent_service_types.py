@@ -19,6 +19,7 @@ from core.agent_types import (
     CommitState,
     ConsumptionState,
     DeliveryState,
+    Mode,
     SubmissionReceipt,
     decode_command_receipt,
     decode_command_ref,
@@ -265,6 +266,38 @@ class TestSubmissionReceipt:
     def test_wire_roundtrip(self):
         receipt = _submission()
         assert decode_submission_receipt(encode_submission_receipt(receipt)) == receipt
+        assert "mode" not in encode_submission_receipt(receipt)
+
+    def test_wire_roundtrip_keeps_authoritative_mode(self):
+        """受理回执携带权威模式（P1-03）：派发据它决定是否启动研究。"""
+
+        receipt = SubmissionReceipt(
+            command=_submission().command,
+            command_record_id="cmd-record-1",
+            session_id="session-1",
+            execution_id="exec-1",
+            workflow_id="wf-1",
+            intent_digest="a" * 64,
+            commit_state=CommitState.COMMITTED,
+            verified_at=_T,
+            next_action=None,
+            mode=Mode.DISCUSS,
+        )
+        assert decode_submission_receipt(encode_submission_receipt(receipt)) == receipt
+
+    def test_legacy_wire_without_mode_decodes_to_unknown(self):
+        """历史回执无 mode → None（不伪造默认值，R21）。"""
+
+        assert decode_submission_receipt(_submission_wire()).mode is None
+
+    def test_rejects_unknown_mode(self):
+        wire = _submission_wire()
+        wire["mode"] = "modify"
+        _reject(
+            lambda: decode_submission_receipt(wire),
+            "invalid_tag",
+            "$.submission_receipt.mode",
+        )
 
     def test_rejects_bad_intent_digest(self):
         wire = _submission_wire()
