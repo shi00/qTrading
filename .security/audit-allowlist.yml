@@ -5,7 +5,8 @@ ignored_vulnerabilities:
       diskcache <= 5.6.3 uses pickle for serialization by default.
       An attacker who can write to the cache directory can achieve arbitrary code execution
       when the program reads the cache. This is a known vulnerability but diskcache has not
-      released a fixed version yet (upstream PR #364 open, no release as of 2026-08-23).
+      released a fixed version yet (upstream PR #364 still open, PyPI latest 5.6.3 as of
+      2026-11-23 re-review; OSV marks last_affected 5.6.3, so no upgrade path exists).
 
       Mitigation: The application does not expose the cache directory to untrusted users.
       diskcache is a transitive dependency (of llama_cpp_python) — the app source has
@@ -13,16 +14,17 @@ ignored_vulnerabilities:
       MEDIUM (requires local write access to the cache dir).
     reviewer: louis2sin@gmail.com
     added: 2026-05-22
-    reevaluate_at: 2026-11-23
+    reevaluate_at: 2027-05-23
     upstream_issue: https://github.com/grantjenks/python-diskcache/issues/357
   - id: PYSEC-2026-2447
     package: diskcache
     reason: |
       Same vulnerability as CVE-2025-69872 (unsafe pickle deserialization in diskcache
-      <= 5.6.3) reported under the OSV identifier. diskcache 5.6.3 remains the latest
-      PyPI release with no fixed version; mitigation unchanged: the app never imports
-      diskcache directly and does not expose the cache directory to untrusted users.
+      <= 5.6.3) reported under the OSV identifier. Re-reviewed 2026-11-23: diskcache
+      5.6.3 remains the latest PyPI release with no fixed version; mitigation unchanged:
+      the app never imports diskcache directly and does not expose the cache directory
+      to untrusted users.
     reviewer: louis2sin@gmail.com
     added: 2026-09-16
-    reevaluate_at: 2026-11-23
+    reevaluate_at: 2027-05-23
     upstream_issue: https://github.com/grantjenks/python-diskcache/issues/357
