@@ -346,7 +346,7 @@ jobs:
   # 静态检查与 DB 迁移校验已拆到 ci-checks-static / ci-checks-db 并行执行，
   # Linux 侧关键路径由「静态 + DB + 测试串行」变为最长分支（见 docs/guides/ci-cd.md「CI Job 矩阵」）。
   ci-checks:
-    name: Unit & Integration Tests (Linux, Python ${{ matrix.python-version }})
+    name: Unit Tests (Linux, Python ${{ matrix.python-version }})
     needs: [lint-fast, changes]
     # 锁定 Ubuntu 24.04（同 embedded-tests L1067）：ubuntu-latest 已迁至 26.04，其 libxml2
     # 为 2.15（soname libxml2.so.16），而 sidecar 下载的 PostgreSQL 二进制动态链接
@@ -389,11 +389,9 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        # diff-coverage 已迁至 ci-coverage（该 job 需 fetch-depth: 0）；本 job 只跑单测，浅克隆即可。
         with:
-          # diff-coverage 需真实 merge-base：默认 fetch-depth=1 浅克隆使三点 diff 退化两点，
-          # 误把 main 侧并发改动计入本分支变更行，导致 diff-coverage 误报（review 流水线问题）。
-          # 完整历史（fetch-depth: 0）保证 `git merge-base origin/main HEAD` 可算。
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Verify CI_PG_PASSWORD secret
         env:
@@ -449,110 +447,18 @@ jobs:
       - name: Run Unit Tests
         env:
           STRICT_SCHEMA_GATE: "1"
+          # 覆盖率片段：本 job 只采集数据（--cov-report= 关闭报告，--cov-fail-under=0 关闭
+          # 从 pyproject 继承的 fail_under；pytest-cov 即使无报告也会按配置判阈值）。
+          # 阈值判定与最终 coverage.xml/json 由 ci-coverage 合并后统一产出。
+          COVERAGE_FILE: cov/unit.data
         run: |
           set -e
           # 污染探测（3 次串行排列，约 2 分钟）不随 PR 执行：改由 nightly flaky-detection 的专用 step 承担，
           # 避免每次 PR 重复付出该成本（同时 xdist 多进程反而掩盖跨测试污染，见该测试模块文档）。
+          mkdir -p cov
           python -m pytest tests/unit/ -v --tb=short \
             --deselect tests/unit/test_pollution_detection.py::test_no_cross_test_pollution_in_core_subset \
-            --cov --cov-report=term-missing --cov-report=xml --cov-report=json --junitxml=junit-unit.xml
-
-      - name: Run Integration Tests
-        timeout-minutes: 10
-        env:
-          TEST_DB_HOST: localhost
-          TEST_DB_PORT: 5432
-          TEST_DB_USER: postgres
-          TEST_DB_PASSWORD: ${{ env.CI_PG_PASSWORD }}
-          DATABASE_URL: postgresql+asyncpg://postgres:${{ env.CI_PG_PASSWORD }}@localhost:5432/test_astock
-        run: |
-          set -e
-          # Diagnose xdist worker hang: thread method dumps all thread stacks to stderr on timeout.
-          # --max-worker-restart=0 prevents xdist from masking the deadlock by restarting workers.
-          # --capture=no ensures faulthandler.dump_traceback() output reaches GitHub Actions logs.
-          # step-level timeout-minutes=10 fails fast if thread method can't interrupt (e.g., C extension deadlock).
-          # --cov-append 把集成阶段数据追加到单测的 .coverage 后，必须同时以同名 coverage.xml/coverage.json
-          # 重新生成最终报告：否则下游 per-file / diff coverage / Codecov / artifact 会消费单测阶段的陈旧报告，
-          # 与 append 后的真实覆盖率不一致（CI-F03）。同名覆盖写入保证下游无需改动消费路径。
-          python -m pytest tests/integration/ -n auto --max-worker-restart=0 \
-            --timeout=120 --timeout-method=thread \
-            -v --tb=long --capture=no \
-            --cov --cov-report=term-missing --cov-report=xml --cov-report=json \
-            --cov-append --junitxml=junit-integration.xml
-
-      - name: Install Rust toolchain (1.97.1, for agent embedded-integration sidecar)
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # stable
-        with:
-          toolchain: 1.97.1
-
-      - name: Cache Cargo registry & target (agent embedded-integration)
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
-        with:
-          workspaces: sidecars/qtrading-pg-sidecar
-          key: ci-checks-agent-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
-          # 同 embedded-tests：只允许 main 保存，避免 PR 各存一份 target 副本挤占 10 GB 预算
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Build sidecar binary (agent embedded_real integration coverage)
-        shell: bash
-        env:
-          # build script 通过 GitHub API 下载 PostgreSQL binaries 清单，传 token 提升限流
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          cd sidecars/qtrading-pg-sidecar
-          cargo build --release
-          BINARY_PATH="target/release/qtrading-pg-sidecar"
-          if [ ! -f "$BINARY_PATH" ]; then
-            echo "ERROR: sidecar binary not found at $BINARY_PATH after cargo build"
-            exit 1
-          fi
-          ABSOLUTE_PATH="$(pwd)/$BINARY_PATH"
-          echo "SIDECAR_BINARY_PATH=$ABSOLUTE_PATH" >> $GITHUB_ENV
-          HASH=$(sha256sum "$BINARY_PATH" | awk '{print $1}')
-          echo "SIDECAR_SHA256=$HASH" >> $GITHUB_ENV
-          echo "Sidecar binary built: $ABSOLUTE_PATH (sha256: $HASH)"
-
-      - name: Run agent embedded integration tests (serial, sidecar)
-        timeout-minutes: 25
-        env:
-          SIDECAR_BINARY_PATH: ${{ env.SIDECAR_BINARY_PATH }}
-          SIDECAR_SHA256: ${{ env.SIDECAR_SHA256 }}
-        run: |
-          set -e
-          # Agent DAO/迁移/恢复/资源/交付等 embedded_real 集成用例此前仅在本地执行
-          # （ci-checks 无 sidecar 注入，-m embedded_real 全部 skip），其覆盖来源缺失
-          # 导致 per-file 覆盖率误报（如 agent_dao.py 4.9%）。以真实 sidecar 串行执行
-          # （-n 1 避免 sidecar 并发，同 embedded-tests）并 --cov-append 合入报告，
-          # 再生同名 xml/json 保证下游 per-file / diff coverage / Codecov 消费合并
-          # 后的真实覆盖率（CI-F03 同因）。
-          python -m pytest tests/integration/ -m embedded_real -n 1 -p no:randomly \
-            --timeout=600 --timeout-method=thread -q \
-            --cov --cov-append --cov-report=term-missing --cov-report=xml --cov-report=json \
-            --junitxml=junit-agent-embedded.xml
-
-      - name: Check Per-File Coverage >= 80%
-        run: python scripts/check_per_file_coverage.py
-
-      - name: Report Layered Coverage (review07-G14, advisory)
-        run: python scripts/check_per_file_coverage.py --report
-
-      - name: Check diff coverage
-        run: |
-          BASE="${{ github.event.pull_request.base.ref }}"
-          BASE="${BASE:-main}"
-          # 禁止浅取：本 job 的 checkout 已 fetch-depth: 0，`--depth=1` 会让 origin/$BASE
-          # 失去祖先，`git merge-base` 不可算，check_diff_coverage.py 将以 fail-closed exit 2。
-          git fetch --no-tags origin "$BASE"
-          python scripts/check_diff_coverage.py --base "origin/$BASE" --strict --threshold 80
-
-      - name: Upload coverage to Codecov
-        if: always()
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5  # v7.1.1
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: coverage.xml
-          fail_ci_if_error: true
-          verbose: true
+            --cov --cov-report= --cov-fail-under=0 --junitxml=junit-unit.xml
 
       # R9: 上传 junit 前脱敏可能含 DB 连接串（含密码）的文本工件（D18-R03）。
       # 上传仅在本步骤成功时执行：脱敏失败/cancel 时不得回退上传未脱敏原始工件。
@@ -567,12 +473,20 @@ jobs:
         if: always() && steps.sanitize_test_reports_linux.outcome == 'success'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: test-reports-${{ runner.os }}-${{ matrix.python-version }}
-          path: |
-            coverage.xml
-            coverage.json
-            junit-*.xml
+          # 覆盖率报告由 ci-coverage 统一产出并上传；本 job 只上传 junit。
+          name: test-reports-unit-${{ runner.os }}-${{ matrix.python-version }}
+          path: junit-*.xml
           retention-days: 14
+
+      # 覆盖率片段（非文本、无需脱敏）：由 ci-coverage 统一下载合并后出报告。
+      - name: Upload coverage fragment
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: cov-unit-py${{ matrix.python-version }}
+          path: cov/unit.data
+          retention-days: 7
+          if-no-files-found: error
 
       - name: Generate SBOM
         id: sbom
@@ -637,6 +551,340 @@ jobs:
           name: sbom-ci-checks-${{ matrix.python-version }}
           path: sbom-ci-checks.cdx.json
           retention-days: 7
+
+  ci-checks-integration:
+    name: Integration Tests (Linux, Python ${{ matrix.python-version }})
+    needs: [lint-fast, changes]
+    # 与 ci-checks 完全同源的跳过条件（fork/dependabot 无 secrets、非代码类 PR 跳过重型套件）。
+    if: needs.changes.outputs.code == 'true' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.14']
+    env:
+      UV_CACHE_DIR: /tmp/uv-cache
+
+    services:
+      postgres:
+        image: postgres:16.14
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ${{ env.CI_PG_PASSWORD }}
+          POSTGRES_DB: test_astock
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Verify CI_PG_PASSWORD secret
+        env:
+          CI_PG_PASSWORD: ${{ env.CI_PG_PASSWORD }}
+        run: |
+          if [ -z "$CI_PG_PASSWORD" ]; then
+            echo "::error::CI_PG_PASSWORD secret is not configured. Please add it in repository settings (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+
+      - name: Setup Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements.txt
+            requirements-optional.txt
+            requirements-dev.txt
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          enable-cache: false
+
+      - name: Cache uv build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: /tmp/uv-cache
+          key: uv-linux-py${{ matrix.python-version }}-${{ hashFiles('requirements.txt', 'requirements-optional.txt', 'requirements-dev.txt') }}
+          restore-keys: |
+            uv-linux-py${{ matrix.python-version }}-
+
+      - name: Install dependencies
+        run: |
+          uv pip install --system -r requirements.txt
+          uv pip install --system -r requirements-optional.txt
+          uv pip install --system -r requirements-dev.txt
+
+      - name: Run Integration Tests
+        timeout-minutes: 10
+        env:
+          TEST_DB_HOST: localhost
+          TEST_DB_PORT: 5432
+          TEST_DB_USER: postgres
+          TEST_DB_PASSWORD: ${{ env.CI_PG_PASSWORD }}
+          DATABASE_URL: postgresql+asyncpg://postgres:${{ env.CI_PG_PASSWORD }}@localhost:5432/test_astock
+          # 覆盖率片段：只采集数据（--cov-report= 关闭报告，--cov-fail-under=0 关闭继承阈值）；
+          # embedded_real 由 ci-checks-embedded 以真实 sidecar 单独采集。
+          COVERAGE_FILE: cov/integration.data
+        run: |
+          set -e
+          mkdir -p cov
+          # Diagnose xdist worker hang: thread method dumps all thread stacks to stderr on timeout.
+          # --max-worker-restart=0 prevents xdist from masking the deadlock by restarting workers.
+          # --capture=no ensures faulthandler.dump_traceback() output reaches GitHub Actions logs.
+          python -m pytest tests/integration/ -m "not embedded_real" -n auto --max-worker-restart=0 \
+            --timeout=120 --timeout-method=thread \
+            -v --tb=long --capture=no \
+            --cov --cov-report= --cov-fail-under=0 --junitxml=junit-integration.xml
+
+      - name: Sanitize test reports
+        id: sanitize_test_reports_integration
+        if: always()
+        shell: bash
+        run: |
+          python scripts/sanitize_artifacts.py 'junit-*.xml'
+
+      - name: Upload test reports
+        if: always() && steps.sanitize_test_reports_integration.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: test-reports-integration-${{ runner.os }}-${{ matrix.python-version }}
+          path: junit-*.xml
+          retention-days: 14
+
+      - name: Upload coverage fragment
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: cov-integration-py${{ matrix.python-version }}
+          path: cov/integration.data
+          retention-days: 7
+          if-no-files-found: error
+
+  ci-checks-embedded:
+    name: Embedded Integration Tests (Linux, Python ${{ matrix.python-version }})
+    needs: [lint-fast, changes]
+    # 与 ci-checks 完全同源的跳过条件。本 job 不需要 postgres service（同 embedded-tests），
+    # 但保留同一 if 以维持 Linux 套件跳过策略一致（docs/guides/ci-cd.md「fork PR 的 secretless 路径」）。
+    if: needs.changes.outputs.code == 'true' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    # 锁定 24.04 同 ci-checks：sidecar 下载的 PG 二进制依赖 libxml2.so.2。
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.14']
+    env:
+      UV_CACHE_DIR: /tmp/uv-cache
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Setup Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements.txt
+            requirements-optional.txt
+            requirements-dev.txt
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          enable-cache: false
+
+      - name: Cache uv build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: /tmp/uv-cache
+          key: uv-linux-py${{ matrix.python-version }}-${{ hashFiles('requirements.txt', 'requirements-optional.txt', 'requirements-dev.txt') }}
+          restore-keys: |
+            uv-linux-py${{ matrix.python-version }}-
+
+      - name: Install dependencies
+        run: |
+          uv pip install --system -r requirements.txt
+          uv pip install --system -r requirements-optional.txt
+          uv pip install --system -r requirements-dev.txt
+
+      - name: Install Rust toolchain (1.97.1, for agent embedded-integration sidecar)
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # stable
+        with:
+          toolchain: 1.97.1
+
+      - name: Cache Cargo registry & target (agent embedded-integration)
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+        with:
+          workspaces: sidecars/qtrading-pg-sidecar
+          key: ci-checks-agent-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
+          # 同 embedded-tests：只允许 main 保存，避免 PR 各存一份 target 副本挤占 10 GB 预算
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build sidecar binary (agent embedded_real integration coverage)
+        shell: bash
+        env:
+          # build script 通过 GitHub API 下载 PostgreSQL binaries 清单，传 token 提升限流
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd sidecars/qtrading-pg-sidecar
+          cargo build --release
+          BINARY_PATH="target/release/qtrading-pg-sidecar"
+          if [ ! -f "$BINARY_PATH" ]; then
+            echo "ERROR: sidecar binary not found at $BINARY_PATH after cargo build"
+            exit 1
+          fi
+          ABSOLUTE_PATH="$(pwd)/$BINARY_PATH"
+          echo "SIDECAR_BINARY_PATH=$ABSOLUTE_PATH" >> $GITHUB_ENV
+          HASH=$(sha256sum "$BINARY_PATH" | awk '{print $1}')
+          echo "SIDECAR_SHA256=$HASH" >> $GITHUB_ENV
+          echo "Sidecar binary built: $ABSOLUTE_PATH (sha256: $HASH)"
+
+      - name: Run agent embedded integration tests (serial, sidecar)
+        timeout-minutes: 25
+        env:
+          SIDECAR_BINARY_PATH: ${{ env.SIDECAR_BINARY_PATH }}
+          SIDECAR_SHA256: ${{ env.SIDECAR_SHA256 }}
+          # 覆盖率片段：与单测/集成片段由 ci-coverage 合并，阈值判定只在 ci-coverage 执行。
+          COVERAGE_FILE: cov/embedded.data
+        run: |
+          set -e
+          mkdir -p cov
+          # Agent DAO/迁移/恢复/资源/交付等 embedded_real 用例需要真实 sidecar + 内置 PostgreSQL。
+          # 串行执行（-n 1 避免 sidecar 并发，同 embedded-tests）。
+          python -m pytest tests/integration/ -m embedded_real -n 1 -p no:randomly \
+            --timeout=600 --timeout-method=thread -q \
+            --cov --cov-report= --cov-fail-under=0 --junitxml=junit-agent-embedded.xml
+
+      - name: Sanitize test reports
+        id: sanitize_test_reports_embedded
+        if: always()
+        shell: bash
+        run: |
+          python scripts/sanitize_artifacts.py 'junit-*.xml'
+
+      - name: Upload test reports
+        if: always() && steps.sanitize_test_reports_embedded.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: test-reports-embedded-${{ runner.os }}-${{ matrix.python-version }}
+          path: junit-*.xml
+          retention-days: 14
+
+      - name: Upload coverage fragment
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: cov-embedded-py${{ matrix.python-version }}
+          path: cov/embedded.data
+          retention-days: 7
+          if-no-files-found: error
+
+  ci-coverage:
+    name: Coverage Gate (Linux, Python 3.14)
+    needs: [changes, ci-checks, ci-checks-integration, ci-checks-embedded]
+    if: needs.changes.outputs.code == 'true' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      UV_CACHE_DIR: /tmp/uv-cache
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # diff-coverage 需真实 merge-base：full 历史保证 `git merge-base origin/main HEAD` 可算。
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: '3.14'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          enable-cache: false
+
+      - name: Install coverage (pinned to requirements-dev)
+        run: |
+          set -euo pipefail
+          # 与测试 job 使用同一锁定版本，避免数据文件格式不兼容；禁止安装 latest。
+          PIN="$(grep -E '^coverage==' requirements-dev.txt | head -n1)"
+          test -n "$PIN"
+          uv pip install --system "$PIN"
+
+      - name: Download coverage fragments
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        with:
+          pattern: cov-*
+          path: fragments
+          merge-multiple: true
+
+      - name: Combine coverage and generate reports
+        run: |
+          set -euo pipefail
+          # coverage combine 的确定行为只针对 `.coverage.*` 片段名：先把非隐藏片段重命名到
+          # fragments/ 顶层，再以目录参数合并（不依赖"任意文件名 + 显式路径"语义；
+          # 用 find 兼容 download-artifact 保留子目录的情况）。
+          while IFS= read -r f; do
+            mv "$f" "fragments/.coverage.$(basename "$f" .data)"
+          done < <(find fragments -type f -name '*.data')
+          coverage combine fragments
+          coverage xml
+          coverage json
+          # fail_under=85 只在合并后的数据上判定（pyproject [tool.coverage.report]）。
+          coverage report --skip-covered
+
+      - name: Check Per-File Coverage >= 80%
+        run: python scripts/check_per_file_coverage.py
+
+      - name: Report Layered Coverage (review07-G14, advisory)
+        run: python scripts/check_per_file_coverage.py --report
+
+      - name: Check diff coverage
+        run: |
+          BASE="${{ github.event.pull_request.base.ref }}"
+          BASE="${BASE:-main}"
+          # 禁止浅取：checkout 已 fetch-depth: 0，`--depth=1` 会让 origin/$BASE 失去祖先，
+          # `git merge-base` 不可算，check_diff_coverage.py 将以 fail-closed exit 2。
+          git fetch --no-tags origin "$BASE"
+          python scripts/check_diff_coverage.py --base "origin/$BASE" --strict --threshold 80
+
+      - name: Upload coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5  # v7.1.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          fail_ci_if_error: true
+          verbose: true
+
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: coverage-report-Linux-3.14
+          path: |
+            coverage.xml
+            coverage.json
+          retention-days: 14
 
   e2e-tests-windows:
     name: E2E Tests (Windows)
@@ -3259,7 +3507,7 @@ jobs:
   # 本 job 用 needs.*.result 显式校验，只放行明确允许的跳过。
   ci-gate:
     name: CI Gate
-    needs: [changes, lint-fast, lint-fast-313, ci-checks, ci-checks-static, ci-checks-db, ci-checks-windows, e2e-tests-windows, embedded-tests, installer-smoke]
+    needs: [changes, lint-fast, lint-fast-313, ci-checks, ci-checks-integration, ci-checks-embedded, ci-coverage, ci-checks-static, ci-checks-db, ci-checks-windows, e2e-tests-windows, embedded-tests, installer-smoke]
     # merge_group 一并覆盖：工作流已声明 merge_group 触发，若只在本 job 限定 pull_request，
     # 启用 merge queue 后 merge group commit 上不会产生 CI Gate，required check 将永久 Pending。
     if: always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
@@ -3278,6 +3526,9 @@ jobs:
           LINT: ${{ needs.lint-fast.result }}
           LINT_313: ${{ needs.lint-fast-313.result }}
           LINUX: ${{ needs.ci-checks.result }}
+          LINUX_INTEGRATION: ${{ needs.ci-checks-integration.result }}
+          LINUX_EMBEDDED: ${{ needs.ci-checks-embedded.result }}
+          COVERAGE: ${{ needs.ci-coverage.result }}
           STATIC: ${{ needs.ci-checks-static.result }}
           DB: ${{ needs.ci-checks-db.result }}
           WINDOWS: ${{ needs.ci-checks-windows.result }}
@@ -3315,7 +3566,10 @@ jobs:
 
           if [ "$CODE" = "false" ]; then
             # 非代码类 PR：重型 job 按设计跳过，允许 skipped；出现 failure 仍判不通过。
-            check_required "Code Quality & Tests (Linux)" "$LINUX" true
+            check_required "Unit Tests (Linux)" "$LINUX" true
+            check_required "Integration Tests (Linux)" "$LINUX_INTEGRATION" true
+            check_required "Embedded Integration Tests (Linux)" "$LINUX_EMBEDDED" true
+            check_required "Coverage Gate (Linux)" "$COVERAGE" true
             check_required "Code Quality (Linux, static)" "$STATIC" true
             check_required "DB Migration Checks (Linux)" "$DB" true
             check_required "Code Quality & Unit Tests (Windows)" "$WINDOWS" true
@@ -3329,7 +3583,11 @@ jobs:
             if [ "$ACTOR" = "dependabot[bot]" ] || [ "$IS_FORK" = "true" ]; then
               linux_allow_skipped=true
             fi
-            check_required "Code Quality & Tests (Linux)" "$LINUX" "$linux_allow_skipped"
+            check_required "Unit Tests (Linux)" "$LINUX" "$linux_allow_skipped"
+            # 拆分后的集成/embedded/覆盖率与 ci-checks 使用同源跳过条件，故同一放行口径。
+            check_required "Integration Tests (Linux)" "$LINUX_INTEGRATION" "$linux_allow_skipped"
+            check_required "Embedded Integration Tests (Linux)" "$LINUX_EMBEDDED" "$linux_allow_skipped"
+            check_required "Coverage Gate (Linux)" "$COVERAGE" "$linux_allow_skipped"
             # 静态/DB 各自独立上报：跳过条件与 ci-checks 一致，故同样按 dependabot/fork 放行。
             check_required "Code Quality (Linux, static)" "$STATIC" "$linux_allow_skipped"
             check_required "DB Migration Checks (Linux)" "$DB" "$linux_allow_skipped"

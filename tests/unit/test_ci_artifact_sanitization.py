@@ -36,6 +36,8 @@ ARTIFACT_PATH_MARKERS = ("junit-", LOG_PATH, "e2e-artifacts", "sidecar-logs")
 # 每个应覆盖工件上传的 job 的脱敏命令（精确断言参数与顺序）
 EXPECTED_SANITIZE_COMMANDS = {
     "ci-checks": f"python {SANITIZE_SCRIPT} 'junit-*.xml'",
+    "ci-checks-integration": f"python {SANITIZE_SCRIPT} 'junit-*.xml'",
+    "ci-checks-embedded": f"python {SANITIZE_SCRIPT} 'junit-*.xml'",
     "ci-checks-windows": f"python {SANITIZE_SCRIPT} 'junit-*.xml'",
     "e2e-tests-windows": f"python {SANITIZE_SCRIPT} {LOG_PATH} 'junit-e2e.xml' e2e-artifacts",
     "embedded-tests": f"python {SANITIZE_SCRIPT} {LOG_PATH} 'junit-*.xml'",
@@ -50,6 +52,8 @@ EXPECTED_SANITIZE_COMMANDS = {
 # 每个脱敏步骤的稳定 id（upload 条件通过 steps.<id>.outcome 引用）
 EXPECTED_SANITIZE_IDS = {
     "ci-checks": "sanitize_test_reports_linux",
+    "ci-checks-integration": "sanitize_test_reports_integration",
+    "ci-checks-embedded": "sanitize_test_reports_embedded",
     "ci-checks-windows": "sanitize_test_reports_windows",
     "e2e-tests-windows": "sanitize_e2e",
     "embedded-tests": "sanitize_embedded",
@@ -60,9 +64,19 @@ EXPECTED_SANITIZE_IDS = {
 # 上传工件名称/保留策略快照（脱敏改造不得改变这些值）
 EXPECTED_UPLOADS = {
     "ci-checks": (
-        "test-reports-${{ runner.os }}-${{ matrix.python-version }}",
+        "test-reports-unit-${{ runner.os }}-${{ matrix.python-version }}",
         14,
-        ("coverage.xml", "coverage.json", "junit-*.xml"),
+        ("junit-*.xml",),
+    ),
+    "ci-checks-integration": (
+        "test-reports-integration-${{ runner.os }}-${{ matrix.python-version }}",
+        14,
+        ("junit-*.xml",),
+    ),
+    "ci-checks-embedded": (
+        "test-reports-embedded-${{ runner.os }}-${{ matrix.python-version }}",
+        14,
+        ("junit-*.xml",),
     ),
     "ci-checks-windows": ("test-reports-${{ runner.os }}", 14, ("junit-*.xml",)),
     "e2e-tests-windows": (
