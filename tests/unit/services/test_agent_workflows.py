@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -25,29 +26,42 @@ from dbos import DBOS
 from services.agent_service.workflows import (
     IDLE_WAIT_INTERVAL_SEC,
     LEAF_EXECUTE_STEP_NAME,
+    ActualInputBinderRegistry,
+    ActualInputBinding,
     LeafDagScheduler,
     LeafExecutionContext,
+    LeafIdentity,
     LeafRuntimeRegistry,
+    LeafTicketGateRegistry,
+    LeafTicketLease,
     NodeOutcome,
+    ParentBindIdentity,
     PlanAdmission,
     PlanRunSummary,
     _leaf_step_evidence,
     _terminal_outcome,
     admit_research_plan,
     build_leaf_payload,
+    build_parent_bind_request,
     build_research_payload,
     build_retry_payload,
+    claim_leaf_ticket,
     compute_actual_input_manifest,
     compute_retry_scope,
+    decode_actual_input_binding,
+    decode_binding_identity,
     decode_leaf_payload,
     decode_node_outcome,
     decode_plan_admission,
     decode_research_payload,
     decode_research_payload_full,
     drive_leaf_dag,
+    leaf_ticket_slot_id,
     leaf_workflow_id,
     observe_leaf_children,
     record_plan_admission,
+    release_leaf_ticket,
+    validate_actual_input_binding,
     wait_next_observation_window,
 )
 
@@ -62,7 +76,9 @@ def _plan(*nodes: PlanNodeSpec) -> PlanSpecProposal:
     return PlanSpecProposal(nodes=nodes)
 
 
-def _outcome(node_id: str, state: str = "complete", **kwargs: str | None) -> NodeOutcome:
+def _outcome(node_id: str, state: str = "complete", **kwargs: Any) -> NodeOutcome:
+    if state == "complete" and "artifact_ref" not in kwargs:
+        kwargs["artifact_ref"] = f"art-{node_id}@1"
     return NodeOutcome(node_id=node_id, state=state, **kwargs)
 
 
@@ -85,6 +101,7 @@ class _DagHarness:
 
     def __init__(self) -> None:
         self.started: list[str] = []
+        self.predecessors: dict[str, tuple[tuple[str, str], ...]] = {}
         self.states: dict[str, str] = {}
         self.active = 0
         self.max_concurrent = 0
@@ -94,9 +111,10 @@ class _DagHarness:
     def gate(self, node_id: str) -> asyncio.Event:
         return self._gates.setdefault(node_id, asyncio.Event())
 
-    async def start(self, node: PlanNodeSpec) -> str:
+    async def start(self, node: PlanNodeSpec, predecessors: tuple[tuple[str, str], ...]) -> str:
         node_id = node.node_id
         self.started.append(node_id)
+        self.predecessors[node_id] = predecessors
         self.active += 1
         self.max_concurrent = max(self.max_concurrent, self.active)
 
@@ -402,7 +420,7 @@ def test_drive_propagates_cancellation() -> None:
     """取消向上传播（R2：不吞 CancelledError、不转成 failed 事实）。"""
     plan = _plan(_node("a"))
 
-    async def cancelled(node: PlanNodeSpec) -> str:
+    async def cancelled(node: PlanNodeSpec, predecessors: tuple[tuple[str, str], ...]) -> str:
         raise asyncio.CancelledError
 
     async def observe(children: tuple[tuple[str, str], ...]) -> dict[str, NodeOutcome]:
@@ -420,7 +438,7 @@ def test_drive_propagates_unexpected_exception() -> None:
     """未判定异常向上传播（不伪造 failed：未知不等于失败）。"""
     plan = _plan(_node("a"))
 
-    async def broken(node: PlanNodeSpec) -> str:
+    async def broken(node: PlanNodeSpec, predecessors: tuple[tuple[str, str], ...]) -> str:
         raise ValueError("infra boom")
 
     async def observe(children: tuple[tuple[str, str], ...]) -> dict[str, NodeOutcome]:
@@ -500,9 +518,9 @@ def test_drive_issues_start_and_observe_in_parent_order() -> None:
     harness = _DagHarness()
     calls: list[tuple[str, tuple[str, ...]]] = []
 
-    async def start(node: PlanNodeSpec) -> str:
+    async def start(node: PlanNodeSpec, predecessors: tuple[tuple[str, str], ...]) -> str:
         calls.append(("start", (node.node_id,)))
-        return await harness.start(node)
+        return await harness.start(node, predecessors)
 
     async def observe(children: tuple[tuple[str, str], ...]) -> dict[str, NodeOutcome]:
         calls.append(("observe", tuple(node_id for node_id, _ in children)))
@@ -527,7 +545,7 @@ def test_drive_observation_budget_only_stops_observation() -> None:
     """未提供持久等待接续者时，达预算只停观察：converged=False、不伪造叶终态（§8.3/R21）。"""
     plan = _plan(_node("a"))
 
-    async def start(node: PlanNodeSpec) -> str:
+    async def start(node: PlanNodeSpec, predecessors: tuple[tuple[str, str], ...]) -> str:
         return "wf:a"
 
     async def observe(children: tuple[tuple[str, str], ...]) -> dict[str, NodeOutcome]:
@@ -546,7 +564,7 @@ def test_drive_budget_exhaustion_resumes_with_persistent_wait() -> None:
     observation_rounds = 0
     waits: list[int] = []
 
-    async def start(node: PlanNodeSpec) -> str:
+    async def start(node: PlanNodeSpec, predecessors: tuple[tuple[str, str], ...]) -> str:
         started.append(node.node_id)
         return f"wf:{node.node_id}"
 
@@ -583,7 +601,7 @@ def test_drive_wait_checkpoint_can_end_batch_without_fake_terminal() -> None:
     """负例：接续者拒绝继续时结束批次，保持 converged=False、不伪造终态（R21）。"""
     plan = _plan(_node("a"))
 
-    async def start(node: PlanNodeSpec) -> str:
+    async def start(node: PlanNodeSpec, predecessors: tuple[tuple[str, str], ...]) -> str:
         return "wf:a"
 
     async def observe(children: tuple[tuple[str, str], ...]) -> dict[str, NodeOutcome]:
@@ -604,7 +622,7 @@ def test_drive_wait_checkpoint_cancellation_propagates() -> None:
     """取消在持久等待点继续传播（R2：不吞 CancelledError、不转成终态事实）。"""
     plan = _plan(_node("a"))
 
-    async def start(node: PlanNodeSpec) -> str:
+    async def start(node: PlanNodeSpec, predecessors: tuple[tuple[str, str], ...]) -> str:
         return "wf:a"
 
     async def observe(children: tuple[tuple[str, str], ...]) -> dict[str, NodeOutcome]:
@@ -637,7 +655,7 @@ def test_drive_rejects_outcome_for_unstarted_node() -> None:
     """未启动节点的完成事实不得计入本轮成果（身份核验）。"""
     plan = _plan(_node("a"))
 
-    async def start(node: PlanNodeSpec) -> str:
+    async def start(node: PlanNodeSpec, predecessors: tuple[tuple[str, str], ...]) -> str:
         return "wf:a"
 
     async def observe(children: tuple[tuple[str, str], ...]) -> dict[str, NodeOutcome]:
@@ -674,10 +692,15 @@ def test_terminal_outcome_maps_failure_statuses(state: str, error_code: str) -> 
     assert outcome == NodeOutcome(node_id="a", state="failed", error_code=error_code)
 
 
-def test_terminal_outcome_maps_cancelled_without_execution_to_ended() -> None:
-    """无任何执行记录的取消（如启动隔离取消）→ ended；不伪装业务失败或空成果。"""
+def test_terminal_outcome_maps_cancelled_without_execution_to_unknown() -> None:
+    """无任何执行记录的取消（如启动隔离取消）→ unknown（未核退出），不伪装成 ended。"""
     outcome = _terminal_outcome("a", state="CANCELLED", output=None)
-    assert outcome == NodeOutcome(node_id="a", state="ended", error_code="leaf_workflow_cancelled")
+    assert outcome == NodeOutcome(
+        node_id="a",
+        state="unknown",
+        error_code="leaf_workflow_exit_unverified",
+        exit_verified=False,
+    )
 
 
 def test_terminal_outcome_projects_outcome_recorded_after_cancel() -> None:
@@ -767,7 +790,7 @@ def test_observe_projects_recorded_outcome_after_cancel(monkeypatch: pytest.Monk
 
 
 def test_observe_reports_cancelled_without_execution(monkeypatch: pytest.MonkeyPatch) -> None:
-    """观察链路：无执行记录的取消（启动隔离取消）→ ended，不宣称成果。"""
+    """观察链路：无执行记录的取消 → unknown（未核退出），不宣称成果或已结束。"""
 
     class _Status:
         status = "CANCELLED"
@@ -791,8 +814,12 @@ def test_observe_reports_cancelled_without_execution(monkeypatch: pytest.MonkeyP
         )
     )
     assert wires == [
-        NodeOutcome(node_id="a", state="ended", error_code="leaf_workflow_cancelled").to_wire(),
-        NodeOutcome(node_id="b", state="ended", error_code="leaf_workflow_cancelled").to_wire(),
+        NodeOutcome(
+            node_id="a", state="unknown", error_code="leaf_workflow_exit_unverified", exit_verified=False
+        ).to_wire(),
+        NodeOutcome(
+            node_id="b", state="unknown", error_code="leaf_workflow_exit_unverified", exit_verified=False
+        ).to_wire(),
     ]
 
 
@@ -1222,3 +1249,278 @@ def test_leaf_payload_carries_input_digest() -> None:
     assert decode_leaf_payload(payload).input_digest == "1" * 64
     without = build_leaf_payload(execution_id="exec-1", round_id="round-1", plan_digest="b" * 64, node=_node("a"))
     assert decode_leaf_payload(without).input_digest is None
+
+
+# ---------------------------------------------------------------------------
+# 实际输入绑定（应用轮次 / 准确前置成果 / 树级额度）
+# ---------------------------------------------------------------------------
+
+
+def _binding_identity() -> ParentBindIdentity:
+    return ParentBindIdentity(
+        user_scope="user-1",
+        session_id="session-1",
+        workflow_code_version="1.0.0",
+        run_epoch=1,
+        expected_input_revision=1,
+    )
+
+
+def _binding(plan: PlanSpecProposal, *, execution_id: str = "exec-1", round_id: str = "round-1") -> ActualInputBinding:
+    digest = "1" * 64
+    return ActualInputBinding(
+        execution_id=execution_id,
+        round_id=round_id,
+        plan_digest=plan_spec_digest(plan),
+        input_revision=1,
+        owner_epoch=2,
+        leaves=tuple(
+            LeafIdentity(
+                node_id=node.node_id,
+                leaf_id=leaf_workflow_id(execution_id=execution_id, round_id=round_id, node_id=node.node_id),
+                input_digest=digest,
+            )
+            for node in plan.nodes
+        ),
+    )
+
+
+def test_actual_input_binding_roundtrip_and_coverage() -> None:
+    """绑定 wire 往返；覆盖计划/清单且叶身份派生一致才算有效。"""
+    plan = _plan(_node("a"), _node("b", ("a",)))
+    binding = _binding(plan)
+    decoded = decode_actual_input_binding(binding.to_wire())
+    assert decoded == binding
+    manifest = compute_actual_input_manifest(plan, input_version_digest="2" * 64)
+    # 清单指纹与构造绑定不同 → 覆盖校验必须拒绝（不把错输入当成已绑定）。
+    with pytest.raises(AgentValidationError) as excinfo:
+        validate_actual_input_binding(
+            decoded,
+            execution_id="exec-1",
+            round_id="round-1",
+            plan_digest=plan_spec_digest(plan),
+            plan=plan,
+            manifest=manifest,
+        )
+    assert excinfo.value.code == "binding_input_mismatch"
+
+
+def test_actual_input_binding_rejects_mismatched_leaf_identity() -> None:
+    """叶身份与三元组派生不一致即拒绝（不冒认其他叶/轮次）。"""
+    plan = _plan(_node("a"))
+    binding = _binding(plan)
+    manifest = compute_actual_input_manifest(plan, input_version_digest=None)
+    wrong = ActualInputBinding(
+        execution_id=binding.execution_id,
+        round_id=binding.round_id,
+        plan_digest=binding.plan_digest,
+        input_revision=binding.input_revision,
+        owner_epoch=binding.owner_epoch,
+        leaves=(LeafIdentity(node_id="a", leaf_id="agent_leaf:other", input_digest=manifest.nodes[0].input_digest),),
+    )
+    with pytest.raises(AgentValidationError) as excinfo:
+        validate_actual_input_binding(
+            wrong,
+            execution_id="exec-1",
+            round_id="round-1",
+            plan_digest=plan_spec_digest(plan),
+            plan=plan,
+            manifest=manifest,
+        )
+    assert excinfo.value.code == "binding_leaf_identity_mismatch"
+
+
+def test_actual_input_binder_registry_requires_install() -> None:
+    """未登记绑定器明确拒绝（父零叶派发，fail-closed）。"""
+    ActualInputBinderRegistry._reset_singleton()
+    with pytest.raises(RuntimeError) as excinfo:
+        ActualInputBinderRegistry.require()
+    assert "actual_input_binding_unavailable" in str(excinfo.value)
+
+
+def test_binding_identity_is_written_and_decoded_strictly() -> None:
+    """派发侧身份写入父载荷并可严格解码；额外键拒绝。"""
+    plan = _plan(_node("a"))
+    payload = build_research_payload(
+        plan,
+        execution_id="exec-1",
+        round_id="round-1",
+        plan_digest=plan_spec_digest(plan),
+        binding_identity=_binding_identity(),
+    )
+    decoded = decode_research_payload_full(payload)
+    assert decoded.binding_identity == _binding_identity()
+    with pytest.raises(AgentValidationError) as excinfo:
+        decode_binding_identity({**_binding_identity().to_wire(), "extra": 1})
+    assert excinfo.value.code == "unknown_field"
+
+
+def test_parent_bind_request_shape() -> None:
+    """父绑定请求携带派发身份与准入清单指纹（PORTABLE 可序列化）。"""
+    request = build_parent_bind_request(
+        _binding_identity(),
+        execution_id="exec-1",
+        round_id="round-1",
+        plan_digest="b" * 64,
+        workflow_id="wf-1",
+        frozen_manifest="{}",
+        actual_input="{}",
+        input_digests={"a": "1" * 64},
+    )
+    assert request["user_scope"] == "user-1"
+    assert request["workflow_id"] == "wf-1"
+    assert request["input_digests"] == {"a": "1" * 64}
+
+
+def test_leaf_payload_carries_binding_and_predecessor_artifacts() -> None:
+    """叶载荷携带绑定身份、输入版与前置成果引用；叶身份不符即拒绝。"""
+    leaf_id = leaf_workflow_id(execution_id="exec-1", round_id="round-1", node_id="a")
+    payload = build_leaf_payload(
+        execution_id="exec-1",
+        round_id="round-1",
+        plan_digest="b" * 64,
+        node=_node("a"),
+        input_digest="1" * 64,
+        leaf_id=leaf_id,
+        input_revision=2,
+        predecessor_artifacts=(("p", "art-1@1"),),
+    )
+    context = decode_leaf_payload(payload)
+    assert context.leaf_id == leaf_id
+    assert context.input_revision == 2
+    assert context.predecessor_artifacts == (("p", "art-1@1"),)
+    with pytest.raises(AgentValidationError) as excinfo:
+        decode_leaf_payload({**payload, "leaf_id": "agent_leaf:other"})
+    assert excinfo.value.code == "leaf_id_mismatch"
+
+
+def test_drive_blocks_leaf_when_ticket_claim_denied() -> None:
+    """票据受阻即阻断节点（含下游），不启动叶、不伪造推进。"""
+    plan = _plan(_node("a"), _node("b", ("a",)))
+    harness = _DagHarness()
+
+    async def claim(node: PlanNodeSpec) -> str | None:
+        return "leaf_ticket_blocked:budget_blocked"
+
+    summary = asyncio.run(drive_leaf_dag(plan, harness.start, harness.observe, claim_leaf=claim))
+    assert harness.started == []
+    assert summary.blocked == ("a", "b")
+    assert summary.block_reasons[0][1] == "leaf_ticket_blocked:budget_blocked"
+    assert summary.converged is True
+
+
+def test_drive_passes_predecessor_artifacts_and_releases_on_terminal() -> None:
+    """前置成果引用传给后继启动；终态后按已核退出释放票据（每叶一次）。"""
+    plan = _plan(_node("a"), _node("b", ("a",)))
+    harness = _DagHarness()
+    releases: list[tuple[str, bool]] = []
+
+    async def start(node: PlanNodeSpec, predecessors: tuple[tuple[str, str], ...]) -> str:
+        return await harness.start(node, predecessors)
+
+    async def observe(children: tuple[tuple[str, str], ...]) -> dict[str, NodeOutcome]:
+        outcomes = await harness.observe(children)
+        if "a" in outcomes:
+            outcomes["a"] = _outcome("a", artifact_ref="art-a@1")
+        if "b" in outcomes:
+            outcomes["b"] = _outcome("b", artifact_ref="art-b@1")
+        return outcomes
+
+    async def release(node: PlanNodeSpec, exit_verified: bool) -> None:
+        releases.append((node.node_id, exit_verified))
+
+    async def scenario() -> PlanRunSummary:
+        task = asyncio.ensure_future(drive_leaf_dag(plan, start, observe, release_leaf=release))
+        await _wait_until(lambda: harness.started == ["a"])
+        harness.gate("a").set()
+        await _wait_until(lambda: "b" in harness.started)
+        harness.gate("b").set()
+        return await task
+
+    summary = asyncio.run(scenario())
+    assert harness.predecessors["a"] == ()
+    assert harness.predecessors["b"] == (("a", "art-a@1"),)
+    assert releases == [("a", True), ("b", True)]
+    assert summary.succeeded == ("a", "b")
+
+
+def test_drive_blocks_successor_when_predecessor_artifact_missing() -> None:
+    """前置成功但无成果引用：后继被阻断（不以无成果前置启动）。"""
+    plan = _plan(_node("a"), _node("b", ("a",)))
+    harness = _DagHarness()
+
+    async def observe(children: tuple[tuple[str, str], ...]) -> dict[str, NodeOutcome]:
+        facts = await harness.observe(children)
+        return {node_id: _outcome(node_id, artifact_ref=None) for node_id in facts}
+
+    async def scenario() -> PlanRunSummary:
+        task = asyncio.ensure_future(drive_leaf_dag(plan, harness.start, observe))
+        await _wait_until(lambda: harness.started == ["a"])
+        harness.gate("a").set()
+        return await task
+
+    summary = asyncio.run(scenario())
+    assert harness.started == ["a"]
+    assert summary.blocked == ("b",)
+    assert summary.block_reasons == (("b", "predecessor_artifact_missing:b"),)
+
+
+def test_ticket_gate_registry_requires_install() -> None:
+    """未登记票据门即拒绝（树级额度是安全不变量，fail-closed）。"""
+    LeafTicketGateRegistry._reset_singleton()
+    with pytest.raises(RuntimeError) as excinfo:
+        LeafTicketGateRegistry.require()
+    assert "leaf_ticket_gate_unavailable" in str(excinfo.value)
+
+
+def test_claim_step_maps_budget_denial_to_reason() -> None:
+    """认领 BUDGET_BLOCKED 映射为受阻原因（不启动叶）。"""
+
+    class _Gate:
+        async def claim(self, *, execution_id: str, round_id: str, node_id: str) -> LeafTicketLease | None:
+            from core.agent_types import AgentErrorCode, AgentServiceError
+
+            raise AgentServiceError(AgentErrorCode.BUDGET_BLOCKED, "leaf quota", "user-1/slot")
+
+        async def release(self, lease: LeafTicketLease, *, exit_verified: bool) -> None: ...
+
+    LeafTicketGateRegistry.install(_Gate())
+    try:
+        result = asyncio.run(
+            claim_leaf_ticket({"execution_id": "exec-1", "round_id": "round-1", "node_id": "a", "owner_epoch": 2})
+        )
+    finally:
+        LeafTicketGateRegistry._reset_singleton()
+    assert result == {"lease": None, "reason": "budget_blocked"}
+
+
+def test_release_step_keeps_capacity_when_exit_unverified() -> None:
+    """未核退出释放保持占用（返回 False，不放空树级额度）。"""
+    released: list[bool] = []
+
+    class _Gate:
+        async def claim(self, *, execution_id: str, round_id: str, node_id: str) -> LeafTicketLease | None:
+            return None
+
+        async def release(self, lease: LeafTicketLease, *, exit_verified: bool) -> None:
+            released.append(exit_verified)
+
+    LeafTicketGateRegistry.install(_Gate())
+    try:
+        slot_id = leaf_ticket_slot_id("exec-1", "round-1", "a")
+        result = asyncio.run(
+            release_leaf_ticket(
+                {
+                    "slot_id": slot_id,
+                    "user_scope": "user-1",
+                    "execution_id": "exec-1",
+                    "node_id": "a",
+                    "owner_epoch": 2,
+                    "exit_verified": False,
+                }
+            )
+        )
+    finally:
+        LeafTicketGateRegistry._reset_singleton()
+    assert result is False
+    assert released == [False]
