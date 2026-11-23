@@ -3,6 +3,9 @@ name: Docs Consistency CI
 on:
   pull_request:
     branches: [ "main" ]
+    # 显式声明活动类型并加入 edited：PR 基线在最后一次 push 之后才改到 main 时只发 edited，
+    # 不声明则 `Docs Consistency Check` 永不生成、required check 永久停在 Pending。
+    types: [opened, synchronize, reopened, edited]
     # 不使用 paths 过滤（检视 §5.4：两个必要验证 job 在每次事件均运行，不用路径分类跳过）：
     # Docs Consistency Check 是 main 的 required status check，若 paths 未命中则本 workflow
     # 不触发，该 check 永久停在 Pending 并阻塞合并；纯 Markdown PR 也由固定执行天然覆盖。

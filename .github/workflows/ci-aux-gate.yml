@@ -12,6 +12,9 @@ name: CI Aux Gate
 on:
   pull_request:
     branches: [ "main" ]
+    # 显式声明活动类型并加入 edited：PR 基线在最后一次 push 之后才改到 main 时只发 edited，
+    # 不声明则聚合 check `CI Aux Gate` 永不生成、required check 永久停在 Pending。
+    types: [opened, synchronize, reopened, edited]
     # 不使用 paths 过滤：required check 必须每次 PR 都出现。
   merge_group:
     branches: [ "main" ]
