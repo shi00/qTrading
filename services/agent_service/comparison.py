@@ -1241,7 +1241,8 @@ class LaneWithdrawal:
 
 
 #: 撤回端口：真正撤回一路未派发执行（写库/关闭派发由实现承担）并回可核事实。
-LaneWithdrawer = Callable[[ComparisonLaneFrozen, str], Awaitable[LaneWithdrawal]]
+#: 参数顺序：本路冻结条目、该路执行 ID（未知为 ``None``）、停止原因码。
+LaneWithdrawer = Callable[[ComparisonLaneFrozen, str | None, str], Awaitable[LaneWithdrawal]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1289,6 +1290,7 @@ async def execute_group_stop(
 
     plan = plan_group_stop(group, observations, reason=reason)
     by_lane = {lane.lane_ref: lane for lane in group.lanes}
+    execution_by_lane = {item.lane_ref: item.execution_id for item in observations}
     outcomes: list[LaneStopOutcome] = []
     for decision in plan.decisions:
         lane = by_lane.get(decision.lane_ref)
@@ -1314,7 +1316,7 @@ async def execute_group_stop(
             )
             continue
         try:
-            fact = await withdraw_lane(lane, plan.reason)
+            fact = await withdraw_lane(lane, execution_by_lane.get(decision.lane_ref), plan.reason)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

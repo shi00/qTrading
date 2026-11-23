@@ -37,10 +37,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from core.agent_types import (
     NON_RECOVERABLE_DISPLAY_STATES,
@@ -120,6 +120,7 @@ from services.agent_service.comparison import (
     ComparisonSubmissionReceipt,
     ComparisonSubmissionRequest,
     FrozenComparisonGroup,
+    LaneWithdrawal,
     LaneWithdrawer,
     build_comparison_view,
     build_lane_accept_request,
@@ -287,7 +288,9 @@ class AgentService:
         ``PERSISTENCE_UNAVAILABLE``，不伪造已生效。``answer_sender`` 为答复原生
         发送端口（P1-05）：未注入时答复保存仍成功，但交付入口 fail-closed 拒绝。
         ``lane_withdrawer`` 为比较组停止的真实撤单端口；未接线时未派发路如实标
-        「撤回未确认」，不把停止计划伪装成已撤回。
+        「撤回未确认」，不把停止计划伪装成已撤回。默认（未注入）时直连 DAO
+        撤单写接口 ``AgentDao.withdraw_comparison_lane``；DAO 未提供该接口或撤回
+        未确认时逐路如实标未确认。
         """
 
         self._dao = dao
@@ -1006,9 +1009,10 @@ class AgentService:
         """组一致停止（F37）：先关本组派发门，再撤单未派发路并逐路核对结果。
 
         共同资料被停止使用时所有路共享同一冻结输入，故组内一致处理：未派发路
-        经注入的撤单端口真实撤回（端口未接线/未确认 → 该路如实标未确认，不把
-        计划当已撤回）；在途路只停新派发（原生退出未核定前不算已停止）；已完成
-        成果与费用保留。派发门关闭后任何在途编排的下一路零派发。
+        经撤单端口真实撤回（默认直连 ``AgentDao.withdraw_comparison_lane``，可用
+        构造参数覆盖；撤回未确认/已派发 → 该路如实标未确认，不把计划当已撤回）；
+        在途路只停新派发（原生退出未核定前不算已停止）；已完成成果与费用保留。
+        派发门关闭后任何在途编排的下一路零派发。
         """
 
         group, view = await self._load_comparison(query)
@@ -1024,12 +1028,40 @@ class AgentService:
         )
         # 先关派发门（撤单前落定），使并发的 run_comparison 不再启动任何新路。
         self._stopped_groups.add(group.group_ref)
+        withdraw_lane = self._lane_withdrawer
+        if withdraw_lane is None:
+            withdraw_lane = self._dao_lane_withdrawer(group.user_scope)
         return await execute_group_stop(
             group,
             observations,
             reason=reason,
-            withdraw_lane=self._lane_withdrawer,
+            withdraw_lane=withdraw_lane,
         )
+
+    def _dao_lane_withdrawer(self, user_scope: str) -> LaneWithdrawer | None:
+        """DAO 撤单端口的默认接线：未实现该写接口时返回 ``None``（逐路如实标未确认）。
+
+        这是组停止「真实撤回未派发路」的生产默认端口：调用
+        ``AgentDao.withdraw_comparison_lane``（只改排队态、幂等、已派发标 preserve），
+        并把 DAO 的可核事实映射为逐路 ``LaneWithdrawal``；不伪报成功（R21）。
+        """
+
+        withdraw = getattr(self._dao, "withdraw_comparison_lane", None)
+        if not callable(withdraw):
+            return None
+        withdraw_call = cast("Callable[..., Awaitable[Any]]", withdraw)
+
+        async def _withdraw(lane: Any, execution_id: str | None, _reason: str) -> LaneWithdrawal:
+            if execution_id is None:
+                return LaneWithdrawal(lane_ref=lane.lane_ref, withdrawn=False, reason="execution_unknown")
+            outcome = await withdraw_call(user_scope=user_scope, execution_id=execution_id)
+            return LaneWithdrawal(
+                lane_ref=lane.lane_ref,
+                withdrawn=bool(outcome.withdrawn),
+                reason=None if outcome.withdrawn else outcome.reason,
+            )
+
+        return _withdraw
 
     # ------------------------------------------------------------------
     # 写入面（受理）
