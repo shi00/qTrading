@@ -19,7 +19,14 @@ import pytest
 from pydantic_ai import DeferredToolRequests
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 
-from core.agent_types import AgentErrorCode, AgentServiceError, PlanNodeSpec, ResearchResult
+from core.agent_types import (
+    AgentErrorCode,
+    AgentServiceError,
+    PlanNodeSpec,
+    ResearchResult,
+    SourceKind,
+    SourceVersionRef,
+)
 from core.model_management_types import ExecutionSnapshot
 from services.agent_service import leaf_agent
 from services.agent_service.leaf_agent import (
@@ -30,6 +37,7 @@ from services.agent_service.leaf_agent import (
     LEAF_MODEL_REF_UNAVAILABLE,
     LEAF_POLICY_DENIED,
     LEAF_RESULT_SAVE_FAILED,
+    LEAF_ROLE_PROMPT_UNAVAILABLE,
     LEAF_TOOL_SETUP_FAILED,
     build_leaf_agent_runner,
     run_leaf_agent,
@@ -43,6 +51,8 @@ from services.agent_service.workflows import LeafExecutionContext
 pytestmark = pytest.mark.unit
 
 _DIGEST = "a" * 64
+#: autouse fixture 会替换模块函数；此处保留原始实现供「读设置页」用例直接验证。
+_ORIGINAL_READ_SAVED_ROLE_PROMPT = leaf_agent._read_saved_role_prompt
 _SNAPSHOT = ExecutionSnapshot(
     snapshot_id="snap-1",
     run_id=None,
@@ -60,12 +70,12 @@ _SNAPSHOT = ExecutionSnapshot(
 )
 
 
-def _context(*, input_digest: str | None = _DIGEST) -> LeafExecutionContext:
+def _context(*, input_digest: str | None = _DIGEST, source_refs: tuple[Any, ...] = ()) -> LeafExecutionContext:
     return LeafExecutionContext(
         execution_id="execution-1",
         round_id="round-1",
         plan_digest="b" * 64,
-        node=PlanNodeSpec(node_id="n1", target="梳理公司业务", role_key="analyst"),
+        node=PlanNodeSpec(node_id="n1", target="梳理公司业务", role_key="analyst", source_refs=source_refs),
         input_digest=input_digest,
     )
 
@@ -167,6 +177,12 @@ def _fake_agent(monkeypatch: pytest.MonkeyPatch) -> type[_FakeAgent]:
     _FakeAgent.messages = [ModelResponse([], model_name="provider-model-1")]
     _FakeAgent.error = None
     monkeypatch.setattr(leaf_agent, "Agent", _FakeAgent)
+    # 角色 Prompt 读取默认走设置页（同步配置 IO）：单元测试以替身冻结，避免读真实配置。
+    monkeypatch.setattr(
+        leaf_agent,
+        "_read_saved_role_prompt",
+        lambda role_key: leaf_agent.RolePromptIdentity(text=f"saved-{role_key}-prompt", version="v-default"),
+    )
     return _FakeAgent
 
 
@@ -206,7 +222,77 @@ class TestRunLeafAgentSuccess:
         assert agent.kwargs["retries"] == 0
         assert agent.kwargs["tools"] == ()
         assert agent.kwargs["name"] == "qtrading_research"
+        assert "saved-sub-prompt" in agent.kwargs["instructions"]
+        assert "analyst" in agent.kwargs["instructions"]
         assert agent.deps.session_id == "session-1"
+
+    async def test_instructions_use_saved_role_prompt_default_plus_append(self, _fake_agent: type[_FakeAgent]) -> None:
+        dao = _Dao()
+
+        await run_leaf_agent(
+            _model(),
+            _context(),
+            _binding(),
+            dao=dao,
+            role_prompt_reader=lambda role_key: leaf_agent.RolePromptIdentity(
+                text="默认子角色正文\n\n优先解释行业景气度", version="v-saved"
+            ),
+        )
+
+        instructions = _fake_agent.instances[0].kwargs["instructions"]
+        assert "默认子角色正文" in instructions
+        assert "优先解释行业景气度" in instructions
+
+    async def test_role_prompt_unavailable_fails_without_outbound(self, _fake_agent: type[_FakeAgent]) -> None:
+        dao = _Dao()
+
+        def _boom(role_key: str) -> leaf_agent.RolePromptIdentity:
+            raise RuntimeError("config unreadable")
+
+        outcome = await run_leaf_agent(_model(), _context(), _binding(), dao=dao, role_prompt_reader=_boom)
+
+        assert outcome.state == "failed"
+        assert outcome.error_code == LEAF_ROLE_PROMPT_UNAVAILABLE
+        assert _fake_agent.instances == []
+        assert dao.drafts == []
+
+    async def test_role_prompt_cancelled_propagates(self, _fake_agent: type[_FakeAgent]) -> None:
+        dao = _Dao()
+
+        def _cancel(role_key: str) -> leaf_agent.RolePromptIdentity:
+            raise asyncio.CancelledError()
+
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await run_leaf_agent(_model(), _context(), _binding(), dao=dao, role_prompt_reader=_cancel)
+
+        assert exc.value.args == ()
+        assert _fake_agent.instances == []
+        assert dao.drafts == []
+
+    async def test_blank_role_prompt_fails_without_outbound(self, _fake_agent: type[_FakeAgent]) -> None:
+        dao = _Dao()
+        outcome = await run_leaf_agent(
+            _model(),
+            _context(),
+            _binding(),
+            dao=dao,
+            role_prompt_reader=lambda role_key: leaf_agent.RolePromptIdentity(text="  \n", version="v-saved"),
+        )
+
+        assert outcome.state == "failed"
+        assert outcome.error_code == LEAF_ROLE_PROMPT_UNAVAILABLE
+        assert _fake_agent.instances == []
+        assert dao.drafts == []
+
+    async def test_node_source_refs_are_saved_with_result(self, _fake_agent: type[_FakeAgent]) -> None:
+        ref = SourceVersionRef(
+            source_kind=SourceKind.USER_MESSAGE, source_id="src-1", source_version="1", source_digest="c" * 64
+        )
+        dao = _Dao()
+
+        await run_leaf_agent(_model(), _context(source_refs=(ref,)), _binding(), dao=dao)
+
+        assert dao.drafts[0].source_refs == (ref,)
 
 
 class TestRunLeafAgentFailures:
@@ -375,3 +461,48 @@ class TestLeafToolLoop:
         assert outcome.state == "failed"
         assert outcome.error_code == "tool_budget_exceeded"
         assert dao.drafts == []
+
+
+class TestSavedRolePromptSource:
+    def test_reads_default_text_plus_saved_append_and_version(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from utils.config_handler import ConfigHandler
+        from utils.config_models import ROLE_PROMPT_DEFAULTS
+
+        default_text, default_version = ROLE_PROMPT_DEFAULTS[leaf_agent.LEAF_ROLE_PROMPT_KEY]
+        monkeypatch.setattr(ConfigHandler, "get_ai_role_prompt_append", staticmethod(lambda role_key: "优先解释景气度"))
+        monkeypatch.setattr(ConfigHandler, "get_ai_role_prompt_version", staticmethod(lambda role_key: "v-saved"))
+
+        monkeypatch.setattr(leaf_agent, "_read_saved_role_prompt", _ORIGINAL_READ_SAVED_ROLE_PROMPT)
+        identity = leaf_agent._read_saved_role_prompt(leaf_agent.LEAF_ROLE_PROMPT_KEY)
+
+        assert identity.text == f"{default_text}\n\n优先解释景气度"
+        assert identity.version == "v-saved"
+
+    def test_blank_append_falls_back_to_default_text_and_version(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from utils.config_handler import ConfigHandler
+        from utils.config_models import ROLE_PROMPT_DEFAULTS
+
+        default_text, default_version = ROLE_PROMPT_DEFAULTS[leaf_agent.LEAF_ROLE_PROMPT_KEY]
+        monkeypatch.setattr(ConfigHandler, "get_ai_role_prompt_append", staticmethod(lambda role_key: "  \n"))
+        monkeypatch.setattr(ConfigHandler, "get_ai_role_prompt_version", staticmethod(lambda role_key: ""))
+
+        monkeypatch.setattr(leaf_agent, "_read_saved_role_prompt", _ORIGINAL_READ_SAVED_ROLE_PROMPT)
+        identity = leaf_agent._read_saved_role_prompt(leaf_agent.LEAF_ROLE_PROMPT_KEY)
+
+        assert identity.text == default_text
+        assert identity.version == default_version
+
+    def test_authorized_connection_id_reads_consent_binding(self) -> None:
+        binding = LeafModelBinding(
+            executor=cast(Any, object()),
+            snapshot=_SNAPSHOT,
+            binding={"data_consent": {"connection_id": "conn-1"}},
+        )
+
+        assert leaf_agent._authorized_connection_id(binding) == "conn-1"
+
+    @pytest.mark.parametrize("binding", [{}, {"data_consent": {}}, {"data_consent": {"connection_id": ""}}])
+    def test_authorized_connection_id_absent_or_blank_is_none(self, binding: dict[str, Any]) -> None:
+        model_binding = LeafModelBinding(executor=cast(Any, object()), snapshot=_SNAPSHOT, binding=binding)
+
+        assert leaf_agent._authorized_connection_id(model_binding) is None

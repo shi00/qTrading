@@ -9,7 +9,10 @@
   既有 ``AgentDao.save_research_result`` 单事务保存，只有保存确认（
   ``final_output_saved=True``）才返回 ``complete``；
 - **边界消费**：``ResearchBoundary`` 装入 Agent ``capabilities``，每次模型请求前按
-  最新来源事实与上下文窗口判定（I65 的生产消费方）；
+  最新来源事实与上下文窗口判定（I65 的生产消费方）；窗口取真实授权连接，其余
+  候选窗口取最严者，并预留输出 token；
+- **角色 Prompt 单一来源**：叶指令 = 设置页已保存的「子研究角色」默认正文 + 用户
+  追加（运行装配时一次解析并冻结），不保留与本设置无关的内置指令旁路；
 - **不伪造**：输入指纹 / 归属事实 / 实际模型名 / 非空文本任一不可得即如实失败
   （R21）；``CancelledError`` 原样传播（R2）。
 
@@ -20,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Protocol, cast
 
@@ -57,6 +61,8 @@ __all__ = [
     "LEAF_POLICY_DENIED",
     "LEAF_RESULT_KIND",
     "LEAF_RESULT_SAVE_FAILED",
+    "LEAF_ROLE_PROMPT_KEY",
+    "LEAF_ROLE_PROMPT_UNAVAILABLE",
     "LEAF_TOOL_BUDGET_EXCEEDED",
     "LEAF_TOOL_RESULT_NOT_SAVED",
     "LEAF_TOOL_SETUP_FAILED",
@@ -65,6 +71,8 @@ __all__ = [
     "LeafAgentDeps",
     "LeafAttributionFacts",
     "LeafResultStore",
+    "RolePromptIdentity",
+    "RolePromptReader",
     "build_leaf_agent_runner",
     "run_leaf_agent",
 ]
@@ -74,6 +82,9 @@ LEAF_AGENT_NAME: Final[str] = "qtrading_research"
 #: 叶成果类别（研究答复，不冒充股票 final/candidate；按角色映射属后续分片）。
 LEAF_RESULT_KIND: Final[str] = "explanation"
 
+#: 叶消费的设置页研究角色键：叶是「子研究角色」（默认正文 + 用户追加的唯一来源）。
+LEAF_ROLE_PROMPT_KEY: Final[str] = "sub"
+
 #: 失败码（NodeOutcome.error_code；稳定前缀 ``leaf_*``）。
 LEAF_INPUT_DIGEST_MISSING: Final[str] = "leaf_input_digest_missing"
 LEAF_ATTRIBUTION_UNAVAILABLE: Final[str] = "leaf_attribution_unavailable"
@@ -82,12 +93,43 @@ LEAF_EMPTY_RESULT: Final[str] = "leaf_empty_result"
 LEAF_MODEL_FAILED: Final[str] = "leaf_model_failed"
 LEAF_POLICY_DENIED: Final[str] = "leaf_policy_denied"
 LEAF_RESULT_SAVE_FAILED: Final[str] = "leaf_result_save_failed"
+LEAF_ROLE_PROMPT_UNAVAILABLE: Final[str] = "leaf_role_prompt_unavailable"
 LEAF_TOOL_SETUP_FAILED: Final[str] = "leaf_tool_setup_failed"
 LEAF_TOOL_BUDGET_EXCEEDED: Final[str] = "tool_budget_exceeded"
 LEAF_TOOL_RESULT_NOT_SAVED: Final[str] = "tool_result_not_saved"
 
-# NOTE(lazy): 叶 instructions 使用内置最小模板. ceiling: 未接角色/Prompt 资产服务，所有角色共用同一指令.
-# upgrade: 角色 Prompt 资产接线（R02/E 系列）时改为按 role_key + 版本读取.
+
+@dataclass(frozen=True, slots=True)
+class RolePromptIdentity:
+    """一次叶请求冻结的角色 Prompt 身份：合成正文 + 已保存版本（缺省为默认版本）。
+
+    正文按设置页同一合同合成（默认只读正文 + 用户追加），在运行装配时**一次性**
+    解析并冻结进 ``Agent(instructions=...)``，不在回合间重读设置。
+    """
+
+    text: str
+    version: str
+
+
+#: 角色 Prompt 读取端口（生产读设置页已保存的默认+追加；测试可注入替身）。
+RolePromptReader = Callable[[str], RolePromptIdentity]
+
+
+def _read_saved_role_prompt(role_key: str) -> RolePromptIdentity:
+    """读设置页已保存的角色 Prompt（默认正文 + 追加）；缺键按默认，不伪造内容。
+
+    追加中的占位符（如 ``{company}``）在叶内**不**替换：叶没有对应真实取数上下文，
+    替换即伪造取值；设置页的变量预览仅用于核对。
+    """
+
+    from utils.config_handler import ConfigHandler
+    from utils.config_models import ROLE_PROMPT_DEFAULTS
+
+    default_text, default_version = ROLE_PROMPT_DEFAULTS[role_key]
+    append = ConfigHandler.get_ai_role_prompt_append(role_key)
+    version = ConfigHandler.get_ai_role_prompt_version(role_key)
+    text = default_text if not append.strip() else f"{default_text}\n\n{append}"
+    return RolePromptIdentity(text=text, version=version or default_version)
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,15 +189,24 @@ class DaoLeafResultStore:
         return cast(ResearchResult, await self._dao.save_research_result(draft))
 
 
-def _leaf_instructions(context: LeafExecutionContext) -> str:
-    """叶指令（最小内置模板；不承诺已完成目标，不虚构资料）。"""
+def _leaf_instructions(context: LeafExecutionContext, prompt: RolePromptIdentity) -> str:
+    """叶指令：设置页已保存的角色 Prompt（默认 + 追加）+ 本节点冻结身份。
 
-    return (
-        "你是单层研究子代理，只能完成当前节点目标，不能委派其他 Agent，也不能调用工具。\n"
-        "只依据已提供的输入与公开事实作答；不得臆造数据、来源或时点。\n"
-        "如资料不足、口径不可比或存在缺口，必须在答复中明确说明限制与缺口，不得以推测补齐。\n"
-        f"节点角色：{context.node.role_key}；节点目标：{context.node.target}"
-    )
+    不再使用与本设置无关的内置指令旁路：角色正文/追加只从单一来源（设置页保存值）
+    读取，并在运行装配时冻结；节点身份（role_key / target）只补充本节点事实。
+    """
+
+    return f"{prompt.text}\n节点角色：{context.node.role_key}；节点目标：{context.node.target}"
+
+
+async def _resolve_role_prompt(reader: RolePromptReader | None) -> RolePromptIdentity:
+    """解析并冻结本次运行的角色 Prompt（同步配置读取经 IO 线程池，R16）。"""
+
+    if reader is not None:
+        return reader(LEAF_ROLE_PROMPT_KEY)
+    from utils.thread_pool import TaskType, ThreadPoolManager
+
+    return await ThreadPoolManager().run_async(TaskType.IO, _read_saved_role_prompt, LEAF_ROLE_PROMPT_KEY)
 
 
 def _leaf_prompt(context: LeafExecutionContext) -> str:
@@ -174,6 +225,16 @@ def _actual_model_ref(result: Any) -> str | None:
         if isinstance(model_name, str) and model_name:
             return model_name
     return None
+
+
+def _authorized_connection_id(binding: LeafModelBinding) -> str | None:
+    """冻结绑定里的真实授权连接（资料许可绑定的 connection_id）；无则 ``None``。"""
+
+    consent = binding.binding.get("data_consent")
+    if not isinstance(consent, Mapping):
+        return None
+    value = consent.get("connection_id")
+    return value if isinstance(value, str) and value else None
 
 
 def _failed(context: LeafExecutionContext, code: str) -> NodeOutcome:
@@ -200,11 +261,13 @@ async def run_leaf_agent(
     dao: Any,
     result_kind: str = LEAF_RESULT_KIND,
     tool_runtime_factory: ToolRuntimeFactory | None = None,
+    role_prompt_reader: RolePromptReader | None = None,
 ) -> NodeOutcome:
     """执行一次叶 Agent 回合并保存成果；失败如实返回 ``failed``（R21）。
 
     ``tool_runtime_factory=None`` 保持无工具单轮（第 2 项已验证行为）；显式注入时
-    在归属事实可知后构造 runtime，并走 Deferred 工具循环。
+    在归属事实可知后构造 runtime，并走 Deferred 工具循环。``role_prompt_reader``
+    缺省时读设置页已保存的角色 Prompt（默认正文 + 追加），读不到即失败不放行。
     """
 
     digest = context.input_digest
@@ -216,6 +279,35 @@ async def run_leaf_agent(
             context.node.node_id,
         )
         return _failed(context, LEAF_INPUT_DIGEST_MISSING)
+
+    try:
+        role_prompt = await _resolve_role_prompt(role_prompt_reader)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning(
+            "[LeafAgent] role prompt unavailable: %s (execution=%s round=%s node=%s)",
+            type(e).__name__,
+            context.execution_id,
+            context.round_id,
+            context.node.node_id,
+        )
+        return _failed(context, LEAF_ROLE_PROMPT_UNAVAILABLE)
+    if not role_prompt.text.strip():
+        logger.warning(
+            "[LeafAgent] role prompt empty, leaf fails without outbound (execution=%s round=%s node=%s)",
+            context.execution_id,
+            context.round_id,
+            context.node.node_id,
+        )
+        return _failed(context, LEAF_ROLE_PROMPT_UNAVAILABLE)
+    logger.debug(
+        "[LeafAgent] role prompt frozen (role=%s version=%s execution=%s node=%s)",
+        LEAF_ROLE_PROMPT_KEY,
+        role_prompt.version,
+        context.execution_id,
+        context.node.node_id,
+    )
 
     try:
         facts = await DaoLeafAttributionReader(dao).read(context.execution_id, context.round_id)
@@ -235,6 +327,7 @@ async def run_leaf_agent(
         dao,
         snapshot=binding.snapshot,
         scenario_id=AGENT_RESEARCH_SCENARIO_ID,
+        connection_id=_authorized_connection_id(binding),
     )
     scope = ToolRunScope(
         user_scope=facts.user_scope,
@@ -265,7 +358,7 @@ async def run_leaf_agent(
         output_type=[str, DeferredToolRequests],
         defer_model_check=True,
         retries=0,
-        instructions=_leaf_instructions(context),
+        instructions=_leaf_instructions(context, role_prompt),
         tools=tools,
         capabilities=(boundary,),
     )
@@ -361,7 +454,7 @@ async def run_leaf_agent(
         ledger_refs=(),
         plan_version=None,
         parent_artifact_refs=(),
-        source_refs=(),
+        source_refs=context.node.source_refs,
     )
     try:
         saved = await DaoLeafResultStore(dao).save_research_result(draft)
@@ -395,6 +488,7 @@ def build_leaf_agent_runner(
     dao: Any | None = None,
     *,
     tool_runtime_factory: ToolRuntimeFactory | None = None,
+    role_prompt_reader: RolePromptReader | None = None,
 ) -> LeafAgentRunner:
     """生产叶主体工厂：显式 DAO 优先，缺省惰性取共享 ``CacheManager``。"""
 
@@ -428,6 +522,7 @@ def build_leaf_agent_runner(
             binding,
             dao=resolved,
             tool_runtime_factory=tool_runtime_factory,
+            role_prompt_reader=role_prompt_reader,
         )
 
     return _runner
