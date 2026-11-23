@@ -96,8 +96,13 @@ def _assert_collector(job: str, steps: list[dict[str, Any]], step_name: str, fra
     assert _has_flag(tokens, "--cov"), f"{job} 采集阶段缺少 --cov"
     assert not _has_flag(tokens, "--cov-append"), f"{job} 拆分后不得再使用 --cov-append"
     assert _flag_values(tokens, "--cov-report") == [""], (
-        f"{job} 采集阶段必须且只能使用 `--cov-report=`（禁止产出局部 coverage.xml/json 或触发分片 fail_under），"
+        f"{job} 采集阶段必须且只能使用 `--cov-report=`（禁止产出局部 coverage.xml/json），"
         f"实际: {_flag_values(tokens, '--cov-report')}"
+    )
+    assert _flag_values(tokens, "--cov-fail-under") == ["0"], (
+        f"{job} 采集阶段必须显式 `--cov-fail-under=0`：pytest-cov 即使不产报告也会继承 "
+        f"pyproject 的 fail_under，未显式关闭会使分片覆盖率误判失败；实际: "
+        f"{_flag_values(tokens, '--cov-fail-under')}"
     )
     env = step.get("env", {})
     assert env.get("COVERAGE_FILE") == f"cov/{fragment}.data", (
@@ -188,9 +193,18 @@ def test_pyproject_fail_under_remains_85() -> None:
     assert fail_under == _FAIL_UNDER_FLOOR, f"整体覆盖率阈值应为 {_FAIL_UNDER_FLOOR}，实际: {fail_under}"
 
 
-def test_workflow_does_not_lower_fail_under(workflow: dict[str, Any]) -> None:
-    lowered = [value for value in _cov_fail_under_values(workflow) if value < _FAIL_UNDER_FLOOR]
-    assert not lowered, f"workflow 不得以低于 {_FAIL_UNDER_FLOOR} 的 --cov-fail-under 放宽阈值: {lowered}"
+def test_workflow_threshold_is_disabled_only_in_collectors(workflow: dict[str, Any]) -> None:
+    for job, (step_name, _) in COLLECTORS.items():
+        tokens = _tokens(_step(_steps(workflow, job), step_name))
+        assert _flag_values(tokens, "--cov-fail-under") == ["0"], (
+            f"{job} 采集阶段必须显式 --cov-fail-under=0，实际: {_flag_values(tokens, '--cov-fail-under')}"
+        )
+    gate_tokens = _tokens(_step(_steps(workflow, GATE_JOB), GATE_COMBINE_STEP))
+    assert _flag_values(gate_tokens, "--cov-fail-under") == [], (
+        "ci-coverage 必须依赖 pyproject fail_under=85，不得在 workflow 覆盖"
+    )
+    disallowed = [value for value in _cov_fail_under_values(workflow) if value != 0]
+    assert not disallowed, f"采集端只允许 0，其余 --cov-fail-under 一律禁止: {disallowed}"
 
 
 def test_linux_test_jobs_share_identical_skip_condition(workflow: dict[str, Any]) -> None:
@@ -224,9 +238,17 @@ def test_mutation_local_report_in_collector_is_detected(workflow: dict[str, Any]
         _assert_collector("ci-checks", steps, "Run Unit Tests", "unit")
 
 
-def test_mutation_lowered_fail_under_is_detected(workflow: dict[str, Any]) -> None:
+def test_mutation_gate_threshold_override_is_detected(workflow: dict[str, Any]) -> None:
     mutated = copy.deepcopy(workflow)
     step = _step(_steps(mutated, GATE_JOB), GATE_COMBINE_STEP)
     step["run"] = step["run"] + "\ncoverage report --cov-fail-under=80\n"
-    lowered = [value for value in _cov_fail_under_values(mutated) if value < _FAIL_UNDER_FLOOR]
-    assert lowered == [80.0], "变异用例必须能被反降级断言捕获"
+    with pytest.raises(AssertionError, match="不得在 workflow 覆盖"):
+        test_workflow_threshold_is_disabled_only_in_collectors(mutated)
+
+
+def test_mutation_collector_threshold_reintroduced_is_detected(workflow: dict[str, Any]) -> None:
+    steps = copy.deepcopy(_steps(workflow, "ci-checks"))
+    step = _step(steps, "Run Unit Tests")
+    step["run"] = step["run"].replace("--cov-fail-under=0", "--cov-fail-under=85")
+    with pytest.raises(AssertionError, match="cov-fail-under"):
+        _assert_collector("ci-checks", steps, "Run Unit Tests", "unit")

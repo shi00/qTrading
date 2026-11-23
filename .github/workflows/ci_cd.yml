@@ -447,7 +447,8 @@ jobs:
       - name: Run Unit Tests
         env:
           STRICT_SCHEMA_GATE: "1"
-          # 覆盖率片段：本 job 只采集数据（--cov-report= 关闭报告与 fail_under），
+          # 覆盖率片段：本 job 只采集数据（--cov-report= 关闭报告，--cov-fail-under=0 关闭
+          # 从 pyproject 继承的 fail_under；pytest-cov 即使无报告也会按配置判阈值）。
           # 阈值判定与最终 coverage.xml/json 由 ci-coverage 合并后统一产出。
           COVERAGE_FILE: cov/unit.data
         run: |
@@ -457,7 +458,7 @@ jobs:
           mkdir -p cov
           python -m pytest tests/unit/ -v --tb=short \
             --deselect tests/unit/test_pollution_detection.py::test_no_cross_test_pollution_in_core_subset \
-            --cov --cov-report= --junitxml=junit-unit.xml
+            --cov --cov-report= --cov-fail-under=0 --junitxml=junit-unit.xml
 
       # R9: 上传 junit 前脱敏可能含 DB 连接串（含密码）的文本工件（D18-R03）。
       # 上传仅在本步骤成功时执行：脱敏失败/cancel 时不得回退上传未脱敏原始工件。
@@ -632,7 +633,8 @@ jobs:
           TEST_DB_USER: postgres
           TEST_DB_PASSWORD: ${{ env.CI_PG_PASSWORD }}
           DATABASE_URL: postgresql+asyncpg://postgres:${{ env.CI_PG_PASSWORD }}@localhost:5432/test_astock
-          # 覆盖率片段：只采集数据；embedded_real 由 ci-checks-embedded 以真实 sidecar 单独采集。
+          # 覆盖率片段：只采集数据（--cov-report= 关闭报告，--cov-fail-under=0 关闭继承阈值）；
+          # embedded_real 由 ci-checks-embedded 以真实 sidecar 单独采集。
           COVERAGE_FILE: cov/integration.data
         run: |
           set -e
@@ -643,7 +645,7 @@ jobs:
           python -m pytest tests/integration/ -m "not embedded_real" -n auto --max-worker-restart=0 \
             --timeout=120 --timeout-method=thread \
             -v --tb=long --capture=no \
-            --cov --cov-report= --junitxml=junit-integration.xml
+            --cov --cov-report= --cov-fail-under=0 --junitxml=junit-integration.xml
 
       - name: Sanitize test reports
         id: sanitize_test_reports_integration
@@ -766,7 +768,7 @@ jobs:
           # 串行执行（-n 1 避免 sidecar 并发，同 embedded-tests）。
           python -m pytest tests/integration/ -m embedded_real -n 1 -p no:randomly \
             --timeout=600 --timeout-method=thread -q \
-            --cov --cov-report= --junitxml=junit-agent-embedded.xml
+            --cov --cov-report= --cov-fail-under=0 --junitxml=junit-agent-embedded.xml
 
       - name: Sanitize test reports
         id: sanitize_test_reports_embedded
