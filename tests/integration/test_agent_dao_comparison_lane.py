@@ -25,7 +25,7 @@ from sqlalchemy import insert, text
 from core.agent_types import Mode, Purpose, decode_json_doc
 from data.persistence.daos.agent_dao import AgentDao
 from data.persistence.embedded_postgres.protocol import ConnectionInfo
-from data.persistence.models import AgentCommand, AgentExecution, AgentSession
+from data.persistence.models import AgentCommand, AgentExecution, AgentRound, AgentSession
 from services.agent_service.comparison import (
     ComparisonLaneSelection,
     ComparisonSharedInput,
@@ -145,6 +145,34 @@ async def _seed_lane_command(
                 updated_at=created_at,
                 revision=revision,
             )
+        )
+
+
+async def _seed_round(dao: AgentDao, *, execution_id: str, round_id: str) -> None:
+    """插入一轮应用轮次并把它挂为该执行的当前轮（满足 ``fk_agent_execution_current_round``）。"""
+
+    async with dao.engine.begin() as conn:  # type: ignore[union-attr]  # 测试内构造前置轮次
+        await conn.execute(
+            insert(AgentRound).values(
+                user_scope=_USER,
+                round_id=round_id,
+                execution_id=execution_id,
+                round_number=1,
+                workflow_id=f"wf-{round_id}",
+                workflow_code_version="1",
+                run_epoch=1,
+                input_revision=0,
+                plan_revision=0,
+                goal_coverage="unknown",
+                final_saved=False,
+                convergence_confirmed=False,
+                active_round=True,
+            )
+        )
+        await conn.execute(
+            sa.update(AgentExecution)
+            .where(AgentExecution.user_scope == _USER, AgentExecution.execution_id == execution_id)
+            .values(current_round_id=round_id)
         )
 
 
@@ -316,8 +344,8 @@ class TestWithdrawComparisonLane:
             group_ref=group.group_ref,
             lane_ref=group.lanes[1].lane_ref,
             display_state="queued",
-            current_round_id="round-b",
         )
+        await _seed_round(dao, execution_id="exec-b", round_id="round-b")
 
         outcome = await dao.withdraw_comparison_lane(user_scope=_USER, execution_id="exec-b")
 
