@@ -20,6 +20,7 @@
 | P1-08 | 成果事件身份含 artifact_id、仅主成果落 final_saved、父流程按已核叶事实投影应用执行终态、wait_result 以应用状态为准 | 本地检视报告（gitignored） | [agent_dao.py](../../data/persistence/daos/agent_dao.py) | 使用中 |
 | P1-09 | 比较组按组键+完整 manifest+逐路连接矩阵先核后建路，运行期消费本路冻结参数，组停真实撤回 | 本地检视报告（gitignored） | [comparison.py](../../services/agent_service/comparison.py) | 使用中 |
 | P1-11 | model_text 同清且残留查零；准入闭包/预览由存储事实派生；清理 fence 与会话引用共享锁并复核；首派发绑定核 fence | 本地检视报告（gitignored） | [agent_dao.py](../../data/persistence/daos/agent_dao.py) | 使用中 |
+| P1-10 | 工具决定只落 pending，答复同事务激活 granted/revoked；claim 行锁核人答/期限/三摘要并与停用门线性化 | 本地检视报告（gitignored） | [tool_runtime.py](../../services/agent_service/tool_runtime.py) | 使用中 |
 | P2-03 | 架构守护范围：import-linter 契约（layers + 补充 forbidden） + AST 静态测试互补 | 文档体系检视 P2 系列 | [docs/architecture/overview.md](../architecture/overview.md#41-分层架构) §4.1 | 使用中 |
 | P2-06 | 受检 markdown 递归发现 + 显式排除清单（_build_doc_excludes） | 文档体系检视 P2 系列 | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
 | P2-07 | 治理文档元数据统一格式（owner/ruleset_version/review_triggers/canonical_for） | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) / [AGENTS.md](../../AGENTS.md) 元数据块 | 使用中 |
