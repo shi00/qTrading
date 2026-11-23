@@ -4612,6 +4612,12 @@ class TestStrategyPresetEntry:
         page.toast.show.assert_called_once_with(
             "i18n[screener_preset_saved]", "success", action_text=None, on_action=None
         )
+        # T-13: 保存成功提示模板含 {name}，必须传入实际方案名（否则显示字面 {name}）
+        saved_calls = [
+            c for c in env["mock_i18n"].get.call_args_list if c.args and c.args[0] == "screener_preset_saved"
+        ]
+        assert saved_calls, "保存成功提示须经 i18n 渲染"
+        assert saved_calls[-1].kwargs.get("name") == "新方案"
 
     def test_duplicate_save_requires_confirmation_then_overwrites(self, screener_view_with_params_env) -> None:
         """重名保存 → 先展示旧参数与替换影响；确认后才写盘."""
@@ -4747,6 +4753,12 @@ class TestStrategyPresetEntry:
         page.toast.show.assert_called_once_with(
             "i18n[screener_preset_deleted]", "success", action_text=None, on_action=None
         )
+        # T-13: 删除成功提示模板含 {name}，必须传入实际方案名（否则显示字面 {name}）
+        deleted_calls = [
+            c for c in env["mock_i18n"].get.call_args_list if c.args and c.args[0] == "screener_preset_deleted"
+        ]
+        assert deleted_calls, "删除成功提示须经 i18n 渲染"
+        assert deleted_calls[-1].kwargs.get("name") == "保守型"
 
     def test_delete_cancel_keeps_preset(self, screener_view_with_params_env) -> None:
         """取消删除 → 方案保留，不调度删除任务."""
