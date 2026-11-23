@@ -106,6 +106,9 @@ class ApplicationSession:
         self.coordinator: ShutdownCoordinator | None = None
         # P01（DD §7.4/§10.6）：本会话 Agent 接线；关闭前置必须先于共享引擎释放。
         self.agent_wiring: Any | None = None
+        #: 当前接线取用器：首次向导/失败重试会在 ``start()`` 之后新建接线，退出门
+        #: 必须读当前实例而非启动时复制的快照（否则新宿主的在途 IO/锁无人收口）。
+        self.agent_wiring_provider: Callable[[], Any | None] | None = None
 
     async def __aenter__(self) -> ApplicationSession:
         return self
@@ -122,9 +125,13 @@ class ApplicationSession:
         派发入口并核定本地/外部在途收敛。未就绪（在途 IO、残留未核定、超时、
         异常、缺失证据）返回 False——调用方必须阻断 cleanup 与引擎/数据库释放，
         保留进程与依赖（R2-I35）。``CancelledError`` 原样传播（R2）。
+
+        接线取用优先走 ``agent_wiring_provider``（当前实例），仅在无取用器时回退
+        到静态字段，避免首次向导/重试后仍读启动时复制的旧接线。
         """
 
-        wiring = self.agent_wiring
+        provider = self.agent_wiring_provider
+        wiring = provider() if provider is not None else self.agent_wiring
         if wiring is None:
             return True
         try:
@@ -280,6 +287,8 @@ async def _run_session(
         # Recorder 最终落账（F02：worker 收敛后、异步 engine dispose 前）。
         scheduling_coordinator=coordinator,
     )
+    # P01/T-02：退出门按当前接线取用（向导完成/失败重试会在 start() 之后替换实例）。
+    session.agent_wiring_provider = lambda: controller.agent_wiring
 
     logger.info("[Main] Before page.render(RootView)")
     _trace_log("[Main] Before page.render(RootView)")
@@ -350,9 +359,8 @@ async def _run_session(
         coordinator.register_task(auto_probe_task)
         registered_auto_probe_task = auto_probe_task
 
-    # P01：接线结果挂到会话，供窗口关闭/断连/升级退出/启动回滚在释放共享引擎前
-    # 完成 Agent 关闭前置。
-    session.agent_wiring = getattr(controller, "agent_wiring", None)
+    # P01：接线结果由 ``session.agent_wiring_provider`` 实时取用（不复制快照），
+    # 保证首次向导完成/失败重试后新建的接线同样在释放共享引擎前被收口。
 
 
 async def _wait_for_user_action(retry_event: threading.Event, exit_event: threading.Event) -> str:

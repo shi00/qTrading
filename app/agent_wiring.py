@@ -41,7 +41,7 @@ import logging
 import os
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.metadata import version
 from typing import Any, Final, cast
 
@@ -198,6 +198,8 @@ class AgentWiring:
     instance_guard: Any | None = None
     _close_command: CloseCommandIdentity | None = None
     _receipt: CloseReadinessReceipt | None = None
+    #: MCP 关停未核事实（连接未确认断开）：进入关闭回执阻塞项，不得报「已安全关闭」。
+    _mcp_close_blockers: tuple[str, ...] = ()
 
     @property
     def ready(self) -> bool:
@@ -215,9 +217,12 @@ class AgentWiring:
 
         有宿主时只认 ``ready=True`` 的关闭回执；宿主从未组装（无 runtime 且无
         待收口 handle）时为可核事实——没有任何 Agent 派发入口/连接。未就绪即
-        不得释放依赖（R2-I35）。
+        不得释放依赖（R2-I35）。MCP 连接未确认断开属未核事实，一律不 ready
+        （含宿主未 launch/未组装时），不得把「仅告警」当已收尾。
         """
 
+        if self._mcp_close_blockers:
+            return False
         if self.runtime is not None:
             return self._receipt is not None and self._receipt.ready
         return self.unclosed_handle is None
@@ -238,8 +243,8 @@ class AgentWiring:
         据 :meth:`close_ready` 阻断后续释放。
         """
 
-        if self.mcp_lifecycle is not None:
-            await self._disconnect_mcp_sessions()
+        mcp_blockers = await self._disconnect_mcp_sessions()
+        self._mcp_close_blockers = mcp_blockers
         if self.service is None:
             return None
         if self._close_command is None:
@@ -277,7 +282,23 @@ class AgentWiring:
         elif receipt is None and self.unclosed_handle is not None:
             # 隔离/launch 失败时未收口的宿主：此处重试关闭并释放唯一执行锁。
             await self._close_unclosed_handle()
+        if mcp_blockers and receipt is not None:
+            # 未确认断开的 MCP 连接是关闭回执的未核事实：阻止「已安全关闭」结论
+            # （含未 launch 的宿主），由调用方保留依赖并在重试成功后放行。
+            receipt = replace(
+                receipt,
+                ready=False,
+                blocking_reasons=(*receipt.blocking_reasons, *mcp_blockers),
+            )
+            self._receipt = receipt
+            logger.warning(
+                "[AgentWiring] mcp close incomplete: %s (host close stays unready)",
+                ",".join(mcp_blockers),
+            )
         if self.close_ready():
+            if self.runtime is not None:
+                # 唯一执行锁已由关闭链在就绪后释放：清引用避免重复 release。
+                self.instance_guard = None
             await self.service.aclose()
         return receipt
 
@@ -293,16 +314,18 @@ class AgentWiring:
             return
         await ledger.verify()
 
-    async def _disconnect_mcp_sessions(self) -> None:
+    async def _disconnect_mcp_sessions(self) -> tuple[str, ...]:
         """关闭前置：断开本进程显式建立的 MCP 连接。
 
-        在途/冻结使用者由共享连接管理器拒停；断开失败如实记录并继续，
-        不把「未确认断开」伪装成已断开（R21），也不阻断其余关闭步骤。
+        在途/冻结使用者由共享连接管理器拒停；断开失败如实返回未核事实
+        （``mcp_disconnect_failed:<identity>``），由 :meth:`prepare_close` 写入
+        关闭回执阻塞项——不把「仅告警」当已收尾（R21），也不阻断其余关闭步骤。
         """
 
         lifecycle = self.mcp_lifecycle
         if lifecycle is None:
-            return
+            return ()
+        blockers: list[str] = []
         for identity in lifecycle.connected_identities():
             try:
                 await lifecycle.disconnect(identity)
@@ -314,6 +337,8 @@ class AgentWiring:
                     type(e).__name__,
                     identity.stable_key(),
                 )
+                blockers.append(f"mcp_disconnect_failed:{identity.stable_key()}")
+        return tuple(blockers)
 
     async def _close_unclosed_handle(self) -> None:
         """重试关闭未收口宿主（``AgentRuntimeHandle.close`` 按资源粒度幂等）。"""
@@ -957,6 +982,8 @@ async def wire_agent_runtime(
         fact_sink=fact_sink,
         blocking_runner=cast(Any, blocking_runner),
         residual_io_probe=_residual_io_probe,
+        # 正常关闭必须把唯一执行锁交给关闭链：就绪关闭完成后才释放（同进程切库可接管）。
+        instance_guard=outcome.instance_guard,
     )
     logger.info(
         "[AgentWiring] agent runtime host ready (launched=%s, isolation_ready=%s, dispatch_wired=True)",

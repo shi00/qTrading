@@ -38,6 +38,9 @@ import sqlalchemy as sa
 from dbos import WorkflowStatus, WorkflowStatusString
 
 from core.agent_types import (
+    NON_RECOVERABLE_DISPLAY_STATES,
+    RECOVERY_UNVERIFIED_DISPLAY_STATES,
+    ROUND_STOP_REASON_USER_TERMINATION,
     DispatchCloseFact,
     DispatchCloseRequest,
     RecoveryExecution,
@@ -383,67 +386,202 @@ async def resume_selected_workflows(
 ) -> ManualRecoveryReceipt:
     """手动恢复用户明确选择的精确集合（HANDOFF §8.4 第 5 条）。
 
-    先由 DAO 事务核定（不可恢复终态/未核状态/用户终止/无活动轮/版本不兼容/
-    未收口 operation/代次不前进 → ``blocked``，其 workflow 不返回）；再按已授予
-    root 解析**必要叶**（直属、``RECOVERY_RESUMABLE_LEAF_STATUSES`` 内、未结案
-    的叶 workflow）。叶先于 root 复接：避免父先运行、其尚未落盘的观察把仍处
-    取消态的叶记为已取消（``ended``）而永久阻塞后继；已落盘的观察记录仍按
-    DBOS 重放语义还原，本函数不伪造也不改写。成功叶与已定失败叶不重跑
-    （零重做）。未选集合（B）不列举、不扩入。
+    顺序固定为「先核叶终态 → 再提交授权 → 再开派发 → 才复接」：
+
+    1. 只读取登记投影并解析每个选择项的 root workflow；登记缺行/无有效轮即
+       ``preflight_incomplete``（不授予、不开派发、不部分恢复）；
+    2. 按 root 解析**必要叶**（直属、``RECOVERY_RESUMABLE_LEAF_STATUSES`` 内、
+       未结案的叶 workflow）并核对原生终态；列举失败即不可证明必要全集，
+       fail-closed（不授予，派发门保持关闭）；
+    3. 再提交 DAO 授权事务（同事务写 ``owner_epoch``/``run_epoch`` 并重开
+       ``dispatch_closed``），候选不合格理由按 DAO 权威事实进 ``blocked``；
+    4. 只复接已授予 root 下的必要叶，叶未可靠接续时该 root 不推进；
+    5. root 最后复接。
+
+    **原授权精确查回**：重试沿用同一 ``(owner_epoch, run_epoch)`` 且派发门闩未关闭
+    时，登记投影中已持有该代次的选择项即视为原授权（不重复授予新代次，R22），
+    未被该授权覆盖的项（含派发门闩已关闭者）如实进 ``blocked``，不会被静默改授
+    新代次或静默复活。叶先于 root 复接：避免父先
+    运行、其尚未落盘的观察把仍处取消态的叶记为已取消（``ended``）而永久阻塞
+    后继；已落盘的观察记录仍按 DBOS 重放语义还原，本函数不伪造也不改写。成功
+    叶与已定失败叶不重跑（零重做）。未选集合（B）不列举、不扩入。
 
     单个 resume 失败如实进 ``resume_failures`` 并使 ``ready=False``；必要叶列举
     失败视为「无法证明必要全集」，不部分恢复（``leaf_resolution_failed``）；
     全部候选被拒（零授予）同样 ``ready=False``（不把「什么都没恢复」当恢复成功）。
     """
 
-    grant = await registry.grant_recovery_epoch(
-        RecoveryGrantRequest(
+    selected_ids = tuple(sorted(set(execution_ids)))
+    if not selected_ids:
+        return _not_ready_receipt(
             user_scope=user_scope,
-            execution_ids=tuple(execution_ids),
             owner_epoch=owner_epoch,
             run_epoch=run_epoch,
-            application_version=application_version,
+            reasons=("no_granted_execution",),
         )
+    try:
+        registered = await registry.list_recovery_executions(user_scope)
+    except Exception as exc:  # 登记投影不可读：无法证明选择项现状，不授予/不派发
+        return _not_ready_receipt(
+            user_scope=user_scope,
+            owner_epoch=owner_epoch,
+            run_epoch=run_epoch,
+            reasons=("recovery_state_unreadable", f"recovery_state_unreadable:{type(exc).__name__}"),
+        )
+    by_id = {item.execution_id: item for item in registered}
+    unresolved = tuple(
+        (execution_id, "workflow_unknown")
+        for execution_id in selected_ids
+        if execution_id not in by_id or by_id[execution_id].workflow_id is None
     )
-    blocking_reasons: list[str] = []
-    if not grant.granted_execution_ids:
-        blocking_reasons.append("no_granted_execution")
-        necessary_leaf_ids: tuple[str, ...] = ()
-    else:
+    if unresolved:
+        return _not_ready_receipt(
+            user_scope=user_scope,
+            owner_epoch=owner_epoch,
+            run_epoch=run_epoch,
+            blocked=unresolved,
+            reasons=("preflight_incomplete",),
+        )
+    selected = tuple(by_id[execution_id] for execution_id in selected_ids)
+    # 原授权仍有效的判定：代次身份匹配且派发门闩未被关闭（关闭即视为已停止，
+    # 需新代次重新授权才能重开，不得凭旧代次静默复活）。
+    authorized = tuple(
+        item
+        for item in selected
+        if item.owner_epoch == owner_epoch and item.run_epoch == run_epoch and not item.dispatch_closed
+    )
+    if authorized:
+        # 原授权可按 (owner_epoch, run_epoch) 从登记投影精确查回：不重复授予新代次
+        granted_execution_ids = tuple(item.execution_id for item in authorized)
+        workflow_ids = tuple(sorted({item.workflow_id for item in authorized if item.workflow_id is not None}))
+        blocked = tuple(
+            (item.execution_id, _authorization_mismatch_reason(item)) for item in selected if item not in authorized
+        )
         try:
-            necessary_leaf_ids = await _list_necessary_leaf_ids(client, grant.workflow_ids)
+            leaf_map = await _list_necessary_leaf_ids(client, workflow_ids)
         except Exception as exc:  # 必要叶全集不可证明：不部分恢复（否则中断叶仍留取消态）
-            return ManualRecoveryReceipt(
+            return _not_ready_receipt(
                 user_scope=user_scope,
                 owner_epoch=owner_epoch,
                 run_epoch=run_epoch,
-                granted_execution_ids=grant.granted_execution_ids,
-                resumed_workflow_ids=(),
-                blocked=grant.blocked,
-                resume_failures=(),
-                blocking_reasons=("leaf_resolution_failed", f"leaf_resolution_failed:{type(exc).__name__}"),
-                ready=False,
+                granted=granted_execution_ids,
+                blocked=blocked,
+                reasons=("leaf_resolution_failed", f"leaf_resolution_failed:{type(exc).__name__}"),
             )
+    else:
+        candidate_roots = tuple(sorted({item.workflow_id for item in selected if item.workflow_id is not None}))
+        try:
+            # 先核对必要叶终态（只读）：不可核即不授予、不开派发门
+            leaf_map = await _list_necessary_leaf_ids(client, candidate_roots)
+        except Exception as exc:
+            return _not_ready_receipt(
+                user_scope=user_scope,
+                owner_epoch=owner_epoch,
+                run_epoch=run_epoch,
+                reasons=("leaf_resolution_failed", f"leaf_resolution_failed:{type(exc).__name__}"),
+            )
+        grant = await registry.grant_recovery_epoch(
+            RecoveryGrantRequest(
+                user_scope=user_scope,
+                execution_ids=selected_ids,
+                owner_epoch=owner_epoch,
+                run_epoch=run_epoch,
+                application_version=application_version,
+            )
+        )
+        granted_execution_ids = grant.granted_execution_ids
+        workflow_ids = grant.workflow_ids
+        blocked = grant.blocked
+        if not granted_execution_ids:
+            return _not_ready_receipt(
+                user_scope=user_scope,
+                owner_epoch=owner_epoch,
+                run_epoch=run_epoch,
+                blocked=blocked,
+                reasons=("no_granted_execution",),
+            )
+
     resumed: list[str] = []
     failures: list[tuple[str, str]] = []
-    for workflow_id in _ordered_resume_ids(necessary_leaf_ids, grant.workflow_ids):
+    failed_roots: set[str] = set()
+    # 已授予 root 必须已有叶终态核对结果；缺失即视为未核，不得直接推进父（fail-closed）
+    for root_id in workflow_ids:
+        if root_id not in leaf_map:
+            failed_roots.add(root_id)
+            failures.append((root_id, "leaf_state_unverified"))
+    for root_id in workflow_ids:
+        if root_id in failed_roots:
+            continue
+        for leaf_id in leaf_map.get(root_id, ()):
+            try:
+                await client.resume_workflows_async([leaf_id])
+            except Exception as exc:
+                failures.append((leaf_id, type(exc).__name__))
+                failed_roots.add(root_id)
+            else:
+                resumed.append(leaf_id)
+    blocking_reasons: list[str] = []
+    if failed_roots:
+        # 必要叶未可靠接续：对应 root 不得推进（父先跑会把仍取消的叶记成已结案）
+        blocking_reasons.append("necessary_leaf_not_resumed")
+    for root_id in workflow_ids:
+        if root_id in failed_roots:
+            continue
         try:
-            await client.resume_workflows_async([workflow_id])
+            await client.resume_workflows_async([root_id])
         except Exception as exc:
-            failures.append((workflow_id, type(exc).__name__))
+            failures.append((root_id, type(exc).__name__))
         else:
-            resumed.append(workflow_id)
+            resumed.append(root_id)
     return ManualRecoveryReceipt(
         user_scope=user_scope,
         owner_epoch=owner_epoch,
         run_epoch=run_epoch,
-        granted_execution_ids=grant.granted_execution_ids,
+        granted_execution_ids=granted_execution_ids,
         resumed_workflow_ids=tuple(resumed),
-        blocked=grant.blocked,
+        blocked=blocked,
         resume_failures=tuple(failures),
         blocking_reasons=tuple(blocking_reasons),
         ready=not failures and not blocking_reasons,
     )
+
+
+def _not_ready_receipt(
+    *,
+    user_scope: str,
+    owner_epoch: int,
+    run_epoch: int,
+    reasons: tuple[str, ...],
+    granted: tuple[str, ...] = (),
+    blocked: tuple[tuple[str, str], ...] = (),
+) -> ManualRecoveryReceipt:
+    """未开派发/未复接的回执（如实报阻塞码与已拒项，不伪造恢复成功）。"""
+
+    return ManualRecoveryReceipt(
+        user_scope=user_scope,
+        owner_epoch=owner_epoch,
+        run_epoch=run_epoch,
+        granted_execution_ids=granted,
+        resumed_workflow_ids=(),
+        blocked=blocked,
+        resume_failures=(),
+        blocking_reasons=reasons,
+        ready=False,
+    )
+
+
+def _authorization_mismatch_reason(item: RecoveryExecution) -> str:
+    """原授权集合外的选择项按登记现状给精确拒绝码（不改写任何事实）。"""
+
+    if item.stop_reason == ROUND_STOP_REASON_USER_TERMINATION:
+        return "user_termination"
+    if item.display_state in NON_RECOVERABLE_DISPLAY_STATES:
+        return "already_terminal"
+    if item.display_state in RECOVERY_UNVERIFIED_DISPLAY_STATES:
+        return "state_unverified"
+    if item.dispatch_closed:
+        return "dispatch_closed"
+    return "authorization_mismatch"
 
 
 #: 单实例执行锁键（PG advisory lock；会话断开/进程崩溃自动释放）。
@@ -853,18 +991,22 @@ async def _list_states_by_id(
     return states
 
 
-async def _list_necessary_leaf_ids(client: WorkflowControlClient, root_workflow_ids: Sequence[str]) -> tuple[str, ...]:
-    """解析每个已授予 root 的「必要叶」原生 ID（HANDOFF §8.4 第 5 条）。
+async def _list_necessary_leaf_ids(
+    client: WorkflowControlClient, root_workflow_ids: Sequence[str]
+) -> dict[str, tuple[str, ...]]:
+    """解析每个 root 的「必要叶」原生 ID（HANDOFF §8.4 第 5 条）。
 
     必要叶 = 该 root 直属（``parent_workflow_id``）、名为叶 workflow、且处于
     ``RECOVERY_RESUMABLE_LEAF_STATUSES``（中断未结案）的子执行。成功叶零重做，
-    已定失败叶（``ERROR``/恢复耗尽）保留其失败成果，均不纳入。只列举已授予
-    root 的直属子代，未选研究不被扩入。分页读满后返回稳定排序集合；列举异常
-    冒泡给调用方（无法证明全集时不得部分恢复，``CancelledError`` 继续传播）。
+    已定失败叶（``ERROR``/恢复耗尽）保留其失败成果，均不纳入。只列举给定
+    root 的直属子代，未选研究不被扩入。分页读满后返回 ``root → 稳定排序叶集合``
+    （保留父叶从属关系，供授权后按已授予 root 精确过滤）；列举异常冒泡给调用
+    方（无法证明全集时不得部分恢复，``CancelledError`` 继续传播）。
     """
 
-    leaf_ids: set[str] = set()
+    leaf_map: dict[str, tuple[str, ...]] = {}
     for root_id in root_workflow_ids:
+        leaf_ids: set[str] = set()
         offset = 0
         while True:
             page = await client.list_workflows_async(
@@ -881,23 +1023,8 @@ async def _list_necessary_leaf_ids(client: WorkflowControlClient, root_workflow_
             if len(page) < ISOLATION_PAGE_SIZE:
                 break
             offset += len(page)
-    return tuple(sorted(leaf_ids))
-
-
-def _ordered_resume_ids(necessary_leaf_ids: Sequence[str], root_workflow_ids: Sequence[str]) -> tuple[str, ...]:
-    """复接顺序：必要叶先、root 后（去重保序）。
-
-    叶须先回到在途，父重放时未落盘的观察步才不会把「刚取消、尚未复接」的叶
-    记成已取消（``ended``）而阻塞其后继。
-    """
-
-    ordered: list[str] = []
-    seen: set[str] = set()
-    for workflow_id in (*necessary_leaf_ids, *root_workflow_ids):
-        if workflow_id not in seen:
-            seen.add(workflow_id)
-            ordered.append(workflow_id)
-    return tuple(ordered)
+        leaf_map[root_id] = tuple(sorted(leaf_ids))
+    return leaf_map
 
 
 def _receipt(

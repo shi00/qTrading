@@ -67,6 +67,8 @@ class _FakeClient:
         self.cancel_error: BaseException | None = None
         self.verify_error: BaseException | None = None
         self.resume_error: BaseException | None = None
+        #: 按 ID 注入 resume 失败（验证「叶未接续则父不推进」）。
+        self.resume_error_workflows: set[str] = set()
         self.cancel_effect = True
         self.list_ignores_offset = False
         self.vanishes_after_cancel = False
@@ -135,6 +137,9 @@ class _FakeClient:
     async def resume_workflows_async(self, workflow_ids: list[str]) -> Any:
         if self.resume_error is not None:
             raise self.resume_error
+        for workflow_id in workflow_ids:
+            if workflow_id in self.resume_error_workflows:
+                raise RuntimeError("resume failed")
         self.resumed.extend(workflow_ids)
         return []
 
@@ -144,6 +149,7 @@ class _FakeRegistry:
     """假应用登记面：记录门闩/保存/回填/授予，可注入失败。"""
 
     registered: tuple[RecoveryExecution, ...] = ()
+    list_error: BaseException | None = None
     save_error: BaseException | None = None
     fence_error: BaseException | None = None
     finalize_error: BaseException | None = None
@@ -153,9 +159,14 @@ class _FakeRegistry:
     finalized: list[tuple[str, str]] = field(default_factory=list)
     fence_requests: list[DispatchCloseRequest] = field(default_factory=list)
     grant_requests: list[RecoveryGrantRequest] = field(default_factory=list)
+    #: 授权事务发生时（只读）原生列举的次数，用于验证「先核叶终态、再授予」。
+    client_ref: Any = None
+    native_list_calls_at_grant: list[int] = field(default_factory=list)
 
     async def list_recovery_executions(self, user_scope: str) -> tuple[RecoveryExecution, ...]:
         self.calls.append("list")
+        if self.list_error is not None:
+            raise self.list_error
         return self.registered
 
     async def mark_dispatch_closed(self, request: DispatchCloseRequest) -> DispatchCloseFact:
@@ -185,6 +196,8 @@ class _FakeRegistry:
     async def grant_recovery_epoch(self, request: RecoveryGrantRequest) -> RecoveryGrantFact:
         self.calls.append("grant")
         self.grant_requests.append(request)
+        if self.client_ref is not None:
+            self.native_list_calls_at_grant.append(len(self.client_ref.list_calls))
         assert self.grant is not None
         return self.grant
 
@@ -423,10 +436,26 @@ class TestStartupIsolation:
         assert client.cancelled == []
 
 
+def _granted(*execution_ids: str, workflow_ids: tuple[str, ...] = ()) -> RecoveryGrantFact:
+    return RecoveryGrantFact(
+        user_scope="user-1",
+        owner_epoch=9,
+        run_epoch=9,
+        granted_execution_ids=tuple(execution_ids),
+        workflow_ids=workflow_ids,
+        blocked=(),
+    )
+
+
 class TestManualRecovery:
     async def test_resumes_only_granted_ids(self) -> None:
         client = _FakeClient([])
         registry = _FakeRegistry(
+            registered=(
+                _execution("exec-a", "agent_research:a"),
+                _execution("exec-b", "agent_research:b"),
+            ),
+            client_ref=client,
             grant=RecoveryGrantFact(
                 user_scope="user-1",
                 owner_epoch=9,
@@ -434,7 +463,7 @@ class TestManualRecovery:
                 granted_execution_ids=("exec-a",),
                 workflow_ids=("agent_research:a",),
                 blocked=(("exec-b", "user_termination"),),
-            )
+            ),
         )
         receipt = await resume_selected_workflows(
             user_scope="user-1",
@@ -450,10 +479,13 @@ class TestManualRecovery:
         assert receipt.blocked == (("exec-b", "user_termination"),)
         assert registry.grant_requests[0].execution_ids == ("exec-a", "exec-b")
         assert registry.grant_requests[0].application_version == _VERSION
+        # 先核叶终态（只读）再提交授权：两个候选 root 的列举都发生在 grant 之前
+        assert registry.native_list_calls_at_grant == [2]
 
     async def test_all_candidates_blocked_is_not_ready(self) -> None:
         client = _FakeClient([])
         registry = _FakeRegistry(
+            registered=(_execution("exec-b", "agent_research:b"),),
             grant=RecoveryGrantFact(
                 user_scope="user-1",
                 owner_epoch=9,
@@ -461,7 +493,7 @@ class TestManualRecovery:
                 granted_execution_ids=(),
                 workflow_ids=(),
                 blocked=(("exec-b", "user_termination"),),
-            )
+            ),
         )
         receipt = await resume_selected_workflows(
             user_scope="user-1",
@@ -490,14 +522,8 @@ class TestManualRecovery:
             ]
         )
         registry = _FakeRegistry(
-            grant=RecoveryGrantFact(
-                user_scope="user-1",
-                owner_epoch=9,
-                run_epoch=9,
-                granted_execution_ids=("exec-a",),
-                workflow_ids=("agent_research:a",),
-                blocked=(),
-            )
+            registered=(_execution("exec-a", "agent_research:a"),),
+            grant=_granted("exec-a", workflow_ids=("agent_research:a",)),
         )
 
         receipt = await resume_selected_workflows(
@@ -524,18 +550,14 @@ class TestManualRecovery:
             "CANCELLED",
         }
 
-    async def test_leaf_resolution_failure_blocks_without_partial_resume(self) -> None:
+    async def test_leaf_resolution_failure_blocks_before_grant(self) -> None:
+        """必要叶终态不可核：不授予（派发门保持关闭）、不部分恢复。"""
+
         client = _FakeClient([_Native("agent_leaf:a:r1:n1", "CANCELLED", parent_workflow_id="agent_research:a")])
         client.list_error = RuntimeError("leaf listing broken")
         registry = _FakeRegistry(
-            grant=RecoveryGrantFact(
-                user_scope="user-1",
-                owner_epoch=9,
-                run_epoch=9,
-                granted_execution_ids=("exec-a",),
-                workflow_ids=("agent_research:a",),
-                blocked=(),
-            )
+            registered=(_execution("exec-a", "agent_research:a"),),
+            grant=_granted("exec-a", workflow_ids=("agent_research:a",)),
         )
 
         receipt = await resume_selected_workflows(
@@ -552,19 +574,48 @@ class TestManualRecovery:
         assert receipt.blocking_reasons == ("leaf_resolution_failed", "leaf_resolution_failed:RuntimeError")
         assert receipt.resumed_workflow_ids == ()
         assert client.resumed == []
+        assert registry.grant_requests == []  # 未提交授权：派发门未被打开
+
+    async def test_leaf_resume_failure_keeps_parent_unadvanced(self) -> None:
+        """必要叶未可靠接续：该 root 不推进，其余 root 不受牵连。"""
+
+        client = _FakeClient(
+            [
+                _Native("agent_leaf:a:r1:n1", "CANCELLED", parent_workflow_id="agent_research:a"),
+                _Native("agent_leaf:b:r1:n1", "CANCELLED", parent_workflow_id="agent_research:b"),
+            ]
+        )
+        client.resume_error_workflows = {"agent_leaf:a:r1:n1"}
+        registry = _FakeRegistry(
+            registered=(
+                _execution("exec-a", "agent_research:a"),
+                _execution("exec-b", "agent_research:b"),
+            ),
+            grant=_granted("exec-a", "exec-b", workflow_ids=("agent_research:a", "agent_research:b")),
+        )
+
+        receipt = await resume_selected_workflows(
+            user_scope="user-1",
+            execution_ids=("exec-a", "exec-b"),
+            owner_epoch=9,
+            run_epoch=9,
+            application_version=_VERSION,
+            client=client,
+            registry=registry,
+        )
+
+        assert receipt.ready is False
+        assert "necessary_leaf_not_resumed" in receipt.blocking_reasons
+        assert "agent_research:a" not in client.resumed
+        assert client.resumed == ["agent_leaf:b:r1:n1", "agent_research:b"]
+        assert ("agent_leaf:a:r1:n1", "RuntimeError") in receipt.resume_failures
 
     async def test_resume_failure_marks_not_ready(self) -> None:
         client = _FakeClient([])
         client.resume_error = RuntimeError("resume failed")
         registry = _FakeRegistry(
-            grant=RecoveryGrantFact(
-                user_scope="user-1",
-                owner_epoch=9,
-                run_epoch=9,
-                granted_execution_ids=("exec-a",),
-                workflow_ids=("agent_research:a",),
-                blocked=(),
-            )
+            registered=(_execution("exec-a", "agent_research:a"),),
+            grant=_granted("exec-a", workflow_ids=("agent_research:a",)),
         )
         receipt = await resume_selected_workflows(
             user_scope="user-1",
@@ -583,14 +634,8 @@ class TestManualRecovery:
         client = _FakeClient([])
         client.resume_error = asyncio.CancelledError()
         registry = _FakeRegistry(
-            grant=RecoveryGrantFact(
-                user_scope="user-1",
-                owner_epoch=9,
-                run_epoch=9,
-                granted_execution_ids=("exec-a",),
-                workflow_ids=("agent_research:a",),
-                blocked=(),
-            )
+            registered=(_execution("exec-a", "agent_research:a"),),
+            grant=_granted("exec-a", workflow_ids=("agent_research:a",)),
         )
         with pytest.raises(asyncio.CancelledError) as exc_info:
             await resume_selected_workflows(
@@ -603,6 +648,129 @@ class TestManualRecovery:
                 registry=registry,
             )
         assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert client.resumed == []
+
+    async def test_retry_recovers_original_authorization_without_new_grant(self) -> None:
+        """重试沿用同一代次：按登记投影精确查回原授权，不重复授予新代次。"""
+
+        client = _FakeClient([_Native("agent_leaf:a:r1:n1", "CANCELLED", parent_workflow_id="agent_research:a")])
+        registry = _FakeRegistry(
+            registered=(
+                _execution("exec-a", "agent_research:a", owner_epoch=9, run_epoch=9),
+                _execution("exec-b", "agent_research:b", run_epoch=1, stop_reason="user_termination"),
+                _execution("exec-c", "agent_research:c", run_epoch=1),
+                _execution("exec-d", "agent_research:d", owner_epoch=9, run_epoch=9, dispatch_closed=True),
+                _execution("exec-e", "agent_research:e", run_epoch=1, display_state="ended"),
+                _execution("exec-f", "agent_research:f", run_epoch=1, display_state="unknown"),
+            ),
+            grant=_granted("exec-a", workflow_ids=("agent_research:a",)),
+        )
+
+        receipt = await resume_selected_workflows(
+            user_scope="user-1",
+            execution_ids=("exec-a", "exec-b", "exec-c", "exec-d", "exec-e", "exec-f"),
+            owner_epoch=9,
+            run_epoch=9,
+            application_version=_VERSION,
+            client=client,
+            registry=registry,
+        )
+
+        assert receipt.ready is True
+        assert registry.grant_requests == []  # 原授权已存在：不再开新代次
+        assert receipt.granted_execution_ids == ("exec-a",)
+        assert client.resumed == ["agent_leaf:a:r1:n1", "agent_research:a"]
+        assert dict(receipt.blocked) == {
+            "exec-b": "user_termination",
+            "exec-c": "authorization_mismatch",
+            "exec-d": "dispatch_closed",
+            "exec-e": "already_terminal",
+            "exec-f": "state_unverified",
+        }
+
+    async def test_unverified_leaf_state_blocks_root_progress(self) -> None:
+        """已授予 root 缺叶终态核对结果：视为未核，父不得推进（fail-closed）。"""
+
+        client = _FakeClient([])
+        registry = _FakeRegistry(
+            registered=(_execution("exec-a", "agent_research:a"),),
+            grant=_granted("exec-a", workflow_ids=("agent_research:a", "agent_research:unknown")),
+        )
+
+        receipt = await resume_selected_workflows(
+            user_scope="user-1",
+            execution_ids=("exec-a",),
+            owner_epoch=9,
+            run_epoch=9,
+            application_version=_VERSION,
+            client=client,
+            registry=registry,
+        )
+
+        assert receipt.ready is False
+        assert "agent_research:unknown" not in client.resumed
+        assert ("agent_research:unknown", "leaf_state_unverified") in receipt.resume_failures
+
+    async def test_preflight_requires_registered_workflow(self) -> None:
+        """登记缺行/无有效轮：无法证明选择项现状，不授予、不派发。"""
+
+        client = _FakeClient([])
+        registry = _FakeRegistry(grant=_granted("exec-a", workflow_ids=("agent_research:a",)))
+
+        receipt = await resume_selected_workflows(
+            user_scope="user-1",
+            execution_ids=("exec-a",),
+            owner_epoch=9,
+            run_epoch=9,
+            application_version=_VERSION,
+            client=client,
+            registry=registry,
+        )
+
+        assert receipt.ready is False
+        assert receipt.blocking_reasons == ("preflight_incomplete",)
+        assert receipt.blocked == (("exec-a", "workflow_unknown"),)
+        assert registry.grant_requests == []
+        assert client.resumed == []
+
+    async def test_empty_selection_is_not_ready_without_grant(self) -> None:
+        client = _FakeClient([])
+        registry = _FakeRegistry(grant=_granted("exec-a", workflow_ids=("agent_research:a",)))
+
+        receipt = await resume_selected_workflows(
+            user_scope="user-1",
+            execution_ids=(),
+            owner_epoch=9,
+            run_epoch=9,
+            application_version=_VERSION,
+            client=client,
+            registry=registry,
+        )
+
+        assert receipt.ready is False
+        assert receipt.blocking_reasons == ("no_granted_execution",)
+        assert registry.grant_requests == []
+
+    async def test_preflight_read_failure_fails_closed(self) -> None:
+        client = _FakeClient([])
+        registry = _FakeRegistry(
+            list_error=RuntimeError("registry read failed"),
+            grant=_granted("exec-a", workflow_ids=("agent_research:a",)),
+        )
+
+        receipt = await resume_selected_workflows(
+            user_scope="user-1",
+            execution_ids=("exec-a",),
+            owner_epoch=9,
+            run_epoch=9,
+            application_version=_VERSION,
+            client=client,
+            registry=registry,
+        )
+
+        assert receipt.ready is False
+        assert receipt.blocking_reasons == ("recovery_state_unreadable", "recovery_state_unreadable:RuntimeError")
+        assert registry.grant_requests == []
         assert client.resumed == []
 
 

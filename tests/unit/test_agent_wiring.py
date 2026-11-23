@@ -537,6 +537,142 @@ async def test_close_gate_probe_supplies_residual_evidence() -> None:
     assert wiring.close_ready() is True
 
 
+async def test_normal_close_releases_instance_guard() -> None:
+    """正常关闭必须把唯一执行锁交给关闭链，就绪后释放（同进程切库可接管）。"""
+    wiring, handle, guard = await _wire()
+
+    receipt = await wiring.prepare_close()
+
+    assert receipt is not None and receipt.ready is True
+    assert handle.closed is True
+    assert guard.released == 1
+    assert wiring.instance_guard is None
+
+
+class _FakeMCPIdentity:
+    def stable_key(self) -> str:
+        return "stdio:demo"
+
+
+class _FakeMCPLifecycle:
+    """MCP 生命周期替身：按需让 disconnect 失败。"""
+
+    def __init__(self, *, failures: int = 0) -> None:
+        self._remaining_failures = failures
+        self.disconnects = 0
+
+    def connected_identities(self) -> tuple[Any, ...]:
+        return (_FakeMCPIdentity(),)
+
+    async def disconnect(self, identity: Any) -> None:
+        self.disconnects += 1
+        if self._remaining_failures > 0:
+            self._remaining_failures -= 1
+            raise RuntimeError("disconnect failed")
+
+
+async def test_mcp_disconnect_failure_blocks_close_ready() -> None:
+    """MCP 关停失败属关闭回执未核事实：不得报「已安全关闭」。"""
+    service = _FakeAgentService()
+    wiring = AgentWiring(
+        service=service,
+        bridge=OwnerLoopBridge.for_running_loop(),
+        runtime=cast(Any, _FakeRuntime(receipt=_receipt(ready=True))),
+        mcp_lifecycle=cast(Any, _FakeMCPLifecycle(failures=1)),
+    )
+
+    receipt = await wiring.prepare_close()
+
+    assert receipt is not None and receipt.ready is False
+    assert "mcp_disconnect_failed:stdio:demo" in receipt.blocking_reasons
+    assert wiring.close_ready() is False
+    assert service.aclose_calls == 0  # 未核收尾：保留可用面，不先关 facade
+
+
+async def test_mcp_disconnect_failure_blocks_unlaunched_close() -> None:
+    """未 launch（无关闭链）时 MCP 未确认断开同样阻止释放依赖。"""
+    service = _FakeAgentService()
+    wiring = AgentWiring(
+        service=service,
+        bridge=OwnerLoopBridge.for_running_loop(),
+        mcp_lifecycle=cast(Any, _FakeMCPLifecycle(failures=1)),
+    )
+
+    assert await wiring.prepare_close() is None
+    assert wiring.close_ready() is False
+    assert service.aclose_calls == 0
+
+
+async def test_mcp_disconnect_retry_success_releases_close_gate() -> None:
+    service = _FakeAgentService()
+    lifecycle = _FakeMCPLifecycle(failures=1)
+    wiring = AgentWiring(
+        service=service,
+        bridge=OwnerLoopBridge.for_running_loop(),
+        runtime=cast(Any, _FakeRuntime(receipt=_receipt(ready=True))),
+        mcp_lifecycle=cast(Any, lifecycle),
+    )
+
+    first = await wiring.prepare_close()
+    second = await wiring.prepare_close()
+
+    assert first is not None and first.ready is False
+    assert second is not None and second.ready is True
+    assert wiring.close_ready() is True
+    assert lifecycle.disconnects == 2
+    assert service.aclose_calls == 1
+
+
+async def test_prepare_agent_close_reads_current_wiring_not_startup_copy() -> None:
+    """首次向导/重试成功后，退出门必须读当前接线而非启动时复制的快照。"""
+    from app.application import ApplicationSession
+
+    calls: list[str] = []
+
+    class _Wiring:
+        def __init__(self, label: str) -> None:
+            self._label = label
+
+        async def prepare_close(self) -> None:
+            calls.append(self._label)
+
+        def close_ready(self) -> bool:
+            return True
+
+    session = ApplicationSession(SimpleNamespace())  # type: ignore[arg-type]  # [reason: 该路径不使用 page]
+    session.agent_wiring = _Wiring("startup-copy")
+    session.agent_wiring_provider = lambda: _Wiring("current")
+
+    assert await session.prepare_agent_close() is True
+    assert calls == ["current"]
+
+
+async def test_prepare_agent_close_follows_wiring_created_after_start() -> None:
+    """启动时为未接线（None）：向导完成后新建的接线仍被退出门消费。"""
+    from app.application import ApplicationSession
+
+    calls: list[str] = []
+
+    class _Wiring:
+        async def prepare_close(self) -> None:
+            calls.append("current")
+
+        def close_ready(self) -> bool:
+            return True
+
+    current: Any | None = None
+    session = ApplicationSession(SimpleNamespace())  # type: ignore[arg-type]  # [reason: 该路径不使用 page]
+    session.agent_wiring = None
+    session.agent_wiring_provider = lambda: current
+
+    assert await session.prepare_agent_close() is True
+    assert calls == []
+
+    current = _Wiring()
+    assert await session.prepare_agent_close() is True
+    assert calls == ["current"]
+
+
 async def test_prepare_agent_close_requires_evidence_accessor() -> None:
     """无就绪证据访问器的接线不得默认放行依赖释放。"""
 
