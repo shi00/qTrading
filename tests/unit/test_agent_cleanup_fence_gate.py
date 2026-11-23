@@ -24,6 +24,7 @@ from core.agent_types import (
     AcceptRequest,
     AgentErrorCode,
     AgentServiceError,
+    BindActualInputRequest,
     CommandReceipt,
     CommandRef,
     CommitState,
@@ -305,6 +306,37 @@ class TestAcceptRequestFenceGate:
             await _dao(conn).accept_request(_accept_request())
         assert exc.value.code is AgentErrorCode.POLICY_DENIED
         assert not any("INSERT INTO agent_command" in sql for sql in conn.statements)
+        assert not any("INSERT INTO agent_message" in sql for sql in conn.statements)
+
+
+def _bind_request() -> BindActualInputRequest:
+    return BindActualInputRequest(
+        user_scope="u1",
+        session_id="s1",
+        execution_id="exec-1",
+        node_id="root",
+        workflow_id="wf-1",
+        workflow_code_version="1",
+        run_epoch=1,
+        expected_input_revision=1,
+        frozen_manifest=json_doc({"schema_version": 1}),
+        actual_input=json_doc({"schema_version": 1}),
+    )
+
+
+class TestBindActualInputFenceGate:
+    """P1-11：首派发绑定必须核清理 fence，未核/已 fence 即拒（零新轮）。"""
+
+    async def test_new_round_rejected_when_session_fenced(self) -> None:
+        conn = _FenceConn(
+            fence_rows=[_fenced(["s1"])],
+            execution_first=SimpleNamespace(session_id="s1"),
+            session_first=SimpleNamespace(session_id="s1"),
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await _dao(conn).bind_actual_input(_bind_request())
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert not any("INSERT INTO agent_round" in sql for sql in conn.statements)
         assert not any("INSERT INTO agent_message" in sql for sql in conn.statements)
 
 

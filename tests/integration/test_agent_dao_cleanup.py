@@ -36,6 +36,8 @@ from sqlalchemy import text
 from core.agent_types import (
     CLEANUP_TOMBSTONE,
     CLEANUP_TOMBSTONE_DIGEST,
+    AgentErrorCode,
+    AgentServiceError,
     CleanupJobRecord,
     CleanupPhase,
     CleanupPrecondition,
@@ -71,6 +73,7 @@ from services.agent_service.cleanup import (
 )
 from services.agent_service.cleanup_execution import CleanupExecutionService
 from services.agent_service.cleanup_native import NativeCleanupExecutor, NativeVerification
+from services.agent_service.cleanup_ports import DaoCleanupAdmissionFacts
 from tests._helpers import create_test_engine, make_alembic_cfg
 from tests.integration.test_agent_runtime_migrator import (
     _create_runtime_database,
@@ -604,6 +607,7 @@ async def test_content_domains_cleared_and_body_payloads_deleted(real_embedded_p
             "subject_revision": 1,
             "role": "assistant",
             "body_text": None,
+            "model_text": secret,
             "payload": {"text": secret},
             "occurred_at": now,
             "committed_at": now,
@@ -726,6 +730,7 @@ async def test_content_domains_cleared_and_body_payloads_deleted(real_embedded_p
                 await conn.execute(
                     sa.select(
                         AgentMessage.body_text,
+                        AgentMessage.model_text,
                         AgentMessage.body_ref,
                         AgentMessage.payload,
                         AgentMessage.search_text,
@@ -779,6 +784,7 @@ async def test_content_domains_cleared_and_body_payloads_deleted(real_embedded_p
                 await conn.execute(
                     sa.select(
                         AgentMessage.body_ref,
+                        AgentMessage.model_text,
                         AgentMessage.payload,
                         AgentMessage.search_text,
                     ).where(AgentMessage.message_id == message_out)
@@ -834,6 +840,7 @@ async def test_content_domains_cleared_and_body_payloads_deleted(real_embedded_p
     assert touched["agent_asset_version"] == 0
 
     assert message_row.body_text is None
+    assert message_row.model_text is None
     assert message_row.body_ref is None
     assert message_row.payload is None
     assert message_row.search_text is None
@@ -853,6 +860,7 @@ async def test_content_domains_cleared_and_body_payloads_deleted(real_embedded_p
     assert operation_row.result_ref is None
     assert sorted(remaining_bodies) == [body_out]
     assert out_message_row.body_ref == body_out
+    assert out_message_row.model_text == secret
     assert out_message_row.payload == {"text": secret}
     assert out_message_row.search_text == secret
     assert out_artifact_row.summary == secret
@@ -1534,3 +1542,218 @@ async def test_asset_scoped_source_links_clear_locator(real_embedded_pg) -> None
     assert rows[link_source] is None
     assert rows[link_derived] is None
     assert rows[link_out] == {"path": f"C:/private/{secret}"}
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_residual_gate_and_cross_session_reference_share_fence(real_embedded_pg) -> None:
+    """P1-11：三种表示未清尽前残留计数非 0；集合外新引用持同一 fence 拒绝删除。
+
+    覆盖：``agent_message`` 的 ``body_text``/``model_text``/``search_text`` 三种表示
+    同句装入 → 残留门禁可见；跨会话草稿引用使 tombstone 拒绝（零副作用）；移除
+    引用并清理后三种表示清空且残留计数为 0。
+    """
+
+    url = real_embedded_pg.url
+    await _reset_and_migrate_app_schema(url)
+
+    suffix = uuid.uuid4().hex[:8]
+    session_in, session_out = f"s-res-{suffix}", f"s-out-{suffix}"
+    execution_in = f"e-res-{suffix}"
+    message_in = f"m-res-{suffix}"
+    asset_in = f"asset-res-{suffix}"
+    link_id = f"l-res-{suffix}"
+    secret = "私人原句-三种表示-清理后不应可查"
+    now = datetime.now(UTC)
+
+    app_engine = create_test_engine(url)
+    try:
+        dao = AgentDao(app_engine)
+        async with app_engine.begin() as conn:
+            await conn.execute(
+                sa.insert(AgentSession),
+                [
+                    {"user_scope": _USER_SCOPE, "session_id": session_in, "title": secret},
+                    {"user_scope": _USER_SCOPE, "session_id": session_out, "title": "集合外会话"},
+                ],
+            )
+            await conn.execute(
+                sa.insert(AgentExecution).values(
+                    user_scope=_USER_SCOPE,
+                    execution_id=execution_in,
+                    session_id=session_in,
+                    execution_kind="root",
+                    source_module=f"module-{execution_in}",
+                    business_request_id=f"request-{execution_in}",
+                    intent_digest="e" * 64,
+                    node_id="root",
+                    display_state="complete",
+                    goal_coverage="full",
+                )
+            )
+            await conn.execute(
+                sa.insert(AgentMessage).values(
+                    user_scope=_USER_SCOPE,
+                    message_id=message_in,
+                    session_id=session_in,
+                    execution_id=execution_in,
+                    round_id=None,
+                    event_id=f"evt-{message_in}",
+                    session_seq=1,
+                    execution_seq=None,
+                    event_kind="public_message_saved",
+                    payload_kind="public_message",
+                    subject_id=message_in,
+                    subject_revision=1,
+                    role="user",
+                    body_text=secret,
+                    model_text=secret,
+                    search_text=secret,
+                    body_untrusted=False,
+                    occurred_at=now,
+                    committed_at=now,
+                )
+            )
+            await conn.execute(
+                sa.insert(AgentAssetVersion).values(
+                    user_scope=_USER_SCOPE,
+                    asset_id=asset_in,
+                    asset_version="1",
+                    asset_kind="summary",
+                    display_name=secret,
+                    digest="9" * 64,
+                    read_state="ready",
+                    verification_state="program_verified",
+                )
+            )
+            # 集合外会话引用集合内资产：新引用竞争（与 fence 同一稳定锁仲裁）。
+            await conn.execute(
+                sa.insert(AgentSourceLink).values(
+                    user_scope=_USER_SCOPE,
+                    link_id=link_id,
+                    source_id=asset_in,
+                    source_version="1",
+                    consumer_kind="draft",
+                    consumer_id=session_out,
+                    consumer_version="1",
+                    session_id=session_out,
+                    relation_kind="accepted_input",
+                )
+            )
+
+        residual_before = await dao.count_cleanup_residual_text(
+            _USER_SCOPE, session_ids=[session_in], asset_keys=[(asset_in, "1")]
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.tombstone_cleanup_text(_USER_SCOPE, session_ids=[session_in], asset_keys=[(asset_in, "1")])
+        rejected_code = exc.value.code
+        async with app_engine.connect() as conn:
+            before_clean = (
+                await conn.execute(
+                    sa.select(AgentMessage.body_text, AgentMessage.model_text, AgentMessage.search_text).where(
+                        AgentMessage.message_id == message_in
+                    )
+                )
+            ).one()
+
+        async with app_engine.begin() as conn:
+            await conn.execute(
+                sa.delete(AgentSourceLink).where(
+                    AgentSourceLink.user_scope == _USER_SCOPE, AgentSourceLink.link_id == link_id
+                )
+            )
+
+        touched = await dao.tombstone_cleanup_text(_USER_SCOPE, session_ids=[session_in], asset_keys=[(asset_in, "1")])
+        residual_after = await dao.count_cleanup_residual_text(
+            _USER_SCOPE, session_ids=[session_in], asset_keys=[(asset_in, "1")]
+        )
+        async with app_engine.connect() as conn:
+            after_clean = (
+                await conn.execute(
+                    sa.select(AgentMessage.body_text, AgentMessage.model_text, AgentMessage.search_text).where(
+                        AgentMessage.message_id == message_in
+                    )
+                )
+            ).one()
+    finally:
+        await app_engine.dispose()
+
+    assert residual_before > 0
+    assert rejected_code is AgentErrorCode.POLICY_DENIED
+    assert before_clean.body_text == secret
+    assert before_clean.model_text == secret
+    assert before_clean.search_text == secret
+    assert touched["agent_message"] == 1
+    assert residual_after == 0
+    assert after_clean.body_text is None
+    assert after_clean.model_text is None
+    assert after_clean.search_text is None
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_admission_derives_closure_and_preview_from_storage(real_embedded_pg) -> None:
+    """P1-11：准入闭包/预览由存储事实派生，不把未列举或缺失清单当作已知有效。"""
+
+    url = real_embedded_pg.url
+    await _reset_and_migrate_app_schema(url)
+
+    suffix = uuid.uuid4().hex[:8]
+    session_id = f"s-close-{suffix}"
+    execution_id = f"e-close-{suffix}"
+    job_ok, job_missing_preview = f"job-ok-{suffix}", f"job-np-{suffix}"
+
+    app_engine = create_test_engine(url)
+    try:
+        dao = AgentDao(app_engine)
+        async with app_engine.begin() as conn:
+            await conn.execute(
+                sa.insert(AgentSession).values(user_scope=_USER_SCOPE, session_id=session_id, title="闭包会话")
+            )
+            await conn.execute(
+                sa.insert(AgentExecution).values(
+                    user_scope=_USER_SCOPE,
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    execution_kind="root",
+                    source_module=f"module-{execution_id}",
+                    business_request_id=f"request-{execution_id}",
+                    intent_digest="e" * 64,
+                    node_id="root",
+                    display_state="complete",
+                    goal_coverage="full",
+                )
+            )
+
+        def _record(job_id: str) -> CleanupJobRecord:
+            return CleanupJobRecord(
+                user_scope=_USER_SCOPE,
+                cleanup_job_id=job_id,
+                owner_ref="owner-close",
+                preview_digest=preview_digest(("owner-close",), ()),
+                expected_revision=1,
+                exact_ids=(),
+                phase=CleanupPhase.PREPARED,
+                fence_committed=False,
+                session_ids=(session_id,),
+            )
+
+        await dao.save_cleanup_job(_record(job_ok), content_manifest={"preview_fields": ["owner-close"]})
+        await dao.save_cleanup_job(_record(job_missing_preview))
+
+        facts = DaoCleanupAdmissionFacts(dao)
+        ok = await facts.derive_precondition(_USER_SCOPE, job_ok)
+        missing = await facts.derive_precondition(_USER_SCOPE, job_missing_preview)
+
+        # 会话闭包内执行不终态时闭包不得核为已知。
+        async with app_engine.begin() as conn:
+            await conn.execute(
+                sa.update(AgentExecution)
+                .where(AgentExecution.execution_id == execution_id)
+                .values(display_state="running")
+            )
+        unsettled = await facts.derive_precondition(_USER_SCOPE, job_ok)
+    finally:
+        await app_engine.dispose()
+
+    assert ok is not None and ok.closure_known is True and ok.preview_valid is True
+    assert missing is not None and missing.preview_valid is False
+    assert unsettled is not None and unsettled.closure_known is False

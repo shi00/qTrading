@@ -8003,6 +8003,12 @@ class CleanupNativeFacts:
 
     ``resolvable_ids`` 为在本用户域内可定位到执行/轮次事实的 ID；不在其内的 ID
     表示事实不可得，调用方必须拒绝清理（不得以「查不到」冒充「可清理」，R21）。
+
+    ``closure_complete`` 表示会话/资产**实际闭包**已完整核查（全部会话与资产版本
+    可定位、其全部执行均终态）；缺省 ``False`` 即 fail-closed（不因「未列举」当作
+    闭包已知）。在途 writer / 未知交付仍由 ``writers_running_ids`` /
+    ``unknown_delivery_ids`` 单独裁决。``new_reference_conflict`` 表示存在集合外会话
+    对集合内资产的新引用（按原 fence 仲裁）。二者不由调用方自述，必须由存储面事实派生。
     """
 
     resolvable_ids: tuple[str, ...]
@@ -8011,6 +8017,8 @@ class CleanupNativeFacts:
     externally_referenced_ids: tuple[str, ...]
     writers_running_ids: tuple[str, ...]
     unknown_delivery_ids: tuple[str, ...]
+    closure_complete: bool = False
+    new_reference_conflict: bool = False
 
 
 @dataclass(frozen=True, slots=True)

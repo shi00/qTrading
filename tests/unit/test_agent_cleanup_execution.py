@@ -100,6 +100,7 @@ class _Dao:
         verified_crash: BaseException | None = None,
         fail_stages: frozenset[str] = frozenset(),
         fail_phases: frozenset[CleanupPhase] = frozenset(),
+        residual: int = 0,
     ) -> None:
         self.phases: list[dict[str, object]] = []
         self.stages: list[dict[str, object]] = []
@@ -109,6 +110,7 @@ class _Dao:
         self._verified_crash = verified_crash
         self._fail_stages = fail_stages
         self._fail_phases = fail_phases
+        self._residual = residual
 
     async def save_cleanup_attempt_stage(self, user_scope: str, cleanup_job_id: str, *, stage: str) -> None:
         if stage in self._fail_stages:
@@ -167,6 +169,15 @@ class _Dao:
         if self._tombstone_error is not None:
             raise self._tombstone_error
         return {"agent_session": len(session_ids), "agent_asset_version": len(asset_keys)}
+
+    async def count_cleanup_residual_text(
+        self,
+        user_scope: str,
+        *,
+        session_ids: tuple[str, ...] = (),
+        asset_keys: tuple[tuple[str, str], ...] = (),
+    ) -> int:
+        return self._residual
 
 
 class _Executor:
@@ -419,6 +430,40 @@ class TestCleanupExecutionFailures:
         # 非零即回滚：原 job 的 fence 与冻结集合保持不变，可在原 fence 下重试。
         assert store.record.fence_committed is True
         assert store.record.exact_ids == _IDS
+
+    @pytest.mark.asyncio
+    async def test_residual_text_blocks_verified(self) -> None:
+        """P1-11 / R21：应用域正文仍有残留（如遗漏表示列）时不得写 verified/complete。"""
+
+        record = _record()
+        service, store, dao, _ = _service(record, dao=_Dao(residual=2))
+
+        receipt = await service.confirm_and_execute(_command(record))
+
+        assert receipt.phase is CleanupPhase.RETRY_PENDING
+        assert dao.tombstones[0][0] == "owner-1"
+        assert [phase["phase"] for phase in dao.phases] == [CleanupPhase.RETRY_PENDING]
+        assert dao.phases[0]["error_category"] == "cleanup_residual_content"
+        assert dao.phases[0]["complete"] is False
+        # 原集合与 fence 保持不变，可在原 fence 下重试。
+        assert store.record.exact_ids == _IDS
+        assert store.record.fence_committed is True
+
+    @pytest.mark.asyncio
+    async def test_residual_retry_allows_missing_native_rows(self) -> None:
+        """残留失败发生在删除之后：重试仍可按原 job 收尾。"""
+
+        record = _record(
+            phase=CleanupPhase.RETRY_PENDING,
+            fence_committed=True,
+            prior_error_category="cleanup_residual_content",
+        )
+        service, _, dao, _ = _service(record, executor=_Executor(missing=("wf-a",)))
+
+        receipt = await service.confirm_and_execute(_command(record))
+
+        assert receipt.phase is CleanupPhase.VERIFIED
+        assert dao.phases[-1]["phase"] is CleanupPhase.VERIFIED
 
     @pytest.mark.asyncio
     async def test_tombstone_failure_keeps_set_and_records_sqlstate(self) -> None:
