@@ -219,7 +219,7 @@ def test_linux_test_jobs_share_identical_skip_condition(workflow: dict[str, Any]
 def test_mutation_missing_combine_is_detected(workflow: dict[str, Any]) -> None:
     tokens = _tokens(_step(_steps(workflow, GATE_JOB), GATE_COMBINE_STEP))
     mutated = [token for token in tokens if token != "combine"]
-    with pytest.raises(AssertionError):
+    with pytest.raises(AssertionError, match="缺少 combine/报告命令"):
         _assert_combine_order(mutated)
 
 
