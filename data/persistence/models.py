@@ -238,7 +238,11 @@ class SyncStatus(Base):
 class ScreeningHistory(Base):
     __tablename__ = "screening_history"
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    run_id = Column(String(16), nullable=False)
+    # F34/AC23：run_id 承载批次入口稳定身份。实时 AI 选股 / 夜间预测复用
+    # ``stock_batch_<32 hex>``（44 字符），并与 ``ai_invocation.run_id`` 同值用于
+    # 费用链回查；16 字符列宽会令 PostgreSQL 拒写（value too long）。扩到 64 保留
+    # 头寸且不截断既有 16 字符记录（截断会造成 run_id 碰撞，破坏 append-only 唯一键）。
+    run_id = Column(String(64), nullable=False)
     trade_date = Column(Date, nullable=False)
     strategy_name = Column(String, nullable=False)
     ts_code = Column(String, nullable=False)

@@ -1411,6 +1411,37 @@ class TestReviewManagerSaveResults:
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
+    async def test_save_preserves_44_char_batch_run_id(self, mock_cm, mock_tc):
+        """F34/AC23：批次身份 stock_batch_<32 hex>（44 字符）原样落库，不得截断。
+
+        截断会让不同批次碰撞到同一 run_id，破坏 append-only 唯一键与账本关联，
+        故保存服务只做透传，由 schema 列宽承载长身份（见迁移 0049）。
+        """
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.save_screening_results = AsyncMock(return_value=1)
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        batch_run_id = "stock_batch_" + "a" * 32
+        assert len(batch_run_id) == 44
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "name": ["Test"],
+                "close": [10.0],
+                "trade_date": ["20240615"],
+                "ai_status": ["analyzed"],
+            }
+        )
+        await rm.save_results("test_strategy", df, trade_date="20240615", run_id=batch_run_id)
+        records = mock_cache.screener_dao.save_screening_results.call_args[0][0]
+        assert records
+        assert all(record["run_id"] == batch_run_id for record in records)
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
     async def test_save_empty_df_returns_zero(self, mock_cm, mock_tc):
         """D4-C1: df 为空 → 返回 0（无写入条数）。"""
         mock_cache = MagicMock()
