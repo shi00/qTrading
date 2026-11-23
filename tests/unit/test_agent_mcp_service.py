@@ -39,6 +39,7 @@ from services.agent_service.mcp import (
     MCPToolDescriptor,
     MCPTransportConfig,
     SharedMCPConnectionManager,
+    config_snapshot_digest,
     validate_transport_config,
 )
 
@@ -1030,6 +1031,19 @@ class TestConnectTotalDeadline:
         assert retry.value.code is AgentErrorCode.POLICY_DENIED
 
     @pytest.mark.asyncio
+    async def test_one_second_config_is_not_rejected_by_integer_truncation(self) -> None:
+        # 合法最小配置 connect_deadline_s=1：open 用掉 0.4 秒后剩余 0.6 秒，
+        # 整秒截断会得到 0 并误拒；应授予端口最小 1 秒并由真实剩余时长硬切。
+        manager, store, _factory, session, _clock = _deadline_manager(open_s=0.4, work_s=0.5)
+        await store.save(_config(connect_deadline_s=1))
+
+        receipt = await manager.connection_test(_identity())
+
+        assert receipt.tool_names == ("read_file",)
+        assert session.list_budgets == [1]
+        assert session.closed is True
+
+    @pytest.mark.asyncio
     async def test_concurrent_waiters_share_one_total_budget(self) -> None:
         clock = _FakeClock()
         factory = _GatedTimedFactory(clock)
@@ -1058,6 +1072,147 @@ class TestConnectTotalDeadline:
         assert all(item.code is AgentErrorCode.POLICY_DENIED for item in errors)  # 共享同一总预算
         assert factory.sessions[0].closed is True
         assert manager.is_connected(_identity()) is False
+
+
+class TestConnectionTestReceiptBinding:
+    """启连必须使用本轮测试回执核对目录/配置：回执要能精确复现测试所见。"""
+
+    @pytest.mark.asyncio
+    async def test_receipt_binds_config_digest_and_monotonic_generation(self) -> None:
+        manager, _store, _factory, _probe = _manager()
+        await manager.save_config(_config())
+
+        first = await manager.connection_test(_identity())
+        second = await manager.connection_test(_identity())
+
+        assert first.config_digest == config_snapshot_digest(_config())
+        assert first.generation == 1
+        assert second.generation == 2
+        assert manager.test_generation(_identity()) == 2
+
+    @pytest.mark.asyncio
+    async def test_failed_test_still_advances_generation(self) -> None:
+        manager, _store, _factory, _probe = _manager(session=_FakeSession((), fail_list=True))
+        await manager.save_config(_config())
+
+        with pytest.raises(RuntimeError) as exc:
+            await manager.connection_test(_identity())
+        assert str(exc.value) == "transport dropped"
+        assert manager.test_generation(_identity()) == 1
+
+    def test_never_tested_generation_is_unknown(self) -> None:
+        manager, _store, _factory, _probe = _manager()
+        assert manager.test_generation(_identity()) is None
+
+
+class TestTestResidueRecovery:
+    """关闭未知的测试残留必须可查、可收尾，且收尾未知时不得重新新开连接。"""
+
+    @pytest.mark.asyncio
+    async def test_connect_refused_while_test_residue_is_unconfirmed(self) -> None:
+        session = _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),), close_failures=1)
+        manager, _store, factory, _probe = _manager(session=session)
+        await manager.save_config(_config())
+        with pytest.raises(AgentServiceError) as test_exc:
+            await manager.connection_test(_identity())
+        assert test_exc.value.code is AgentErrorCode.OPERATION_UNKNOWN
+        assert test_exc.value.sanitized_message == "connection test session close is unconfirmed"
+        assert len(manager.connection_test_residue(_identity())) == 1
+
+        with pytest.raises(AgentServiceError) as exc:
+            await manager.connect(_identity())
+
+        assert exc.value.code is AgentErrorCode.OPERATION_UNKNOWN
+        assert "retry close before connecting" in exc.value.sanitized_message
+        assert factory.opened == 1  # 只有测试那一次 open，不得重新新开
+
+    @pytest.mark.asyncio
+    async def test_retry_close_clears_residue_and_unblocks_connect(self) -> None:
+        session = _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),), close_failures=1)
+        manager, _store, factory, _probe = _manager(session=session)
+        await manager.save_config(_config())
+        with pytest.raises(AgentServiceError) as test_exc:
+            await manager.connection_test(_identity())
+        assert test_exc.value.code is AgentErrorCode.OPERATION_UNKNOWN
+
+        closed = await manager.retry_test_residue_close(_identity())
+
+        assert closed == 1
+        assert manager.connection_test_residue(_identity()) == ()
+        assert session.closed is True
+        await manager.connect(_identity())
+        assert factory.opened == 2
+
+    @pytest.mark.asyncio
+    async def test_retry_close_failure_keeps_residue(self) -> None:
+        session = _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),), close_failures=2)
+        manager, _store, _factory, _probe = _manager(session=session)
+        await manager.save_config(_config())
+        with pytest.raises(AgentServiceError) as test_exc:
+            await manager.connection_test(_identity())
+        assert test_exc.value.code is AgentErrorCode.OPERATION_UNKNOWN
+
+        with pytest.raises(AgentServiceError) as exc:
+            await manager.retry_test_residue_close(_identity())
+        assert exc.value.code is AgentErrorCode.OPERATION_UNKNOWN
+        residue = manager.connection_test_residue(_identity())
+        assert [item.error for item in residue] == ["RuntimeError"]
+
+        await manager.retry_test_residue_close(_identity())
+        assert manager.connection_test_residue(_identity()) == ()
+
+    @pytest.mark.asyncio
+    async def test_retry_close_without_residue_is_noop(self) -> None:
+        manager, _store, _factory, _probe = _manager()
+        await manager.retry_test_residue_close(_identity())
+        assert manager.connection_test_residue(_identity()) == ()
+
+
+class TestSameVersionUpdateWhileConnected:
+    """活动连接持有的配置版不得就地改写：改写会让「已连接」不再等于「按存储配置服务」。"""
+
+    @pytest.mark.asyncio
+    async def test_save_refused_when_active_connection_would_drift(self) -> None:
+        session = _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),))
+        manager, store, _factory, _probe = _manager(session=session)
+        await manager.save_config(_config())
+        await manager.connect(_identity())
+
+        with pytest.raises(AgentServiceError) as exc:
+            await manager.save_config(_config(connect_deadline_s=10))
+
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert "active connection" in exc.value.sanitized_message
+        stored = await store.load(_identity())
+        assert stored is not None and stored.connect_deadline_s == MCP_DEFAULT_DEADLINE_S
+        assert manager.is_connected(_identity()) is True
+
+    @pytest.mark.asyncio
+    async def test_display_name_only_update_is_still_allowed(self) -> None:
+        session = _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),))
+        manager, store, _factory, _probe = _manager(session=session)
+        await manager.save_config(_config())
+        await manager.connect(_identity())
+
+        await manager.save_config(_config(display_name="改名后的展示名"))
+
+        stored = await store.load(_identity())
+        assert stored is not None and stored.display_name == "改名后的展示名"
+        assert manager.is_connected(_identity()) is True
+
+    @pytest.mark.asyncio
+    async def test_new_config_version_is_allowed_while_connected(self) -> None:
+        session = _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),))
+        manager, store, _factory, _probe = _manager(session=session)
+        await manager.save_config(_config())
+        await manager.connect(_identity())
+
+        new_identity = _identity(config_version=2)
+        await manager.save_config(_config(identity=new_identity, audit=_audit(new_identity), connect_deadline_s=10))
+
+        stored = await store.load(new_identity)
+        assert stored is not None and stored.connect_deadline_s == 10
+        assert manager.is_connected(_identity()) is True
 
 
 class _FakeClock:

@@ -154,7 +154,7 @@ class TestListStates:
         ]
         assert I18n.get("mcp_state_connected") in status_texts
         assert I18n.get("mcp_state_disconnected") in status_texts
-        assert len(_of(view, ft.TextButton)) == 2 + 2  # 选服务按钮 + 刷新/新建
+        assert len(_of(view, ft.TextButton)) == 2 + 3  # 选服务按钮 + 刷新/新建/重试关闭残留
 
 
 class TestConfigForm:

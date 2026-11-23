@@ -137,29 +137,53 @@ _STDIO_TEMP_KEYS: tuple[str, ...] = ("TEMP", "TMP")
 _STDIO_TEMP_PREFIX = "astock-mcp-stdio-"
 
 
+def _resolve_reference(ref: str) -> str:
+    """解析一处安全引用（``env:NAME`` / ``keyring:item``）为实际值。
+
+    这是唯一把秘密读入内存的位置；失败只抛 ``ValueError``（消息仅含引用名，不含秘密，
+    R9）。引用在配置中持久化，故存储只留引用、不留明文。
+    """
+
+    if ref.startswith("env:"):
+        var_name = ref[len("env:") :]
+        value = os.environ.get(var_name)
+        if not value:
+            raise ValueError(f"secure reference not found: env:{var_name}")
+        return value
+    item = ref[len("keyring:") :]
+    import utils.config_handler as cfg
+
+    value = cfg.keyring.get_password(cfg.KEYRING_SERVICE_NAME, item)
+    if not value:
+        raise ValueError(f"secure reference not found: keyring:{item}")
+    return value
+
+
+def _is_secure_reference(value: str) -> bool:
+    """值是否为本机凭据安全引用（``env:`` / ``keyring:`` 且名称非空）。"""
+
+    return any(value.startswith(scheme) and value[len(scheme) :] for scheme in ("env:", "keyring:"))
+
+
 def _resolve_http_headers(headers: tuple[tuple[str, str], ...]) -> dict[str, str]:
     """把 HTTP Header 的**安全引用**解析为实际值（``env:`` / ``keyring:``）。
 
-    只接受引用形态（明文值在配置校验阶段已拒绝），故本函数是唯一把秘密读入内存的
-    位置；解析失败只抛 ``ValueError``（消息仅含引用名，不含秘密，R9）。
+    只接受引用形态（明文值在配置校验阶段已拒绝），见 :func:`_resolve_reference`。
     """
 
-    resolved: dict[str, str] = {}
-    for name, ref in headers:
-        if ref.startswith("env:"):
-            var_name = ref[len("env:") :]
-            value = os.environ.get(var_name)
-            if not value:
-                raise ValueError(f"secure header reference not found: env:{var_name}")
-        else:
-            item = ref[len("keyring:") :]
-            import utils.config_handler as cfg
+    return {name: _resolve_reference(ref) for name, ref in headers}
 
-            value = cfg.keyring.get_password(cfg.KEYRING_SERVICE_NAME, item)
-            if not value:
-                raise ValueError(f"secure header reference not found: keyring:{item}")
-        resolved[name] = value
-    return resolved
+
+def _resolve_stdio_env(configured: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], ...]:
+    """解析 stdio 环境变量中的安全引用；非引用值按字面量使用。
+
+    本地 MCP 服务同样需要凭据：允许 ``env:NAME`` / ``keyring:item`` 形式，使凭据只以
+    引用落库、在 spawn 前才读取，避免把明文秘密写进配置存储（R9/R10）。
+    """
+
+    return tuple(
+        (key, _resolve_reference(value) if _is_secure_reference(value) else value) for key, value in configured
+    )
 
 
 def _build_stdio_env(
@@ -774,9 +798,19 @@ class FastMCPClientFactory:
         stdio_env: _ManagedStdioEnvironment | None = None
         if guard is None:
             guard = MCPBudgetGuard(config.budget, identity=label)
+        resolved_env: tuple[tuple[str, str], ...] = ()
+        if is_stdio:
+            try:
+                # 本地凭据只存引用：spawn 前才解析，失败即零派发（不建目录/不建进程）。
+                resolved_env = await asyncio.to_thread(_resolve_stdio_env, config.transport.env)
+            except ValueError as exc:
+                _discard_drain(drain)
+                raise AgentServiceError(
+                    AgentErrorCode.CONFIG_UNAVAILABLE, "mcp secure env reference unavailable", label
+                ) from exc
         try:
             if is_stdio:
-                stdio_env = _ManagedStdioEnvironment.create(config.transport.env)
+                stdio_env = _ManagedStdioEnvironment.create(resolved_env)
             transport = self._transport(
                 config,
                 drain,

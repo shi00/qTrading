@@ -257,16 +257,20 @@ class TestDisplayNameAdmission:
 
 
 class TestHttpRiskAdmission:
-    def test_http_requires_explicit_risk_confirmation(self) -> None:
+    def test_plain_http_requires_explicit_risk_confirmation(self) -> None:
         with pytest.raises(AgentValidationError) as exc:
-            validate_transport_config(_http_transport(http_risk_approved=False))
+            validate_transport_config(_http_transport(url="http://mcp.example.test/tools", http_risk_approved=False))
         assert exc.value.code == "http_not_approved"
-        validate_transport_config(_http_transport())
+        validate_transport_config(_http_transport(url="http://mcp.example.test/tools"))
+
+    def test_https_does_not_require_plaintext_http_confirmation(self) -> None:
+        # TLS 已承载机密性：不得要求用户确认一个与其配置不符的「明文 HTTP」风险。
+        validate_transport_config(_http_transport(http_risk_approved=False))
 
     def test_sse_requires_compat_and_risk_approval(self) -> None:
         sse = MCPTransportConfig(
             kind=MCPTransportKind.SSE,
-            url="https://mcp.example.test/sse",
+            url="http://mcp.example.test/sse",
             sse_compat_approved=True,
             http_risk_approved=True,
         )
@@ -274,6 +278,8 @@ class TestHttpRiskAdmission:
         with pytest.raises(AgentValidationError) as exc:
             validate_transport_config(replace(sse, http_risk_approved=False))
         assert exc.value.code == "http_not_approved"
+        # SSE over https 仍只需显式核准兼容传输，不需确认明文风险。
+        validate_transport_config(replace(sse, url="https://mcp.example.test/sse", http_risk_approved=False))
 
     def test_plaintext_header_value_is_rejected(self) -> None:
         headers = (("authorization", "Bearer plaintext-value"),)
@@ -306,7 +312,7 @@ class TestLoadRecheckBeforeConnect:
         [
             _config(transport=_stdio_transport(cwd=None)),
             _config(display_name="   "),
-            _config(transport=_http_transport(http_risk_approved=False)),
+            _config(transport=_http_transport(url="http://mcp.example.test/tools", http_risk_approved=False)),
             _config(transport=_stdio_transport(command=str(Path(sys.executable).parent / "missing.exe"))),
             _config(transport=_stdio_transport(cwd=str(Path(sys.executable).parent / "missing-cwd"))),
         ],
@@ -383,7 +389,9 @@ class TestFactoryReusesValidation:
     @pytest.mark.asyncio
     async def test_factory_refuses_unconfirmed_http_before_any_send(self) -> None:
         with pytest.raises(AgentServiceError) as exc:
-            await FastMCPClientFactory().open(_config(transport=_http_transport(http_risk_approved=False)))
+            await FastMCPClientFactory().open(
+                _config(transport=_http_transport(url="http://mcp.example.test/tools", http_risk_approved=False))
+            )
         assert exc.value.code is AgentErrorCode.INPUT_INVALID
 
 

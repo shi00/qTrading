@@ -125,9 +125,16 @@ class TestCodecRejection:
             decode_mcp_server_config(wire)
         assert exc.value.code == "invalid_budget"
 
-    def test_http_requires_risk_approval(self) -> None:
+    def test_plain_http_requires_risk_approval(self) -> None:
         wire = encode_mcp_server_config(_config(_http_transport()))
+        wire["transport"]["url"] = "http://mcp.example.test/tools"
         wire["transport"]["http_risk_approved"] = False
         with pytest.raises(AgentValidationError) as exc:
             decode_mcp_server_config(wire)
         assert exc.value.code == "http_not_approved"
+
+    def test_https_does_not_require_plaintext_risk_approval(self) -> None:
+        wire = encode_mcp_server_config(_config(_http_transport()))
+        wire["transport"]["http_risk_approved"] = False
+        decoded = decode_mcp_server_config(wire)
+        assert decoded.transport.http_risk_approved is False

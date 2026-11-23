@@ -6,7 +6,9 @@
   配置保存 / 连接测试 / 显式启连 / 显式断开映射为不可变状态快照与命令；
 - **不自动启连**：只有用户点击「连接测试」「启连」才触发出站；``load`` 只读配置；
 - **不宣称已打通**：操作结果如实反映回执，失败保留原因（R21）；
-- 启连核准工具只能来自本次连接测试发现且落入只读审核范围的工具；
+- 启连核准工具只能来自本次连接测试发现且落入只读审核范围的工具；启连把本轮测试
+  回执交给服务层，由服务层核对配置摘要/测试代次/目录摘要，漂移即拒绝（须重新测试）；
+- 测试残留关闭未确认时提供显式「重试关闭残留」命令，不用新连接覆盖未知收尾；
 - VM 不 import flet、不持有控件、不感知 locale（只产出 i18n key/params）；
 - ``CancelledError`` 原样传播（R2）；异常消息经 ``DataSanitizer`` 脱敏后进入状态（R9）。
 """
@@ -24,7 +26,7 @@ from core.agent_types import (
     MCPServiceIdentity,
     MCPTransportKind,
 )
-from services.agent_service.mcp import MCPServerConfig, MCPTransportConfig
+from services.agent_service.mcp import MCPConnectionTestReceipt, MCPServerConfig, MCPTransportConfig
 from services.agent_service.mcp_lifecycle import MCPServiceLifecycle
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
@@ -189,6 +191,8 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
     def __init__(self, lifecycle: MCPServiceLifecycle | None) -> None:
         self._lifecycle = lifecycle
         self._configs: dict[str, MCPServerConfig] = {}
+        #: 本轮连接测试回执（启连凭它核对配置/代次/目录，漂移即拒绝）。
+        self._test_receipt: MCPConnectionTestReceipt | None = None
         self._state = MCPServicesState(available=lifecycle is not None)
         self._init_mixin_fields()
 
@@ -223,6 +227,7 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
         config = self._configs.get(identity_key)
         if config is None:
             return
+        self._test_receipt = None
         self._set_state(
             draft=self._draft_from_config(config),
             draft_saved=True,
@@ -235,6 +240,7 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
     def begin_new(self) -> None:
         """清空表单进入新建态（不写库、不连接）。"""
 
+        self._test_receipt = None
         self._set_state(
             draft=MCPConfigDraft(),
             draft_saved=False,
@@ -253,6 +259,7 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
             return
         self._set_state(draft=replace(self._state.draft, **{field: value}), draft_saved=self._is_draft_saved())
         if field in {"transport_kind", "service_id", "config_version"}:
+            self._test_receipt = None
             self._set_state(discovered_tools=(), approved_tools=())
 
     def set_draft_flag(self, field: str, value: bool) -> None:
@@ -333,6 +340,7 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
         if lifecycle is None or identity is None:
             return
         self._set_state(busy=True, status=None, discovered_tools=(), approved_tools=())
+        self._test_receipt = None
         try:
             receipt = await lifecycle.connection_test(identity)
         except asyncio.CancelledError:
@@ -341,6 +349,7 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
         except Exception as exc:
             self._fail(exc)
             return
+        self._test_receipt = receipt
         self._set_state(
             busy=False,
             discovered_tools=tuple(receipt.tool_names),
@@ -357,7 +366,11 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
 
     @log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def connect(self) -> None:
-        """显式启连并冻结核准工具集（未测试/未保存时明确拒绝，不猜）。"""
+        """显式启连并冻结核准工具集（未测试/未保存时明确拒绝，不猜）。
+
+        启连携带本轮测试回执：服务层据此核对配置摘要/测试代次/目录摘要，测试与启连
+        之间发生漂移即拒绝（必须重新测试），不把旧勾选当新连接的核准。
+        """
 
         if not self._guard():
             return
@@ -365,7 +378,7 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
         identity = self._require_saved_identity()
         if lifecycle is None or identity is None:
             return
-        if not self._state.discovered_tools:
+        if not self._state.discovered_tools or self._test_receipt is None:
             self._set_state(status=Message("mcp_status_need_test"), status_level=STATUS_WARNING)
             return
         self._set_state(busy=True, status=None)
@@ -373,6 +386,7 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
             receipt = await lifecycle.connect(
                 identity,
                 approved_tools=self._state.approved_tools,
+                test_receipt=self._test_receipt,
             )
         except asyncio.CancelledError:
             self._set_state(busy=False)
@@ -406,6 +420,7 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
         except Exception as exc:
             self._fail(exc)
             return
+        self._test_receipt = None
         self._set_state(
             busy=False,
             discovered_tools=(),
@@ -414,6 +429,34 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
             status_level=STATUS_INFO,
         )
         await self._refresh_rows()
+
+    @log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
+    async def retry_test_residue_close(self) -> None:
+        """重试关闭连接测试未确认的残留会话（收尾未知不得靠新连接覆盖）。"""
+
+        if not self._guard():
+            return
+        lifecycle = self._lifecycle
+        identity = self._require_saved_identity()
+        if lifecycle is None or identity is None:
+            return
+        self._set_state(busy=True, status=None)
+        try:
+            closed = await lifecycle.retry_test_residue_close(identity)
+        except asyncio.CancelledError:
+            self._set_state(busy=False)
+            raise
+        except Exception as exc:
+            self._fail(exc)
+            return
+        self._set_state(
+            busy=False,
+            status=Message(
+                "mcp_status_residue_closed" if closed else "mcp_status_no_residue",
+                {"service_id": identity.service_id, "count": str(closed)},
+            ),
+            status_level=STATUS_SUCCESS,
+        )
 
     # -- 内部 ---------------------------------------------------------------
 

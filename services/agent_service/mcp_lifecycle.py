@@ -30,6 +30,7 @@ from services.agent_service.mcp import (
     MCPServerConfig,
     SharedMCPConnectionManager,
     catalog_digest,
+    config_snapshot_digest,
 )
 from services.agent_service.mcp_config_store import AppStateMCPConfigStore
 from services.agent_service.mcp_grant import AppStateMCPGrantStore, MCPConnectGrant, MCPToolSets
@@ -89,25 +90,80 @@ class MCPServiceLifecycle:
 
         return await self._manager.connection_test(identity)
 
+    async def retry_test_residue_close(self, identity: MCPServiceIdentity) -> int:
+        """重试关闭测试残留会话：成功才清空，仍失败即显式拒绝（不伪装已收尾）。
+
+        返回本次确认关闭的数量（无残留即 0），供界面如实报告。
+        """
+
+        return await self._manager.retry_test_residue_close(identity)
+
     async def connect(
         self,
         identity: MCPServiceIdentity,
         *,
         approved_tools: Iterable[str],
+        test_receipt: MCPConnectionTestReceipt,
     ) -> MCPConnectReceipt:
         """用户显式启连并冻结本次核准的工具集。
 
-        顺序：建立共享连接 → 取冻结目录 → 核准集必须落在只读审核范围内 →
-        既有授权记录的目录摘要必须一致（schema/目录变化要求重新核准）→ 写授权。
-        任一步失败即断开本次连接并传播原因，不留下「已连接但无授权」的悬空状态。
+        顺序：核对本轮测试回执（身份/代次/关闭确认/配置摘要）→ 建立共享连接 →
+        取冻结目录并与回执目录摘要比对 → 核准集必须落在**当前目录**与只读审核
+        范围内 → 既有授权记录的目录摘要必须一致（schema/目录变化要求重新核准）
+        → 写授权。任一步失败即断开本次连接并传播原因，不留下「已连接但无授权」的
+        悬空状态。
+
+        回执绑定是 fail-closed 的关键：测试与启连之间配置或目录若发生漂移，旧回执
+        不再代表实际连接发现的内容，必须重新测试，不得用旧勾选核准新连接。
         """
 
         label = identity.stable_key()
+        if test_receipt.identity != identity:
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                "connect requires the connection test receipt of this service",
+                label,
+            )
+        if not test_receipt.closed:
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                "connection test closed unconfirmed; retry close before connecting",
+                label,
+            )
+        if self._manager.test_generation(identity) != test_receipt.generation:
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                "connection test receipt is stale; test again",
+                label,
+            )
+        stored = await self._configs.load(identity)
+        if stored is None:
+            raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "mcp service config not found", label)
+        if config_snapshot_digest(stored) != test_receipt.config_digest:
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                "mcp config changed since the connection test; test again",
+                label,
+            )
         approved = tuple(sorted({require_identity(name, "$.mcp.approved_tools") for name in approved_tools}))
         await self._manager.connect(identity)
         try:
             catalog = self._manager.frozen_catalog(identity)
             digest = catalog_digest(catalog)
+            if digest != test_receipt.catalog_digest:
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    "catalog_changed_since_test",
+                    label,
+                )
+            catalog_names = {tool.name for tool in catalog}
+            missing = tuple(name for name in approved if name not in catalog_names)
+            if missing:
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    f"approved tools are not in the live tool catalog: {','.join(missing)}",
+                    label,
+                )
             reviewed = frozenset(self._manager.audit_tool_scope(identity))
             outside = tuple(name for name in approved if name not in reviewed)
             if outside:

@@ -164,6 +164,9 @@ def MCPServicesTab(lifecycle: Any | None = None) -> ft.Container:
     def _on_disconnect(_e: ft.ControlEvent) -> None:
         _run(vm.disconnect)
 
+    def _on_retry_residue(_e: ft.ControlEvent) -> None:
+        _run(vm.retry_test_residue_close)
+
     # -- 字段构造 -----------------------------------------------------------
 
     def _text_field(label_key: str, value: str, field: str, *, multiline: bool = False) -> ft.TextField:
@@ -482,6 +485,12 @@ def MCPServicesTab(lifecycle: Any | None = None) -> ft.Container:
         on_click=safe_on_click(_on_disconnect),
         disabled=state.busy,
     )
+    btn_retry_close = ft.TextButton(
+        content=I18n.get("mcp_btn_retry_close"),
+        icon=ft.Icons.REFRESH,
+        on_click=safe_on_click(_on_retry_residue),
+        disabled=state.busy,
+    )
 
     return ft.Container(
         content=ft.Column(
@@ -566,7 +575,7 @@ def MCPServicesTab(lifecycle: Any | None = None) -> ft.Container:
                             SectionHeader(I18n.get("mcp_tools_title"), title_key="mcp_tools_title"),
                             _build_tools_section(state),
                             ft.Row(
-                                [btn_save, btn_test, btn_connect, btn_disconnect],
+                                [btn_save, btn_test, btn_connect, btn_disconnect, btn_retry_close],
                                 spacing=AppStyles.SPACING_SM,
                                 wrap=True,
                             ),
