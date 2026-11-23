@@ -1,6 +1,8 @@
 """``save_tool_decision`` / ``save_tool_result`` 事务事实（SQ-03）。
 
-- 决定 + operation 同事务落库，grant 初值 ``granted`` / revision 1；
+- 决定 + operation 同事务落库，grant 初值 ``pending`` / revision 1（P1-10：本次
+  人答消费前不得是可派发 ``granted``）；
+- 有效期必填（``None`` 拒绝），不把「无限期」当默认；
 - 同 ``decision_id`` 重放只读原事实；归属/操作缺失即拒绝；
 - 结果三态映射 phase/effect/io，operation 不存在拒绝写入。
 """
@@ -8,6 +10,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -29,6 +32,7 @@ pytestmark = pytest.mark.unit
 _DIGEST = "a" * 64
 _SCHEMA_DIGEST = "b" * 64
 _SCOPE_DIGEST = "c" * 64
+_EXPIRES_AT = (datetime.now(UTC) + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 class _Result:
@@ -83,6 +87,7 @@ def _request(**overrides: Any) -> SaveToolDecisionRequest:
         "schema_digest": _SCHEMA_DIGEST,
         "audit_scope_digest": _SCOPE_DIGEST,
         "question_payload": json.dumps({"question": "allow?"}),
+        "expires_at": _EXPIRES_AT,
     }
     values.update(overrides)
     return SaveToolDecisionRequest(**values)
@@ -94,19 +99,31 @@ class TestSaveToolDecision:
 
         fact = await dao.save_tool_decision(_request())
 
-        assert fact.grant_state is ToolGrantState.GRANTED
+        assert fact.grant_state is ToolGrantState.PENDING
         assert fact.grant_revision == 1
         assert fact.grant_id
         assert len(conn.statements) == 4
         decision_params = conn.statements[2].compile().params
         assert decision_params["decision_kind"] == "tool_permission"
-        assert decision_params["grant_state"] == "granted"
+        assert decision_params["grant_state"] == "pending"
         assert decision_params["grant_revision"] == 1
         assert decision_params["parameter_digest"] == _DIGEST
+        # P1-10：本次人答 schema 与有效期同事务持久化（未答不可派发）。
+        assert decision_params["answer_schema"]["required"] == ["approve"]
+        assert decision_params["expires_at"] is not None
         operation_params = conn.statements[3].compile().params
         assert operation_params["phase"] == "prepared"
         assert operation_params["effect_state"] == "not_dispatched"
         assert operation_params["call_kind"] == "tool_call"
+
+    async def test_missing_validity_window_is_rejected(self) -> None:
+        dao, conn = _dao()
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.save_tool_decision(_request(expires_at=None))
+
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert conn.statements == []
 
     async def test_replay_returns_original_fact(self) -> None:
         existing = SimpleNamespace(

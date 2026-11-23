@@ -1,13 +1,14 @@
 """工具派发许可的生产适配器（I44）：连接 ``ToolGrantPort`` 与既有单胜者 CAS。
 
 生产实现只复用 ``AgentDao.claim_tool_dispatch``（grant_revision CAS + operation
-绑定 + owner/run epoch 复核），不建第二权限库。
+绑定 + owner/run epoch 复核 + 人答消费/有效期/授权摘要/MCP 停用门），不建第二
+权限库。
 
-**摘要比对边界（§7-Q1 决策 a）**：决定表目前只持久化 ``parameter_digest`` /
-``tool_call_id``，没有 ``schema_digest`` / ``audit_scope_digest`` / ``boundary_digest``
-列。因此本适配器只比对参数摘要（不符即 ``REVOKED``）；其余摘要仅供调用门自身比对与
-日志追溯，暂无持久化落点——该缺口已在台账登记，补齐需新增列 + 迁移 + 授权写入路径，
-不在本次装配范围。不得因此放宽参数比对。
+**摘要比对（P1-10 补齐）**：决定表没有独立摘要列，但 ``save_tool_decision`` 已把
+``schema_digest`` / ``audit_scope_digest`` / ``boundary_digest`` 并入
+``question_payload`` 同事务持久化；本适配器把调用门新鲜重算的三项摘要与连接
+身份稳定键随 claim 交给 DAO，在决定行锁内逐项比对，任一不符即 ``REVOKED``
+（零派发）。授权摘要因此是**持久化来源认领**，重放只查回原操作、不扩大。
 """
 
 from __future__ import annotations
@@ -71,9 +72,9 @@ class DaoToolGrantPort(ToolGrantPort):
     ) -> ToolDispatchVerdict:
         """认领派发权；任何无法证明授权的情形一律 ``REVOKED``（零派发）。
 
-        ``schema_digest`` / ``audit_scope_digest`` / ``boundary_digest`` 当前无持久化
-        落点（见模块说明），仍做非空校验以避免空摘要被当作有效授权；研究边界事实的
-        新鲜比对由调用门在 claim 前完成（I43）。
+        P1-10：只有**本次答复已消费且为批准**的许可（``GRANTED``）可认领；
+        ``PENDING``（未答/待消费）同样是零派发。三项授权摘要与连接身份稳定键
+        交由 DAO 在决定行锁内与持久化值比对，并在同一事务内锁定停用门。
         """
 
         if (
@@ -98,8 +99,7 @@ class DaoToolGrantPort(ToolGrantPort):
             scope is None
             or scope.decision_id is None
             or scope.grant_revision is None
-            or scope.grant_state is None
-            or scope.grant_state is ToolGrantState.REVOKED
+            or scope.grant_state is not ToolGrantState.GRANTED
         ):
             return ToolDispatchVerdict.REVOKED
         if scope.parameter_digest is None or scope.parameter_digest != arguments_digest:
@@ -111,6 +111,10 @@ class DaoToolGrantPort(ToolGrantPort):
                     decision_id=scope.decision_id,
                     expected_grant_revision=scope.grant_revision,
                     operation_id=operation_id,
+                    schema_digest=schema_digest,
+                    audit_scope_digest=audit_scope_digest,
+                    boundary_digest=boundary_digest,
+                    mcp_service_key=identity.stable_key(),
                 )
             )
         except asyncio.CancelledError:

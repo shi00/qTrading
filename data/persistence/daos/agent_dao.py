@@ -587,6 +587,7 @@ from data.persistence.models import (
     AgentSourceLink,
     AiAttempt,
     AiInvocation,
+    AppState,
 )
 
 
@@ -640,6 +641,111 @@ def _wire_to_dt(value: str | None) -> datetime | None:
     if value is None:
         return None
     return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+
+
+#: 工具许可答复 schema（P1-10）：本次人答必须显式给出批准/拒绝布尔值。
+#: 启连审核与目录勾选不是逐调用批准，故答复是唯一可激活 ``granted`` 的人答事实。
+_TOOL_APPROVAL_ANSWER_SCHEMA: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {"approve": {"type": "boolean"}},
+    "required": ["approve"],
+    "additionalProperties": False,
+}
+
+#: MCP 派发停用门 ``app_state`` 键前缀（P1-10，复用既有配置域，不新建表）。
+_MCP_DISPATCH_GATE_PREFIX: Final[str] = "agent.mcp.dispatch_gate."
+_MCP_DISPATCH_GATE_ACTIVE: Final[str] = "active"
+_MCP_DISPATCH_GATE_STOPPED: Final[str] = "stopped"
+
+
+def _mcp_dispatch_gate_key(service_key: str) -> str:
+    return f"{_MCP_DISPATCH_GATE_PREFIX}{service_key}"
+
+
+def _decode_dispatch_gate(raw: object) -> dict[str, Any]:
+    """停用门载荷严格解码：不可解释即拒绝（不把坏数据读成 active，R21）。"""
+
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError) as exc:
+        raise AgentServiceError(
+            AgentErrorCode.PERSISTENCE_UNAVAILABLE, "mcp dispatch gate is not decodable", "mcp.dispatch_gate"
+        ) from exc
+    if not isinstance(value, dict):
+        raise AgentServiceError(
+            AgentErrorCode.PERSISTENCE_UNAVAILABLE, "mcp dispatch gate is not an object", "mcp.dispatch_gate"
+        )
+    state = value.get("state")
+    if state not in (_MCP_DISPATCH_GATE_ACTIVE, _MCP_DISPATCH_GATE_STOPPED):
+        raise AgentServiceError(
+            AgentErrorCode.PERSISTENCE_UNAVAILABLE, "mcp dispatch gate state is unknown", "mcp.dispatch_gate"
+        )
+    return value
+
+
+def _tool_approval(answer_payload: Any) -> bool | None:
+    """从已消费答复载荷取批准事实；无法解释即 ``None``（不激活、不冒认批准）。"""
+
+    if not isinstance(answer_payload, dict):
+        return None
+    approve = answer_payload.get("approve")
+    return approve if isinstance(approve, bool) else None
+
+
+def _mcp_frozen_users_stmt(identity: MCPServiceIdentity) -> Any:
+    """未终结研究引用该 MCP 配置版的持久化查询（I59；停用门复用同一判定）。"""
+
+    return (
+        sa.select(AgentDecision.execution_id)
+        .join(
+            AgentExecution,
+            sa.and_(
+                AgentExecution.user_scope == AgentDecision.user_scope,
+                AgentExecution.execution_id == AgentDecision.execution_id,
+            ),
+        )
+        .where(
+            AgentDecision.decision_kind == "tool_permission",
+            AgentDecision.question_payload["service_id"].astext == identity.service_id,
+            AgentDecision.question_payload["config_version"].astext == str(identity.config_version),
+            AgentExecution.display_state.in_(_MCP_FROZEN_EXECUTION_STATES),
+        )
+        .distinct()
+    )
+
+
+def _assert_grant_digests(question_payload: Any, request: GrantRevisionRequest, identity: str) -> None:
+    """认领前核授权摘要（P1-10）：来源/审核/schema 必须与授权时持久化值一致。
+
+    授权摘要不落独立列，但已并入决定 ``question_payload``（``save_tool_decision``
+    同事务写入）。任一项缺失或不等即拒绝：旧许可不得因调用方当前视图变化而放行
+    （R21：读不到不等于无限制）。
+    """
+
+    if not isinstance(question_payload, dict):
+        raise AgentServiceError(
+            AgentErrorCode.POLICY_DENIED,
+            "dispatch claim rejected: authorized tool digests are unavailable",
+            identity,
+        )
+    if not request.mcp_service_key:
+        raise AgentServiceError(
+            AgentErrorCode.POLICY_DENIED,
+            "dispatch claim rejected: mcp service identity is missing",
+            identity,
+        )
+    for attr, field in (
+        (request.schema_digest, "schema_digest"),
+        (request.audit_scope_digest, "audit_scope_digest"),
+        (request.boundary_digest, "boundary_digest"),
+    ):
+        stored = question_payload.get(field)
+        if not isinstance(stored, str) or not stored or not isinstance(attr, str) or attr != stored:
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                f"dispatch claim rejected: {field} does not match the authorized decision",
+                identity,
+            )
 
 
 def _parse_answer_payload(answer_payload: CanonicalJson, identity: str) -> dict[str, Any]:
@@ -3712,6 +3818,8 @@ class AgentDao(BaseDao):
                         AgentDecision.answer_consumed_at,
                         AgentDecision.expires_at,
                         AgentDecision.answer_schema,
+                        AgentDecision.decision_kind,
+                        AgentDecision.grant_state,
                     )
                     .where(
                         AgentDecision.user_scope == request.user_scope,
@@ -3793,6 +3901,29 @@ class AgentDao(BaseDao):
                 )
                 .values(answer_consumed_at=occurred, updated_at=occurred)
             )
+            # P1-10：工具许可只在本答复被消费时激活。批准 → pending→granted（可
+            # claim）；拒绝 → pending→revoked（不可逆）。答复不可解释时不激活，
+            # 保持 pending（零派发），不以「无明确拒绝」当批准（R21）。
+            if (
+                decision_row.decision_kind == "tool_permission"
+                and decision_row.grant_state == ToolGrantState.PENDING.value
+            ):
+                approval = _tool_approval(cmd_row.request_payload)
+                if approval is not None:
+                    await conn.execute(
+                        sa.update(AgentDecision)
+                        .where(
+                            AgentDecision.user_scope == request.user_scope,
+                            AgentDecision.decision_id == decision_row.decision_id,
+                            AgentDecision.grant_state == ToolGrantState.PENDING.value,
+                        )
+                        .values(
+                            grant_state=(ToolGrantState.GRANTED if approval else ToolGrantState.REVOKED).value,
+                            grant_revision=AgentDecision.grant_revision + 1,
+                            revision=AgentDecision.revision + 1,
+                            updated_at=occurred,
+                        )
+                    )
             # 3. 同事务可靠事件（R2-I21）：消费事实与 watermarks 同提交；已消费
             #    重放已在上方返回原事实，不重复写（消费 CAS 只允许一次首生效）。
             watermarks = await self._lock_session_event_watermarks(
@@ -4083,16 +4214,16 @@ class AgentDao(BaseDao):
         )
 
     async def revoke_tool_grant(self, request: GrantRevisionRequest) -> ToolGrantFact:
-        """许可撤销（§5.4 第 6 条/SQ-03）：grant_state granted|claimed→revoked
+        """许可撤销（§5.4 第 6 条/SQ-03）：grant_state pending|granted|claimed→revoked
         CAS。撤销先胜则零新派发；派发先胜后撤销仍可 revoked（保真实在途，
         阻止后续 claim），不能倒写「从未发送」。
 
         撤销不绑定派发 operation（``request.operation_id`` 被忽略），也不核
-        期限/轮次：过期或旧轮许可仍必须可被撤销。"""
+        期限/轮次：过期、未答或旧轮许可仍必须可被撤销。"""
 
         return await self._cas_grant_state(
             request,
-            allowed_current_states=(ToolGrantState.GRANTED, ToolGrantState.CLAIMED),
+            allowed_current_states=(ToolGrantState.PENDING, ToolGrantState.GRANTED, ToolGrantState.CLAIMED),
             target_state=ToolGrantState.REVOKED,
         )
 
@@ -4113,24 +4244,140 @@ class AgentDao(BaseDao):
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
         async with engine.connect() as conn:
-            rows = await conn.execute(
-                sa.select(AgentDecision.execution_id)
-                .join(
-                    AgentExecution,
-                    sa.and_(
-                        AgentExecution.user_scope == AgentDecision.user_scope,
-                        AgentExecution.execution_id == AgentDecision.execution_id,
-                    ),
+            rows = await conn.execute(_mcp_frozen_users_stmt(identity))
+            return tuple(sorted(row.execution_id for row in rows))
+
+    async def stop_mcp_dispatch_gate(self, identity: MCPServiceIdentity, *, reason: str = "disconnect") -> None:
+        """停用 MCP 服务派发门（P1-10）：与工具 claim 共享 ``app_state`` 行锁。
+
+        单事务内：锁停用门行 → 核持久化冻结使用者（任一存在即 ``POLICY_DENIED``，
+        零状态写）→ 置 ``stopped``。认领方在同一行锁下先读到 stopped 即拒绝新
+        claim；反之若认领先提交，本事务能看到该研究仍在使用并拒绝停用——两者
+        只有一个合法顺序（行锁线性化点），不存在「停用已提交但仍有新派发」。
+
+        ``reason`` 仅用于状态载荷溯源，不改变判定。
+        """
+
+        self._check_engine("mcp dispatch stop")
+        service_key = identity.stable_key()
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            gate = await self._lock_mcp_dispatch_gate_row(conn, service_key, service_key, create=True)
+            if gate["state"] == _MCP_DISPATCH_GATE_STOPPED:
+                return  # 幂等：已停用即已达成（disconnect 重试不重复写）
+            users = (await conn.execute(_mcp_frozen_users_stmt(identity))).all()
+            if users:
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    f"mcp config is still frozen by queued/paused researches before {reason}: "
+                    + ",".join(sorted(row.execution_id for row in users)),
+                    service_key,
                 )
-                .where(
-                    AgentDecision.decision_kind == "tool_permission",
-                    AgentDecision.question_payload["service_id"].astext == identity.service_id,
-                    AgentDecision.question_payload["config_version"].astext == str(identity.config_version),
-                    AgentExecution.display_state.in_(_MCP_FROZEN_EXECUTION_STATES),
+            await conn.execute(
+                self._dispatch_gate_upsert(
+                    service_key,
+                    {
+                        "schema_version": 1,
+                        "state": _MCP_DISPATCH_GATE_STOPPED,
+                        "stopped_at": _utc_now_wire(),
+                        "reason": reason,
+                    },
                 )
-                .distinct()
             )
-            return tuple(sorted(row[0] for row in rows))
+
+    async def resume_mcp_dispatch_gate(self, identity: MCPServiceIdentity) -> None:
+        """恢复派发门（P1-10）：停用未真正完成时回退，避免永久拒绝新 claim。"""
+
+        self._check_engine("mcp dispatch resume")
+        service_key = identity.stable_key()
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            await conn.execute(
+                self._dispatch_gate_upsert(
+                    service_key,
+                    {
+                        "schema_version": 1,
+                        "state": _MCP_DISPATCH_GATE_ACTIVE,
+                        "resumed_at": _utc_now_wire(),
+                    },
+                )
+            )
+
+    async def _lock_mcp_dispatch_gate(self, conn: AsyncConnection, service_key: str | None, identity: str) -> None:
+        """认领事务内锁定停用门（P1-10）：行锁持续到 commit。
+
+        门行不存在视为 ``active``（服务从未停用）：先就地建行，再在行锁下复核，
+        避免并发首建时跳过锁。状态为 ``stopped`` 即拒绝认领（零派发）。
+        """
+
+        if not isinstance(service_key, str) or not service_key:
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                "dispatch claim rejected: mcp service identity is missing",
+                identity,
+            )
+        gate = await self._lock_mcp_dispatch_gate_row(conn, service_key, identity, create=True)
+        if gate["state"] != _MCP_DISPATCH_GATE_ACTIVE:
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                "dispatch claim rejected: mcp service dispatch is stopped",
+                identity,
+            )
+
+    async def _lock_mcp_dispatch_gate_row(
+        self, conn: AsyncConnection, service_key: str, identity: str, *, create: bool
+    ) -> dict[str, Any]:
+        """锁定（必要时首建）门行并返回其状态；状态判定由调用方按用途决定。"""
+
+        key = _mcp_dispatch_gate_key(service_key)
+        row = (
+            await conn.execute(sa.select(AppState.config_value).where(AppState.config_key == key).with_for_update())
+        ).first()
+        if row is None:
+            if not create:
+                raise AgentServiceError(
+                    AgentErrorCode.PERSISTENCE_UNAVAILABLE, "mcp dispatch gate row is missing", identity
+                )
+            # 首建用 DO NOTHING：并发首建时绝不以 active 覆盖已提交的 stopped
+            # （门状态只能由 stop/resume 显式改写）。
+            await conn.execute(
+                self._dispatch_gate_insert(
+                    service_key,
+                    {"schema_version": 1, "state": _MCP_DISPATCH_GATE_ACTIVE},
+                )
+            )
+            row = (
+                await conn.execute(sa.select(AppState.config_value).where(AppState.config_key == key).with_for_update())
+            ).first()
+            if row is None:
+                raise AgentServiceError(
+                    AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                    "mcp dispatch gate row was not created",
+                    identity,
+                )
+        return _decode_dispatch_gate(row.config_value)
+
+    @staticmethod
+    def _dispatch_gate_insert(service_key: str, payload: dict[str, Any]) -> Any:
+        key = _mcp_dispatch_gate_key(service_key)
+        value = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        return (
+            sa_pg.insert(AppState)
+            .values(config_key=key, config_value=value)
+            .on_conflict_do_nothing(index_elements=["config_key"])
+        )
+
+    @staticmethod
+    def _dispatch_gate_upsert(service_key: str, payload: dict[str, Any]) -> Any:
+        key = _mcp_dispatch_gate_key(service_key)
+        value = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        stmt = sa_pg.insert(AppState).values(config_key=key, config_value=value)
+        return stmt.on_conflict_do_update(
+            index_elements=["config_key"],
+            set_={"config_value": value, "updated_at": sa.func.now()},
+        )
 
     async def read_operation_grant_scope(self, *, operation_id: str) -> OperationGrantScope | None:
         """按 operation 身份只读解析许可范围（I44 生产适配器）。
@@ -4222,10 +4469,17 @@ class AgentDao(BaseDao):
         """保存工具许可决定与待派发 operation（SQ-03「保存准确 decision」）。
 
         单事务写 ``agent_decision``（``decision_kind="tool_permission"``、
-        ``grant_state=granted``、``grant_revision=1``）与 ``agent_operation``
+        ``grant_state=pending``、``grant_revision=1``）与 ``agent_operation``
         （``phase=prepared`` / effect ``not_dispatched`` / io ``not_started``），
-        使后续 ``claim_tool_dispatch`` 有可核来源。同 ``decision_id`` 重放只读原
-        事实、零新行；归属/工具/操作不符即拒绝，不覆盖原事实（R21）。
+        使后续 ``claim_tool_dispatch`` 有可核来源。
+
+        P1-10：建立决定**不得**直接写 ``granted``，也不得缺省有效期：
+        ``expires_at`` 必须由调用方给出本次人答窗口（``None`` → ``INPUT_INVALID``），
+        决定只落 ``pending``；只有本次答复被 ``consume_answer`` 消费且为批准时才
+        在答复消费事务内激活 ``granted``（``claim_tool_dispatch`` 另核该事实）。
+
+        同 ``decision_id`` 重放只读原事实、零新行；归属/工具/操作不符即拒绝，
+        不覆盖原事实（R21）。
         """
 
         self._check_engine("tool decision")
@@ -4246,6 +4500,16 @@ class AgentDao(BaseDao):
         ):
             if not is_digest(digest):
                 raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"invalid {field}", identity)
+        if request.expires_at is None:
+            # 无有效期 = 「永久可派发」，不得以缺省冒充；必须有本次人答窗口。
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                "tool decision requires a bounded validity window (expires_at)",
+                identity,
+            )
+        expires_at = _wire_to_dt(request.expires_at)
+        if expires_at is None:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "invalid expires_at", identity)
         try:
             payload = json.loads(request.question_payload)
         except (TypeError, ValueError) as exc:
@@ -4334,12 +4598,13 @@ class AgentDao(BaseDao):
                         decision_kind="tool_permission",
                         tool_call_id=request.tool_call_id,
                         question_payload=payload,
+                        answer_schema=_TOOL_APPROVAL_ANSWER_SCHEMA,
                         parameter_digest=request.parameter_digest,
                         tool_ref=request.tool_name,
-                        expires_at=_wire_to_dt(request.expires_at),
+                        expires_at=expires_at,
                         grant_id=grant_id,
                         grant_revision=1,
-                        grant_state=ToolGrantState.GRANTED.value,
+                        grant_state=ToolGrantState.PENDING.value,
                         presentation_batch_seq=presentation_batch_seq,
                         updated_at=occurred,
                     )
@@ -4375,7 +4640,7 @@ class AgentDao(BaseDao):
                 decision_id=request.decision_id,
                 grant_id=grant_id,
                 grant_revision=1,
-                grant_state=ToolGrantState.GRANTED,
+                grant_state=ToolGrantState.PENDING,
             )
 
     async def save_tool_result(self, request: SaveToolResultRequest) -> None:
@@ -4449,8 +4714,15 @@ class AgentDao(BaseDao):
 
         派发认领（target=claimed）在同一事务内先做首生效核验再 CAS：锁序
         decision → operation（与 ``claim_data_consent`` 一致），``operation_id``
-        必填；胜者 CAS 更新同写 ``dispatch_operation_id``（检视 D07）。撤销不做
-        这些核验（见 ``revoke_tool_grant``）。
+        必填；胜者 CAS 更新同写 ``dispatch_operation_id``（检视 D07）。
+
+        P1-10：认领另须证明「本次人答已消费 + 有效期已核定 + 授权摘要未变 +
+        服务未停用」：决定行锁内读 ``answer_consumed_at`` / ``expires_at`` /
+        ``question_payload`` 的 ``schema_digest`` / ``audit_scope_digest`` /
+        ``boundary_digest``，与请求逐项比对；并在同一事务内锁定该 MCP 服务的
+        停用门行（``app_state`` 行锁）：停用先提交即拒绝新 claim（零派发），
+        认领先提交则停用方复核时看到该服务仍有使用者。撤销不做这些核验（见
+        ``revoke_tool_grant``）。
         """
 
         self._check_engine()
@@ -4474,6 +4746,8 @@ class AgentDao(BaseDao):
                         AgentDecision.execution_id,
                         AgentDecision.round_id,
                         AgentDecision.expires_at,
+                        AgentDecision.answer_consumed_at,
+                        AgentDecision.question_payload,
                         AgentDecision.dispatch_operation_id,
                     )
                     .where(
@@ -4512,6 +4786,24 @@ class AgentDao(BaseDao):
                     grant_state=target_state,
                 )
             if bind_operation:
+                # P1-10：派发认领前三项人答/有效期/摘要核定（全部在同事务、决定行
+                # 锁内完成；任一不满足即零 claim/零派发）。
+                if decision_row.answer_consumed_at is None:
+                    raise AgentServiceError(
+                        AgentErrorCode.POLICY_DENIED,
+                        "dispatch claim rejected: tool question is not answered and consumed",
+                        identity,
+                    )
+                if decision_row.expires_at is None:
+                    raise AgentServiceError(
+                        AgentErrorCode.POLICY_DENIED,
+                        "dispatch claim rejected: grant validity is unverified",
+                        identity,
+                    )
+                _assert_grant_digests(decision_row.question_payload, request, identity)
+                # 停用门与认领共享同一行锁：停用先提交 → 此处读到 stopped 即拒绝；
+                # 认领先提交 → 停用方在自身事务内可见该服务仍有使用者并拒绝停用。
+                await self._lock_mcp_dispatch_gate(conn, request.mcp_service_key, identity)
                 # 首生效新鲜核验（检视 D07）：过期/终止/旧轮由问题新鲜核统一判定，
                 # 并取权威 owner_epoch/run_epoch 核 operation 是否当前代次。
                 owner_epoch, run_epoch = await self._assert_question_answerable(

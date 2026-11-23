@@ -23,7 +23,7 @@ from services.agent_service.mcp_fastmcp import FastMCPClientFactory
 from services.agent_service.mcp_grant import AppStateMCPGrantStore
 from services.agent_service.mcp_lifecycle import MCPServiceLifecycle
 from services.agent_service.mcp_probe import StdioImplementationProbe
-from services.agent_service.mcp_usage import DaoMCPFrozenUsage
+from services.agent_service.mcp_usage import DaoMCPDispatchGate, DaoMCPFrozenUsage
 
 __all__ = ["build_mcp_lifecycle"]
 
@@ -45,5 +45,6 @@ def build_mcp_lifecycle(*, engine: Any, dao: Any) -> MCPServiceLifecycle:
         factory=FastMCPClientFactory(),
         probe=StdioImplementationProbe(),
         usage=DaoMCPFrozenUsage(dao),
+        dispatch_gate=DaoMCPDispatchGate(dao),
     )
     return MCPServiceLifecycle(manager=manager, configs=configs, grants=grants)

@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -41,6 +42,7 @@ from core.agent_types import (
     EventKind,
     GrantRevisionRequest,
     MarkAnswerDeliveredRequest,
+    MCPServiceIdentity,
     Mode,
     Purpose,
     SubmissionReceipt,
@@ -65,6 +67,7 @@ from data.persistence.models import (
     AgentRound,
     AgentSession,
     AgentSourceLink,
+    AppState,
 )
 from tests._helpers import create_test_engine, make_alembic_cfg
 
@@ -173,12 +176,21 @@ def _grant_request(
     expected: int = 1,
     user_scope: str = "u1",
     operation_id: str | None = "op-1",
+    *,
+    schema_digest: str | None = "b" * 64,
+    audit_scope_digest: str | None = "c" * 64,
+    boundary_digest: str | None = "d" * 64,
+    mcp_service_key: str | None = "svc-1:1",
 ) -> GrantRevisionRequest:
     return GrantRevisionRequest(
         user_scope=user_scope,
         decision_id=decision_id,
         expected_grant_revision=expected,
         operation_id=operation_id,
+        schema_digest=schema_digest,
+        audit_scope_digest=audit_scope_digest,
+        boundary_digest=boundary_digest,
+        mcp_service_key=mcp_service_key,
     )
 
 
@@ -248,6 +260,12 @@ async def _seed_decision(
         "node_id": "root",
         "decision_kind": "tool_grant",
         "presentation_batch_seq": 1,
+        # P1-10：派发认领核本次人答消费、有效期与授权摘要（来源边界持久认领）。
+        "answer_consumed_at": datetime.now(UTC),
+        "expires_at": datetime.now(UTC) + timedelta(hours=1),
+        "question_payload": json_doc(
+            {"schema_digest": "b" * 64, "audit_scope_digest": "c" * 64, "boundary_digest": "d" * 64}
+        ),
     }
     values.update(overrides)
     _SEEDED_DECISION_SCOPE[values["decision_id"]] = (values["execution_id"], values["round_id"])
@@ -1040,6 +1058,136 @@ class TestGrantCas:
             await dao.claim_tool_dispatch(_grant_request("d-1", expected=1, operation_id="op-2"))
 
         assert excinfo.value.code is AgentErrorCode.REVISION_CONFLICT
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_claim_rejected_when_tool_question_unanswered(self, real_embedded_pg: ConnectionInfo) -> None:
+        """P1-10：未答/未消费的工具许可零派发，且不写 dispatch_operation_id。"""
+
+        dao, receipt, round_id = await _full_setup(real_embedded_pg)
+        await _seed_decision(
+            dao,
+            receipt,
+            round_id,
+            grant_id="grant-1",
+            grant_revision=1,
+            grant_state="granted",
+            parameter_digest="a" * 64,
+            answer_consumed_at=None,
+        )
+        engine = create_test_engine(real_embedded_pg.url)
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_tool_dispatch(_grant_request("d-1", expected=1))
+
+        assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(AgentDecision.grant_state, AgentDecision.dispatch_operation_id).where(
+                        AgentDecision.decision_id == "d-1"
+                    )
+                )
+            ).one()
+        assert row.grant_state == "granted" and row.dispatch_operation_id is None
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_claim_rejected_when_boundary_digest_changed(self, real_embedded_pg: ConnectionInfo) -> None:
+        """P1-10/R21：授权后来源边界摘要变化 → 旧许可不得放行。"""
+
+        dao, receipt, round_id = await _full_setup(real_embedded_pg)
+        await _seed_decision(
+            dao,
+            receipt,
+            round_id,
+            grant_id="grant-1",
+            grant_revision=1,
+            grant_state="granted",
+            parameter_digest="a" * 64,
+        )
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_tool_dispatch(_grant_request("d-1", expected=1, boundary_digest="f" * 64))
+
+        assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_claim_rejected_after_dispatch_gate_stopped(self, real_embedded_pg: ConnectionInfo) -> None:
+        """P1-10：停用门先提交 → 同一行锁下认领读到 stopped，零派发。"""
+
+        dao, receipt, round_id = await _full_setup(real_embedded_pg)
+        await _seed_decision(
+            dao,
+            receipt,
+            round_id,
+            grant_id="grant-1",
+            grant_revision=1,
+            grant_state="granted",
+            parameter_digest="a" * 64,
+        )
+        engine = create_test_engine(real_embedded_pg.url)
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.insert(AppState).values(
+                    config_key="agent.mcp.dispatch_gate.svc-1:1",
+                    config_value=json_doc({"schema_version": 1, "state": "stopped"}),
+                )
+            )
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_tool_dispatch(_grant_request("d-1", expected=1))
+
+        assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_stop_gate_refused_while_research_references_config(self, real_embedded_pg: ConnectionInfo) -> None:
+        """P1-10：停用门与 claim 共享判定——仍有冻结该配置版的研究即拒绝停用。"""
+
+        dao, receipt, round_id = await _full_setup(real_embedded_pg)
+        await _seed_decision(
+            dao,
+            receipt,
+            round_id,
+            decision_kind="tool_permission",
+            grant_id="grant-1",
+            grant_revision=1,
+            grant_state="granted",
+            parameter_digest="a" * 64,
+            question_payload=json_doc(
+                {
+                    "service_id": "svc-1",
+                    "config_version": 1,
+                    "schema_digest": "b" * 64,
+                    "audit_scope_digest": "c" * 64,
+                    "boundary_digest": "d" * 64,
+                }
+            ),
+        )
+        identity = MCPServiceIdentity(service_id="svc-1", config_version=1)
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.stop_mcp_dispatch_gate(identity)
+
+        assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+        assert await dao.list_mcp_frozen_users(identity) == (receipt.execution_id,)
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_stop_gate_commits_when_no_research_uses_config(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao, _receipt, _round_id = await _full_setup(real_embedded_pg)
+        identity = MCPServiceIdentity(service_id="svc-9", config_version=1)
+
+        await dao.stop_mcp_dispatch_gate(identity)
+
+        engine = create_test_engine(real_embedded_pg.url)
+        async with engine.connect() as conn:
+            raw = (
+                await conn.execute(
+                    sa.select(AppState.config_value).where(AppState.config_key == "agent.mcp.dispatch_gate.svc-9:1")
+                )
+            ).scalar_one()
+        assert json.loads(raw)["state"] == "stopped"
+        await engine.dispose()
 
 
 class TestReviseQueued:
