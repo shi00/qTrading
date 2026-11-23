@@ -17,6 +17,7 @@
 | P1-03 | 受理重放先证命令键绑定并以受理权威模式派发（同键异意图 fail-closed） | 本地检视报告（gitignored） | [agent_dao.py](../../data/persistence/daos/agent_dao.py) | 使用中 |
 | P1-05 | 另义（同名异义双义登记）：跨会话待处理聚合与答复交付闭环（保存/交付/消费三态分列、幂等可重试、命令键复用、fail-closed 受治理入口；原生 workflow 按决定身份核验后消费） | 本地检视报告（gitignored） | [workflows.py](../../services/agent_service/workflows.py) | 使用中 |
 | P1-07 | 父 workflow 派发前绑定应用轮次与实际输入，叶载荷携带身份/输入版/前置产物，叶启动须过树级票据门（缺登记或未核对即零叶派发、退出未核记 `unknown`） | 本地检视报告（gitignored） | [workflows.py](../../services/agent_service/workflows.py) | 使用中 |
+| P1-09 | 比较组按组键+完整 manifest+逐路连接矩阵先核后建路，运行期消费本路冻结参数，组停真实撤回 | 本地检视报告（gitignored） | [comparison.py](../../services/agent_service/comparison.py) | 使用中 |
 | P2-03 | 架构守护范围：import-linter 契约（layers + 补充 forbidden） + AST 静态测试互补 | 文档体系检视 P2 系列 | [docs/architecture/overview.md](../architecture/overview.md#41-分层架构) §4.1 | 使用中 |
 | P2-06 | 受检 markdown 递归发现 + 显式排除清单（_build_doc_excludes） | 文档体系检视 P2 系列 | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
 | P2-07 | 治理文档元数据统一格式（owner/ruleset_version/review_triggers/canonical_for） | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) / [AGENTS.md](../../AGENTS.md) 元数据块 | 使用中 |
