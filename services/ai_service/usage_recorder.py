@@ -55,6 +55,9 @@ _RESERVE_REJECTED = "RESERVE_REJECTED"
 # D13-005：限额已配置但金额未知（价格 / 用量不可估算）——预算门无法判定，
 # fail-closed 拒绝，不静默降级为不占预算的 usage_only。
 _RESERVE_AMOUNT_UNKNOWN = "RESERVE_AMOUNT_UNKNOWN"
+# T-06：operation 行缺失 / 不可更新——费用投影引用无法落库（非 owner 失权，
+# 独立错误码避免把「行缺失」误报为失权）。
+_OPERATION_ROW_MISSING = "OPERATION_ROW_MISSING"
 
 # F20：可恢复失败错误码（保留重放）。其余错误码确认为不可恢复——
 # METADATA_INCOMPLETE：重放无新元数据来源（观察 / 记录不可变）；
@@ -436,6 +439,40 @@ class UsageRecorder:
             )
 
         return await self._guarded_outcome(_run, db_timeout_code=_DB_SETTLE_TIMEOUT)
+
+    async def record_operation_ledger_refs(
+        self,
+        *,
+        user_scope: str,
+        operation_id: str,
+        invocation_id: str,
+        attempt_ids: tuple[str, ...] = (),
+    ) -> PersistenceOutcome:
+        """把模型 operation 行的原账本引用写回（T-06：费用投影接线）。
+
+        ``persisted=True`` = 引用已落库（费用投影可经 operation 行反查原账本）；
+        ``persisted=False`` = 引用不可核（账本不可用 / 超时 / 无该 operation 行）——
+        调用方必须零出站并明确失败，不得把「无引用」当成「无费用」（R21）。
+        """
+
+        async def _run() -> bool:
+            dao = self._dao_provider()
+            if dao is None:
+                raise _DaoUnavailable()
+            return bool(
+                await dao.record_operation_ledger_refs(
+                    user_scope=user_scope,
+                    operation_id=operation_id,
+                    invocation_id=invocation_id,
+                    attempt_ids=attempt_ids,
+                )
+            )
+
+        result = await self._guarded_run(_run, db_timeout_code=_DB_SETTLE_TIMEOUT)
+        if isinstance(result, _GuardedFailure):
+            return PersistenceOutcome(persisted=False, error_code=result.error_code)
+        # False 与 owner 失权无关：语义 = operation 行缺失/不可更新，独立错误码
+        return PersistenceOutcome(persisted=bool(result), error_code=None if result else _OPERATION_ROW_MISSING)
 
     # ------------------------------------------------------------------
     # 终态落账（§10：迟到差额幂等整体推进由 DAO 保证）

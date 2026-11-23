@@ -1246,7 +1246,7 @@ class ScenarioExecutor:
                 # 同样零出站且不切换候选（operation 级事实）。
                 if policy.data_operation_scope is not None:
                     prepare_denial = await self._ensure_data_operation(
-                        policy.data_operation_scope, policy.data_authorization, identity
+                        policy.data_operation_scope, policy.data_authorization, identity, attempt_id
                     )
                     if prepare_denial is not None:
                         last_reason = prepare_denial
@@ -1739,6 +1739,7 @@ class ScenarioExecutor:
         scope: _DataOperationScope,
         template: DataAttemptAuthorization,
         identity: _TurnIdentity,
+        attempt_id: str,
     ) -> str | None:
         """确保本次模型调用的 operation 行存在（I43）：``None``=就绪，否则脱敏原因码。
 
@@ -1746,6 +1747,10 @@ class ScenarioExecutor:
         一模型调用一 operation），归属 execution/round/node 随 binding 冻结；
         owner/run 代次由 DAO 读 DB 权威值。能力缺失 / 持久化失败一律 fail-closed
         （零出站，原因仅含稳定码与异常类型，R9/R21）。
+
+        T-06：operation 行必须同时保存原账本引用（``invocation_id`` /
+        ``attempt_refs``）——费用投影只经该引用反查原账本；引用写不进去即视为
+        准备失败（零出站），不得让「无引用」在展示侧冒充「无费用」（R21）。
         """
 
         ensure = getattr(self._config_service, "ensure_model_operation", None)
@@ -1763,6 +1768,14 @@ class ScenarioExecutor:
             raise
         except Exception as e:
             return f"data operation prepare failed: {type(e).__name__}"
+        refs = await self._recorder.record_operation_ledger_refs(
+            user_scope=template.user_scope,
+            operation_id=identity.invocation_id,
+            invocation_id=identity.invocation_id,
+            attempt_ids=(attempt_id,),
+        )
+        if not refs.persisted:
+            return f"data operation ledger refs unavailable: {refs.error_code}"
         return None
 
     async def _authorize_data_attempt(self, template: DataAttemptAuthorization, attempt_id: str) -> str | None:

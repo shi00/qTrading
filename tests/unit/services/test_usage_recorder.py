@@ -1229,6 +1229,56 @@ class TestRevisionAdvancement:
         revisions = [c.kwargs["usage_revision"] for c in dao.settle_attempt_usage.await_args_list]
         assert revisions == [1, 1]
 
+
+class TestRecordOperationLedgerRefs:
+    """T-06：operation 行原账本引用写回（失败不伪装为已写，R21）。"""
+
+    @pytest.mark.asyncio
+    async def test_persists_refs_through_ledger_dao(self):
+        dao = _dao_mock()
+        dao.record_operation_ledger_refs = AsyncMock(return_value=True)
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+
+        outcome = await recorder.record_operation_ledger_refs(
+            user_scope="user-1",
+            operation_id="mc-1",
+            invocation_id="mc-1",
+            attempt_ids=("att-1",),
+        )
+
+        assert outcome.persisted is True
+        assert outcome.error_code is None
+        dao.record_operation_ledger_refs.assert_awaited_once_with(
+            user_scope="user-1",
+            operation_id="mc-1",
+            invocation_id="mc-1",
+            attempt_ids=("att-1",),
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_operation_row_is_not_persisted(self):
+        dao = _dao_mock()
+        dao.record_operation_ledger_refs = AsyncMock(return_value=False)
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+
+        outcome = await recorder.record_operation_ledger_refs(
+            user_scope="user-1", operation_id="mc-missing", invocation_id="mc-missing"
+        )
+
+        assert outcome.persisted is False
+        assert outcome.error_code == "OPERATION_ROW_MISSING"
+
+    @pytest.mark.asyncio
+    async def test_unavailable_ledger_is_not_persisted(self):
+        recorder = UsageRecorder(dao_provider=lambda: None)
+
+        outcome = await recorder.record_operation_ledger_refs(
+            user_scope="user-1", operation_id="mc-1", invocation_id="mc-1"
+        )
+
+        assert outcome.persisted is False
+        assert outcome.error_code == "DB_UNAVAILABLE"
+
     @pytest.mark.asyncio
     async def test_window_expires_at_persisted_naive_utc(self):
         """F33：窗口截止真实持久化（修复前 metadata 透传恒 None → 永久未关闭）。"""
