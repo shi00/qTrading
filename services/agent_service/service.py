@@ -111,7 +111,7 @@ from services.agent_service.comparison import (
     ACCEPT_FAILED_PREFIX,
     DISPATCH_FAILED_PREFIX,
     STOP_REASON_USER_ENDED_GROUP,
-    ComparisonGroupStopPlan,
+    ComparisonGroupStopOutcome,
     ComparisonGroupView,
     ComparisonLaneObservation,
     ComparisonLaneReceipt,
@@ -120,20 +120,24 @@ from services.agent_service.comparison import (
     ComparisonSubmissionReceipt,
     ComparisonSubmissionRequest,
     FrozenComparisonGroup,
+    LaneWithdrawer,
     build_comparison_view,
     build_lane_accept_request,
     comparison_export_rows,
     decode_comparison_manifest,
     drive_comparison_group,
+    execute_group_stop,
     freeze_comparison_group,
     observations_from_executions,
-    plan_group_stop,
     plan_lane_retry,
+    require_group_lane_consistency,
+    verify_group_manifest_authority,
 )
 from services.agent_service.dispatch import DispatchOutcome, ResearchDispatcher, ResearchWorkflowResult
 from services.agent_service.skills import SkillAvailabilityReceipt, SkillCatalogService
 from services.agent_service.sources import BusinessSourceService
 from utils.error_classifier import classify_error
+from utils.loop_local import get_loop_local
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,6 +277,7 @@ class AgentService:
         dispatcher: ResearchDispatcher | None = None,
         skills: SkillCatalogService | None = None,
         answer_sender: AnswerSender | None = None,
+        lane_withdrawer: LaneWithdrawer | None = None,
     ) -> None:
         """``usage_dao`` 为共享模型调度账本（同一引擎）；缺省时费用投影如实报读取失败。
 
@@ -281,6 +286,8 @@ class AgentService:
         用户级 Skill 启停与角色版本选择（F12/F13），未接线时相关入口如实报
         ``PERSISTENCE_UNAVAILABLE``，不伪造已生效。``answer_sender`` 为答复原生
         发送端口（P1-05）：未注入时答复保存仍成功，但交付入口 fail-closed 拒绝。
+        ``lane_withdrawer`` 为比较组停止的真实撤单端口；未接线时未派发路如实标
+        「撤回未确认」，不把停止计划伪装成已撤回。
         """
 
         self._dao = dao
@@ -288,6 +295,9 @@ class AgentService:
         self._dispatcher = dispatcher
         self._skills = skills
         self._answer_sender = answer_sender
+        self._lane_withdrawer = lane_withdrawer
+        #: 已停止的比较组（组派发门关闭事实）：在途编排的下一路一律零派发。
+        self._stopped_groups: set[str] = set()
         # 进程内交付单飞（同一命令在途时不并发重发；原生发送按命令键幂等）。
         self._answer_delivery_inflight: set[str] = set()
         self._closed = False
@@ -598,10 +608,24 @@ class AgentService:
     # 多模型独立分析（F37/SQ-08）
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _group_accept_locks() -> dict[str, asyncio.Lock]:
+        """按组键串行受理的比较组锁表（绑定当前事件循环，R11）。"""
+
+        return get_loop_local("agent_comparison_group_accept_locks", dict)
+
     async def _accept_comparison_group(
         self, request: ComparisonSubmissionRequest
     ) -> tuple[FrozenComparisonGroup, tuple[tuple[str, SubmissionReceipt | None, str | None], ...]]:
-        """冻结共同输入并逐路受理；返回 ``(路身份, 原受理回执或 None, 错误码)``。"""
+        """冻结共同输入、核验组权威 manifest 后逐路受理。
+
+        组键（``user_scope`` + ``session_id`` + ``group_command_id``）只允许一个
+        完整冻结 manifest：先读既有权威版本并逐项核验，再建任何路。同键携不同
+        模型集合/连接版本 → 整组 ``INPUT_CONFLICT``（零新路）；读到的 manifest
+        未覆盖该组已持久化的全部路（旧版/部分写入）→ ``OPERATION_UNKNOWN``。
+        同一组的并发受理在本进程内按组键串行，避免两次不同模型集合各自读到
+        「无既有组」后混入同一组。
+        """
 
         try:
             group = freeze_comparison_group(
@@ -618,25 +642,67 @@ class AgentService:
                 f"{exc.code}: {exc.field_path}",
                 f"{request.user_scope}/{request.session_id}",
             ) from exc
-        accepted: list[tuple[str, SubmissionReceipt | None, str | None]] = []
-        for lane in group.lanes:
-            accept = build_lane_accept_request(
-                group,
-                lane,
-                expected_revision=request.expected_revision,
-                node_id=request.node_id,
-                workflow_id=request.workflow_id,
-                source_display_name=request.source_display_name,
-            )
-            try:
-                receipt = await self._dao.accept_request(accept)
-            except asyncio.CancelledError:
-                raise
-            except AgentServiceError as exc:
-                accepted.append((lane.lane_ref, None, exc.code.value))
-                continue
-            accepted.append((lane.lane_ref, receipt, None))
+        lock = self._group_accept_locks().setdefault(group.group_ref, asyncio.Lock())
+        async with lock:
+            await self._verify_group_authority(group)
+            accepted: list[tuple[str, SubmissionReceipt | None, str | None]] = []
+            for lane in group.lanes:
+                accept = build_lane_accept_request(
+                    group,
+                    lane,
+                    expected_revision=request.expected_revision,
+                    node_id=request.node_id,
+                    workflow_id=request.workflow_id,
+                    source_display_name=request.source_display_name,
+                )
+                try:
+                    receipt = await self._dao.accept_request(accept)
+                except asyncio.CancelledError:
+                    raise
+                except AgentServiceError as exc:
+                    accepted.append((lane.lane_ref, None, exc.code.value))
+                    continue
+                accepted.append((lane.lane_ref, receipt, None))
         return group, tuple(accepted)
+
+    async def _verify_group_authority(self, group: FrozenComparisonGroup) -> None:
+        """核验该组键的权威冻结 manifest（不存在 = 本组首版，由本条提交建立）。"""
+
+        identity = f"{group.user_scope}/{group.session_id}/{group.group_ref}"
+        payload = await self._dao.read_comparison_manifest(user_scope=group.user_scope, group_ref=group.group_ref)
+        if payload is None:
+            return
+        try:
+            authoritative = decode_comparison_manifest(decode_json_doc(payload))
+            verify_group_manifest_authority(authoritative, group)
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_CONFLICT,
+                f"{exc.code}: {exc.field_path}",
+                identity,
+            ) from exc
+        except ValueError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN, "comparison manifest unreadable", identity
+            ) from exc
+        session = await self._dao.get_session_read(
+            SessionReadQuery(session_id=group.session_id, limit=50),
+            user_scope=group.user_scope,
+        )
+        persisted = frozenset(
+            row_lane
+            for row in session.executions
+            for row_lane in (getattr(row, "comparison_lane_ref", None),)
+            if getattr(row, "comparison_group_ref", None) == group.group_ref and isinstance(row_lane, str)
+        )
+        try:
+            require_group_lane_consistency(authoritative, persisted)
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                f"{exc.code}: {exc.field_path}",
+                identity,
+            ) from exc
 
     @staticmethod
     def _lane_receipts(
@@ -719,6 +785,9 @@ class AgentService:
         dispatch_outcomes: dict[str, DispatchOutcome] = {}
 
         async def start_lane(lane: Any) -> str:
+            if group.group_ref in self._stopped_groups:
+                # 组停止已落定：任何在途编排的下一路一律零派发（不再启动新路）。
+                raise _LaneDispatchRefused("group_stopped")
             receipt = by_lane.get(lane.lane_ref)
             if receipt is None:
                 raise _LaneDispatchRefused(
@@ -784,6 +853,13 @@ class AgentService:
         self._require_open("retry_comparison_lane")
         group, observations, executions = await self._load_comparison_state(query)
         identity = f"{query.user_scope}/{query.session_id}/{group.group_ref}/{lane_ref}"
+        if group.group_ref in self._stopped_groups:
+            # 组已停止：重试即新派发，一律拒绝（不复活已停止的组）。
+            raise AgentServiceError(
+                AgentErrorCode.REVISION_CONFLICT,
+                "comparison group is stopped",
+                identity,
+            )
         view = build_comparison_view(group, observations)
         lane_view = next((lane for lane in view.lanes if lane.lane_ref == lane_ref), None)
         if lane_view is None:
@@ -926,11 +1002,13 @@ class AgentService:
         query: ComparisonReadQuery,
         *,
         reason: str = STOP_REASON_USER_ENDED_GROUP,
-    ) -> ComparisonGroupStopPlan:
-        """组一致停止计划（F37）：未派发撤回、在途停新派发、已完成成果保留。
+    ) -> ComparisonGroupStopOutcome:
+        """组一致停止（F37）：先关本组派发门，再撤单未派发路并逐路核对结果。
 
-        共同资料被停止使用时所有路共享同一冻结输入，故组内一致处理；在途未知
-        仍核实（不伪回滚）。本入口只读事实并产出动作计划，不写库、不派发。
+        共同资料被停止使用时所有路共享同一冻结输入，故组内一致处理：未派发路
+        经注入的撤单端口真实撤回（端口未接线/未确认 → 该路如实标未确认，不把
+        计划当已撤回）；在途路只停新派发（原生退出未核定前不算已停止）；已完成
+        成果与费用保留。派发门关闭后任何在途编排的下一路零派发。
         """
 
         group, view = await self._load_comparison(query)
@@ -944,7 +1022,14 @@ class AgentService:
             )
             for lane in view.lanes
         )
-        return plan_group_stop(group, observations, reason=reason)
+        # 先关派发门（撤单前落定），使并发的 run_comparison 不再启动任何新路。
+        self._stopped_groups.add(group.group_ref)
+        return await execute_group_stop(
+            group,
+            observations,
+            reason=reason,
+            withdraw_lane=self._lane_withdrawer,
+        )
 
     # ------------------------------------------------------------------
     # 写入面（受理）

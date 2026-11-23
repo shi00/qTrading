@@ -83,6 +83,13 @@ COMPARISON_COST_FAILED: Final[str] = "failed"
 DISPATCH_FAILED_PREFIX: Final[str] = "dispatch_failed:"
 ACCEPT_FAILED_PREFIX: Final[str] = "accept_failed:"
 
+#: 校验码：同组键携不同完整冻结 manifest（模型集合/连接版本等任一维度不同）。
+GROUP_MANIFEST_CONFLICT: Final[str] = "group_manifest_conflict"
+#: 校验码：读到的 manifest 未覆盖该组已持久化的全部路（旧版/部分写入，非权威）。
+GROUP_MANIFEST_STALE: Final[str] = "group_manifest_stale"
+#: 校验码：本路冻结参数缺失/非法（不得回退当前设置重解析）。
+LANE_PARAMETERS_MISSING: Final[str] = "lane_parameters_missing"
+
 _MANIFEST_KEYS: Final = frozenset(
     {"schema_version", "group_ref", "user_scope", "session_id", "source_module", "input_digest", "shared", "lanes"}
 )
@@ -1116,6 +1123,239 @@ def plan_group_stop(
     )
 
 
+def verify_group_manifest_authority(authoritative: FrozenComparisonGroup, candidate: FrozenComparisonGroup) -> None:
+    """受理前核验：同组键只能有一个完整冻结 manifest（先核后建路）。
+
+    逐项比对组键（``user_scope`` / ``session_id`` / ``source_module`` /
+    ``group_ref``）、共同输入摘要、完整 manifest 摘要与逐路连接矩阵
+    （``lane_ref`` + 连接 ID/版本/目标指纹/用途/范围版本/授权引用）。任一不同
+    → ``group_manifest_conflict``：整组拒绝，不建任何新路——同组键携不同模型
+    集合（新连接带来新路键）不得并入既有组，也不静默另立一组。
+    """
+
+    path = "$.comparison_group.manifest"
+    for attr, field in (
+        ("user_scope", "user_scope"),
+        ("session_id", "session_id"),
+        ("source_module", "source_module"),
+        ("group_ref", "group_ref"),
+        ("input_digest", "input_digest"),
+        ("manifest_digest", "manifest_digest"),
+    ):
+        if getattr(authoritative, attr) != getattr(candidate, attr):
+            _fail(GROUP_MANIFEST_CONFLICT, f"{path}.{field}")
+    authoritative_matrix = {lane.lane_ref: _selection_wire(lane.selection) for lane in authoritative.lanes}
+    candidate_matrix = {lane.lane_ref: _selection_wire(lane.selection) for lane in candidate.lanes}
+    if authoritative_matrix != candidate_matrix:
+        _fail(GROUP_MANIFEST_CONFLICT, f"{path}.lanes")
+
+
+def require_group_lane_consistency(group: FrozenComparisonGroup, persisted_lane_refs: frozenset[str]) -> None:
+    """核验读到的 manifest 覆盖该组已持久化的全部路（读到的可能不是权威版本）。
+
+    会话投影里存在 manifest 未登记的路，说明本次读到的 manifest 是旧版/部分
+    写入，不能据此反推组内模型集合；显式 ``group_manifest_stale`` 失败，不把
+    旧 manifest 当作该组权威版本使用。
+    """
+
+    known = {lane.lane_ref for lane in group.lanes}
+    unknown = sorted(persisted_lane_refs - known)
+    if unknown:
+        _fail(GROUP_MANIFEST_STALE, f"$.comparison_group.manifest.lanes[{unknown[0]}]")
+
+
+@dataclass(frozen=True, slots=True)
+class ComparisonLaneParameters:
+    """一路运行期必须消费的冻结参数（缺失即 fail-closed，不按当前设置重解析）。
+
+    这些值来自组共同 manifest 的该路条目：受理时冻结的连接 ID/版本/目标指纹/
+    用途/范围版本（M15 精确授权语义）。运行期只核不换——不得以当前
+    ``agent_research`` 场景路由或当前连接设置替换本路所选连接。
+    """
+
+    group_ref: str
+    lane_ref: str
+    connection_id: str
+    connection_revision: int
+    target_fingerprint: str
+    purpose: str
+    scope_version: int
+    verified_connection_grant_id: str | None = None
+
+
+def require_lane_parameters(group: FrozenComparisonGroup, lane_ref: str) -> ComparisonLaneParameters:
+    """取本路冻结参数；任一必填项缺失/非法 → ``lane_parameters_missing``。
+
+    这是运行期唯一允许的取值入口：调用方拿不到完整参数时必须零外发，不得
+    回退按当前设置重解析另一连接或候选。
+    """
+
+    lane = next((item for item in group.lanes if item.lane_ref == lane_ref), None)
+    if lane is None:
+        _fail("unknown_lane", f"$.lanes[{lane_ref}]")
+    selection = lane.selection
+    path = f"$.lanes[{lane_ref}]"
+    if not isinstance(selection, ComparisonLaneSelection):
+        _fail(LANE_PARAMETERS_MISSING, path)
+    for field, value in (
+        ("connection_id", selection.connection_id),
+        ("connection_target_fingerprint", selection.target_fingerprint),
+        ("connection_purpose", selection.connection_purpose),
+    ):
+        if not isinstance(value, str) or value == "":
+            _fail(LANE_PARAMETERS_MISSING, f"{path}.{field}")
+    if (
+        isinstance(selection.connection_revision, bool)
+        or not isinstance(selection.connection_revision, int)
+        or selection.connection_revision < 1
+    ):
+        _fail(LANE_PARAMETERS_MISSING, f"{path}.connection_revision")
+    if (
+        isinstance(selection.scope_version, bool)
+        or not isinstance(selection.scope_version, int)
+        or selection.scope_version < 0
+    ):
+        _fail(LANE_PARAMETERS_MISSING, f"{path}.connection_scope_version")
+    grant = selection.verified_connection_grant_id
+    if grant is not None and (not isinstance(grant, str) or grant == ""):
+        _fail(LANE_PARAMETERS_MISSING, f"{path}.verified_connection_grant_id")
+    return ComparisonLaneParameters(
+        group_ref=group.group_ref,
+        lane_ref=lane.lane_ref,
+        connection_id=selection.connection_id,
+        connection_revision=selection.connection_revision,
+        target_fingerprint=selection.target_fingerprint,
+        purpose=selection.connection_purpose,
+        scope_version=selection.scope_version,
+        verified_connection_grant_id=selection.verified_connection_grant_id,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class LaneWithdrawal:
+    """一路撤回的可核事实：``withdrawn`` 只在撤回已落定且可核时为真。"""
+
+    lane_ref: str
+    withdrawn: bool
+    reason: str | None = None
+
+
+#: 撤回端口：真正撤回一路未派发执行（写库/关闭派发由实现承担）并回可核事实。
+LaneWithdrawer = Callable[[ComparisonLaneFrozen, str], Awaitable[LaneWithdrawal]]
+
+
+@dataclass(frozen=True, slots=True)
+class LaneStopOutcome:
+    """一路停止结果：计划动作 + 是否已落实并可核（未核不伪装成功，R21）。"""
+
+    lane_ref: str
+    action: str
+    verified: bool
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class ComparisonGroupStopOutcome:
+    """组停止结果：派发关闭事实 + 逐路落实结果（不再只是计划）。
+
+    ``verified`` 只在动作已落定且可核时为真：撤回需撤回端口确认；在途路只停
+    新派发（原生退出未核定前不算已停止）；已完成路不再变更、成果保留。
+    """
+
+    group_ref: str
+    reason: str
+    dispatch_closed: bool
+    lanes: tuple[LaneStopOutcome, ...]
+
+    @property
+    def all_verified(self) -> bool:
+        return all(lane.verified for lane in self.lanes)
+
+
+async def execute_group_stop(
+    group: FrozenComparisonGroup,
+    observations: tuple[ComparisonLaneObservation, ...],
+    *,
+    reason: str,
+    withdraw_lane: LaneWithdrawer | None,
+) -> ComparisonGroupStopOutcome:
+    """执行组停止：撤单未派发路 + 关闭派发，并逐路核对落实结果。
+
+    调用方必须**先**关闭本组派发门（``dispatch_closed`` 在下发前落定，使任何
+    在途编排的下一路零派发），再调用本函数。``withdraw`` 动作的路必须经
+    ``withdraw_lane`` 真正撤回；端口未接线、抛错或回执未确认 → ``verified=False``
+    （如实标未确认，不把「计划」当「已撤回」）。``CancelledError`` 原样传播（R2）。
+    """
+
+    plan = plan_group_stop(group, observations, reason=reason)
+    by_lane = {lane.lane_ref: lane for lane in group.lanes}
+    outcomes: list[LaneStopOutcome] = []
+    for decision in plan.decisions:
+        lane = by_lane.get(decision.lane_ref)
+        if decision.action != "withdraw":
+            # 已完成/未知核实不在本函数写库；在途只停新派发，原生退出未核定不算已停止。
+            outcomes.append(
+                LaneStopOutcome(
+                    lane_ref=decision.lane_ref,
+                    action=decision.action,
+                    verified=decision.action == "preserve_result",
+                    reason=decision.reason,
+                )
+            )
+            continue
+        if lane is None or withdraw_lane is None:
+            outcomes.append(
+                LaneStopOutcome(
+                    lane_ref=decision.lane_ref,
+                    action=decision.action,
+                    verified=False,
+                    reason=f"{decision.reason}:withdrawer_unwired",
+                )
+            )
+            continue
+        try:
+            fact = await withdraw_lane(lane, plan.reason)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            code_value = getattr(code, "value", code)
+            reason_code = code_value if isinstance(code_value, str) and code_value else type(exc).__name__
+            outcomes.append(
+                LaneStopOutcome(
+                    lane_ref=decision.lane_ref,
+                    action=decision.action,
+                    verified=False,
+                    reason=f"{decision.reason}:withdraw_failed:{reason_code}",
+                )
+            )
+            continue
+        if not fact.withdrawn:
+            outcomes.append(
+                LaneStopOutcome(
+                    lane_ref=decision.lane_ref,
+                    action=decision.action,
+                    verified=False,
+                    reason=f"{decision.reason}:{fact.reason or 'withdraw_unconfirmed'}",
+                )
+            )
+            continue
+        outcomes.append(
+            LaneStopOutcome(
+                lane_ref=decision.lane_ref,
+                action=decision.action,
+                verified=True,
+                reason=f"{decision.reason}:withdrawn",
+            )
+        )
+    return ComparisonGroupStopOutcome(
+        group_ref=group.group_ref,
+        reason=plan.reason,
+        dispatch_closed=plan.dispatch_closed,
+        lanes=tuple(outcomes),
+    )
+
+
 LaneStart = Callable[[ComparisonLaneFrozen], Awaitable[str]]
 LaneObserve = Callable[[tuple[tuple[str, str], ...]], Awaitable[Mapping[str, ComparisonLaneObservation]]]
 StopCheckpoint = Callable[[], Awaitable[bool]]
@@ -1307,12 +1547,17 @@ __all__ = [
     "COMPARISON_SESSION_SLOTS",
     "COMPARISON_TOTAL_SLOTS",
     "DISPATCH_FAILED_PREFIX",
+    "GROUP_MANIFEST_CONFLICT",
+    "GROUP_MANIFEST_STALE",
+    "LANE_PARAMETERS_MISSING",
     "STOP_REASON_SHARED_SOURCE",
     "STOP_REASON_USER_ENDED_GROUP",
+    "ComparisonGroupStopOutcome",
     "ComparisonGroupStopPlan",
     "ComparisonGroupView",
     "ComparisonLaneFrozen",
     "ComparisonLaneObservation",
+    "ComparisonLaneParameters",
     "ComparisonLaneReceipt",
     "ComparisonLaneRetry",
     "ComparisonLaneSelection",
@@ -1325,16 +1570,23 @@ __all__ = [
     "FrozenComparisonGroup",
     "LaneQueueDecision",
     "LaneStopDecision",
+    "LaneStopOutcome",
+    "LaneWithdrawal",
+    "LaneWithdrawer",
     "build_comparison_view",
     "build_lane_accept_request",
     "comparison_export_rows",
     "converge_comparison_group",
     "decode_comparison_manifest",
     "drive_comparison_group",
+    "execute_group_stop",
     "freeze_comparison_group",
     "observations_from_executions",
     "plan_group_stop",
     "plan_lane_queue",
     "plan_lane_retry",
+    "require_group_lane_consistency",
     "require_lane_connection",
+    "require_lane_parameters",
+    "verify_group_manifest_authority",
 ]
