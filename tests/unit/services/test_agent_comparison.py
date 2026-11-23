@@ -47,23 +47,28 @@ from services.agent_service.comparison import (
     COMPARISON_SESSION_SLOTS,
     COMPARISON_TOTAL_SLOTS,
     STOP_REASON_SHARED_SOURCE,
+    STOP_REASON_USER_ENDED_GROUP,
     ComparisonLaneObservation,
     ComparisonLaneSelection,
     ComparisonReadQuery,
     ComparisonSharedInput,
     ComparisonSubmissionRequest,
     FrozenComparisonGroup,
+    LaneWithdrawal,
     build_comparison_view,
     build_lane_accept_request,
     comparison_export_rows,
     decode_comparison_manifest,
     drive_comparison_group,
+    execute_group_stop,
     freeze_comparison_group,
     observations_from_executions,
     plan_group_stop,
     plan_lane_queue,
     plan_lane_retry,
     require_lane_connection,
+    require_lane_parameters,
+    verify_group_manifest_authority,
 )
 from services.agent_service.dispatch import DispatchOutcome
 from services.agent_service.service import AgentService
@@ -379,7 +384,7 @@ class TestConvergence:
 
 
 class _FakeReadDao:
-    def __init__(self, manifest_payload: str, executions: tuple[object, ...]) -> None:
+    def __init__(self, manifest_payload: str | None, executions: tuple[object, ...]) -> None:
         self.manifest_payload = manifest_payload
         self.executions = executions
         self.calls: list[str] = []
@@ -445,7 +450,7 @@ class TestServiceComparison:
 
     @pytest.mark.asyncio
     async def test_submit_queues_independent_full_tasks_with_fixed_connections(self) -> None:
-        fake = _FakeReadDao("", ())
+        fake = _FakeReadDao(None, ())
         service = AgentService(cast(AgentDao, fake))
         request = ComparisonSubmissionRequest(
             user_scope="u1",
@@ -458,7 +463,8 @@ class TestServiceComparison:
         receipt = await service.submit_comparison(request)
         assert receipt.lane_count == 2
         assert receipt.all_accepted is True
-        assert fake.calls == ["accept_request", "accept_request"]
+        # 组受理前先按组键读权威 manifest（无既有组 → 本组首版）。
+        assert fake.calls == ["read_comparison_manifest", "accept_request", "accept_request"]
 
     @pytest.mark.asyncio
     async def test_observations_from_executions_keep_unknown(self) -> None:
@@ -1450,3 +1456,257 @@ class TestReadCostAndRetry:
                 await service.retry_comparison_lane(query, lane_ref, expected_revision=0)
             assert exc.value.code is AgentErrorCode.REVISION_CONFLICT
         assert dao.accept_calls == []
+
+
+# ---------------------------------------------------------------------------
+# P1-09：同组键只能一个完整冻结 manifest（先核后建路）+ 组停真实撤回
+# ---------------------------------------------------------------------------
+
+
+def _accept_receipt(request: Any) -> SubmissionReceipt:
+    return SubmissionReceipt(
+        command=CommandRef(
+            user_scope=request.user_scope,
+            source_module=request.source_module,
+            business_request_id=request.business_request_id,
+            command_id=request.client_command_id,
+            expected_revision=request.expected_revision,
+        ),
+        command_record_id=f"cmd-{request.comparison_lane_ref}",
+        session_id=request.session_id,
+        execution_id=f"exec-{request.comparison_lane_ref}",
+        workflow_id=request.workflow_id,
+        intent_digest="0" * 64,
+        commit_state=CommitState.COMMITTED,
+        verified_at="2026-11-16T00:00:00.000000Z",
+        next_action=None,
+    )
+
+
+class _GroupStoreDao:
+    """比较组受理面替身：首个受理的 manifest 即该组已持久化权威版本。"""
+
+    def __init__(self, *, sessions: tuple[object, ...] = ()) -> None:
+        self.manifest: str | None = None
+        self.sessions = sessions
+        self.accept_calls: list[Any] = []
+
+    async def read_comparison_manifest(self, *, user_scope: str, group_ref: str) -> str | None:
+        return self.manifest
+
+    async def get_session_read(self, query: Any, *, user_scope: str) -> Any:
+        return SimpleNamespace(executions=tuple(self.sessions))
+
+    async def accept_request(self, request: Any) -> Any:
+        self.accept_calls.append(request)
+        self.manifest = request.manifest_payload
+        return _accept_receipt(request)
+
+
+def _submit_request(
+    group_command_id: str = "cmp-1",
+    lanes: tuple[ComparisonLaneSelection, ...] | None = None,
+) -> ComparisonSubmissionRequest:
+    return ComparisonSubmissionRequest(
+        user_scope="u1",
+        session_id="s1",
+        source_module="ui",
+        group_command_id=group_command_id,
+        shared=_shared(),
+        lanes=lanes if lanes is not None else (_selection("conn-a"), _selection("conn-b")),
+    )
+
+
+class TestGroupManifestAuthority:
+    @pytest.mark.asyncio
+    async def test_same_group_key_with_new_model_lane_conflicts_before_any_write(self) -> None:
+        dao = _GroupStoreDao()
+        service = AgentService(cast(AgentDao, dao))
+        await service.submit_comparison(_submit_request())
+        assert len(dao.accept_calls) == 2
+
+        with pytest.raises(AgentServiceError) as exc:
+            await service.submit_comparison(
+                _submit_request(lanes=(_selection("conn-a"), _selection("conn-b"), _selection("conn-c")))
+            )
+
+        assert exc.value.code is AgentErrorCode.INPUT_CONFLICT
+        # 整组拒绝：新模型路一条都不建（不并入既有组）。
+        assert len(dao.accept_calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_identical_resubmission_replays_without_conflict(self) -> None:
+        dao = _GroupStoreDao()
+        service = AgentService(cast(AgentDao, dao))
+        first = await service.submit_comparison(_submit_request())
+        second = await service.submit_comparison(_submit_request())
+
+        assert first.manifest_digest == second.manifest_digest
+        assert len(dao.accept_calls) == 4
+
+    @pytest.mark.asyncio
+    async def test_reordered_lane_matrix_conflicts(self) -> None:
+        dao = _GroupStoreDao()
+        service = AgentService(cast(AgentDao, dao))
+        await service.submit_comparison(_submit_request())
+
+        with pytest.raises(AgentServiceError) as exc:
+            await service.submit_comparison(_submit_request(lanes=(_selection("conn-b"), _selection("conn-a"))))
+
+        assert exc.value.code is AgentErrorCode.INPUT_CONFLICT
+        assert len(dao.accept_calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_stale_manifest_not_covering_persisted_lanes_fails_closed(self) -> None:
+        group_ab = _group()
+        group_abc = _group((_selection("conn-a"), _selection("conn-b"), _selection("conn-c")))
+        extra_lane = group_abc.lanes[2]
+        dao = _GroupStoreDao(
+            sessions=(
+                SimpleNamespace(comparison_group_ref=group_ab.group_ref, comparison_lane_ref=extra_lane.lane_ref),
+            )
+        )
+        dao.manifest = group_ab.manifest_payload
+        service = AgentService(cast(AgentDao, dao))
+
+        with pytest.raises(AgentServiceError) as exc:
+            await service.submit_comparison(_submit_request())
+
+        assert exc.value.code is AgentErrorCode.OPERATION_UNKNOWN
+        assert dao.accept_calls == []
+
+    def test_authority_rejects_connection_revision_or_model_set_change(self) -> None:
+        base = _group()
+        changed_revision = _group((_selection("conn-a", revision=4), _selection("conn-b")))
+        added_model = _group((_selection("conn-a"), _selection("conn-b"), _selection("conn-c")))
+        for candidate in (changed_revision, added_model):
+            with pytest.raises(AgentValidationError) as exc:
+                verify_group_manifest_authority(base, candidate)
+            assert exc.value.code == "group_manifest_conflict"
+
+    def test_lane_parameters_return_frozen_values(self) -> None:
+        group = _group()
+        lane = group.lanes[0]
+        parameters = require_lane_parameters(group, lane.lane_ref)
+        assert (parameters.group_ref, parameters.lane_ref) == (group.group_ref, lane.lane_ref)
+        assert parameters.connection_id == "conn-a"
+        assert parameters.connection_revision == 3
+        assert parameters.target_fingerprint == "fp-conn-a"
+
+    def test_missing_frozen_parameter_fails_closed(self) -> None:
+        group = _group()
+        lane = group.lanes[0]
+        broken_lane = replace(lane, selection=replace(lane.selection, connection_id=""))
+        broken = replace(group, lanes=(broken_lane, group.lanes[1]))
+        with pytest.raises(AgentValidationError) as exc:
+            require_lane_parameters(broken, lane.lane_ref)
+        assert exc.value.code == "lane_parameters_missing"
+
+
+def _stop_query(group: FrozenComparisonGroup) -> ComparisonReadQuery:
+    return ComparisonReadQuery(user_scope="u1", session_id="s1", group_ref=group.group_ref)
+
+
+class TestGroupStopExecution:
+    @pytest.mark.asyncio
+    async def test_stop_withdraws_undispatched_lane_and_closes_dispatch(self) -> None:
+        group = _group()
+        lane_a, lane_b = group.lanes
+        dao = _RunDao(
+            group,
+            [
+                _row(group, lane_a.lane_ref, "queued", "exec-a"),
+                _row(group, lane_b.lane_ref, "running", "exec-b"),
+            ],
+        )
+        withdrawn: list[str] = []
+
+        async def _withdraw(lane: Any, reason: str) -> LaneWithdrawal:
+            withdrawn.append(lane.lane_ref)
+            return LaneWithdrawal(lane_ref=lane.lane_ref, withdrawn=True)
+
+        dispatcher = _RunDispatcher()
+        service = AgentService(
+            cast(AgentDao, dao),
+            dispatcher=cast(Any, dispatcher),
+            lane_withdrawer=_withdraw,
+        )
+
+        outcome = await service.stop_comparison_group(_stop_query(group))
+
+        by_lane = {item.lane_ref: item for item in outcome.lanes}
+        assert outcome.dispatch_closed is True
+        assert by_lane[lane_a.lane_ref].action == "withdraw"
+        assert by_lane[lane_a.lane_ref].verified is True
+        assert by_lane[lane_b.lane_ref].action == "stop_new_dispatch"
+        # 在途路只停新派发：原生退出未核定前不报已停止。
+        assert by_lane[lane_b.lane_ref].verified is False
+        assert withdrawn == [lane_a.lane_ref]
+
+        # 停止后同一入参再推进：零派发（不再启动任何路）。
+        await service.run_comparison(_submission(group))
+        assert dispatcher.calls == []
+
+    @pytest.mark.asyncio
+    async def test_stop_without_withdrawer_marks_withdrawal_unconfirmed(self) -> None:
+        group = _group()
+        lane_a = group.lanes[0]
+        dao = _RunDao(group, [_row(group, lane_a.lane_ref, "queued", "exec-a")])
+        service = AgentService(cast(AgentDao, dao))
+
+        outcome = await service.stop_comparison_group(_stop_query(group))
+
+        lane_outcome = next(item for item in outcome.lanes if item.lane_ref == lane_a.lane_ref)
+        assert lane_outcome.action == "withdraw"
+        assert lane_outcome.verified is False
+        assert lane_outcome.reason.endswith("withdrawer_unwired")
+        assert outcome.all_verified is False
+
+    @pytest.mark.asyncio
+    async def test_withdrawer_unconfirmed_reports_not_withdrawn(self) -> None:
+        group = _group()
+        lane_a = group.lanes[0]
+        dao = _RunDao(group, [_row(group, lane_a.lane_ref, "queued", "exec-a")])
+
+        async def _withdraw(lane: Any, reason: str) -> LaneWithdrawal:
+            return LaneWithdrawal(lane_ref=lane.lane_ref, withdrawn=False, reason="still_queued")
+
+        service = AgentService(cast(AgentDao, dao), lane_withdrawer=_withdraw)
+        outcome = await service.stop_comparison_group(_stop_query(group))
+
+        lane_outcome = next(item for item in outcome.lanes if item.lane_ref == lane_a.lane_ref)
+        assert lane_outcome.verified is False
+        assert lane_outcome.reason.endswith("still_queued")
+
+    @pytest.mark.asyncio
+    async def test_retry_after_stop_is_rejected(self) -> None:
+        group = _group()
+        lane_a = group.lanes[0]
+        dao = _RunDao(group, [_row(group, lane_a.lane_ref, "failed", "exec-a")])
+        dispatcher = _RunDispatcher()
+        service = AgentService(cast(AgentDao, dao), dispatcher=cast(Any, dispatcher))
+        await service.stop_comparison_group(_stop_query(group))
+
+        with pytest.raises(AgentServiceError) as exc:
+            await service.retry_comparison_lane(_stop_query(group), lane_a.lane_ref, expected_revision=0)
+
+        assert exc.value.code is AgentErrorCode.REVISION_CONFLICT
+        assert dispatcher.calls == []
+
+    @pytest.mark.asyncio
+    async def test_execute_group_stop_keeps_completed_results_verified(self) -> None:
+        group = _group()
+        lane_a, lane_b = group.lanes
+        outcome = await execute_group_stop(
+            group,
+            (
+                ComparisonLaneObservation(lane_ref=lane_a.lane_ref, display_state="complete", reliable_result=True),
+                ComparisonLaneObservation(lane_ref=lane_b.lane_ref, display_state="queued"),
+            ),
+            reason=STOP_REASON_USER_ENDED_GROUP,
+            withdraw_lane=None,
+        )
+        by_lane = {item.lane_ref: item for item in outcome.lanes}
+        assert by_lane[lane_a.lane_ref].action == "preserve_result"
+        assert by_lane[lane_a.lane_ref].verified is True
+        assert by_lane[lane_b.lane_ref].verified is False

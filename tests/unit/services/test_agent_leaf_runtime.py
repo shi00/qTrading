@@ -22,21 +22,31 @@ from core.agent_types import (
     ConnectionAuthorizationRef,
     DataConsentBinding,
     DataConsentState,
+    Mode,
     PlanNodeSpec,
+    Purpose,
     data_consent_source_scope_digest,
     derive_round_id,
 )
 from core.model_management_types import ExecutionSnapshot
+from services.agent_service.comparison import (
+    ComparisonLaneSelection,
+    ComparisonSharedInput,
+    freeze_comparison_group,
+    require_lane_parameters,
+)
 from services.agent_service.leaf_runtime import (
     AdmissionCountingExecutor,
     AdmissionCountingToolExecutor,
     DaoLeafTicketGate,
+    FrozenLaneBinding,
     LeafRuntimeWiring,
     build_actual_input_binder,
     default_leaf_runtime,
     install_leaf_runtime,
     leaf_call_identity,
     resolve_agent_model_binding,
+    resolve_comparison_lane_freeze,
     resolve_leaf_data_consent,
 )
 from services.agent_service.model import derive_model_call_id
@@ -296,6 +306,274 @@ class TestResolveLeafDataConsent:
         with pytest.raises(ValueError) as excinfo:
             await resolve_leaf_data_consent(_context(), dao=dao)
         assert "scope does not match" in str(excinfo.value)
+
+
+class _ComparisonDao(_FakeDao):
+    """比较路冻结读取面：执行摘要 + 组 manifest（缺省如实返回）。"""
+
+    def __init__(
+        self,
+        *,
+        summary: Any,
+        manifest: str | None,
+        facts: _Facts | None = None,
+        authority: Any | None = None,
+    ) -> None:
+        super().__init__(facts=facts, authority=authority)
+        self.summary = summary
+        self.manifest = manifest
+        self.manifest_reads = 0
+
+    async def get_execution_snapshot(self, execution_id: str, *, user_scope: str, limit: int = 50) -> Any:
+        return SimpleNamespace(execution=self.summary)
+
+    async def read_comparison_manifest(self, *, user_scope: str, group_ref: str) -> str | None:
+        self.manifest_reads += 1
+        return self.manifest
+
+
+def _lane_group(
+    revision: int = 1,
+    *,
+    confirm_lane: str = "conn-local",
+) -> Any:
+    return freeze_comparison_group(
+        user_scope="user-1",
+        session_id="session-1",
+        source_module="ui",
+        group_command_id="cmp-1",
+        shared=ComparisonSharedInput(text="同一任务", mode=Mode.DISCUSS, purpose=Purpose.CONCEPT),
+        lanes=(
+            ComparisonLaneSelection(
+                connection_id=confirm_lane,
+                connection_revision=revision,
+                target_fingerprint="fp-1",
+                connection_purpose="agent_research",
+                scope_version=1,
+                display_name="本地连接",
+            ),
+            ComparisonLaneSelection(
+                connection_id="conn-b",
+                connection_revision=1,
+                target_fingerprint="fp-b",
+                connection_purpose="agent_research",
+                scope_version=1,
+                display_name="备用连接",
+            ),
+        ),
+    )
+
+
+def _route_snapshot(*candidates: dict[str, Any]) -> ExecutionSnapshot:
+    from services.ai_service.scenario_dispatch import build_route_snapshot
+
+    return ExecutionSnapshot(
+        snapshot_id="snap-1",
+        run_id=None,
+        config_revision=1,
+        routes=(
+            build_route_snapshot(
+                {
+                    "route_revision": 1,
+                    "transient_retries": 0,
+                    "fallback_enabled": False,
+                    "total_timeout_seconds": 30.0,
+                },
+                scenario_id="agent_research",
+                candidates=candidates,
+            ),
+        ),
+        connections=(),
+        business_contract_versions={},
+        security_scope_version=1,
+        created_at="2026-11-18T00:00:00.000000Z",
+    )
+
+
+def _candidate(connection_id: str, *, fingerprint: str, index: int) -> dict[str, Any]:
+    return {
+        "candidate_index": index,
+        "task_id": "agent_research",
+        "connection_id": connection_id,
+        "budget_limit_cny": None,
+        "budget_policy_snapshot": None,
+        "target_fingerprint": fingerprint,
+        "purpose": "agent_research",
+    }
+
+
+def _install_dispatch(monkeypatch: pytest.MonkeyPatch, snapshot: ExecutionSnapshot) -> None:
+    async def _resolve(_scenario_id: str) -> ScenarioDispatch | None:
+        return ScenarioDispatch(
+            executor=object(),
+            snapshot=snapshot,
+            route_revision=1,
+            total_timeout_seconds=30.0,
+            task_routes={},
+        )
+
+    monkeypatch.setattr("services.ai_service.scenario_dispatch.resolve_executor", _resolve)
+
+
+def _lane_provider(group: Any):
+    parameters = require_lane_parameters(group, group.lanes[0].lane_ref)
+
+    async def _provide(_context: LeafExecutionContext) -> FrozenLaneBinding:
+        return FrozenLaneBinding(group_ref=group.group_ref, lane_ref=parameters.lane_ref, parameters=parameters)
+
+    return _provide
+
+
+class TestComparisonLaneBinding:
+    @pytest.mark.asyncio
+    async def test_lane_pins_frozen_connection_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        group = _lane_group()
+        _install_dispatch(
+            monkeypatch,
+            _route_snapshot(
+                _candidate("conn-other", fingerprint="fp-other", index=0),
+                _candidate("conn-local", fingerprint="fp-1", index=1),
+            ),
+        )
+        payload = _consent_payload(_binding(connection_id="conn-local"))
+
+        async def _provide(_context: LeafExecutionContext) -> dict[str, Any]:
+            return payload
+
+        resolved = await resolve_agent_model_binding(
+            _context(),
+            data_consent_provider=_provide,
+            lane_freeze_provider=_lane_provider(group),
+        )
+
+        (route,) = resolved.snapshot.routes
+        (candidate,) = route["candidates"]
+        assert candidate["connection_id"] == "conn-local"
+        assert candidate["candidate_index"] == 0
+
+    @pytest.mark.asyncio
+    async def test_missing_frozen_connection_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        group = _lane_group()
+        _install_dispatch(
+            monkeypatch,
+            _route_snapshot(_candidate("conn-other", fingerprint="fp-other", index=0)),
+        )
+        payload = _consent_payload(_binding(connection_id="conn-local"))
+
+        async def _provide(_context: LeafExecutionContext) -> dict[str, Any]:
+            return payload
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await resolve_agent_model_binding(
+                _context(),
+                data_consent_provider=_provide,
+                lane_freeze_provider=_lane_provider(group),
+            )
+        assert "frozen connection is unavailable" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_consent_connection_mismatch_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        group = _lane_group()
+        _install_dispatch(
+            monkeypatch,
+            _route_snapshot(_candidate("conn-local", fingerprint="fp-1", index=0)),
+        )
+        payload = _consent_payload(_binding(connection_id="conn-other"))
+
+        async def _provide(_context: LeafExecutionContext) -> dict[str, Any]:
+            return payload
+
+        with pytest.raises(ValueError) as excinfo:
+            await resolve_agent_model_binding(
+                _context(),
+                data_consent_provider=_provide,
+                lane_freeze_provider=_lane_provider(group),
+            )
+        assert "does not match frozen lane" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_changed_connection_target_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        group = _lane_group()
+        _install_dispatch(
+            monkeypatch,
+            _route_snapshot(_candidate("conn-local", fingerprint="fp-changed", index=0)),
+        )
+        payload = _consent_payload(_binding(connection_id="conn-local"))
+
+        async def _provide(_context: LeafExecutionContext) -> dict[str, Any]:
+            return payload
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await resolve_agent_model_binding(
+                _context(),
+                data_consent_provider=_provide,
+                lane_freeze_provider=_lane_provider(group),
+            )
+        assert "target changed since acceptance" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_lane_without_data_consent_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        group = _lane_group()
+        _install_dispatch(
+            monkeypatch,
+            _route_snapshot(_candidate("conn-local", fingerprint="fp-1", index=0)),
+        )
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await resolve_agent_model_binding(
+                _context(),
+                lane_freeze_provider=_lane_provider(group),
+            )
+        assert "requires a frozen data consent" in str(excinfo.value)
+
+
+class TestResolveComparisonLaneFreeze:
+    @pytest.mark.asyncio
+    async def test_non_comparison_execution_returns_none(self) -> None:
+        dao = _ComparisonDao(
+            summary=SimpleNamespace(comparison_group_ref=None, comparison_lane_ref=None),
+            manifest=None,
+        )
+        assert await resolve_comparison_lane_freeze(_context(), dao=dao) is None
+        assert dao.manifest_reads == 0
+
+    @pytest.mark.asyncio
+    async def test_lane_freeze_uses_persisted_group_manifest(self) -> None:
+        group = _lane_group()
+        lane = group.lanes[0]
+        dao = _ComparisonDao(
+            summary=SimpleNamespace(comparison_group_ref=group.group_ref, comparison_lane_ref=lane.lane_ref),
+            manifest=group.manifest_payload,
+        )
+
+        frozen = await resolve_comparison_lane_freeze(_context(), dao=dao)
+
+        assert frozen is not None
+        assert frozen.group_ref == group.group_ref
+        assert frozen.parameters.connection_id == "conn-local"
+        assert frozen.parameters.connection_revision == 1
+
+    @pytest.mark.asyncio
+    async def test_missing_group_manifest_fails_closed(self) -> None:
+        group = _lane_group()
+        lane = group.lanes[0]
+        dao = _ComparisonDao(
+            summary=SimpleNamespace(comparison_group_ref=group.group_ref, comparison_lane_ref=lane.lane_ref),
+            manifest=None,
+        )
+        with pytest.raises(ValueError) as excinfo:
+            await resolve_comparison_lane_freeze(_context(), dao=dao)
+        assert "manifest unavailable" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_group_without_lane_ref_fails_closed(self) -> None:
+        dao = _ComparisonDao(
+            summary=SimpleNamespace(comparison_group_ref="comparison_group_x", comparison_lane_ref=None),
+            manifest="{}",
+        )
+        with pytest.raises(ValueError) as excinfo:
+            await resolve_comparison_lane_freeze(_context(), dao=dao)
+        assert "missing its lane ref" in str(excinfo.value)
 
 
 class _CountingExecutor:

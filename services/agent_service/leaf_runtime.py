@@ -23,12 +23,18 @@ from __future__ import annotations
 import functools
 import logging
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Final, Protocol, cast
 
 from core.model_management_types import ExecutionSnapshot
 from pydantic_ai.profiles import ModelProfile
 
+from services.agent_service.comparison import (
+    ComparisonLaneParameters,
+    FrozenComparisonGroup,
+    decode_comparison_manifest,
+    require_lane_parameters,
+)
 from services.agent_service.model import ChatTurnExecutor, GatewayModel, derive_model_call_id
 from services.agent_service.tool_runtime import ToolRuntimeFactory
 from services.agent_service.workflows import (
@@ -78,6 +84,19 @@ LeafAgentRunner = Callable[[GatewayModel, LeafExecutionContext, LeafModelBinding
 
 #: 叶资料许可提供者（I43）：返回该叶的 15 键冻结资料上下文；``None`` = 无决定。
 DataConsentProvider = Callable[[LeafExecutionContext], Awaitable[Mapping[str, Any] | None]]
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenLaneBinding:
+    """叶所属比较路的冻结绑定（运行期只许用该连接，禁按当前设置重解析）。"""
+
+    group_ref: str
+    lane_ref: str
+    parameters: ComparisonLaneParameters
+
+
+#: 比较路冻结参数提供者：非比较执行返回 ``None``；读不到即抛错（零外发）。
+LaneFreezeProvider = Callable[[LeafExecutionContext], Awaitable[FrozenLaneBinding | None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -374,10 +393,100 @@ def _validated_data_consent_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
     return dict(raw)
 
 
+async def resolve_comparison_lane_freeze(
+    context: LeafExecutionContext, *, dao: Any | None = None
+) -> FrozenLaneBinding | None:
+    """读叶所属比较路的冻结参数（非比较执行返回 ``None``；读不到即抛错）。
+
+    只用持久事实：执行摘要给出 ``group_ref``/``lane_ref``，组共同 manifest 给出
+    该路冻结连接（ID/版本/目标指纹/用途/范围版本）。组/路引用存在但 manifest
+    不可读、不含该路或参数不全 → 抛错（调用方零模型外发，不回退当前
+    ``agent_research`` 场景路由另选连接）。
+    """
+
+    from core.agent_types import decode_json_doc
+
+    agent_dao = dao
+    if agent_dao is None:
+        # lazy-import：CacheManager 依赖全量 DAO 注册链，仅比较路绑定需要。
+        from data.cache.cache_manager import CacheManager
+
+        agent_dao = getattr(CacheManager(), "agent_dao", None)
+    if agent_dao is None:
+        raise RuntimeError("agent dao unavailable (zero model dispatch)")
+    facts = await agent_dao.read_leaf_dispatch_facts(context.execution_id, context.round_id)
+    snapshot = await agent_dao.get_execution_snapshot(context.execution_id, user_scope=facts.user_scope, limit=1)
+    summary = snapshot.execution
+    group_ref = getattr(summary, "comparison_group_ref", None)
+    if group_ref is None:
+        return None
+    lane_ref = getattr(summary, "comparison_lane_ref", None)
+    if not isinstance(lane_ref, str) or lane_ref == "":
+        raise ValueError("comparison group execution is missing its lane ref (zero model dispatch)")
+    payload = await agent_dao.read_comparison_manifest(user_scope=facts.user_scope, group_ref=group_ref)
+    if payload is None:
+        raise ValueError("comparison group manifest unavailable (zero model dispatch)")
+    group: FrozenComparisonGroup = decode_comparison_manifest(decode_json_doc(payload))
+    parameters = require_lane_parameters(group, lane_ref)
+    return FrozenLaneBinding(group_ref=group.group_ref, lane_ref=parameters.lane_ref, parameters=parameters)
+
+
+def _pinned_snapshot(snapshot: ExecutionSnapshot, parameters: ComparisonLaneParameters) -> ExecutionSnapshot:
+    """把执行快照收窄到本路冻结连接（只留该候选；缺失/目标变化即 fail-closed）。
+
+    不按当前场景路由顺序另选连接：路线里没有该连接、或该连接的目标指纹已与受理
+    时冻结值不同（用户改过连接）→ 抛错，调用方零模型外发。
+    """
+
+    from services.ai_service.scenario_dispatch import build_route_snapshot
+
+    pinned: list[Mapping[str, Any]] = []
+    for route in snapshot.routes:
+        matches = [
+            candidate
+            for candidate in route.get("candidates", ())
+            if isinstance(candidate, Mapping) and str(candidate.get("connection_id")) == parameters.connection_id
+        ]
+        if not matches:
+            continue
+        candidate = matches[0]
+        fingerprint = candidate.get("target_fingerprint")
+        if fingerprint is not None and str(fingerprint) != parameters.target_fingerprint:
+            raise RuntimeError("comparison lane connection target changed since acceptance (zero model dispatch)")
+        pinned.append(
+            build_route_snapshot(
+                route,
+                scenario_id=str(route.get("scenario_id") or AGENT_RESEARCH_SCENARIO_ID),
+                candidates=({**dict(candidate), "candidate_index": 0},),
+            )
+        )
+    if not pinned:
+        raise RuntimeError("comparison lane frozen connection is unavailable (zero model dispatch)")
+    return replace(snapshot, routes=tuple(pinned))
+
+
+def _require_consent_connection(payload: Mapping[str, Any], parameters: ComparisonLaneParameters) -> None:
+    """资料许可的实际连接必须等于本路冻结连接（M15：运行期只核不换）。"""
+
+    connection_id = payload.get("connection_id")
+    connection_revision = payload.get("connection_revision")
+    if connection_id != parameters.connection_id:
+        raise ValueError("comparison lane data consent connection does not match frozen lane (zero model dispatch)")
+    if (
+        isinstance(connection_revision, bool)
+        or not isinstance(connection_revision, int)
+        or connection_revision != parameters.connection_revision
+    ):
+        raise ValueError(
+            "comparison lane data consent connection revision does not match frozen lane (zero model dispatch)"
+        )
+
+
 async def resolve_agent_model_binding(
     context: LeafExecutionContext,
     *,
     data_consent_provider: DataConsentProvider | None = None,
+    lane_freeze_provider: LaneFreezeProvider | None = None,
 ) -> LeafModelBinding:
     """生产默认模型绑定：按 ``agent_research`` 场景路由取执行器与冻结快照。
 
@@ -385,6 +494,10 @@ async def resolve_agent_model_binding(
     I43：资料许可决定随 binding 冻结——有决定则写 ``data_consent``（15 键）与
     operation 归属作用域；无决定（含未接线 provider）写 ``require_data_consent``
     且**不写** ``data_consent``（执行器零外发拒绝，不放行「无资料发送」）。
+
+    F37 比较路（``lane_freeze_provider`` 命中）：快照收窄到该路冻结连接，且资料
+    许可的连接 ID/版本必须与冻结值逐项相等；任一缺失/不同 → 抛错（零外发），
+    不以当前场景路由替换本路所选模型。
     """
 
     from services.ai_service.scenario_dispatch import resolve_executor
@@ -392,7 +505,14 @@ async def resolve_agent_model_binding(
     dispatch = await resolve_executor(AGENT_RESEARCH_SCENARIO_ID)
     if dispatch is None:
         raise RuntimeError(f"{AGENT_RESEARCH_SCENARIO_ID} route unavailable (zero model dispatch)")
+    lane_freeze = await lane_freeze_provider(context) if lane_freeze_provider is not None else None
+    snapshot = dispatch.snapshot
     raw_consent = await data_consent_provider(context) if data_consent_provider is not None else None
+    if lane_freeze is not None:
+        if raw_consent is None:
+            raise RuntimeError("comparison lane requires a frozen data consent (zero model dispatch)")
+        _require_consent_connection(raw_consent, lane_freeze.parameters)
+        snapshot = _pinned_snapshot(snapshot, lane_freeze.parameters)
     binding: dict[str, Any] = {
         "scenario_id": AGENT_RESEARCH_SCENARIO_ID,
         "task_id": context.node.node_id,
@@ -408,7 +528,7 @@ async def resolve_agent_model_binding(
         }
     return LeafModelBinding(
         executor=dispatch.executor,
-        snapshot=dispatch.snapshot,
+        snapshot=snapshot,
         binding=binding,
     )
 
@@ -446,9 +566,17 @@ def default_leaf_runtime(
         if dao is None
         else cast(DataConsentProvider, functools.partial(resolve_leaf_data_consent, dao=dao))
     )
+    # F37：比较路按持久 manifest 冻结连接绑定（非比较执行返回 None，不改语义）。
+    lane_provider: LaneFreezeProvider = (
+        resolve_comparison_lane_freeze
+        if dao is None
+        else cast(LaneFreezeProvider, functools.partial(resolve_comparison_lane_freeze, dao=dao))
+    )
 
     async def _model_binding(context: LeafExecutionContext) -> LeafModelBinding:
-        return await resolve_agent_model_binding(context, data_consent_provider=provider)
+        return await resolve_agent_model_binding(
+            context, data_consent_provider=provider, lane_freeze_provider=lane_provider
+        )
 
     # lazy-import：leaf_agent 依赖本模块的类型与常量，模块级互引会成环。
     from services.agent_service.leaf_agent import build_leaf_agent_runner
