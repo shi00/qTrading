@@ -45,6 +45,7 @@ from core.agent_types import (
     to_wire_dict,
 )
 from services.agent_service.attachment_worker import (
+    ATTACHMENT_WORKER_FLAG,
     MAX_HEADER_BYTES,
     MAX_RESULT_BYTES,
     AttachmentParseError,
@@ -178,6 +179,19 @@ def _is_xlsx_container(data: bytes) -> bool:
     except (zipfile.BadZipFile, OSError):
         return False
     return "xl/workbook.xml" in names
+
+
+def worker_command() -> tuple[str, ...]:
+    """附件 worker 的启动命令：源码模式用模块入口，冻结 EXE 复用主入口的 worker 子命令。
+
+    PyInstaller 产物里 ``sys.executable`` 是应用本身而非解释器，``-m`` 无法启动模块；
+    故冻结形态下发 ``ATTACHMENT_WORKER_FLAG``，由 ``main.py`` 在进入 Flet 前分发到
+    worker 的 stdin/stdout 协议。
+    """
+
+    if getattr(sys, "frozen", False):
+        return (sys.executable, ATTACHMENT_WORKER_FLAG)
+    return (sys.executable, "-m", "services.agent_service.attachment_worker")
 
 
 @dataclass
@@ -345,7 +359,7 @@ class SubprocessAttachmentWorker:
         if len(header_bytes) > MAX_HEADER_BYTES:
             raise AttachmentWorkerError("attachment_request_too_large", "worker header exceeds bounded size")
 
-        command = self._command or (sys.executable, "-m", "services.agent_service.attachment_worker")
+        command = self._command or worker_command()
         root = Path(__file__).resolve().parents[2]
         env = dict(os.environ)
         env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(root), env.get("PYTHONPATH"))))

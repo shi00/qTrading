@@ -85,6 +85,14 @@ def main() -> None:
     if "--smoke-test" in sys.argv:
         raise SystemExit(_run_smoke_test())
 
+    # 冻结 EXE 单入口：附件 worker 以同一可执行文件的子命令运行（``-m`` 不可用），
+    # 必须在进入 Flet 前分发到 stdin/stdout 解析协议。此处用字面量判定、仅命中时
+    # 才导入 worker（保持 PRF-02 首帧最小 import；字面量与常量一致性由单测守护）。
+    if "--attachment-worker" in sys.argv[1:]:
+        from services.agent_service.attachment_worker import main as attachment_worker_main
+
+        raise SystemExit(attachment_worker_main())
+
     import config
     from app.application import run
     from utils.app_env import is_e2e_mode

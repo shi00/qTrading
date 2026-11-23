@@ -75,6 +75,8 @@ from core.agent_types import (
 MAX_RESULT_BYTES: Final = 64 * 1024 * 1024
 #: 请求头 JSON 上限（防止无界读）。
 MAX_HEADER_BYTES: Final = 64 * 1024
+#: 冻结 EXE（PyInstaller）下复用主入口启动 worker 的参数；``-m`` 在冻结产物中不可用。
+ATTACHMENT_WORKER_FLAG: Final = "--attachment-worker"
 
 _NS_MAIN: Final = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 _NS_REL: Final = "{http://schemas.openxmlformats.org/package/2006/relationships}"
@@ -702,11 +704,16 @@ class XlsxMetadata:
     ``hidden_sheets`` 记录 workbook.xml 中 ``<sheet state=...>`` 为 hidden /
     veryHidden 的表名与状态：openpyxl 的只读视图不保留该事实，必须由本层取证，
     否则隐藏表会被当成普通可见表投递（I72）。
+
+    ``unlocatable_sheets`` 记录 workbook.xml 声明为 worksheet、但其关系或部件无法
+    定位到容器条目的表名：这类表既不能读取也不能证明为空，不得在 ``selection=all``
+    下被静默跳过并报完整读取（R21）。
     """
 
     sheet_paths: dict[str, str]
     date_epoch: str
     hidden_sheets: dict[str, str] = field(default_factory=dict)
+    unlocatable_sheets: tuple[str, ...] = ()
 
 
 def _xlsx_entry_key(name: str) -> str:
@@ -863,12 +870,17 @@ def _inspect_xlsx_container(data: bytes) -> XlsxMetadata:
     }
     sheet_paths: dict[str, str] = {}
     hidden_sheets: dict[str, str] = {}
+    unlocatable_sheets: list[str] = []
     for sheet in workbook.findall(f"{_NS_MAIN}sheets/{_NS_MAIN}sheet"):
         name = sheet.get("name", "")
         rel_id = sheet.get(f"{_NS_OFFICE_REL}id", "")
         target, rel_type = targets.get(rel_id, ("", ""))
-        # 图表页不能按 worksheet API 迭代；在结构门拒绝而不是后续 AttributeError。
-        if not name or not target or rel_type.endswith("/chartsheet"):
+        # 图表页不能按 worksheet API 迭代，且不含单元格数据；不属于不可定位表。
+        if rel_type.endswith("/chartsheet"):
+            continue
+        if not name or not target or not rel_id:
+            # 声明为 worksheet 却缺名称/关系/目标：不能读也不能证明为空，不得静默跳过。
+            unlocatable_sheets.append(name or "<unnamed>")
             continue
         normalized = target.lstrip("/")
         if not normalized.startswith("xl/"):
@@ -878,12 +890,18 @@ def _inspect_xlsx_container(data: bytes) -> XlsxMetadata:
             raise AttachmentParseError("invalid_structure", "XLSX sheet relationship target is unsafe")
         normalized = "/".join(pure.parts)
         if normalized not in by_name:
+            unlocatable_sheets.append(name)
             continue
         sheet_paths[name] = normalized
         state = sheet.get("state", "")
         if state in {"hidden", "veryHidden"}:
             hidden_sheets[name] = state
-    return XlsxMetadata(sheet_paths=sheet_paths, date_epoch=date_epoch, hidden_sheets=hidden_sheets)
+    return XlsxMetadata(
+        sheet_paths=sheet_paths,
+        date_epoch=date_epoch,
+        hidden_sheets=hidden_sheets,
+        unlocatable_sheets=tuple(unlocatable_sheets),
+    )
 
 
 def _xlsx_hidden_flag(value: str | None) -> bool:
@@ -1080,32 +1098,25 @@ class XlsxCacheProbe:
         return found
 
 
-#: Excel 错误值词法（openpyxl 以普通字符串返回，XML 以 ``t="e"`` 标注）。
-_EXCEL_ERROR_LEXEMES: Final = frozenset(
-    {"#NULL!", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A", "#GETTING_DATA", "#SPILL!", "#CALC!"}
-)
-
-
-def _is_error_lexeme(value: Any) -> bool:
-    return isinstance(value, str) and value in _EXCEL_ERROR_LEXEMES
-
-
 def _typed_scalar(
     value: Any,
     *,
     xml_lexeme: str | None = None,
     date_epoch: str | None = None,
     xml_type: str | None = None,
+    data_type: str | None = None,
 ) -> dict[str, Any]:
     """openpyxl 标量 → 带类型精确表示（不引入 float 往返，保留 XML 原证据）。
 
-    - ``xml_type="e"`` 或值本身是 Excel 错误词法 → ``error``（不与 string 混同）；
+    - 错误值只认类型证据：XML ``t="e"``（结构可核时）或 openpyxl ``data_type == "e"``
+      （XML 不可核时）→ ``error``；文本恰为 ``#N/A`` 等错误词法仍是 ``string``，
+      不得按值猜类型（显式文本与错误值在 XLSX 里由 ``t`` 区分）；
     - 数值保留 XML ``<v>`` 原 lexeme（``lexeme`` 为 openpyxl 值表示，
       ``unsupported_precision`` 标记其可能已丢精度）；
     - 日期/时间保留序列号（``serial``）与 workbook epoch（``date_epoch``）。
     """
 
-    if xml_type == "e" or _is_error_lexeme(value):
+    if xml_type == "e" or (xml_type is None and data_type == "e"):
         return {"raw_type": "error", "lexeme": None if value is None else str(value)}
     if value is None:
         return {"raw_type": "null", "lexeme": None}
@@ -1193,6 +1204,8 @@ def _cache_meta(
     formula_text: str | None,
     cached_value: Any,
     number_format: str | None,
+    *,
+    cached_data_type: str | None = None,
 ) -> dict[str, Any]:
     meta: dict[str, Any] = {
         "schema_version": XLSX_CELL_META_VERSION,
@@ -1245,7 +1258,13 @@ def _cache_meta(
         # 共享字符串索引需要共享表才能还原；不猜值，保存在但值 unknown。
         meta["cache_missing_reason"] = "cache_shared_string_unresolved"
         return meta
-    typed = _typed_scalar(cached_value, xml_lexeme=xml_lexeme, date_epoch=probe.date_epoch if probe else None)
+    typed = _typed_scalar(
+        cached_value,
+        xml_lexeme=xml_lexeme,
+        date_epoch=probe.date_epoch if probe else None,
+        xml_type=error_type,
+        data_type=cached_data_type,
+    )
     meta["cache_raw_type"] = typed["raw_type"]
     if typed["raw_type"] == "error":
         meta["cache_raw_value"] = json_doc({"raw_type": "error", "lexeme": typed["lexeme"]})
@@ -1353,7 +1372,14 @@ def _parse_xlsx(
 ) -> ParsedAttachment:
     _reject_unsupported_selection(selection, (SheetsRange, RowsRange))
     _check_no_overlap(selection, RowsRange)
+    _reject_interleaved_rows_sheets(selection)
     metadata = _inspect_xlsx_container(data)
+    if metadata.unlocatable_sheets and selection.kind == "all":
+        # 声明的 worksheet 部件无法定位：既不能读取也不能证明为空，全选无法表达
+        # 这一缺口，明确拒绝而不是静默跳过并报完整读取（R21）。
+        raise AttachmentParseError(
+            "invalid_structure", "XLSX worksheet part cannot be located; full selection cannot be verified"
+        )
     selected_sheets = _select_xlsx_sheets(selection, list(metadata.sheet_paths))
     budget.enforce_sheets(len(selected_sheets))
     formulas, cached = _load_openpyxl(data)
@@ -1452,12 +1478,15 @@ def _parse_xlsx(
                         formula_text,
                         cached_cell.value,
                         getattr(formula_cell, "number_format", None),
+                        cached_data_type=getattr(cached_cell, "data_type", None),
                     )
                     payload = _typed_scalar(
                         cached_cell.value if formula_text is not None else formula_value,
                         xml_lexeme=meta["xml_value_lexeme"],
                         date_epoch=probe.date_epoch if probe is not None else None,
                         xml_type=xml_type,
+                        # XML 不可核时退回该值来源单元格的 openpyxl 类型（错误值 "e"）。
+                        data_type=getattr(cached_cell if formula_text is not None else formula_cell, "data_type", None),
                     )
                     if structure is not None:
                         # t 属性缺失即数值默认类型：如实记录证据（null 表示无该属性）。
@@ -1669,6 +1698,34 @@ def _xlsx_read_unread_atoms(
     return read_atoms, unread_atoms
 
 
+def _reject_interleaved_rows_sheets(selection: Selection) -> None:
+    """拒绝交错跨表的行选择（同一表在选择的非相邻位置再次出现）。
+
+    行轴投递按表聚合为块、而 ``read_ranges`` 按选择原子输出；若表顺序被别的表
+    打断（如 S1 1—2、S2 1—2、S1 3—4），块顺序（S1 全部、S2）与原子顺序
+    （S1 1—2、S2 1—2、S1 3—4）无法同时如实表达，正文顺序与范围原子必然不一致。
+    此类选择明确拒绝，不静默改序或吞并。
+    """
+
+    if selection.kind != "limited" or isinstance(selection.ranges[0], SheetsRange):
+        return
+    seen: list[str] = []
+    for atom in selection.ranges:
+        assert isinstance(atom, RowsRange)
+        sheet = atom.sheet
+        if sheet is None:
+            # 未命名表由 ``_select_xlsx_sheets`` 以 invalid_selection 拒绝，此处不改语义。
+            return
+        if seen and seen[-1] == sheet:
+            continue
+        if sheet in seen:
+            raise AttachmentParseError(
+                "invalid_selection",
+                "interleaved XLSX row ranges across sheets are not supported; keep each sheet's segments contiguous",
+            )
+        seen.append(sheet)
+
+
 def _xlsx_row_spans(selection: Selection, sheet_name: str) -> list[tuple[int, int]] | None:
     """返回该工作表的行段列表，保持选择顺序（不因归并重排，I21）。
 
@@ -1794,7 +1851,9 @@ def _image_decode_bytes(mode: str, pixels: int) -> int:
     return pixels * Image.getmodebands(mode) * _IMAGE_SAMPLE_BYTES.get(mode, 1)
 
 
-def _parse_pdf(data: bytes, selection: Selection, budget: AttachmentBudget) -> ParsedAttachment:
+def _parse_pdf(
+    data: bytes, selection: Selection, budget: AttachmentBudget, deadline: float, timeout_s: float
+) -> ParsedAttachment:
     _reject_unsupported_selection(selection, (PagesRange,))
     _check_no_overlap(selection, PagesRange)
     try:
@@ -1832,8 +1891,12 @@ def _parse_pdf(data: bytes, selection: Selection, budget: AttachmentBudget) -> P
         texts: list[str] = []
         limitations: list[dict[str, str]] = []
         readable_pages: list[int] = []
-        unreadable_pages: list[int] = []
-        for page_index in pages:
+        timed_out_position: int | None = None
+        for position, page_index in enumerate(pages):
+            if time.monotonic() > deadline:
+                # 超时保住本次范围：未开始提取的页如实记未读，不以空正文报 READY。
+                timed_out_position = position
+                break
             try:
                 text = reader.pages[page_index].extract_text() or ""
             except MemoryError:
@@ -1842,15 +1905,19 @@ def _parse_pdf(data: bytes, selection: Selection, budget: AttachmentBudget) -> P
                 limitations.append(
                     _limitation("page_text_unreadable", f"第 {page_index + 1} 页文本提取失败（页面结构不可读）")
                 )
-                unreadable_pages.append(page_index)
                 texts.append("")
                 continue
             if not text.strip():
                 limitations.append(_limitation("page_text_unavailable", f"第 {page_index + 1} 页无可提取文本"))
-                unreadable_pages.append(page_index)
             else:
                 readable_pages.append(page_index)
             texts.append(text)
+        if timed_out_position is not None:
+            remaining = pages[timed_out_position:]
+            limitations.append(
+                _limitation("extract_timeout", f"所选范围未在 {timeout_s:g} 秒内完成，未完成的页记为未读")
+            )
+            texts.extend([""] * len(remaining))
         body = "\n".join(texts)
         budget.enforce_codepoints(len(body))
         unread_ranges: list[dict[str, Any]] = []
@@ -1859,8 +1926,17 @@ def _parse_pdf(data: bytes, selection: Selection, budget: AttachmentBudget) -> P
             # 写入页区间会被父侧判 worker_protocol_invalid；缺口改由 limitations 与
             # PARTIAL/limited coverage 表达，只有 limited 选择才逐页列出可读/未读区间。
             if selection.kind == "limited":
-                read_ranges = _page_range_atoms(readable_pages)
-                unread_ranges = _page_range_atoms(unreadable_pages)
+                readable = set(readable_pages)
+                read_ranges = []
+                unread_ranges = []
+                # 逐选择原子展开：合并后的区间必须仍被单个选择原子包含（§3.3.1），
+                # 相邻但分属不同选择原子（如 1—2 与 3—4）不得跨原子合并，
+                # 否则父侧判 not_in_selection。
+                for atom in selection.ranges:
+                    assert isinstance(atom, PagesRange)
+                    atom_pages = range(atom.start - 1, atom.end)
+                    read_ranges.extend(_page_range_atoms([index for index in atom_pages if index in readable]))
+                    unread_ranges.extend(_page_range_atoms([index for index in atom_pages if index not in readable]))
             else:
                 read_ranges = []
         return ParsedAttachment(
@@ -2050,7 +2126,7 @@ def _dispatch_parse(
             # 不把 IndexError/ValueError 泄漏出解析边界（worker 否则无 JSON 结果）。
             raise AttachmentParseError("invalid_structure", "XLSX cached cell values are unreadable") from exc
     if knit is AttachmentKind.PDF:
-        return _parse_pdf(data, selection, budget)
+        return _parse_pdf(data, selection, budget, deadline, timeout_s)
     if knit in (AttachmentKind.PNG, AttachmentKind.JPEG):
         return _parse_image(data, selection)
     raise AttachmentParseError("unsupported_kind", f"attachment kind {kind.value!r} is not supported")
