@@ -41,6 +41,11 @@ Windows Job Object、POSIX 进程组、关闭 stdin → 宽限 → 杀进程树�
 ------
 子进程由本模块自管，``_stop_server_process`` 之后 ``process.returncode`` 可读，
 经 ``on_exit_status`` 回调写入诊断；仍未观测到则保持 ``None``（不伪造 0）。
+
+自行退出（EOF）
+---------------
+进程自己退出时 stdout 读到 EOF/读失败：仅结束读循环会让调用方仍认为连接有效，
+故此处另经 ``on_process_exit`` 通知一次（从 ``shutting_down`` 之后的收尾不通知）。
 """
 
 from __future__ import annotations
@@ -139,6 +144,7 @@ class BudgetedStdioTransport(ClientTransport):
         encoding_error_handler: str = "strict",
         on_exit_status: Callable[[int | None], None] | None = None,
         on_limit_exceeded: Callable[[str], None] | None = None,
+        on_process_exit: Callable[[], None] | None = None,
     ) -> None:
         self._command = command
         self._args = args
@@ -150,6 +156,7 @@ class BudgetedStdioTransport(ClientTransport):
         self._encoding_error_handler = encoding_error_handler
         self._on_exit_status = on_exit_status
         self._on_limit_exceeded = on_limit_exceeded
+        self._on_process_exit = on_process_exit
 
     @asynccontextmanager
     async def connect_session(
@@ -183,6 +190,9 @@ class BudgetedStdioTransport(ClientTransport):
                             try:
                                 chunk = await process.stdout.receive()
                             except anyio.EndOfStream:
+                                # 进程自行退出：连接已不可用，必须上报而不是只结束读循环。
+                                if not shutting_down:
+                                    self._report_process_exit()
                                 return
                             try:
                                 messages = reader.feed(chunk)
@@ -201,6 +211,7 @@ class BudgetedStdioTransport(ClientTransport):
             except (anyio.BrokenResourceError, ConnectionError):
                 if not shutting_down:
                     logger.warning("Reading from the MCP server's stdout failed mid-session")
+                    self._report_process_exit()
 
         async def stdin_writer() -> None:
             assert process.stdin, "Opened process is missing stdin"
@@ -260,3 +271,9 @@ class BudgetedStdioTransport(ClientTransport):
     def _report_exit_status(self, code: int | None) -> None:
         if self._on_exit_status is not None:
             self._on_exit_status(code)
+
+    def _report_process_exit(self) -> None:
+        """子进程自行退出/读失败：通知一次，供上层立即使连接判据失效（不重连）。"""
+
+        if self._on_process_exit is not None:
+            self._on_process_exit()

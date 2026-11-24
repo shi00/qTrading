@@ -203,6 +203,23 @@ class TestLoad:
         _assert_immutable_state(vm.state)
 
     @pytest.mark.asyncio
+    async def test_refresh_after_process_exit_shows_disconnected_without_connecting(self) -> None:
+        """N11：进程自行退出后刷新不得再显示已连接，也不得顺手建立新连接。"""
+
+        fake = _FakeLifecycle([_config()])
+        fake.connected_keys.add(_identity().stable_key())
+        vm = _vm(fake)
+        await vm.load()
+        assert [row.connected for row in vm.state.rows] == [True]
+
+        fake.connected_keys.discard(_identity().stable_key())  # 子进程自行退出
+
+        await vm.load()
+
+        assert [row.connected for row in vm.state.rows] == [False]
+        assert fake.connect_calls == []
+
+    @pytest.mark.asyncio
     async def test_load_failure_keeps_loaded_false(self) -> None:
         fake = _FakeLifecycle([_config()])
         fake.fail_with = RuntimeError("db is down token=secret")
