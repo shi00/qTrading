@@ -463,12 +463,14 @@ class TestRecoveryFenceGate:
     async def test_fenced_session_execution_is_blocked(self) -> None:
         conn = _FenceConn(
             fence_rows=[_fenced(["s1"])],
+            guard_row=SimpleNamespace(slot_id="global_guard"),
             execution_rows=[
                 SimpleNamespace(
                     execution_id="exec-1",
                     session_id="s1",
                     display_state="running",
                     owner_epoch=1,
+                    node_id="root",
                     round_id="round-1",
                     workflow_id="wf-1",
                     run_epoch=1,

@@ -10984,6 +10984,15 @@ class AgentDao(BaseDao):
         不合格项进入 ``blocked``（明确拒绝，不静默跳过），对应原生集合不返回，
         故不会被 resume。
 
+        **总占位承接（N33）**：合格项在该执行下仍有开放总票时，在同一事务内把
+        该票据行原地承接给新代次（``owner_epoch``/``run_epoch``/``round_id``），
+        不释放重取、不新增行——否则恢复后会话唯一总位仍记在旧代次上：旧票因
+        代次不符不能再领，新票因会话上限 1 被拒，旧代迟到释放还会误放新代容量。
+        承接只在可核时进行：执行下开放总票恰为一张、会话开放总票恰为一张、
+        节点与当前轮一致、且未处于释放尾段未知（``released_at`` 有值而未核）；
+        任一不满足即保原票并把该项拒绝在 ``blocked``（``slot_takeover_unverified``），
+        不授予、不复接。锁序与认领一致：guard → execution → 票据。
+
         Raises:
             AgentServiceError: INPUT_INVALID（入参非法/空集合/epoch 非正/版本空）。
         """
@@ -11003,8 +11012,12 @@ class AgentDao(BaseDao):
         granted: list[str] = []
         workflow_ids: list[str] = []
         round_ids: list[str] = []
+        # 承接票据：slot_id → (承接前 owner_epoch, 承接到的当前轮)。
+        takeover_slots: list[tuple[str, int, str]] = []
         now = datetime.now(UTC)
         async with engine.begin() as conn:
+            # 与认领共用同一序化点（§5.4 锁序第 1 条）：guard → execution → 票据。
+            await self._lock_resource_guard(conn, identity)
             rows = (
                 await conn.execute(
                     sa.select(
@@ -11012,6 +11025,7 @@ class AgentDao(BaseDao):
                         AgentExecution.session_id,
                         AgentExecution.display_state,
                         AgentExecution.owner_epoch,
+                        AgentExecution.node_id,
                         AgentRound.round_id,
                         AgentRound.workflow_id,
                         AgentRound.run_epoch,
@@ -11084,6 +11098,67 @@ class AgentDao(BaseDao):
                 if row.run_epoch is not None and request.run_epoch <= row.run_epoch:
                     blocked.append((execution_id, "epoch_not_advanced"))
                     continue
+                # 总占位承接（N33）：本执行已认领且仍开放的总票必须随代次原地
+                # 承接；承接不可核即保原票并拒绝授予（不把「票据不可用」当恢复成功）。
+                owned_total_slots = (
+                    await conn.execute(
+                        sa.select(
+                            AgentResourceSlot.slot_id,
+                            AgentResourceSlot.node_id,
+                            AgentResourceSlot.round_id,
+                            AgentResourceSlot.owner_epoch,
+                            AgentResourceSlot.run_epoch,
+                            AgentResourceSlot.released_at,
+                        )
+                        .where(
+                            AgentResourceSlot.user_scope == request.user_scope,
+                            AgentResourceSlot.execution_id == execution_id,
+                            AgentResourceSlot.slot_kind == ResourceSlotKind.TOTAL.value,
+                            sa.or_(
+                                AgentResourceSlot.released_at.is_(None),
+                                AgentResourceSlot.release_verified.is_(False),
+                            ),
+                        )
+                        .order_by(AgentResourceSlot.slot_id)
+                        .with_for_update()
+                    )
+                ).all()
+                if owned_total_slots:
+                    session_open_total = (
+                        await conn.execute(
+                            sa.select(sa.func.count())
+                            .select_from(AgentResourceSlot)
+                            .join(
+                                AgentExecution,
+                                sa.and_(
+                                    AgentExecution.user_scope == AgentResourceSlot.user_scope,
+                                    AgentExecution.execution_id == AgentResourceSlot.execution_id,
+                                ),
+                            )
+                            .where(
+                                AgentResourceSlot.slot_kind == ResourceSlotKind.TOTAL.value,
+                                AgentResourceSlot.user_scope == request.user_scope,
+                                AgentExecution.session_id == row.session_id,
+                                sa.or_(
+                                    AgentResourceSlot.released_at.is_(None),
+                                    AgentResourceSlot.release_verified.is_(False),
+                                ),
+                            )
+                        )
+                    ).scalar_one()
+                    slot = owned_total_slots[0]
+                    if (
+                        len(owned_total_slots) != 1
+                        or session_open_total != 1
+                        or slot.node_id != row.node_id
+                        or (slot.round_id is not None and slot.round_id != row.round_id)
+                        or slot.released_at is not None
+                        or slot.owner_epoch > row.owner_epoch
+                        or (row.run_epoch is not None and slot.run_epoch > row.run_epoch)
+                    ):
+                        blocked.append((execution_id, "slot_takeover_unverified"))
+                        continue
+                    takeover_slots.append((slot.slot_id, slot.owner_epoch, row.round_id))
                 granted.append(execution_id)
                 workflow_ids.append(row.workflow_id)
                 round_ids.append(row.round_id)
@@ -11113,6 +11188,26 @@ class AgentDao(BaseDao):
                         updated_at=now,
                     )
                 )
+                # 总票原地承接（N33）：同一票据行改代次/当前轮，不释放、不新增；
+                # 只匹配已核承接前代次与仍开放状态（旧代迟到释放按完整匹配失败）。
+                for slot_id, prior_owner_epoch, round_id in takeover_slots:
+                    await conn.execute(
+                        sa.update(AgentResourceSlot)
+                        .where(
+                            AgentResourceSlot.user_scope == request.user_scope,
+                            AgentResourceSlot.slot_id == slot_id,
+                            AgentResourceSlot.owner_epoch == prior_owner_epoch,
+                            AgentResourceSlot.released_at.is_(None),
+                            AgentResourceSlot.release_verified.is_(False),
+                        )
+                        .values(
+                            owner_epoch=request.owner_epoch,
+                            run_epoch=request.run_epoch,
+                            round_id=round_id,
+                            revision=AgentResourceSlot.revision + 1,
+                            updated_at=now,
+                        )
+                    )
         return RecoveryGrantFact(
             user_scope=request.user_scope,
             owner_epoch=request.owner_epoch,
