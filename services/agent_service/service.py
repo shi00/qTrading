@@ -136,6 +136,7 @@ from services.agent_service.comparison import (
     execute_group_stop,
     freeze_comparison_group,
     observations_from_executions,
+    plan_lane_queue,
     plan_lane_retry,
     require_group_lane_consistency,
     verify_group_manifest_authority,
@@ -786,10 +787,25 @@ class AgentService:
     def _lane_receipts(
         accepted: tuple[tuple[str, SubmissionReceipt | None, str | None], ...],
         dispatch_outcomes: Mapping[str, DispatchOutcome] | None = None,
+        capacity_reasons: Mapping[str, str] | None = None,
     ) -> tuple[ComparisonLaneReceipt, ...]:
+        """逐路受理 + 派发事实。
+
+        真实派发结果优先；未被派发的**已受理**路若被限额挡下（本批从未尝试），
+        回执如实记 ``dispatch_submitted=False`` 并带上真实容量原因，不折叠成
+        「未尝试」（``None``）。受理失败的路保持 ``None``（原因在 ``error_code``）。
+        """
+
         receipts: list[ComparisonLaneReceipt] = []
         for lane_ref, receipt, error_code in accepted:
             outcome = dispatch_outcomes.get(lane_ref) if dispatch_outcomes is not None else None
+            capacity_reason = capacity_reasons.get(lane_ref) if capacity_reasons is not None else None
+            if outcome is not None:
+                dispatch_submitted, dispatch_reason = outcome.submitted, outcome.reason
+            elif receipt is not None and capacity_reason is not None:
+                dispatch_submitted, dispatch_reason = False, capacity_reason
+            else:
+                dispatch_submitted, dispatch_reason = None, None
             receipts.append(
                 ComparisonLaneReceipt(
                     lane_ref=lane_ref,
@@ -797,8 +813,8 @@ class AgentService:
                     command_record_id=receipt.command_record_id if receipt is not None else None,
                     commit_state=receipt.commit_state if receipt is not None else None,
                     error_code=error_code,
-                    dispatch_submitted=outcome.submitted if outcome is not None else None,
-                    dispatch_reason=outcome.reason if outcome is not None else None,
+                    dispatch_submitted=dispatch_submitted,
+                    dispatch_reason=dispatch_reason,
                 )
             )
         return tuple(receipts)
@@ -835,7 +851,9 @@ class AgentService:
         准入失败均沿用原语义；未注入派发器时零派发）。逐路按 D05 总位/会话单总
         执行顺序推进，单路派发失败只标该路 ``dispatch_failed``，不阻断其他路；
         本批只回传终态事实，未完成的路保持未收敛，再次调用同一输入即可接续
-        （受理与派发均幂等，不重复执行/计费）。``CancelledError`` 传播（R2）。
+        （受理与派发均幂等，不重复执行/计费）。被限额挡下、本批未尝试派发的已
+        受理路，回执记 ``dispatch_submitted=False`` 并给出真实容量原因（全局总位
+        或本会话单总执行）。``CancelledError`` 传播（R2）。
         """
 
         self._require_open("run_comparison")
@@ -861,8 +879,10 @@ class AgentService:
             )
 
         dispatch_outcomes: dict[str, DispatchOutcome] = {}
+        attempted: set[str] = set()
 
         async def start_lane(lane: Any) -> str:
+            attempted.add(lane.lane_ref)
             if group.group_ref in self._stopped_groups:
                 # 组停止已落定：任何在途编排的下一路一律零派发（不再启动新路）。
                 raise _LaneDispatchRefused("group_stopped")
@@ -903,10 +923,20 @@ class AgentService:
             active_session_executions=active_session_executions,
             idle_observation_limit=1,
         )
+        # 本批被限额挡下、从未尝试派发的路：即时回执给出真实容量原因（总位/会话）。
+        capacity_reasons = {
+            decision.lane_ref: decision.reason
+            for decision in plan_lane_queue(
+                group,
+                active_total_executions=active_total_executions,
+                active_session_executions=active_session_executions,
+            )
+            if decision.decision == "queued" and decision.reason is not None and decision.lane_ref not in attempted
+        }
         return ComparisonRunReceipt(
             group_ref=group.group_ref,
             manifest_digest=group.manifest_digest,
-            lanes=self._lane_receipts(accepted, dispatch_outcomes),
+            lanes=self._lane_receipts(accepted, dispatch_outcomes, capacity_reasons),
             view=view,
             dispatcher_wired=True,
         )
