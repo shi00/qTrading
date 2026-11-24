@@ -32,6 +32,7 @@ from core.agent_types import (
     ConsumptionState,
     DeliveryState,
     DraftPayload,
+    DraftReadQuery,
     DraftSaveCommand,
     Mode,
     Purpose,
@@ -286,6 +287,38 @@ class TestSaveDraft:
         assert row.draft_revision == 2
         rows = await _command_rows(real_embedded_pg.url)
         assert len(rows) == 1
+
+    async def test_source_ref_order_round_trips_and_reorder_is_conflict(self, real_embedded_pg: ConnectionInfo) -> None:
+        """资料卡非 ID 顺序写入后原序回读；同键仅换序声明为异输入（UX P03）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        await _seed_asset(dao, "src-a")
+        await _seed_asset(dao, "src-b")
+        chosen = tuple(
+            SourceVersionRef(
+                source_kind=SourceKind.USER_MESSAGE,
+                source_id=asset_id,
+                source_version="1",
+                source_digest=_DIGEST,
+            )
+            for asset_id in ("src-b", "src-a")
+        )
+        command = _command(payload=_payload(source_refs=chosen))
+        first = await dao.save_draft(command)
+
+        reopened = await dao.read_draft(DraftReadQuery(session_id="s1"), user_scope=_USER)
+        assert reopened.payload is not None
+        assert [ref.source_id for ref in reopened.payload.source_refs] == ["src-b", "src-a"]
+
+        assert await dao.save_draft(command) == first
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.save_draft(_command(payload=_payload(source_refs=tuple(reversed(chosen)))))
+        _expect_error(excinfo, AgentErrorCode.INPUT_CONFLICT)
+
+        row = await _session_row(real_embedded_pg.url)
+        assert row.draft_revision == 2
+        assert [item["source_id"] for item in row.draft_payload["source_refs"]] == ["src-b", "src-a"]
 
     async def test_same_command_different_input_conflicts(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
