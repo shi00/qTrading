@@ -133,6 +133,7 @@ def _read(**overrides: object) -> ArtifactRead:
         "next_cursor": None,
         "body_available": True,
         "unavailable_reason": None,
+        "question_public_text": "如何评估该策略的风险？",
     }
     values.update(overrides)
     return ArtifactRead(**values)  # pyright: ignore[reportArgumentType]
@@ -387,6 +388,7 @@ class TestHappyPath:
         assert index["metadata:source_available_state"].value_text == "available"
         assert index["metadata:current_source_state"].value_text == "unknown"
         assert index["body:"].value_text == "成果正文"
+        assert index["metadata:question_public"].value_text == "如何评估该策略的风险？"
         assert index["payload:/s"].value_text == "00123"
         assert index["payload:/n/1"].value_type == "null"
 
@@ -435,6 +437,20 @@ class TestCompleteBody:
 
 
 class TestPrePublishFailures:
+    async def test_missing_public_question_is_reported_and_never_publishes(self) -> None:
+        store = FakeStore()
+        dao = FakePhaseDao()
+
+        outcome = await _service(
+            artifacts=FakeArtifacts([_read(question_public_text=None)]), dao=dao, store=store
+        ).deliver(_command(), _context())
+
+        assert dao.phases == ["manifest_saved"]
+        assert store.staged_contents == []
+        assert store.published == []
+        assert outcome.receipt.error_code == "question_public_unavailable"
+        assert outcome.receipt.publish_effect == "not_attempted"
+
     async def test_stage_error_keeps_manifest_saved_and_never_publishes(self) -> None:
         store = FakeStore()
         store.stage_error = DeliveryFileError("delivery_target_changed", "target changed")

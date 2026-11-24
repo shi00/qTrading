@@ -2556,7 +2556,9 @@ class AgentDao(BaseDao):
         - 行内容严格解码（冻结值域），坏行 → ``OPERATION_UNKNOWN``；
         - 正文取 ``body_text`` 或 ``body_ref`` 载荷（核 owner 三元组/编码/长度/
           SHA-256），按码点分页并给下一游标，不静默截断；失效游标 → ``INPUT_INVALID``；
-        - 正文未保存与已清理分开报告，不用空正文冒充成果（R21）。
+        - 正文未保存与已清理分开报告，不用空正文冒充成果（R21）；
+        - 附带本成果所回答问题的**获准公开表示**（用户消息 ``search_text`` 投影）；
+          取不到/歧义时为 ``None``，不回落私密原文（R9/R21）。
         """
 
         self._check_engine()
@@ -2639,6 +2641,7 @@ class AgentDao(BaseDao):
             source_ref_states = await self._artifact_source_states(
                 conn, payload=item.result_payload, user_scope=user_scope, identity=identity
             )
+            question_public_text = await self._artifact_question_public(conn, item=item, user_scope=user_scope)
             return ArtifactRead(
                 artifact_id=item.artifact_id,
                 artifact_version=item.artifact_version,
@@ -2662,7 +2665,88 @@ class AgentDao(BaseDao):
                 body_available=body_available,
                 unavailable_reason=unavailable_reason,
                 source_ref_states=source_ref_states,
+                question_public_text=question_public_text,
             )
+
+    async def _artifact_question_public(
+        self,
+        conn: AsyncConnection,
+        *,
+        item: Any,
+        user_scope: str,
+    ) -> str | None:
+        """成果所回答问题的**获准公开表示**（用户消息 ``search_text`` 公开投影）。
+
+        - 只认该执行本输入版绑定的受理输入源（``accepted_input``，``consumer_version``
+          即输入版），从源资产的 ``user_message_origin`` 定位原消息；
+        - 只输出消息的公开导出投影 ``search_text``（中和 + R9 脱敏）；正文
+          ``body_text`` 为私密原文，绝不用于导出，也不作为回退（R9）；
+        - 无候选 / 多候选文本不一致 / 消息缺失 / 投影为空 → ``None``：调用方不得
+          把「取不到」当完整交付，也不得用原文补齐（R21）。
+        """
+
+        rows = (
+            await conn.execute(
+                sa.select(AgentAssetVersion.metadata_payload)
+                .join(
+                    AgentSourceLink,
+                    sa.and_(
+                        AgentSourceLink.user_scope == AgentAssetVersion.user_scope,
+                        AgentSourceLink.source_id == AgentAssetVersion.asset_id,
+                        AgentSourceLink.source_version == AgentAssetVersion.asset_version,
+                    ),
+                )
+                .where(
+                    AgentSourceLink.user_scope == user_scope,
+                    AgentSourceLink.consumer_kind == "execution",
+                    AgentSourceLink.consumer_id == item.execution_id,
+                    AgentSourceLink.consumer_version == str(item.input_revision),
+                    AgentSourceLink.relation_kind == SourceRelationKind.ACCEPTED_INPUT.value,
+                    AgentAssetVersion.asset_kind == "source",
+                )
+            )
+        ).fetchall()
+        message_ids: list[str] = []
+        for row in rows:
+            metadata = row.metadata_payload
+            if not isinstance(metadata, dict):
+                continue
+            origin = metadata.get("user_message_origin")
+            if not isinstance(origin, dict):
+                continue
+            message_id = origin.get("message_id")
+            if isinstance(message_id, str) and message_id:
+                message_ids.append(message_id)
+        if not message_ids:
+            return None
+        message_rows = (
+            await conn.execute(
+                sa.select(
+                    AgentMessage.message_id,
+                    AgentMessage.role,
+                    AgentMessage.search_text,
+                    AgentMessage.payload,
+                ).where(
+                    AgentMessage.user_scope == user_scope,
+                    AgentMessage.message_id.in_(list(dict.fromkeys(message_ids))),
+                )
+            )
+        ).fetchall()
+        texts: set[str] = set()
+        for row in message_rows:
+            if row.role != "user":
+                continue
+            payload = row.payload
+            if isinstance(payload, dict) and (
+                payload.get("message_id") not in (None, row.message_id) or payload.get("role") not in (None, "user")
+            ):
+                continue
+            text = row.search_text
+            if isinstance(text, str) and text:
+                texts.add(text)
+        if len(texts) != 1:
+            return None
+        return texts.pop()
 
     @staticmethod
     def _artifact_source_refs(payload: CanonicalJson | None, identity: str) -> tuple[SourceVersionRef, ...]:

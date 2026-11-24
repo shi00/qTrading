@@ -7141,6 +7141,9 @@ class ArtifactRead:
     用户确认清理删除；``next_cursor`` 只在正文还有后续码点时给出。``result_payload``
     保留结构/限制/证据等元数据，不复制整份正文（§9.7）。``source_ref_states`` 为
     成果引用的每个来源版本的当前可得性（逐项核定；无来源引用时为空元组）。
+    ``question_public_text`` 为本成果所回答问题的**获准公开表示**（用户消息的公开
+    导出投影，已中和/脱敏），不是用户原文；无法安全确定时为 ``None``（R21，调用
+    方不得把缺失当完整交付）。
     """
 
     artifact_id: str
@@ -7165,6 +7168,7 @@ class ArtifactRead:
     body_available: bool
     unavailable_reason: str | None
     source_ref_states: tuple[ArtifactSourceState, ...] = ()
+    question_public_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -10363,6 +10367,7 @@ _DELIVERY_METADATA_ORDER: Final[tuple[str, ...]] = (
     "session_id",
     "execution_id",
     "round_id",
+    "question_public",
     "artifact_kind",
     "input_revision",
     "actual_input_digest",
@@ -10585,6 +10590,10 @@ def build_delivery_fields(
     状态（写入 ``source`` 记录域，一项一行，缺来源行不得被聚合列掩盖）；
     ``current_source_state`` 是该集合的聚合单列，只在无逐项引用时直接采用。
     未显式提供时按 ``unknown``（未核 ≠ 可用，R21）。三者都按统一词表口径规范化。
+
+    交付文件必须能独立说明答复针对的问题：``read.question_public_text`` 为获准
+    公开表示，缺失/无法安全取得即拒绝（``question_public_unavailable``），不得
+    用私密原文补齐、也不得渲染空问题冒充完整交付（R9/R21）。
     """
 
     if not isinstance(read, ArtifactRead):
@@ -10594,6 +10603,8 @@ def build_delivery_fields(
     full_body = body_text if body_text is not None else read.body_text
     if read.body_available and full_body is None:
         _fail("body_missing", "$.delivery.artifact_read.body_text")
+    if not isinstance(read.question_public_text, str) or not read.question_public_text:
+        _fail("question_public_unavailable", "$.delivery.artifact_read.question_public_text")
 
     states = tuple(current_source_states)
     if any(not isinstance(state, ArtifactSourceState) for state in states):
@@ -10613,6 +10624,7 @@ def build_delivery_fields(
         "session_id": read.session_id,
         "execution_id": read.execution_id,
         "round_id": read.round_id,
+        "question_public": read.question_public_text,
         "artifact_kind": read.artifact_kind,
         "input_revision": read.input_revision,
         "actual_input_digest": read.actual_input_digest,
