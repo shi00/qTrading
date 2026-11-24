@@ -8165,6 +8165,7 @@ class AgentDao(BaseDao):
             keys_union.c.sort_version,
         ).subquery()
         aggregate = sa.func.string_agg(
+            sa.literal(","),
             sa_pg.aggregate_order_by(
                 ordered.c.key_text,
                 ordered.c.sort_moment,
@@ -8172,7 +8173,6 @@ class AgentDao(BaseDao):
                 ordered.c.anchor_id,
                 ordered.c.sort_version,
             ),
-            sa.literal(","),
         )
         row = (await conn.execute(sa.select(sa.func.md5(sa.func.coalesce(aggregate, sa.literal("")))))).first()
         digest = "" if row is None or row[0] is None else str(row[0])

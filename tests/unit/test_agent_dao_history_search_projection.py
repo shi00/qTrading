@@ -175,6 +175,9 @@ class TestHistoryWindowDigest:
         digest_sql = next(_literal_sql(stmt) for stmt in conn.statements if "md5(" in _literal_sql(stmt))
         assert "string_agg(" in digest_sql
         assert "ORDER BY" in digest_sql
+        # 分隔符是第一实参：若误放进 aggregate_order_by，会退化为单参 string_agg(text) 而报错
+        assert "string_agg(','," in digest_sql
+        assert digest_sql.index("string_agg(',',") < digest_sql.index("ORDER BY")
         assert "concat_ws('|'" in digest_sql
         assert "UNION ALL" in digest_sql
 

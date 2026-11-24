@@ -793,7 +793,13 @@ class TestPagingAndFailClosed:
             await dao.get_execution_snapshot("exec-other", user_scope=USER_SCOPE, limit=2, message_cursor=cursor)
         assert _code_of(exc) == AgentErrorCode.REVISION_CONFLICT
         # 当前轮推进后旧游标失效（版本失效）：新目标须重首读，不续用旧位置
+        # 同一执行仅允许一个 active 轮（idx_agent_round_active）：先收口旧轮再插新轮
         async with dao.engine.begin() as conn:
+            await conn.execute(
+                sa.update(AgentRound)
+                .where(AgentRound.user_scope == USER_SCOPE, AgentRound.execution_id == execution_id)
+                .values(active_round=False)
+            )
             await conn.execute(
                 insert(AgentRound).values(
                     user_scope=USER_SCOPE,
