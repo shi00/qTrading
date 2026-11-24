@@ -1206,6 +1206,7 @@ class TestPresetManagement:
         """refresh_presets 写入排序稳定的方案名元组到 state."""
         from unittest.mock import AsyncMock
 
+        vm._set_state(selected_strategy="value_strategy")
         with patch("ui.viewmodels.strategy_meta_mixin.ThreadPoolManager") as mock_tpm_cls:
             mock_tpm = mock_tpm_cls.return_value
             mock_tpm.run_async = AsyncMock(return_value={"b": {}, "a": {}})
@@ -1213,6 +1214,57 @@ class TestPresetManagement:
             await vm.refresh_presets("value_strategy")
 
         assert vm.state.preset_names == ("a", "b")
+
+    @pytest.mark.asyncio
+    async def test_refresh_presets_discards_late_read_after_strategy_switch(self, vm):
+        """N09: 旧策略的迟到回读不得覆盖切换后新策略的方案列表."""
+        from unittest.mock import AsyncMock
+
+        release = asyncio.Event()
+
+        async def _slow_read(*_args, **_kwargs):
+            await release.wait()
+            return {"b_preset": {}}
+
+        with patch("ui.viewmodels.strategy_meta_mixin.ThreadPoolManager") as mock_tpm_cls:
+            mock_tpm_cls.return_value.run_async = AsyncMock(side_effect=_slow_read)
+            vm._set_state(selected_strategy="b_strategy", preset_names=("b_old",))
+            task = asyncio.create_task(vm.refresh_presets("b_strategy"))
+            await asyncio.sleep(0)  # 让 B 的刷新先登记在途
+            # 用户快速切换到 A，A 的刷新已完成并写入自己的方案列表
+            vm._set_state(selected_strategy="a_strategy", preset_names=("a_preset",))
+            release.set()
+            await task
+
+        assert vm.state.preset_names == ("a_preset",)
+
+    @pytest.mark.asyncio
+    async def test_refresh_presets_discards_older_same_strategy_read(self, vm):
+        """N09: 同策略下先发起的迟到回读不得覆盖后发起刷新的结果."""
+        from unittest.mock import AsyncMock
+
+        release_first = asyncio.Event()
+        call_count = 0
+
+        async def _read(*_args, **_kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                await release_first.wait()
+                return {"old": {}}
+            return {"new": {}}
+
+        with patch("ui.viewmodels.strategy_meta_mixin.ThreadPoolManager") as mock_tpm_cls:
+            mock_tpm_cls.return_value.run_async = AsyncMock(side_effect=_read)
+            vm._set_state(selected_strategy="value_strategy")
+            first = asyncio.create_task(vm.refresh_presets("value_strategy"))
+            await asyncio.sleep(0)
+            second = asyncio.create_task(vm.refresh_presets("value_strategy"))
+            await second
+            release_first.set()
+            await first
+
+        assert vm.state.preset_names == ("new",)
 
     @pytest.mark.asyncio
     async def test_refresh_presets_clears_when_no_strategy(self, vm):
