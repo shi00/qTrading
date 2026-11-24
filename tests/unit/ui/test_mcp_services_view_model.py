@@ -20,6 +20,8 @@ import pytest
 
 from core.agent_types import (
     MCP_BUDGET_FIELDS,
+    AgentErrorCode,
+    AgentServiceError,
     MCPBudgetProfile,
     MCPReadOnlyAudit,
     MCPServiceIdentity,
@@ -30,6 +32,11 @@ from services.agent_service.mcp import (
     MCPConnectionTestReceipt,
     MCPServerConfig,
     MCPTransportConfig,
+)
+from services.agent_service.mcp_config_store import (
+    LISTING_PATH_UNAVAILABLE,
+    LISTING_UNREADABLE,
+    MCPConfigListEntry,
 )
 from services.agent_service.mcp_lifecycle import MCPConnectReceipt, MCPServiceLifecycle
 from ui.viewmodels import Message
@@ -86,14 +93,28 @@ class _FakeLifecycle:
         self.residue_retries: list[MCPServiceIdentity] = []
         self.residue_closed = 1
         self.fail_with: BaseException | None = None
+        #: 路径失效的配置身份（列表标注为不可用，但仍可载入编辑）。
+        self.path_invalid_keys: set[str] = set()
+        #: 连结构都无法解码的记录（列表跳过并计数）。
+        self.extra_entries: list[MCPConfigListEntry] = []
+        #: 使用点仍拒绝的身份（模拟存储读取期的 fail-closed）。
+        self.reject_identities: set[str] = set()
 
     def _maybe_fail(self) -> None:
         if self.fail_with is not None:
             raise self.fail_with
 
-    async def list_services(self) -> tuple[MCPServerConfig, ...]:
+    async def list_services(self) -> tuple[MCPConfigListEntry, ...]:
         self._maybe_fail()
-        return tuple(self.configs)
+        entries = [
+            MCPConfigListEntry(
+                identity_key=config.identity.stable_key(),
+                config=config,
+                problem=(LISTING_PATH_UNAVAILABLE if config.identity.stable_key() in self.path_invalid_keys else None),
+            )
+            for config in self.configs
+        ]
+        return tuple(entries) + tuple(self.extra_entries)
 
     async def save_config(self, config: MCPServerConfig) -> MCPConfigSaveReceipt:
         self._maybe_fail()
@@ -104,6 +125,12 @@ class _FakeLifecycle:
 
     async def connection_test(self, identity: MCPServiceIdentity) -> MCPConnectionTestReceipt:
         self._maybe_fail()
+        if identity.stable_key() in self.reject_identities:
+            raise AgentServiceError(
+                AgentErrorCode.CONFIG_UNAVAILABLE,
+                "mcp config payload is not decodable",
+                identity.stable_key(),
+            )
         self.tested.append(identity)
         return MCPConnectionTestReceipt(
             identity=identity,
@@ -227,6 +254,76 @@ class TestLoad:
             await vm.load()
         assert type(exc.value) is asyncio.CancelledError
         assert vm.state.busy is False
+
+
+class TestPerRowTolerance:
+    """A 路径失效 + B 健康：同一列表共存，A 可编辑修复，使用点仍拒绝（J25）。"""
+
+    @pytest.mark.asyncio
+    async def test_failed_row_does_not_hide_healthy_row(self) -> None:
+        fake = _FakeLifecycle([_config("alpha", 1), _config("beta", 2)])
+        fake.path_invalid_keys.add(_identity("alpha", 1).stable_key())
+        vm = _vm(fake)
+
+        await vm.load()
+
+        assert vm.state.loaded is True
+        assert [row.service_id for row in vm.state.rows] == ["alpha", "beta"]
+        assert vm.state.rows[0].problem_key == "mcp_row_path_invalid"
+        assert vm.state.rows[1].problem_key is None
+        assert vm.state.unreadable_count == 0
+
+    @pytest.mark.asyncio
+    async def test_failed_row_stays_editable_and_operations_are_still_refused(self) -> None:
+        key = _identity("alpha", 1).stable_key()
+        fake = _FakeLifecycle([_config("alpha", 1), _config("beta", 2)])
+        fake.path_invalid_keys.add(key)
+        fake.reject_identities.add(key)
+        vm = _vm(fake)
+        await vm.load()
+
+        vm.select_service(key)
+
+        assert vm.state.draft.command == "/bin/echo"
+        assert vm.state.draft.service_id == "alpha"
+        assert vm.state.draft_saved is True
+
+        await vm.connection_test()
+
+        assert fake.tested == []
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_error"
+        assert vm.state.status_level == STATUS_ERROR
+
+        await vm.connect()
+
+        assert fake.connect_calls == []
+
+    @pytest.mark.asyncio
+    async def test_healthy_row_remains_independently_manageable(self) -> None:
+        fake = _FakeLifecycle([_config("alpha", 1), _config("beta", 2)])
+        fake.path_invalid_keys.add(_identity("alpha", 1).stable_key())
+        vm = _vm(fake)
+        await vm.load()
+
+        vm.select_service(_identity("beta", 2).stable_key())
+        await vm.connection_test()
+
+        assert fake.tested == [_identity("beta", 2)]
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_tested"
+
+    @pytest.mark.asyncio
+    async def test_undecodable_record_is_counted_not_listed(self) -> None:
+        fake = _FakeLifecycle([_config("beta", 2)])
+        fake.extra_entries.append(MCPConfigListEntry(identity_key="mcp_service_deadbeef", problem=LISTING_UNREADABLE))
+        vm = _vm(fake)
+
+        await vm.load()
+
+        assert vm.state.loaded is True
+        assert [row.service_id for row in vm.state.rows] == ["beta"]
+        assert vm.state.unreadable_count == 1
 
 
 class TestDraftEditing:

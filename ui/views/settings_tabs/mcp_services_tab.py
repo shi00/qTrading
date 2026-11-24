@@ -26,6 +26,7 @@ from ui.viewmodels.mcp_services_view_model import (
     STATUS_SUCCESS,
     STATUS_WARNING,
     MCPConfigDraft,
+    MCPServiceRow,
     MCPServicesState,
     MCPServicesViewModel,
 )
@@ -336,62 +337,81 @@ def MCPServicesTab(lifecycle: Any | None = None) -> ft.Container:
             spacing=AppStyles.SPACING_SM,
         )
 
+    def _row_status(row: MCPServiceRow) -> ft.Text:
+        """行状态：失效原因优先（不把已知不可用渲染成「未连接」）。"""
+
+        if row.problem_key is not None:
+            return ft.Text(I18n.get(row.problem_key), size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.WARNING)
+        return ft.Text(
+            I18n.get("mcp_state_connected" if row.connected else "mcp_state_disconnected"),
+            size=AppStyles.FONT_SIZE_BODY_SM,
+            color=AppColors.SUCCESS if row.connected else AppColors.TEXT_SECONDARY,
+        )
+
     def _build_service_list(current: MCPServicesState) -> ft.Control:
         if not current.loaded:
-            return ft.Text(
+            body: ft.Control = ft.Text(
                 I18n.get("mcp_not_loaded"),
                 size=AppStyles.FONT_SIZE_BODY_SM,
                 color=AppColors.WARNING,
             )
-        if not current.rows:
-            return ft.Text(
+        elif not current.rows:
+            body = ft.Text(
                 I18n.get("mcp_list_empty"),
                 size=AppStyles.FONT_SIZE_BODY_SM,
                 color=AppColors.TEXT_SECONDARY,
             )
-        rows = [
-            ft.DataRow(
-                cells=[
-                    ft.DataCell(ft.Text(row.display_name, size=AppStyles.FONT_SIZE_BODY_SM)),
-                    ft.DataCell(ft.Text(row.service_id, size=AppStyles.FONT_SIZE_BODY_SM)),
-                    ft.DataCell(ft.Text(str(row.config_version), size=AppStyles.FONT_SIZE_BODY_SM)),
-                    ft.DataCell(
-                        ft.Text(
-                            I18n.get(_TRANSPORT_LABEL_KEYS.get(row.transport_kind, "mcp_field_transport")),
-                            size=AppStyles.FONT_SIZE_BODY_SM,
-                        )
-                    ),
-                    ft.DataCell(
-                        ft.Text(
-                            I18n.get("mcp_state_connected" if row.connected else "mcp_state_disconnected"),
-                            size=AppStyles.FONT_SIZE_BODY_SM,
-                            color=AppColors.SUCCESS if row.connected else AppColors.TEXT_SECONDARY,
-                        )
-                    ),
-                    ft.DataCell(
-                        ft.TextButton(
-                            I18n.get("mcp_btn_select"),
-                            on_click=safe_on_click(_on_select(row.identity_key)),
-                            disabled=current.busy,
-                        )
-                    ),
-                ]
+        else:
+            rows = [
+                ft.DataRow(
+                    cells=[
+                        ft.DataCell(ft.Text(row.display_name, size=AppStyles.FONT_SIZE_BODY_SM)),
+                        ft.DataCell(ft.Text(row.service_id, size=AppStyles.FONT_SIZE_BODY_SM)),
+                        ft.DataCell(ft.Text(str(row.config_version), size=AppStyles.FONT_SIZE_BODY_SM)),
+                        ft.DataCell(
+                            ft.Text(
+                                I18n.get(_TRANSPORT_LABEL_KEYS.get(row.transport_kind, "mcp_field_transport")),
+                                size=AppStyles.FONT_SIZE_BODY_SM,
+                            )
+                        ),
+                        ft.DataCell(_row_status(row)),
+                        ft.DataCell(
+                            ft.TextButton(
+                                I18n.get("mcp_btn_select"),
+                                on_click=safe_on_click(_on_select(row.identity_key)),
+                                disabled=current.busy,
+                            )
+                        ),
+                    ]
+                )
+                for row in current.rows
+            ]
+            body = ft.DataTable(
+                columns=[
+                    ft.DataColumn(label=ft.Text(I18n.get("mcp_col_service"))),
+                    ft.DataColumn(label=ft.Text(I18n.get("mcp_col_service_id"))),
+                    ft.DataColumn(label=ft.Text(I18n.get("mcp_col_version")), numeric=True),
+                    ft.DataColumn(label=ft.Text(I18n.get("mcp_col_transport"))),
+                    ft.DataColumn(label=ft.Text(I18n.get("mcp_col_status"))),
+                    ft.DataColumn(label=ft.Text("")),
+                ],
+                rows=rows,
+                heading_row_color=AppColors.TABLE_HEADER_BG,
+                border=ft.Border.all(1, AppColors.DIVIDER),
+                vertical_lines=ft.BorderSide(1, AppColors.DIVIDER),
             )
-            for row in current.rows
-        ]
-        return ft.DataTable(
-            columns=[
-                ft.DataColumn(label=ft.Text(I18n.get("mcp_col_service"))),
-                ft.DataColumn(label=ft.Text(I18n.get("mcp_col_service_id"))),
-                ft.DataColumn(label=ft.Text(I18n.get("mcp_col_version")), numeric=True),
-                ft.DataColumn(label=ft.Text(I18n.get("mcp_col_transport"))),
-                ft.DataColumn(label=ft.Text(I18n.get("mcp_col_status"))),
-                ft.DataColumn(label=ft.Text("")),
+        if current.unreadable_count <= 0:
+            return body
+        return ft.Column(
+            [
+                body,
+                ft.Text(
+                    I18n.get("mcp_list_unreadable_hint", count=str(current.unreadable_count)),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.WARNING,
+                ),
             ],
-            rows=rows,
-            heading_row_color=AppColors.TABLE_HEADER_BG,
-            border=ft.Border.all(1, AppColors.DIVIDER),
-            vertical_lines=ft.BorderSide(1, AppColors.DIVIDER),
+            spacing=AppStyles.SPACING_XS,
         )
 
     def _build_tools_section(current: MCPServicesState) -> ft.Column:

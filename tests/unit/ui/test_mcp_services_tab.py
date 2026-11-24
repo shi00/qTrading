@@ -108,7 +108,7 @@ def _of(view: Any, kind: type) -> list[Any]:
     return [control for control in _walk(view) if isinstance(control, kind)]
 
 
-def _row(identity_key: str = "svc", *, connected: bool) -> MCPServiceRow:
+def _row(identity_key: str = "svc", *, connected: bool, problem_key: str | None = None) -> MCPServiceRow:
     return MCPServiceRow(
         identity_key=identity_key,
         service_id=identity_key,
@@ -116,6 +116,7 @@ def _row(identity_key: str = "svc", *, connected: bool) -> MCPServiceRow:
         display_name=f"{identity_key}-name",
         transport_kind="stdio",
         connected=connected,
+        problem_key=problem_key,
     )
 
 
@@ -155,6 +156,35 @@ class TestListStates:
         assert I18n.get("mcp_state_connected") in status_texts
         assert I18n.get("mcp_state_disconnected") in status_texts
         assert len(_of(view, ft.TextButton)) == 2 + 3  # 选服务按钮 + 刷新/新建/重试关闭残留
+
+    def test_invalid_path_row_is_marked_and_still_selectable(
+        self, monkeypatch: pytest.MonkeyPatch, mock_i18n_state: Any, mock_app_colors_state: Any
+    ) -> None:
+        rows = (
+            _row("svc-a", connected=False, problem_key="mcp_row_path_invalid"),
+            _row("svc-b", connected=True),
+        )
+        view, _vm, _page = _render(monkeypatch, _state(rows=rows))
+
+        table = _of(view, ft.DataTable)[0]
+        status_texts = [
+            cell.content.value for row in table.rows for cell in row.cells if isinstance(cell.content, ft.Text)
+        ]
+        assert I18n.get("mcp_row_path_invalid") in status_texts
+        select_buttons = [
+            button for button in _of(view, ft.TextButton) if str(button.content) == I18n.get("mcp_btn_select")
+        ]
+        assert len(select_buttons) == 2
+        assert all(button.disabled is False for button in select_buttons)
+
+    def test_unreadable_records_render_skipped_hint(
+        self, monkeypatch: pytest.MonkeyPatch, mock_i18n_state: Any, mock_app_colors_state: Any
+    ) -> None:
+        view, _vm, _page = _render(monkeypatch, _state(rows=(), unreadable_count=2))
+
+        texts = [control.value for control in _of(view, ft.Text)]
+        assert I18n.get("mcp_list_empty") in texts
+        assert I18n.get("mcp_list_unreadable_hint", count="2") in texts
 
 
 class TestConfigForm:

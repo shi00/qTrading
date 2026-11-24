@@ -138,8 +138,15 @@ def _decode_audit(value: object, path: str) -> MCPReadOnlyAudit | None:
     return decode_mcp_read_only_audit(value, path)
 
 
-def decode_mcp_server_config(value: object, path: str = "$.mcp.config") -> MCPServerConfig:
-    """wire 字典 → 配置；全键必填、禁额外键，末尾复用统一准入校验。"""
+def decode_mcp_server_config(
+    value: object, path: str = "$.mcp.config", *, validate_admission: bool = True
+) -> MCPServerConfig:
+    """wire 字典 → 配置；全键必填、禁额外键，末尾复用统一准入校验。
+
+    ``validate_admission=False`` 只做结构解码（不做程序/目录存在性等准入判定），
+    仅供配置列表逐行容错使用：列表须能展示「已保存但程序被移动」的记录，以便用户
+    载入后修复路径。使用点（读取/保存/启连）必须保持默认 ``True``（fail-closed）。
+    """
 
     if not isinstance(value, dict):
         raise AgentValidationError("invalid_mcp_config", f"{path}: must be an object")
@@ -160,5 +167,6 @@ def decode_mcp_server_config(value: object, path: str = "$.mcp.config") -> MCPSe
         tool_deadline_s=validate_mcp_deadline(value["tool_deadline_s"], f"{path}.tool_deadline_s"),
         audit=_decode_audit(value["audit"], f"{path}.audit"),
     )
-    validate_mcp_server_config(config, path)
+    if validate_admission:
+        validate_mcp_server_config(config, path)
     return config

@@ -178,7 +178,9 @@ class TestLifecycleFlow:
         )
 
         await lifecycle.save_config(_config())
-        assert [item.identity for item in await lifecycle.list_services()] == [_IDENTITY]
+        assert [item.config.identity for item in await lifecycle.list_services() if item.config is not None] == [
+            _IDENTITY
+        ]
 
         receipt = await lifecycle.connection_test(_IDENTITY)
         assert receipt.closed is True
