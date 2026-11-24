@@ -50,8 +50,8 @@ def setup_test_files(
     manifest = tmp_path / ".release-please-manifest.json"
     manifest.write_text(f'{{".": "{manifest_v}"}}', encoding="utf-8")
 
-    # Create doc files consistent with pyproject version
-    major_minor = ".".join(pyproject_v.split(".")[:2])
+    # Create doc files consistent with pyproject version（SECURITY.md 须含支持策略章节：
+    # 版本策略不携带字面量，Check 4 校验章节存在且无版本表回归）
     readme = tmp_path / "README.md"
     readme.write_text(
         "# README\n[![CI](https://github.com/shi00/qTrading)](https://github.com/shi00/qTrading)\n",
@@ -63,7 +63,7 @@ def setup_test_files(
 
     security = tmp_path / "SECURITY.md"
     security.write_text(
-        f"# Security\n| Version | Supported |\n| ------- | ---------- |\n| {major_minor}.x | :white_check_mark: |\n",
+        "# Security\n\n## Supported Versions\n\nLatest published minor series receives security fixes.\n",
         encoding="utf-8",
     )
 
@@ -713,10 +713,60 @@ def test_check_repo_url_consistency_fail_closed_on_missing_doc(tmp_path):
     assert "fail-closed" in joined
 
 
-def test_check_security_supported_version_fail_closed_on_missing_doc(tmp_path):
+def test_check_security_policy_accepts_policy_text(tmp_path):
+    """允许例：仅声明章节与策略，不携带版本字面量。"""
+    security = tmp_path / "SECURITY.md"
+    security.write_text(
+        "# Security Policy\n\n## Supported Versions\n\nLatest published minor series receives security fixes.\n",
+        encoding="utf-8",
+    )
+    with patch("verify_versions.SECURITY_PATH", security):
+        assert verify_versions.check_security_policy() == []
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        "| 0.12.x | :white_check_mark: |",
+        "| < 0.12 | :x: |",
+        "| 0.12.0 | :white_check_mark: |",
+        "| v0.13.0 | :white_check_mark: |",
+        "| `0.12.x` | :white_check_mark: |",
+        "| **0.12.x** | :white_check_mark: |",
+        "| 0.12.x (latest) | :white_check_mark: |",
+        "0.12.x | :white_check_mark: |",
+        "| 0.12.3-rc.1 | :white_check_mark: |",
+    ],
+)
+def test_check_security_policy_rejects_version_table_rows(tmp_path, row):
+    """旧反例：精确 / 通配 / 带 v 前缀 / 装饰 / 省略前导竖线 / 预发布均不得重新引入。"""
+    security = tmp_path / "SECURITY.md"
+    security.write_text(
+        f"## Supported Versions\n\n| Version | Supported |\n|---|---|\n{row}\n",
+        encoding="utf-8",
+    )
+    with patch("verify_versions.SECURITY_PATH", security):
+        errors = verify_versions.check_security_policy()
+
+    assert len(errors) == 1
+    assert "版本字面量" in errors[0]
+
+
+def test_check_security_policy_requires_supported_versions_section(tmp_path):
+    """章节被整节删除时显式失败，不以「文件存在」装通过。"""
+    security = tmp_path / "SECURITY.md"
+    security.write_text("# Security Policy\n", encoding="utf-8")
+    with patch("verify_versions.SECURITY_PATH", security):
+        errors = verify_versions.check_security_policy()
+
+    assert len(errors) == 1
+    assert "Supported Versions" in errors[0]
+
+
+def test_check_security_policy_fail_closed_on_missing_doc(tmp_path):
     """§5.1/F17：SECURITY.md 缺失必须报错，不得静默返回空列表。"""
     with patch("verify_versions.SECURITY_PATH", tmp_path / "SECURITY.md"):
-        errors = verify_versions.check_security_supported_version("0.6.9")
+        errors = verify_versions.check_security_policy()
 
     assert len(errors) == 1
     assert "fail-closed" in errors[0]

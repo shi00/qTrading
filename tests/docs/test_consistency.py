@@ -99,22 +99,16 @@ class TestVersionConsistency:
         )
 
 
-class TestSecurityVersion:
-    """J②: SECURITY.md supported version matches pyproject.toml."""
+class TestSecurityPolicy:
+    """ADR-0017 Errata（2026-11-24）：支持版本为无版本字面量策略，且章节必须存在。
 
-    def test_security_version_matches_pyproject(self):
-        pyproject_ver = _get_pyproject_version()
-        major_minor = ".".join(pyproject_ver.split(".")[:2])
-        content = _read(SECURITY_PATH)
-        pattern = rf"\| {re.escape(major_minor)}\.x\s+\| :white_check_mark:"
-        assert re.search(pattern, content), (
-            f"SECURITY.md should list '{major_minor}.x' as supported (pyproject version: {pyproject_ver})"
-        )
+    直接调用生产检查函数，使纯文档 PR（不触发 ci-checks-static）同样受 docs-static 门禁覆盖。
+    """
 
-    def test_no_stale_version_in_security(self):
-        """SECURITY.md should not contain stale '1.x.x' version."""
-        content = _read(SECURITY_PATH)
-        assert "1.x.x" not in content, "SECURITY.md still references '1.x.x' (should be '0.7.x')"
+    def test_security_policy_structure(self):
+        import verify_versions
+
+        assert verify_versions.check_security_policy() == []
 
 
 class TestRepoUrlConsistency:

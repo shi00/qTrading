@@ -72,7 +72,7 @@ Relates to #XXX
 - [ ] README.md 同步更新功能/URL/配置/版本
 - [ ] CLAUDE.md 架构、单例、策略规范同步对齐
 - [ ] CONTRIBUTING.md 流程、安装命令、测试步骤同步
-- [ ] SECURITY.md 支持版本、依赖CVE更新
+- [ ] SECURITY.md 安全策略、依赖CVE更新
 - [ ] docs/flet/ 子文档按 [docs/flet/README.md](../docs/flet/README.md) 任务路由同步；man/ 其他专题按各自文档头部 STATUS/适用范围同步（man/flet-best-practices.md 已改为 stub 指向 docs/flet/）
 - [ ] CHANGELOG.md 由 release-please 自动生成，无手动修改
 

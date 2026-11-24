@@ -16,7 +16,7 @@ E09 远端部分只做本地只读静态核验（合成夹具参照实现 + 真�
 - E02 → dg.run_update + cdc.check_docs_generated（conftest generated_block_repo 夹具）
 - E03 → git mv + cdc.check_docs_index_completeness + cdc.check_relative_dead_links
 - E04 → dg.run_update（作者源缺失 / 提取集合为空 / 合法删除顺序）+ cdc.check_docs_generated
-- E05 → verify_versions.check_security_supported_version（版本绑定证据机器下限）
+- E05 → verify_versions.check_release_tag_version（版本绑定证据机器下限）
 - E06 → cdc.check_relative_dead_links + cdc.check_anchor_dead_links（docs_markdown 统一视图）
 - E07 → dg.run_update（重复/嵌套/越界/中断/屏障注入/正文保真）
 - E08 → cdc._check_enforcement_invariants（触发器感知）+ dg.run_update（active=False 槽位）
@@ -322,27 +322,27 @@ def test_e04_migrate_consumers_then_delete_source_passes(
 
 
 # ---------------------------------------------------------------------------
-# E05：API 证据版本——旧版 PASS 不认证当前版；配准确证据后恢复
+# E05：发行 tag 版本证据——旧版 PASS 不认证当前版；更新产品正本后恢复
 # ---------------------------------------------------------------------------
 
 
 def test_e05_old_version_evidence_not_valid_for_current(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """版本绑定证据机器下限：supported 表只登记旧版本 → 对旧版判定成立、对当前版必须失败
-    （标缺失，不写当前已验证）；补当前版本准确证据后恢复。API 证据（核验快照）的版本续效
-    语义层人工核对（无专用续效检查器，报告如实登记）。"""
-    security = tmp_path / "SECURITY.md"
-    security.write_text("| 版本 | 支持 |\n|---|---|\n| 1.9.x | :white_check_mark: |\n", encoding="utf-8")
-    monkeypatch.setattr(vv, "SECURITY_PATH", security)
+    """版本绑定证据机器下限：发行 tag 的数值证据只对与其一致的产品版本成立；旧 tag 不认证
+    当前版本；产品正本更新到目标版本后同一 tag 才恢复通过。"""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nversion = "1.9.5"\n', encoding="utf-8")
+    manifest = tmp_path / ".release-please-manifest.json"
+    manifest.write_text('{".": "1.9.5"}\n', encoding="utf-8")
+    monkeypatch.setattr(vv, "PYPROJECT_PATH", pyproject)
+    monkeypatch.setattr(vv, "RELEASE_MANIFEST_PATH", manifest)
 
-    assert vv.check_security_supported_version("1.9.5") == [], "旧版证据对其目标版本成立（旧版 PASS 本身合法）"
-    errors = vv.check_security_supported_version("2.0.0")
-    assert errors and "2.0.x" in errors[0], f"旧版 PASS 不得认证当前版: {errors}"
+    assert vv.check_release_tag_version("v1.9.5") == [], "旧 tag 对其目标版本成立（旧版 PASS 本身合法）"
+    errors = vv.check_release_tag_version("v2.0.0")
+    assert errors and "2.0.0" in errors[0], f"旧版证据不得认证当前版本: {errors}"
 
-    security.write_text(
-        "| 版本 | 支持 |\n|---|---|\n| 1.9.x | :white_check_mark: |\n| 2.0.x | :white_check_mark: |\n",
-        encoding="utf-8",
-    )
-    assert vv.check_security_supported_version("2.0.0") == [], "配当前版准确证据后恢复（注入-恢复闭环）"
+    pyproject.write_text('[project]\nversion = "2.0.0"\n', encoding="utf-8")
+    manifest.write_text('{".": "2.0.0"}\n', encoding="utf-8")
+    assert vv.check_release_tag_version("v2.0.0") == [], "产品正本更新到 2.0.0 后同一 tag 恢复通过"
 
 
 # ---------------------------------------------------------------------------

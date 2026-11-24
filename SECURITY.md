@@ -1,13 +1,10 @@
 # Security Policy
 
-<!-- NOTE: The "Supported Versions" table is maintained manually at each release and verified in CI by `scripts/verify_versions.py` (check 5), which requires the row to match the major.minor of pyproject.toml. SECURITY.md is listed in release-please-config.json extra-files, but its generic updater needs an `x-release-please-version` marker, which this file does not use, and a wildcard row such as `0.12.x` cannot be rewritten automatically. Update the table by hand when the supported major.minor changes. -->
-
 ## Supported Versions
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.12.x  | :white_check_mark: |
-| < 0.12  | :x:                |
+Security fixes are provided for the latest published minor series, including all of its patch releases. When a newer minor series is released, earlier series no longer receive security fixes.
+
+This policy deliberately does not repeat a version number; see [Releases](https://github.com/shi00/qTrading/releases) for the latest published version. The product version SSOT is `pyproject.toml` (ADR-0017).
 
 ## Reporting a Vulnerability
 
