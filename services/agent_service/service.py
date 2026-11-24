@@ -550,11 +550,13 @@ class AgentService:
         """只读等待收敛（§4.1 ``wait_result``）：组合快照与事件，零持久化。
 
         每次轮询以 ``get_execution_snapshot`` 取一致截点、以 ``read_events`` 追平
-        会话事件增量；``display_state`` 进入终态集（``NON_RECOVERABLE_DISPLAY_STATES``）
-        才算收敛。到达调用方给定的 ``timeout_s`` 仍未收敛时返回 ``converged=False``/
-        ``timed_out=True`` 与最后一次快照事实，**不伪造结果、不写任何事实**（R21）。
-        等待用 ``asyncio.sleep`` 让出事件循环；取消按 ``CancelledError`` 原样传播
-        （R2），不转译成 ACK/空结果。
+        会话事件增量；``read_events`` 单页有界，故本轮持续读取直到 ``has_more``
+        为假（T-05：不得在终态返回时漏掉同窗口后续事件，末事件必须完整）；期限
+        到达即停止续读，避免追平拖过调用方 ``timeout_s``；``display_state``
+        进入终态集（``NON_RECOVERABLE_DISPLAY_STATES``）才算收敛。到达调用方给定的
+        ``timeout_s`` 仍未收敛时返回 ``converged=False``/``timed_out=True`` 与最后一次
+        快照事实，**不伪造结果、不写任何事实**（R21）。等待用 ``asyncio.sleep``
+        让出事件循环；取消按 ``CancelledError`` 原样传播（R2），不转译成 ACK/空结果。
         """
 
         self._require_open("wait_result")
@@ -579,8 +581,29 @@ class AgentService:
                     limit=limit,
                 )
             )
-            observed.extend(page.events)
-            cursor = page.last_seq
+            # 单页有界：追平到末页才进入收敛判定，避免终态返回时漏掉后续事件（T-05）。
+            while True:
+                if page.has_more and not page.events:
+                    # has_more 却空页违反事件页合同：显式失败，不静默当作追平完成（R21）。
+                    raise AgentServiceError(
+                        AgentErrorCode.OPERATION_UNKNOWN,
+                        "event page claims more but returned no events",
+                        execution_id,
+                    )
+                observed.extend(page.events)
+                cursor = page.last_seq
+                # 追平受调用方期限约束：期限已到即停止续读，收敛与否仍按已取快照
+                # 如实判定（不把期限外的读取拖成无限循环）。
+                if not page.has_more or loop.time() >= deadline:
+                    break
+                page = await self._dao.read_events(
+                    EventReadQuery(
+                        user_scope=user_scope,
+                        session_id=snapshot.identity.session_id,
+                        after_seq=cursor,
+                        limit=limit,
+                    )
+                )
             state = snapshot.execution.display_state
             converged = state in NON_RECOVERABLE_DISPLAY_STATES
             elapsed_ms = int((loop.time() - started) * 1000)

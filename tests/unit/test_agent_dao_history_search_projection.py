@@ -71,11 +71,13 @@ class _HistoryConn:
         first_row_marker: str | None = None,
         session_row: bool = False,
         anchor_exists: bool = False,
+        window_digest: str | None = None,
     ) -> None:
         self.statements: list[Any] = []
         self._first_row_marker = first_row_marker
         self._session_row = session_row
         self._anchor_exists = anchor_exists
+        self._window_digest = window_digest
 
     async def execution_options(self, **_kwargs: Any) -> _HistoryConn:
         return self
@@ -96,6 +98,8 @@ class _HistoryConn:
             first_value = (1,)
         if self._first_row_marker is not None and self._first_row_marker in sql:
             first_value = (1,)
+        if "md5(" in sql and self._window_digest is not None:
+            first_value = (self._window_digest,)
         result.first.return_value = first_value
         result.all.return_value = []
         return result
@@ -120,10 +124,12 @@ def _query(**overrides: object) -> HistoryQuery:
 
 
 async def _union_sql(*, session_row: bool = False, anchor_exists: bool = False, **overrides: object) -> str:
-    conn = _HistoryConn(session_row=session_row, anchor_exists=anchor_exists)
+    conn = _HistoryConn(session_row=session_row, anchor_exists=anchor_exists, window_digest="0123456789abcdef")
     dao = _dao(conn)
     await dao.search_history(_query(**overrides), user_scope="u1")
-    union_statements = [stmt for stmt in conn.statements if "UNION ALL" in _literal_sql(stmt)]
+    union_statements = [
+        stmt for stmt in conn.statements if "UNION ALL" in _literal_sql(stmt) and "md5(" not in _literal_sql(stmt)
+    ]
     assert len(union_statements) == 1
     return _literal_sql(union_statements[0])
 
@@ -143,6 +149,50 @@ class TestSessionTitleSearch:
     async def test_no_title_predicate_without_keyword(self) -> None:
         sql = await _union_sql()
         assert "agent_session.title" not in sql
+
+
+class TestMessageSummaryInheritsPublicProjection:
+    """消息摘要继承公开投影（T-05）：不得把原始 body_text 当摘要带出。"""
+
+    @pytest.mark.asyncio
+    async def test_message_summary_selects_search_text(self) -> None:
+        sql = await _union_sql()
+        assert "agent_message.search_text AS summary_source" in sql
+        assert "agent_message.body_text AS summary_source" not in sql
+
+
+class TestHistoryWindowDigest:
+    """历史游标集合摘要（T-05/F-04）：固定上界内命中集合修订 → 显式失效重首读。"""
+
+    @pytest.mark.asyncio
+    async def test_window_digest_aggregates_ordered_full_key(self) -> None:
+        digest = compute_history_query_digest(_query(limit=2))
+        cursor = (
+            f"h:{digest}:2026-07-01T00:00:00.000000Z:2026-06-30T00:00:00.000000Z:message:anchor-1:0:0123456789abcdef"
+        )
+        conn = _HistoryConn(anchor_exists=True, window_digest="0123456789abcdef")
+        await _dao(conn).search_history(_query(limit=2, cursor=cursor), user_scope="u1")
+        digest_sql = next(_literal_sql(stmt) for stmt in conn.statements if "md5(" in _literal_sql(stmt))
+        assert "string_agg(" in digest_sql
+        assert "ORDER BY" in digest_sql
+        # 分隔符是第一实参：若误放进 aggregate_order_by，会退化为单参 string_agg(text) 而报错
+        assert "string_agg(','," in digest_sql
+        assert digest_sql.index("string_agg(',',") < digest_sql.index("ORDER BY")
+        assert "concat_ws('|'" in digest_sql
+        assert "UNION ALL" in digest_sql
+
+    @pytest.mark.asyncio
+    async def test_revised_window_rejects_cursor_before_keyset(self) -> None:
+        digest = compute_history_query_digest(_query(limit=2))
+        cursor = (
+            f"h:{digest}:2026-07-01T00:00:00.000000Z:2026-06-30T00:00:00.000000Z:message:anchor-1:0:ffffffffffffffff"
+        )
+        conn = _HistoryConn(anchor_exists=True, window_digest="0123456789abcdef")
+        with pytest.raises(AgentServiceError) as exc:
+            await _dao(conn).search_history(_query(limit=2, cursor=cursor), user_scope="u1")
+        assert exc.value.code == AgentErrorCode.REVISION_CONFLICT
+        # 校验先于命中扫描：不执行带 LIMIT 的命中 UNION 查询
+        assert all("LIMIT" not in _literal_sql(stmt) for stmt in conn.statements)
 
 
 class TestArtifactPublicBodySearch:
@@ -272,7 +322,9 @@ class TestExistingFiltersNotBypassed:
     async def test_query_text_keeps_cursor_keyset(self) -> None:
         base = _query(query_text="回撤", limit=2)
         digest = compute_history_query_digest(base)
-        cursor = f"h:{digest}:2026-07-01T00:00:00.000000Z:2026-06-30T00:00:00.000000Z:artifact:anchor-1:2"
+        cursor = (
+            f"h:{digest}:2026-07-01T00:00:00.000000Z:2026-06-30T00:00:00.000000Z:artifact:anchor-1:2:0123456789abcdef"
+        )
         sql = await _union_sql(query_text="回撤", limit=2, cursor=cursor, anchor_exists=True)
         # 成果分支 keyset 带版本分量（检视 D19：同 ID 多版本同时间不跳过）
         assert "agent_artifact.artifact_id < 'anchor-1'" in sql
@@ -282,7 +334,9 @@ class TestExistingFiltersNotBypassed:
     @pytest.mark.asyncio
     async def test_message_cursor_keyset_uses_full_order_without_version(self) -> None:
         digest = compute_history_query_digest(_query(query_text="回撤", limit=2))
-        cursor = f"h:{digest}:2026-07-01T00:00:00.000000Z:2026-06-30T00:00:00.000000Z:message:anchor-1:0"
+        cursor = (
+            f"h:{digest}:2026-07-01T00:00:00.000000Z:2026-06-30T00:00:00.000000Z:message:anchor-1:0:0123456789abcdef"
+        )
         sql = await _union_sql(query_text="回撤", limit=2, cursor=cursor, anchor_exists=True)
         # 消息分支按 message_id 续读；消息无版本，不生成版本比较
         assert "agent_message.message_id < 'anchor-1'" in sql
@@ -296,8 +350,10 @@ class TestExistingFiltersNotBypassed:
         """锚行按完整键唯一命中：同锚 ID 但版本不同不得放行（检视 D19）。"""
 
         digest = compute_history_query_digest(_query(limit=2))
-        cursor = f"h:{digest}:2026-07-01T00:00:00.000000Z:2026-06-30T00:00:00.000000Z:artifact:anchor-1:2"
-        conn = _HistoryConn()
+        cursor = (
+            f"h:{digest}:2026-07-01T00:00:00.000000Z:2026-06-30T00:00:00.000000Z:artifact:anchor-1:2:0123456789abcdef"
+        )
+        conn = _HistoryConn(window_digest="0123456789abcdef")
         dao = _dao(conn)
         with pytest.raises(AgentServiceError) as exc:
             await dao.search_history(_query(limit=2, cursor=cursor), user_scope="u1")

@@ -77,6 +77,7 @@ class _FakeService:
                 title="研究 A",
                 updated_at="2026-11-17T02:00:00.000000Z",
                 draft_revision=0,
+                cleaned_at=None,
             ),
             executions=(
                 SimpleNamespace(

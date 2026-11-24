@@ -6790,8 +6790,9 @@ class AgentDao(BaseDao):
         cursor_seq: int | None,
         limit: int,
         identity_str: str,
+        cursor_target: str,
     ) -> MessagePage:
-        """消息首屏页：session_seq DESC keyset（游标 m:{seq}）。"""
+        """消息首屏页：session_seq DESC keyset（游标 ``m:<target>:<seq>``）。"""
 
         stmt = (
             sa.select(
@@ -6839,7 +6840,7 @@ class AgentDao(BaseDao):
         return MessagePage(
             items=items,
             has_more=has_more,
-            next_cursor=f"m:{items[-1].session_seq}" if has_more else None,
+            next_cursor=f"m:{cursor_target}:{items[-1].session_seq}" if has_more else None,
         )
 
     async def _load_artifact_page(
@@ -6853,9 +6854,10 @@ class AgentDao(BaseDao):
         cursor_key: tuple[datetime, str, int] | None,
         limit: int,
         identity_str: str,
+        cursor_target: str,
     ) -> ArtifactPage:
         """成果首屏页：可靠保存时点 DESC（published_at，NULL 以 created_at 承载），
-        同点 artifact_id/version DESC tie-break，keyset 游标 a:{ts}:{id}:{ver}。"""
+        同点 artifact_id/version DESC tie-break，keyset 游标 ``a:<target>:<ts>:<id>:<ver>``。"""
 
         sort_key = sa.func.coalesce(AgentArtifact.published_at, AgentArtifact.created_at)
         stmt = sa.select(
@@ -6913,7 +6915,10 @@ class AgentDao(BaseDao):
         items = tuple(self._artifact_item_from_row(row, identity_str) for row in rows)
         next_cursor: str | None = None
         if has_more:
-            next_cursor = f"a:{_wire_time(rows[-1].sort_moment)}:{rows[-1].artifact_id}:{rows[-1].artifact_version}"
+            next_cursor = (
+                f"a:{cursor_target}:{_wire_time(rows[-1].sort_moment)}:"
+                f"{rows[-1].artifact_id}:{rows[-1].artifact_version}"
+            )
         return ArtifactPage(items=items, has_more=has_more, next_cursor=next_cursor)
 
     async def _load_decisions(
@@ -6944,24 +6949,65 @@ class AgentDao(BaseDao):
         return tuple(self._decision_summary_from_row(row, identity_str) for row in rows)
 
     @staticmethod
-    def _parse_session_cursors(
-        message_cursor: str | None, artifact_cursor: str | None, identity_str: str
-    ) -> tuple[int | None, tuple[datetime, str, int] | None]:
-        """游标解析为 keyset 键值（语法已由 validate_session_read_query 冻结）。
+    def _session_cursor_target(
+        *,
+        user_scope: str,
+        session_id: str,
+        execution_id: str | None,
+        round_id: str | None,
+    ) -> str:
+        """游标绑定摘要：读取目标（用户域/会话/执行/轮次）→ 16 位十六进制（T-05）。
 
-        游标 ``a:{ts}:{id}:{ver}`` 中 ts 自身含冒号（YYYY-MM-DDTHH:MM:SS.ffffffZ，
-        恰 3 段），id 段冻结不含冒号，ver 为末段。语法冻结不核日期取值
-        （正则放过 9999-99-99 等），strptime 失败按 INPUT_INVALID 拒绝
-        （检视 m-1：裸 ValueError 不得逃逸受理边界）。
+        会话首读与执行快照的 keyset 游标只描述位置，不携带目标；跨会话/跨执行/
+        轮次推进后复用同一游标会把「他目标的翻页位置」静默应用到当前目标。摘要
+        随游标保存并在续读入口核对，不一致即显式失效（不返回看似正常的分页）。
         """
 
+        return sha256_hex(
+            json_doc(
+                {
+                    "kind": "session_cursor_target",
+                    "user_scope": user_scope,
+                    "session_id": session_id,
+                    "execution_id": execution_id,
+                    "round_id": round_id,
+                }
+            )
+        )[:16]
+
+    @staticmethod
+    def _parse_session_cursors(
+        message_cursor: str | None, artifact_cursor: str | None, identity_str: str
+    ) -> tuple[str | None, int | None, tuple[datetime, str, int] | None]:
+        """游标解析为（目标摘要, keyset 键值）（语法已由 validate_session_read_query 冻结）。
+
+        游标 ``m:<target>:<seq>`` / ``a:<target>:<ts>:<id>:<ver>`` 中 ``target`` 为
+        读取目标摘要（T-05）；ts 自身含冒号（YYYY-MM-DDTHH:MM:SS.ffffffZ，恰 3 段），
+        id 段冻结不含冒号，ver 为末段。语法冻结不核日期取值（正则放过 9999-99-99
+        等），strptime 失败按 INPUT_INVALID 拒绝（检视 m-1）。两条游标同时给出时
+        必须来自同一目标，否则各自后续核对必然冲突，先在此显式拒绝。
+        """
+
+        message_parts = message_cursor.split(":") if message_cursor is not None else None
+        artifact_parts = artifact_cursor.split(":") if artifact_cursor is not None else None
+        message_target = message_parts[1] if message_parts is not None else None
+        artifact_target = artifact_parts[1] if artifact_parts is not None else None
+        if message_target is not None and artifact_target is not None and message_target != artifact_target:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                "message/artifact cursors belong to different read targets",
+                identity_str,
+            )
         message_cursor_seq: int | None = None
-        if message_cursor is not None:
-            message_cursor_seq = int(message_cursor[2:])
+        if message_parts is not None:
+            message_cursor_seq = int(message_parts[2])
         artifact_cursor_key: tuple[datetime, str, int] | None = None
-        if artifact_cursor is not None:
-            parts = artifact_cursor[2:].split(":")
-            wire_ts, artifact_id_part, version_part = ":".join(parts[:3]), parts[3], parts[4]
+        if artifact_parts is not None:
+            wire_ts, artifact_id_part, version_part = (
+                ":".join(artifact_parts[2:5]),
+                artifact_parts[5],
+                artifact_parts[6],
+            )
             try:
                 cursor_moment = datetime.strptime(wire_ts, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
             except ValueError as exc:
@@ -6969,7 +7015,7 @@ class AgentDao(BaseDao):
                     AgentErrorCode.INPUT_INVALID, "artifact cursor contains invalid date value", identity_str
                 ) from exc
             artifact_cursor_key = (cursor_moment, artifact_id_part, int(version_part))
-        return message_cursor_seq, artifact_cursor_key
+        return message_target or artifact_target, message_cursor_seq, artifact_cursor_key
 
     async def get_session_read(self, query: SessionReadQuery, *, user_scope: str) -> SessionRead:
         """会话首读（§4.2 read_session + §9.13）：一致读取截点下的五要素组装。
@@ -6981,9 +7027,11 @@ class AgentDao(BaseDao):
           草稿正文不在此读取面返回）；
         - 单事务 REPEATABLE READ 截点读五要素：summary 行投影 / executions 摘要 /
           消息成果首屏分页 / 待决定列表；行级严格解码 fail-closed OPERATION_UNKNOWN（R21）；
-        - 分页：消息按 session_seq DESC keyset 游标 ``m:{seq}``；成果按可靠保存时点
-          DESC（published_at，NULL 时以 created_at 承载排序——工程裁决，未发布行
-          不静默截断）游标 ``a:{ts}:{id}:{ver}``；
+        - 分页：消息按 session_seq DESC keyset 游标 ``m:<target>:<seq>``；成果按可靠
+          保存时点 DESC（published_at，NULL 时以 created_at 承载排序——工程裁决，
+          未发布行不静默截断）游标 ``a:<target>:<ts>:<id>:<ver>``；``target`` 为读取
+          目标摘要（用户域/会话/执行/轮次），跨目标/换过滤复用游标 → REVISION_CONFLICT
+          显式失效（T-05，不静默套用他目标翻页位置）；
         - 目标 execution/round 可选过滤：execution 须属本 session、round 须属该
           execution（精确用户域，§9.13），错配 INPUT_INVALID；指定时五要素聚焦该目标。
         """
@@ -7002,9 +7050,21 @@ class AgentDao(BaseDao):
             ) from exc
         if query.round_id is not None and query.execution_id is None:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "round_id target requires execution_id", identity_str)
-        message_cursor_seq, artifact_cursor_key = self._parse_session_cursors(
+        cursor_target, message_cursor_seq, artifact_cursor_key = self._parse_session_cursors(
             query.message_cursor, query.artifact_cursor, identity_str
         )
+        target_digest = self._session_cursor_target(
+            user_scope=user_scope,
+            session_id=query.session_id,
+            execution_id=query.execution_id,
+            round_id=query.round_id,
+        )
+        if cursor_target is not None and cursor_target != target_digest:
+            raise AgentServiceError(
+                AgentErrorCode.REVISION_CONFLICT,
+                "cursor was issued for a different session read target",
+                identity_str,
+            )
 
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
@@ -7084,6 +7144,7 @@ class AgentDao(BaseDao):
                     cursor_seq=message_cursor_seq,
                     limit=query.limit,
                     identity_str=identity_str,
+                    cursor_target=target_digest,
                 )
                 artifacts = await self._load_artifact_page(
                     conn,
@@ -7094,6 +7155,7 @@ class AgentDao(BaseDao):
                     cursor_key=artifact_cursor_key,
                     limit=query.limit,
                     identity_str=identity_str,
+                    cursor_target=target_digest,
                 )
                 decisions = await self._load_decisions(
                     conn,
@@ -7588,7 +7650,7 @@ class AgentDao(BaseDao):
             raise AgentServiceError(
                 AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity_str
             ) from exc
-        message_cursor_seq, artifact_cursor_key = self._parse_session_cursors(
+        cursor_target, message_cursor_seq, artifact_cursor_key = self._parse_session_cursors(
             message_cursor, artifact_cursor, identity_str
         )
 
@@ -7626,6 +7688,20 @@ class AgentDao(BaseDao):
                     )
 
                 effective_round_id = round_id if round_id is not None else execution_row.current_round_id
+                # 游标目标绑定（T-05）：显式轮次或执行当前轮次推进后，上一目标发出的
+                # 游标不得继续作用于新目标（不静默返回他轮分页）。
+                target_digest = self._session_cursor_target(
+                    user_scope=user_scope,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    round_id=effective_round_id,
+                )
+                if cursor_target is not None and cursor_target != target_digest:
+                    raise AgentServiceError(
+                        AgentErrorCode.REVISION_CONFLICT,
+                        "cursor was issued for a different snapshot target or an earlier round",
+                        identity_str,
+                    )
                 round_row = None
                 if effective_round_id is not None:
                     round_row = (
@@ -7715,6 +7791,7 @@ class AgentDao(BaseDao):
                     cursor_seq=message_cursor_seq,
                     limit=limit,
                     identity_str=identity_str,
+                    cursor_target=target_digest,
                 )
                 artifacts_page = await self._load_artifact_page(
                     conn,
@@ -7725,6 +7802,7 @@ class AgentDao(BaseDao):
                     cursor_key=artifact_cursor_key,
                     limit=limit,
                     identity_str=identity_str,
+                    cursor_target=target_digest,
                 )
 
                 # source_reads：本执行选定输入版（有 round 时含该轮直接消费边）的
@@ -8054,10 +8132,69 @@ class AgentDao(BaseDao):
             ]
         return sha256_hex(json_doc({"scope": query.scope, "members": members_wire}))
 
+    @staticmethod
+    async def _history_window_digest(
+        conn: AsyncConnection,
+        message_stmt: Any,
+        artifact_stmt: Any,
+    ) -> str:
+        """固定上界内命中集合（有序全序键）摘要 → 16 位十六进制（T-05/F-04）。
+
+        输入为两分支在应用 keyset 谓词之前的语句（已含 scope/类型/关键词/日期/
+        固定上界过滤），故本摘要只覆盖「本次查询在固定上界内的命中集合」。任何
+        让某行进入/离开该集合或改变其排序键的变化（置顶/更新/增删/命中改变）
+        都会改变摘要 → 续读游标显式失效并要求重首读；固定上界之外的追加不改变
+        本摘要，故未修订窗口的续读仍可推进（V01 活性）。摘要按
+        ``(sort_moment, hit_kind, anchor_id, sort_version)`` 全序拼接后在库内
+        计算（不把命中行拉回 Python）。
+        """
+
+        def _keys(stmt: Any) -> Any:
+            selected = stmt.selected_columns
+            return stmt.with_only_columns(
+                selected.sort_moment.label("sort_moment"),
+                selected.hit_kind.label("hit_kind"),
+                selected.anchor_id.label("anchor_id"),
+                selected.sort_version.label("sort_version"),
+            )
+
+        keys_union = sa.union_all(_keys(message_stmt), _keys(artifact_stmt)).subquery()
+        key_text = sa.func.concat_ws(
+            "|",
+            sa.cast(keys_union.c.sort_moment, sa.Text),
+            keys_union.c.hit_kind,
+            keys_union.c.anchor_id,
+            sa.cast(keys_union.c.sort_version, sa.Text),
+        ).label("key_text")
+        ordered = sa.select(
+            key_text,
+            keys_union.c.sort_moment,
+            keys_union.c.hit_kind,
+            keys_union.c.anchor_id,
+            keys_union.c.sort_version,
+        ).subquery()
+        aggregate = sa.func.string_agg(
+            sa.literal(","),
+            sa_pg.aggregate_order_by(
+                ordered.c.key_text,
+                ordered.c.sort_moment,
+                ordered.c.hit_kind,
+                ordered.c.anchor_id,
+                ordered.c.sort_version,
+            ),
+        )
+        row = (await conn.execute(sa.select(sa.func.md5(sa.func.coalesce(aggregate, sa.literal("")))))).first()
+        digest = "" if row is None or row[0] is None else str(row[0])
+        return digest[:16]
+
     def _history_hit_from_row(self, row: Any, identity_str: str) -> HistoryHit:
         """消息/成果命中行 → HistoryHit（严格解码，坏行 fail-closed）。
 
-        UNION 后统一行：summary_source=消息 body_text / summary=成果 summary 列。
+        UNION 后统一行：summary_source=消息公开文本投影（``search_text``，
+        中和 + R9 脱敏后的公开表示）/ summary=成果 summary 列。消息摘要不得取
+        原始 ``body_text``：命中虽按公开投影匹配（或按会话标题），把原文当摘要
+        会把未公开/未脱敏内容随命中带出（T-05）；缺公开投影时摘要为空，不回落
+        原文。
         """
 
         hit_kind = row.hit_kind
@@ -8290,15 +8427,18 @@ class AgentDao(BaseDao):
           （current_session/current_child）执行属于目标会话；目标间冲突（exact
           ↔ agent_filter ↔ child_target 指向不同执行）显式 INPUT_INVALID。
           组合不合法不得被会话/执行过滤成「合法空页」，合法但无命中才返回空页；
-        - 游标翻页：``h:{查询摘要}:{上界ts}:{排序键ts}:{命中类型}:{锚ID}:{版本}``——
+        - 游标翻页：``h:{查询摘要}:{上界ts}:{排序键ts}:{命中类型}:{锚ID}:{版本}:{集合摘要}``——
           摘要绑定规范查询
           （续读必须同一筛选/范围，换筛选/换 scope 复用即 REVISION_CONFLICT，
           校验先于任何扫描/命中）；上界绑定翻页（续读复用首读上界，不因数据增长
           漏复检）；命中类型/版本是排序键的后两段（见下），锚行按完整键定位
           （成果必须带 ``artifact_version``，同锚 ID 多版本不歧义）；锚行缺失视为
-          覆盖域已被修订 → REVISION_CONFLICT（R02，成员
-          变化只经 revision_fingerprint 漂移呈现，不阻断同查询续翻；端到端指纹
-          比对由服务层承载）；
+          覆盖域已被修订 → REVISION_CONFLICT（R02；成员变化另经
+          revision_fingerprint 漂移对外呈现，不冒充「无变化」）；
+        - 集合修订即重首读（T-05/F-04/V-06）：游标末段为固定上界内命中集合的
+          有序全序键摘要。续读前重算，不一致即 REVISION_CONFLICT（调用方必须
+          从首读重新开始，不静默在已修订集合上续翻、不重复漏页）；仅固定上界
+          之外的追加不改变该摘要，故未修订窗口连续追加仍可续读到末页（活性）；
         - 扫描：消息与成果 UNION 前分别过滤后统一按全序键
           ``(sort_moment, hit_kind, anchor_id, artifact_version)`` 排序
           （newest_first 四个分量同时 DESC / oldest_first 同时 ASC）：消息侧
@@ -8336,6 +8476,8 @@ class AgentDao(BaseDao):
           或成果 ``body_ref`` 载荷声明 utf-8 但字节不可解码（SQLSTATE 22021），
           即抛 ``OPERATION_UNKNOWN``，不返回「看起来准确」的空页/残缺页；
         - 摘要不复制完整正文：summary_text 截断 200 字符（正文经准确地址按需读取）；
+          消息摘要只取公开文本投影 ``search_text``（中和 + R9 脱敏），不取原始
+          ``body_text``（T-05），缺投影时摘要为空而不回落原文；
         - fingerprint：覆盖域成员/水位 CanonicalJson 后 sha256（每次读取即时计算）。
         """
 
@@ -8356,10 +8498,17 @@ class AgentDao(BaseDao):
         cursor_anchor: str | None = None
         cursor_kind: str | None = None
         cursor_version = 0
+        cursor_window_digest: str | None = None
         if query.cursor is not None:
-            cursor_digest, upper_text, sort_text, cursor_kind, anchor_id, cursor_version = parse_history_cursor(
-                query.cursor
-            )
+            (
+                cursor_digest,
+                upper_text,
+                sort_text,
+                cursor_kind,
+                anchor_id,
+                cursor_version,
+                cursor_window_digest,
+            ) = parse_history_cursor(query.cursor)
             try:
                 cursor_bound = datetime.strptime(upper_text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
                 cursor_sort_moment = datetime.strptime(sort_text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
@@ -8532,7 +8681,7 @@ class AgentDao(BaseDao):
                     sa.literal(None).label("artifact_kind"),
                     sa.literal(None).label("artifact_version"),
                     sa.literal(0).label("sort_version"),
-                    AgentMessage.body_text.label("summary_source"),
+                    AgentMessage.search_text.label("summary_source"),
                     sa.literal(None).label("summary"),
                 ]
                 # 候选范围（与关键词/游标解耦，供缺投影核对复用同一判据）
@@ -8614,6 +8763,9 @@ class AgentDao(BaseDao):
                             ),
                         )
                     )
+                # 游标续读前的窗口基线（不含 keyset 谓词）：集合摘要按固定上界内
+                # 全部命中计算，续读前核对窗口内命中集合未被修订（T-05）。
+                message_base_stmt = message_stmt
                 if cursor_sort_moment is not None and cursor_anchor is not None:
                     assert cursor_kind is not None  # 有游标必有命中类型（parse_history_cursor 返回）
                     message_stmt = message_stmt.where(
@@ -8735,6 +8887,17 @@ class AgentDao(BaseDao):
                     artifact_stmt = artifact_stmt.where(artifact_moment >= day_from)
                 if day_to_excl is not None:
                     artifact_stmt = artifact_stmt.where(artifact_moment < day_to_excl)
+                artifact_base_stmt = artifact_stmt
+                if cursor_window_digest is not None:
+                    # 集合修订即显式失效并要求重首读（F-04/V-06）：续读不得在已修订
+                    # 的命中集合上静默重漏；固定上界之外的追加不改变本摘要（活性）。
+                    window_digest = await self._history_window_digest(conn, message_base_stmt, artifact_base_stmt)
+                    if window_digest != cursor_window_digest:
+                        raise AgentServiceError(
+                            AgentErrorCode.REVISION_CONFLICT,
+                            "history coverage within the fixed window was revised; restart from the first page",
+                            identity_str,
+                        )
                 if cursor_sort_moment is not None and cursor_anchor is not None:
                     assert cursor_kind is not None  # 有游标必有命中类型（parse_history_cursor 返回）
                     artifact_stmt = artifact_stmt.where(
@@ -8800,14 +8963,19 @@ class AgentDao(BaseDao):
                 union_rows = union_rows[: query.limit]
                 hits = tuple(self._history_hit_from_row(row, identity_str) for row in union_rows)
                 fingerprint = await self._history_fingerprint(conn, user_scope=user_scope, query=query)
+                window_digest: str | None = None
+                if has_more:
+                    # 集合摘要：固定上界内命中集合（有序全序键）的摘要，续读前核对（T-05）。
+                    window_digest = await self._history_window_digest(conn, message_base_stmt, artifact_base_stmt)
 
         next_cursor: str | None = None
         if has_more and union_rows:
             last = union_rows[-1]
+            assert window_digest is not None  # has_more 时已算集合摘要
             # 游标携带完整全序键：命中类型与版本使同锚 ID 多版本/同刻混排可定位
             next_cursor = (
                 f"h:{query_digest}:{upper_wire}:{_wire_time(last.sort_moment)}:"
-                f"{last.hit_kind}:{last.anchor_id}:{last.sort_version}"
+                f"{last.hit_kind}:{last.anchor_id}:{last.sort_version}:{window_digest}"
             )
         return HistoryPage(
             query_digest=query_digest,

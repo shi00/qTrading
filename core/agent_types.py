@@ -3920,11 +3920,15 @@ OPERATION_PHASES: Final[frozenset[str]] = frozenset(
 #: 工具 grant 状态（C-02-3 工程冻结 wire 值，无 DB CHECK）。
 GRANT_STATES: Final[frozenset[str]] = frozenset({"pending", "granted", "claimed", "revoked"})
 
-#: 游标最小编码（工程裁决，§4.2 L402）：message ``m:<session_seq>``。
-_MESSAGE_CURSOR_RE: Final = re.compile(r"m:(?:0|[1-9][0-9]*)")
-#: artifact ``a:<published_at wire>:<artifact_id>:<version>``（artifact_id 无冒号）。
+#: 游标最小编码（工程裁决，§4.2 L402）：message ``m:<target>:<session_seq>``。
+#: ``target`` 为读取目标（user_scope/会话/执行/轮次）的 16 位十六进制摘要，
+#: 使跨会话/跨目标复用的游标显式失效（T-05，不静默返回他目标分页）。
+_MESSAGE_CURSOR_RE: Final = re.compile(r"m:[0-9a-f]{16}:(?:0|[1-9][0-9]*)")
+#: artifact ``a:<target>:<published_at wire>:<artifact_id>:<version>``（artifact_id 无冒号）。
 # NOTE(lazy): 分页游标锚段 [^:\s]+ 禁冒号，含冒号的 artifact_id/message_id 无法编码进游标（该 ID 翻页失效，检视 m-5）. ceiling: 项目内 ID 均由 stable_id（kind_sha256 十六进制）等内部生成器产出，不含冒号. upgrade: 引入接受外部自定义 ID 的入口或人工构造含冒号 ID 的路径时，改为锚段转义编码（cursor 格式需同步升版）.
-_ARTIFACT_CURSOR_RE: Final = re.compile(r"a:(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z):([^:\s]+):([1-9][0-9]*)")
+_ARTIFACT_CURSOR_RE: Final = re.compile(
+    r"a:[0-9a-f]{16}:(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z):([^:\s]+):([1-9][0-9]*)"
+)
 
 
 def _opt_cursor(value: object, path: str) -> str | None:
@@ -3941,8 +3945,9 @@ def _opt_cursor(value: object, path: str) -> str | None:
 class SessionReadQuery:
     """会话首读查询（§4.2 SessionReadQuery 行；limit 为工程读取边界 1—50）。
 
-    准确选择不使用 latest 覆盖（无 latest 字段）；游标只做语法校验，绑定
-    user_scope/查询 digest/修订指纹失效属 HistoryQuery/HistoryPage（R02，C-03-3）。
+    准确选择不使用 latest 覆盖（无 latest 字段）；游标语法在此校验，游标与读取
+    目标（user_scope/会话/执行/轮次）的绑定由 DAO 在读取入口核对（T-05：跨目标
+    复用显式失败，不静默返回他目标分页）。
     """
 
     session_id: str
@@ -5207,9 +5212,10 @@ def decode_research_snapshot(value: object, path: str = "$.snapshot") -> Researc
 #:   维度，工程冻结）；
 #: - 全部条件、空值含义、版本选择、规范关键词和准确祖先进入 query_digest；
 #: - HistoryPage 修订指纹为 sha256 摘要（覆盖域成员/水位经 DAO CanonicalJson
-#:   组装后哈希）；游标 h:{查询摘要}:{上界ts}:{排序键ts}:{命中类型}:{锚ID}:{版本}
+#:   组装后哈希）；游标 h:{查询摘要}:{上界ts}:{排序键ts}:{命中类型}:{锚ID}:{版本}:{集合摘要}
 #:   （摘要绑定规范查询身份、上界绑定翻页；命中类型与版本承载历史搜索全序键的
-#:   后两段，见 DAO ``search_history``；换筛选/换范围复用游标由 DAO 拒绝）。
+#:   后两段，集合摘要绑定固定上界内命中集合，见 DAO ``search_history``；换筛选/
+#:   换范围复用或窗口内命中集合已修订的续读由 DAO 拒绝）。
 
 HISTORY_SCOPES: Final[frozenset[str]] = frozenset({"all_saved", "current_session", "current_child"})
 ROUND_SELECTION_KINDS: Final[frozenset[str]] = frozenset({"all_rounds", "exact"})
@@ -5224,7 +5230,8 @@ HISTORY_HIT_KINDS: Final[frozenset[str]] = frozenset({"message", "artifact"})
 _DATE_RE: Final = re.compile(r"\d{4}-\d{2}-\d{2}")
 _HISTORY_CURSOR_RE: Final = re.compile(
     r"h:([0-9a-f]{64}):(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z):"
-    r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z):(message|artifact):([^:\s]+):(0|[1-9][0-9]*)"
+    r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z):(message|artifact):([^:\s]+):"
+    r"(0|[1-9][0-9]*):([0-9a-f]{16})"
 )
 
 
@@ -5547,16 +5554,20 @@ def compute_history_query_digest(query: HistoryQuery) -> str:
     return sha256_hex(normalize_history_query(query))
 
 
-def parse_history_cursor(cursor: str) -> tuple[str, str, str, str, str, int]:
-    """游标 ``h:{摘要}:{上界ts}:{排序键ts}:{命中类型}:{锚ID}:{版本}`` → 六段。
+def parse_history_cursor(cursor: str) -> tuple[str, str, str, str, str, int, str]:
+    """游标 ``h:{摘要}:{上界ts}:{排序键ts}:{命中类型}:{锚ID}:{版本}:{集合摘要}`` → 七段。
 
-    返回 (查询摘要, 固定上界, 排序键时刻, 命中类型, 锚 ID, 版本)，其中命中类型为
-    ``message`` / ``artifact``，版本对消息固定为 0、对成果为该成果版本号（>=1）。
-    语法已由 validate_history_query 冻结；摘要绑定规范查询身份（DAO 续读前
-    必须与当前查询摘要比对，不一致即拒绝换筛选复用），上界供 DAO 组装
-    keyset 续读；命中类型与版本是历史搜索全序键
+    返回 (查询摘要, 固定上界, 排序键时刻, 命中类型, 锚 ID, 版本, 集合摘要)，其中
+    命中类型为 ``message`` / ``artifact``，版本对消息固定为 0、对成果为该成果
+    版本号（>=1）。语法已由 validate_history_query 冻结；摘要绑定规范查询身份
+    （DAO 续读前必须与当前查询摘要比对，不一致即拒绝换筛选复用），上界供 DAO
+    组装 keyset 续读；命中类型与版本是历史搜索全序键
     ``(sort_moment, hit_kind, anchor_id, artifact_version)`` 的后两段，DAO 续读
-    必须用同一套分量比较，否则同 ID 多版本同时间会重复或漏页。
+    必须用同一套分量比较，否则同 ID 多版本同时间会重复或漏页。集合摘要为该
+    固定上界内命中集合（有序全序键）的 16 位十六进制摘要：续读窗口内命中集合
+    被修订（置顶/更新/增删/命中改变）即视为游标失效，调用方必须重首读，不得
+    静默在已修订集合上续翻（T-05/F-04）；固定上界之外的追加不影响该摘要
+    （V01 活性：追加不会让未修订窗口的续读失效）。
     """
 
     match = _HISTORY_CURSOR_RE.fullmatch(cursor)
@@ -5568,7 +5579,15 @@ def parse_history_cursor(cursor: str) -> tuple[str, str, str, str, str, int]:
     # 组合不成立即拒绝（不留可解析但语义错位的游标）。
     if (hit_kind == "message") != (version == 0):
         _fail("invalid_cursor", "$.cursor")
-    return match.group(1), match.group(2), match.group(3), hit_kind, match.group(5), version
+    return (
+        match.group(1),
+        match.group(2),
+        match.group(3),
+        hit_kind,
+        match.group(5),
+        version,
+        match.group(7),
+    )
 
 
 @dataclass(frozen=True, slots=True)

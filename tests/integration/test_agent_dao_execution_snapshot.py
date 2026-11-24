@@ -782,12 +782,76 @@ class TestPagingAndFailClosed:
         page1 = await dao.get_execution_snapshot(execution_id, user_scope=USER_SCOPE, limit=2)
         assert [m.session_seq for m in page1.messages_page.items] == [3, 2]
         assert page1.messages_page.has_more is True
-        assert page1.messages_page.next_cursor == "m:2"
+        target = AgentDao._session_cursor_target(
+            user_scope=USER_SCOPE, session_id=session_id, execution_id=execution_id, round_id=round_id
+        )
+        assert page1.messages_page.next_cursor == f"m:{target}:2"
         page2 = await dao.get_execution_snapshot(
             execution_id, user_scope=USER_SCOPE, limit=2, message_cursor=page1.messages_page.next_cursor
         )
         assert [m.session_seq for m in page2.messages_page.items] == [1]
         assert page2.messages_page.has_more is False
+
+    async def test_cursor_from_other_execution_or_round_rejected(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        session_id, execution_id, round_id = await _seed_chain(dao)
+        for index in range(1, 4):
+            await _seed_message(dao, session_id, execution_id, f"p{index}", round_id=round_id, body_text=f"消息{index}")
+        page1 = await dao.get_execution_snapshot(execution_id, user_scope=USER_SCOPE, limit=2)
+        cursor = page1.messages_page.next_cursor
+        assert cursor is not None
+        # 跨执行复用同一游标：目标摘要不同 → 显式失效（不静默套用他执行位置）
+        async with dao.engine.begin() as conn:
+            await conn.execute(
+                insert(AgentExecution).values(
+                    user_scope=USER_SCOPE,
+                    execution_id="exec-other",
+                    session_id=session_id,
+                    execution_kind="root",
+                    source_module="ui",
+                    business_request_id="req-other",
+                    node_id="root",
+                    display_state="queued",
+                    goal_coverage="unknown",
+                    intent_digest="b" * 64,
+                )
+            )
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.get_execution_snapshot("exec-other", user_scope=USER_SCOPE, limit=2, message_cursor=cursor)
+        assert _code_of(exc) == AgentErrorCode.REVISION_CONFLICT
+        # 当前轮推进后旧游标失效（版本失效）：新目标须重首读，不续用旧位置
+        # 同一执行仅允许一个 active 轮（idx_agent_round_active）：先收口旧轮再插新轮
+        async with dao.engine.begin() as conn:
+            await conn.execute(
+                sa.update(AgentRound)
+                .where(AgentRound.user_scope == USER_SCOPE, AgentRound.execution_id == execution_id)
+                .values(active_round=False)
+            )
+            await conn.execute(
+                insert(AgentRound).values(
+                    user_scope=USER_SCOPE,
+                    round_id="round-adv",
+                    execution_id=execution_id,
+                    round_number=2,
+                    workflow_id="wf-snap-2",
+                    workflow_code_version="wcv-1",
+                    run_epoch=1,
+                    input_revision=2,
+                    plan_revision=2,
+                    goal_coverage="unknown",
+                    final_saved=False,
+                    convergence_confirmed=False,
+                    active_round=True,
+                )
+            )
+            await conn.execute(
+                sa.update(AgentExecution)
+                .where(AgentExecution.user_scope == USER_SCOPE, AgentExecution.execution_id == execution_id)
+                .values(current_round_id="round-adv")
+            )
+        with pytest.raises(AgentServiceError) as exc2:
+            await dao.get_execution_snapshot(execution_id, user_scope=USER_SCOPE, limit=2, message_cursor=cursor)
+        assert _code_of(exc2) == AgentErrorCode.REVISION_CONFLICT
 
     async def test_corrupt_execution_row_fail_closed(self, real_embedded_pg) -> None:
         dao = await _setup(real_embedded_pg.url)
