@@ -10,6 +10,7 @@ from core.agent_types import DraftPayload, DraftRead, Mode, Purpose
 from ui.viewmodels.research_observer_view_model import (
     UNAVAILABLE_NOT_READY,
     UNAVAILABLE_NOT_WIRED,
+    DispatchReasonView,
     ResearchObserverState,
     ResearchObserverViewModel,
     reset_shared_research_observer,
@@ -1277,6 +1278,9 @@ class _FakeIntake:
         session_id: str | None = None,
         session_title: str | None = None,
         expected_revision: int | None = None,
+        role_prompt_refs: Any = (),
+        skill_refs: Any = (),
+        mcp_scope_digest: str | None = None,
     ) -> Any:
         self.question_calls.append((text, mode, session_id, expected_revision))
         if self.error is not None:
@@ -1320,7 +1324,9 @@ class TestComposer:
     @pytest.mark.asyncio
     async def test_send_first_question_uses_selected_mode_and_clears_text(self) -> None:
         service = _FakeService()
-        intake = _FakeIntake(dispatch=SimpleNamespace(submitted=False, reason="mode_research_disabled"))
+        intake = _FakeIntake(
+            dispatch=SimpleNamespace(submitted=False, reason_code="mode_research_disabled", reason_params=())
+        )
         vm = ResearchObserverViewModel(service, intake=intake)
         vm.set_composer_text("  研究银行股  ")
         vm.set_composer_mode("discuss")
@@ -1330,7 +1336,42 @@ class TestComposer:
         assert intake.question_calls == [("研究银行股", Mode.DISCUSS, None, 0)]
         assert vm.state.composer_text == ""
         assert vm.state.composer_pending is False
-        assert vm.state.last_dispatch_reason == "mode_research_disabled"
+        assert vm.state.last_dispatch_reason == DispatchReasonView(code="mode_research_disabled")
+
+    @pytest.mark.asyncio
+    async def test_default_closed_dispatch_reason_is_explainable(self) -> None:
+        """门闩默认关闭：零派发但原因是可 i18n 的结构化状态（非自由文本）。"""
+
+        intake = _FakeIntake(dispatch=SimpleNamespace(submitted=False, reason_code="dispatch_closed", reason_params=()))
+        vm = ResearchObserverViewModel(_FakeService(), intake=intake)
+        vm.set_composer_text("研究银行股")
+
+        await vm.send_first_question()
+
+        reason = vm.state.last_dispatch_reason
+        assert reason == DispatchReasonView(code="dispatch_closed")
+        assert reason is not None
+        assert reason.params == ()
+
+    @pytest.mark.asyncio
+    async def test_plan_unavailable_reason_keeps_structured_params(self) -> None:
+        intake = _FakeIntake(
+            dispatch=SimpleNamespace(
+                submitted=False,
+                reason_code="plan_unavailable",
+                reason_params=(("cause", "plan_not_produced"),),
+            )
+        )
+        vm = ResearchObserverViewModel(_FakeService(), intake=intake)
+        vm.set_composer_text("研究银行股")
+        vm.set_composer_mode("execute")
+
+        await vm.send_first_question()
+
+        assert vm.state.last_dispatch_reason == DispatchReasonView(
+            code="plan_unavailable",
+            params=(("cause", "plan_not_produced"),),
+        )
 
     @pytest.mark.asyncio
     async def test_empty_question_is_not_submitted(self) -> None:

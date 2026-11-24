@@ -22,6 +22,7 @@ from ui.viewmodels.research_observer_view_model import (
     COMPOSER_MODES,
     PENDING_SCOPE_ALL,
     PENDING_STAGES,
+    DispatchReasonView,
     ExecutionNodeView,
     LoadedArtifactBody,
     PendingAnswerView,
@@ -32,6 +33,33 @@ from ui.viewmodels.research_observer_view_model import (
     SessionDraftView,
     SessionMessageView,
 )
+
+#: 零派发原因码 → i18n key（未知码回落通用「未派发」文案，不丢原因）。
+_DISPATCH_REASON_KEYS: dict[str, str] = {
+    "not_wired": "agent_research_dispatch_reason_not_wired",
+    "dispatch_closed": "agent_research_dispatch_reason_dispatch_closed",
+    "plan_unavailable": "agent_research_dispatch_reason_plan_unavailable",
+    "plan_invalid": "agent_research_dispatch_reason_plan_invalid",
+    "plan_admission_unconfigured": "agent_research_dispatch_reason_plan_admission_unconfigured",
+    "capability_policy_unavailable": "agent_research_dispatch_reason_capability_policy_unavailable",
+    "binding_identity_unavailable": "agent_research_dispatch_reason_binding_identity_unavailable",
+    "binding_identity_mismatch": "agent_research_dispatch_reason_binding_identity_mismatch",
+    "mode_research_disabled": "agent_research_dispatch_reason_mode_research_disabled",
+    "not_committed": "agent_research_dispatch_reason_not_committed",
+    "submit_failed": "agent_research_dispatch_reason_submit_failed",
+}
+
+
+def _dispatch_reason_text(reason: DispatchReasonView) -> str:
+    """按结构化原因码渲染文案；参数以 ``name=value`` 附注（不做自由文本拼接）。"""
+
+    key = _DISPATCH_REASON_KEYS.get(reason.code, "agent_research_dispatch_zero")
+    text = I18n.get(key)
+    if reason.params:
+        detail = ", ".join(f"{name}={value}" for name, value in reason.params)
+        text = I18n.get("agent_research_dispatch_reason_detail_fmt").format(reason=text, detail=detail)
+    return text
+
 
 PANEL_WIDTH = 340
 
@@ -174,7 +202,7 @@ def _build_composer(
     if state.last_dispatch_reason:
         rows.append(
             ft.Text(
-                I18n.get("agent_research_dispatch_reason_fmt").format(reason=state.last_dispatch_reason),
+                _dispatch_reason_text(state.last_dispatch_reason),
                 size=AppStyles.FONT_SIZE_CAPTION,
                 color=AppColors.TEXT_HINT,
             )

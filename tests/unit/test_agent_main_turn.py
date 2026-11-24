@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -27,8 +28,12 @@ from core.agent_types import (
 )
 from services.agent_service.dispatch import (
     CAPABILITY_POLICY_UNAVAILABLE,
+    DISPATCH_CLOSED,
     PLAN_ADMISSION_UNCONFIGURED,
+    PLAN_UNAVAILABLE,
+    DispatchOutcome,
     ResearchDispatcher,
+    ResearchWorkflowResult,
 )
 from services.agent_service.workflows import ParentBindIdentity
 from services.agent_service.loop import (
@@ -276,9 +281,16 @@ def test_plan_steps_reject_unexpected_shapes(payload: dict[str, Any]) -> None:
 
 
 class _ManifestDao:
-    def __init__(self, manifest: str | None, proposal: PlanProposal | None = None) -> None:
+    def __init__(
+        self,
+        manifest: str | None,
+        proposal: PlanProposal | None = None,
+        *,
+        current_proposal: PlanProposal | None = None,
+    ) -> None:
         self._manifest = manifest
         self._proposal = proposal
+        self._current_proposal = current_proposal
 
     async def read_authoritative_manifest(self, *, user_scope: str, execution_id: str) -> str | None:
         return self._manifest
@@ -287,6 +299,9 @@ class _ManifestDao:
         self, *, user_scope: str, execution_id: str, plan_revision: int
     ) -> PlanProposal | None:
         return self._proposal
+
+    async def read_current_plan_proposal(self, *, user_scope: str, execution_id: str) -> PlanProposal | None:
+        return self._current_proposal
 
 
 @pytest.mark.asyncio
@@ -306,6 +321,31 @@ async def test_plan_provider_returns_none_without_reference_or_proposal() -> Non
     no_plan = _ManifestDao(_manifest(plan_ref={"execution_id": "e0", "plan_revision": 1}), None)
     assert await build_plan_spec_provider(no_plan)("u1", "e") is None
     assert await build_plan_spec_provider(_ManifestDao(None))("u1", "e") is None
+
+
+@pytest.mark.asyncio
+async def test_plan_provider_reads_auto_plan_for_execute_first_question() -> None:
+    """执行模式首问：manifest 声明 plan_source=auto → 读本执行当前计划版映射。"""
+
+    dao = _ManifestDao(_manifest(plan_source="auto"), current_proposal=_proposal())
+
+    spec = await build_plan_spec_provider(dao)("u1", "execution-1")
+
+    assert spec is not None
+    assert [node.node_id for node in spec.nodes] == ["step-1", "step-2"]
+    assert [node.target for node in spec.nodes] == ["读取行情", "汇总结论"]
+
+
+@pytest.mark.asyncio
+async def test_plan_provider_auto_plan_requires_saved_version_and_selection() -> None:
+    """无保存计划版 / 无角色能力手选 → 不可得（fail-closed，不猜最新计划）。"""
+
+    assert await build_plan_spec_provider(_ManifestDao(_manifest(plan_source="auto")))("u1", "e") is None
+    no_selection = _ManifestDao(
+        _manifest(plan_source="auto", role_prompt_refs=[], skill_refs=[]),
+        current_proposal=_proposal(),
+    )
+    assert await build_plan_spec_provider(no_selection)("u1", "e") is None
 
 
 @pytest.mark.asyncio
@@ -444,6 +484,26 @@ async def test_plan_turn_without_structured_steps_has_no_reference() -> None:
     )
     request = MainTurnRequest(identity=_IDENTITY, mode=Mode.PLAN, prompt_text="研究问题")
     turn = _ScriptedTurn([TurnDecision(action=LoopAction.PLAN, text="只有正文")])
+
+    outcome = await runner.run(request, turn=turn)
+
+    assert outcome.plan_reference is None
+    assert store.items == []
+
+
+@pytest.mark.asyncio
+async def test_plan_turn_with_empty_steps_does_not_save_version() -> None:
+    """空步骤不得冒充「已确认计划」（R21，执行模式首问据此零派发）。"""
+
+    store = _PlanStore()
+    runner = MainTurnRunner(
+        producer=ResearchResultProducer(_Store()),
+        plan_store_factory=lambda _identity: store,
+    )
+    request = MainTurnRequest(identity=_IDENTITY, mode=Mode.PLAN, prompt_text="研究问题")
+    turn = _ScriptedTurn(
+        [TurnDecision(action=LoopAction.PLAN, text="计划正文", structured_fields=json_doc({"steps": []}))]
+    )
 
     outcome = await runner.run(request, turn=turn)
 
@@ -627,15 +687,54 @@ class _IntakeFacade:
     def __init__(self, receipt: SubmissionReceipt) -> None:
         self.sessions: list[Any] = []
         self.requests: list[Any] = []
+        self.accepts: list[Any] = []
         self._receipt = receipt
 
     async def change_session(self, command: Any) -> Any:
         self.sessions.append(command)
         return cast(Any, object())
 
+    async def accept(self, request: Any, *, command: Any) -> Any:
+        self.accepts.append(request)
+        return self._receipt
+
     async def submit_and_dispatch(self, request: Any, *, command: Any) -> Any:
         self.requests.append(request)
         return SimpleNamespace(receipt=self._receipt, dispatch=None)
+
+
+class _SwitchGate:
+    def __init__(self, *, closed: bool) -> None:
+        self._closed = closed
+
+    def dispatch_closed(self) -> bool:
+        return self._closed
+
+    def close_dispatch(self) -> bool:
+        return True
+
+
+def _recording_dispatcher(*, closed: bool) -> tuple[ResearchDispatcher, list[str]]:
+    submitted: list[str] = []
+
+    async def _submit(workflow_id: str, payload: dict[str, Any]) -> None:
+        submitted.append(workflow_id)
+
+    async def _plan(user_scope: str, execution_id: str) -> PlanSpecProposal:
+        return _spec()
+
+    async def _read(workflow_id: str) -> ResearchWorkflowResult:
+        return ResearchWorkflowResult(workflow_id=workflow_id, state="SUCCESS", output={"summary": "ok"})
+
+    dispatcher = ResearchDispatcher(
+        gate=_SwitchGate(closed=closed),
+        submit=_submit,
+        plan_provider=_plan,
+        read_result=_read,
+        role_capabilities={"researcher": frozenset({"skill:skill-a@2"})},
+        binding_identity_provider=_binding,
+    )
+    return dispatcher, submitted
 
 
 def _intake_receipt() -> SubmissionReceipt:
@@ -748,17 +847,172 @@ async def test_intake_discuss_runs_main_turn_and_returns_answer() -> None:
 
 
 @pytest.mark.asyncio
-async def test_intake_execute_does_not_run_main_turn() -> None:
+async def test_intake_execute_first_question_plans_then_dispatches_when_gate_open() -> None:
+    """启门证据：门闩显式开启 + 假模型 + 假派发器 → 首问进入主回合并产生执行。"""
+
     facade = _IntakeFacade(_intake_receipt())
-    runner = _MainTurnRunnerStub()
+    runner = _MainTurnRunnerStub(plan_reference=PlanReference(execution_id="execution-1", plan_revision=1))
+    dispatcher, submitted = _recording_dispatcher(closed=False)
     intake = MainTurnIntake(
         facade,
         manifest_reader=_ManifestDao(None),
         user_scope="u1",
         main_turn=cast(Any, runner),
+        dispatcher=dispatcher,
+    )
+
+    result = await intake.start_question(
+        "执行研究",
+        mode=Mode.EXECUTE,
+        role_prompt_refs=(("researcher", "v1"),),
+        skill_refs=(("skill-a", "2"),),
+    )
+
+    # 先受理（不自动派发），再进入主回合产出计划，最后显式派发。
+    assert [request.mode for request in facade.accepts] == [Mode.EXECUTE]
+    assert facade.requests == []
+    assert [request.mode for request in runner.requests] == [Mode.PLAN]
+    assert runner.requests[0].prompt_text == "执行研究"
+    assert submitted == ["workflow-1"]
+    assert result.receipt.execution_id == "execution-1"
+    assert result.dispatch is not None
+    assert result.dispatch.submitted is True
+    assert result.plan_reference == PlanReference(execution_id="execution-1", plan_revision=1)
+    assert result.main_turn is None
+    frozen = json.loads(facade.accepts[0].manifest_payload)
+    assert frozen["plan_source"] == "auto"
+    policy = derive_frozen_selection_policy(facade.accepts[0].manifest_payload)
+    assert policy is not None
+    assert policy.role_key == "researcher"
+
+
+@pytest.mark.asyncio
+async def test_intake_execute_first_question_default_closed_zero_dispatch() -> None:
+    """默认关闭：计划可产出但零派发，且原因为结构化可解释状态（非自由文本）。"""
+
+    facade = _IntakeFacade(_intake_receipt())
+    runner = _MainTurnRunnerStub(plan_reference=PlanReference(execution_id="execution-1", plan_revision=1))
+    dispatcher, submitted = _recording_dispatcher(closed=True)
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+        dispatcher=dispatcher,
+    )
+
+    result = await intake.start_question(
+        "执行研究",
+        mode=Mode.EXECUTE,
+        role_prompt_refs=(("researcher", "v1"),),
+        skill_refs=(("skill-a", "2"),),
+    )
+
+    assert [request.mode for request in runner.requests] == [Mode.PLAN]
+    assert submitted == []
+    assert result.dispatch == DispatchOutcome(
+        execution_id="execution-1",
+        workflow_id="workflow-1",
+        submitted=False,
+        reason=DISPATCH_CLOSED,
+        reason_code=DISPATCH_CLOSED,
+    )
+
+
+@pytest.mark.asyncio
+async def test_intake_execute_without_main_turn_returns_plan_unavailable() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    dispatcher, submitted = _recording_dispatcher(closed=False)
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        dispatcher=dispatcher,
+    )
+
+    result = await intake.start_question("执行研究", mode=Mode.EXECUTE)
+
+    assert submitted == []
+    assert result.dispatch is not None
+    assert result.dispatch.submitted is False
+    assert result.dispatch.reason_code == PLAN_UNAVAILABLE
+    assert result.dispatch.reason_params == (("cause", "main_turn_not_wired"),)
+
+
+@pytest.mark.asyncio
+async def test_intake_execute_without_selection_returns_plan_unavailable() -> None:
+    """无角色能力手选 → 无派发准入判据：零派发、不耗模型、原因可解释。"""
+
+    facade = _IntakeFacade(_intake_receipt())
+    runner = _MainTurnRunnerStub(plan_reference=PlanReference(execution_id="execution-1", plan_revision=1))
+    dispatcher, submitted = _recording_dispatcher(closed=False)
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+        dispatcher=dispatcher,
     )
 
     result = await intake.start_question("执行研究", mode=Mode.EXECUTE)
 
     assert runner.requests == []
-    assert result.main_turn is None
+    assert submitted == []
+    assert result.dispatch is not None
+    assert result.dispatch.reason_code == PLAN_UNAVAILABLE
+    assert result.dispatch.reason_params == (("cause", "role_policy_missing"),)
+
+
+@pytest.mark.asyncio
+async def test_intake_execute_model_failure_returns_plan_unavailable() -> None:
+    class _FailingRunner:
+        async def run(self, request: MainTurnRequest, *, turn: Any = None) -> Any:
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "model unavailable", "u1")
+
+    facade = _IntakeFacade(_intake_receipt())
+    dispatcher, submitted = _recording_dispatcher(closed=False)
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, _FailingRunner()),
+        dispatcher=dispatcher,
+    )
+
+    result = await intake.start_question(
+        "执行研究",
+        mode=Mode.EXECUTE,
+        role_prompt_refs=(("researcher", "v1"),),
+        skill_refs=(("skill-a", "2"),),
+    )
+
+    assert submitted == []
+    assert result.dispatch is not None
+    assert result.dispatch.reason_code == PLAN_UNAVAILABLE
+    assert result.dispatch.reason_params == (("cause", AgentErrorCode.OPERATION_UNKNOWN.value),)
+
+
+@pytest.mark.asyncio
+async def test_intake_execute_without_plan_reference_returns_plan_unavailable() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    runner = _MainTurnRunnerStub(plan_reference=None)
+    dispatcher, submitted = _recording_dispatcher(closed=False)
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+        dispatcher=dispatcher,
+    )
+
+    result = await intake.start_question(
+        "执行研究",
+        mode=Mode.EXECUTE,
+        role_prompt_refs=(("researcher", "v1"),),
+        skill_refs=(("skill-a", "2"),),
+    )
+
+    assert submitted == []
+    assert result.dispatch is not None
+    assert result.dispatch.reason_code == PLAN_UNAVAILABLE
+    assert result.dispatch.reason_params == (("cause", "plan_not_produced"),)

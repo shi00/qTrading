@@ -1167,6 +1167,16 @@ class AgentService:
         receipt, _ = await self._accept_and_dispatch(request, command=command)
         return receipt
 
+    async def accept(self, request: AcceptRequest, *, command: CommandRef) -> SubmissionReceipt:
+        """仅受理落定、不自动派发（执行模式首问：先产出计划，再由入口显式派发）。
+
+        与 ``submit`` 共用同一校验/准入/落定路径；区别只在于不调用派发器，因此
+        调用方必须自行对回执做显式派发（或如实记录零派发），不得把「已受理」
+        当成「已启动」。``CancelledError`` 照常传播（R2）。
+        """
+
+        return await self._accept_request(request, command=command)
+
     async def _accept_and_dispatch(
         self, request: AcceptRequest, *, command: CommandRef
     ) -> tuple[SubmissionReceipt, DispatchOutcome | None]:
@@ -1175,6 +1185,20 @@ class AgentService:
         dispatch 的失败已在派发器内折叠为 ``submitted=False`` + 原因（不抛出），
         故受理成功语义不受派发结果影响；``CancelledError`` 照常传播（R2）。
         """
+
+        receipt = await self._accept_request(request, command=command)
+        dispatcher = self._dispatcher
+        if dispatcher is None:
+            return receipt, None
+        # 派发使用受理时权威模式（P1-03）：重放查回的是原受理回执，不能拿本次请求
+        # 的模式覆盖。历史回执无 mode 字段时，受理事务已按冻结 manifest 证明请求
+        # 模式与受理时一致（DAO ``_legacy_intent_replays``），故回退到请求值仍等价。
+        dispatch_mode = receipt.mode if receipt.mode is not None else request.mode
+        outcome = await dispatcher.dispatch(receipt, user_scope=request.user_scope, mode=dispatch_mode)
+        return receipt, outcome
+
+    async def _accept_request(self, request: AcceptRequest, *, command: CommandRef) -> SubmissionReceipt:
+        """校验命令引用与准入 → 受理事务落定 → 登记来源（不派发）。"""
 
         self._require_open("submit")
         identity = f"{request.user_scope}/{request.session_id}"
@@ -1206,15 +1230,7 @@ class AgentService:
         receipt = await self._dao.accept_request(request)
         # 准入通过后才登记已核来源（同一判据重放），consumer 绑定本次执行身份。
         await self._register_source_admission(admission, receipt)
-        dispatcher = self._dispatcher
-        if dispatcher is None:
-            return receipt, None
-        # 派发使用受理时权威模式（P1-03）：重放查回的是原受理回执，不能拿本次请求
-        # 的模式覆盖。历史回执无 mode 字段时，受理事务已按冻结 manifest 证明请求
-        # 模式与受理时一致（DAO ``_legacy_intent_replays``），故回退到请求值仍等价。
-        dispatch_mode = receipt.mode if receipt.mode is not None else request.mode
-        outcome = await dispatcher.dispatch(receipt, user_scope=request.user_scope, mode=dispatch_mode)
-        return receipt, outcome
+        return receipt
 
     async def _admit_business_sources(self, request: AcceptRequest, receipt: SubmissionReceipt) -> None:
         """受理期业务来源 PIT 准入（I63）：先预检再登记（保留的兼容入口）。

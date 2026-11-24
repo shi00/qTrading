@@ -1098,7 +1098,14 @@ async def wire_agent_runtime(
         ),
         turn_factory=turn_factory,
     )
-    intake = MainTurnIntake(facade, manifest_reader=dao, user_scope=user_scope, main_turn=main_turn)
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=dao,
+        user_scope=user_scope,
+        main_turn=main_turn,
+        # 执行模式首问：受理后先产出计划，再由入口显式派发（同一门闩/计划准入）。
+        dispatcher=dispatcher,
+    )
     return AgentWiring(
         service=facade,
         bridge=bridge,
