@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -30,6 +31,7 @@ from core.agent_types import (
     AnswerDeliveryRequest,
     AnswerReceipt,
     ArtifactReadQuery,
+    CommandRef,
     DraftRead,
     DraftReadQuery,
     HistoryPage,
@@ -40,6 +42,8 @@ from core.agent_types import (
     PendingAnswerFact,
     PendingAnswerPage,
     SaveAnswerRequest,
+    SessionAction,
+    SessionChangeCommand,
     SessionRead,
     SessionReadQuery,
     json_doc,
@@ -82,6 +86,17 @@ COMPOSER_MODES: Final[tuple[str, ...]] = ("discuss", "plan", "execute")
 DEFAULT_COMPOSER_MODE: Final[str] = "execute"
 #: 精确导航目标在读取期间被更新的最大重读次数（超过则如实报码，不落过期会话）。
 _REFRESH_TARGET_ATTEMPTS: Final[int] = 3
+
+#: 会话列表：历史扫描上限（HistoryQuery.limit 硬上界 50）。
+_SESSION_SCAN_LIMIT: Final[int] = 50
+#: 会话列表展示上限（每个会话需一次轻量摘要读取，限制读取扇出）。
+SESSION_LIST_LIMIT: Final[int] = 10
+
+#: 会话状态文案 key（未知/已清理/已归档/正常分列；不把未知读成「正常」）。
+SESSION_STATUS_UNKNOWN = "agent_research_session_status_unknown"
+SESSION_STATUS_CLEANED = "agent_research_session_status_cleaned"
+SESSION_STATUS_ARCHIVED = "agent_research_session_status_archived"
+SESSION_STATUS_ACTIVE = "agent_research_session_status_active"
 
 
 class MainTurnIntakePort(Protocol):
@@ -289,6 +304,37 @@ class PendingAnswerView:
 
 
 @dataclass(frozen=True)
+class SessionListItemView:
+    """会话列表项只读投影（标题/时点/状态/元数据版）。
+
+    ``title`` 为 None 表示标题读取失败或缺失（View 显示未命名，不伪造标题）；
+    ``revision`` 为 None 表示该会话摘要未读到，改名/置顶/归档等 CAS 动作被拒绝
+    （不以猜测的预期版覆盖）。
+    """
+
+    session_id: str
+    title: str | None
+    updated_at: str | None
+    revision: int | None
+    pinned: bool
+    archived: bool
+    cleaned: bool
+    status_unknown: bool = False
+
+    @property
+    def status_key(self) -> str:
+        """状态文案 key（未知优先，不把读取失败读成「正常」）。"""
+
+        if self.status_unknown:
+            return SESSION_STATUS_UNKNOWN
+        if self.cleaned:
+            return SESSION_STATUS_CLEANED
+        if self.archived:
+            return SESSION_STATUS_ARCHIVED
+        return SESSION_STATUS_ACTIVE
+
+
+@dataclass(frozen=True)
 class DispatchReasonView:
     """零派发的结构化原因（稳定原因码 + 键值参数；View 按码 i18n，不拼接自由文本）。"""
 
@@ -361,6 +407,18 @@ class ResearchObserverState:
     plan_reference: tuple[str, int] | None = None
     plan_pending: bool = False
     plan_error_key: str | None = None
+    #: 会话列表与元数据动作（W-14）：列表只读投影 + 动作在途/错误 + 新建/改名输入态。
+    sessions: tuple[SessionListItemView, ...] = ()
+    sessions_loading: bool = False
+    sessions_error_code: str | None = None
+    session_action_pending: bool = False
+    session_action_error_key: str | None = None
+    session_action_error_code: str | None = None
+    new_session_title: str = ""
+    rename_target_session_id: str | None = None
+    rename_text: str = ""
+    #: 当前会话的元数据版（会话 CAS 动作的预期版；读取失败保持 0，动作被拒绝）。
+    session_revision: int = 0
 
     def draft_for(self, decision_id: str) -> str:
         """读取某决定的答复草稿（收起/重渲染后仍在）。"""
@@ -460,6 +518,21 @@ def _answer_command_key(decision_id: str) -> str:
     """答复命令键：按决定身份派生（同一决定的每次提交命中同一命令）。"""
 
     return f"{_ANSWER_COMMAND_KEY_PREFIX}{decision_id}"
+
+
+def _unknown_session_item(session_id: str) -> SessionListItemView:
+    """会话摘要读取失败时的列表项：身份已知、标题/时点/版未知（R21）。"""
+
+    return SessionListItemView(
+        session_id=session_id,
+        title=None,
+        updated_at=None,
+        revision=None,
+        pinned=False,
+        archived=False,
+        cleaned=False,
+        status_unknown=True,
+    )
 
 
 def _is_expired(expires_at: str | None) -> bool:
@@ -763,6 +836,269 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             return
         await self.refresh(target)
 
+    # ------------------------------------------------------------------
+    # 会话列表与元数据（W-14；只读列表 + 元数据 CAS 动作，不派发研究）
+    # ------------------------------------------------------------------
+
+    async def load_sessions(self) -> None:
+        """读取会话列表（标题/时间/状态；只读）。
+
+        列表由历史命中去重得到（newest_first），逐会话以 ``limit=1`` 只读摘要取
+        标题/时点/元数据版。单个会话读取失败如实标为「状态未知」并给出错误码，
+        不把失败读成空列表或伪造标题（R21）。
+        """
+
+        if self._service is None or not self._state.available:
+            return
+        if self._state.sessions_loading:
+            return
+        self._track_inflight_cancellable()
+        self._set_state(sessions_loading=True, sessions_error_code=None)
+        try:
+            page = await self._service.search(
+                HistoryQuery(
+                    scope="all_saved",
+                    round_selection=HistoryRoundSelection(kind="all_rounds"),
+                    query_text="",
+                    time_basis="updated",
+                    sort="newest_first",
+                    limit=_SESSION_SCAN_LIMIT,
+                ),
+                user_scope=self._user_scope,
+            )
+        except asyncio.CancelledError:
+            self._set_state(sessions_loading=False)
+            raise
+        except Exception as e:
+            self._set_state(sessions_loading=False, sessions_error_code=self._error_code(e))
+            return
+        session_ids: list[str] = []
+        for hit in page.hits:
+            if hit.session_id not in session_ids:
+                session_ids.append(hit.session_id)
+            if len(session_ids) >= SESSION_LIST_LIMIT:
+                break
+        items: list[SessionListItemView] = []
+        failure: str | None = None
+        for session_id in session_ids:
+            try:
+                read = await self._service.read_session(
+                    SessionReadQuery(session_id=session_id, limit=1),
+                    user_scope=self._user_scope,
+                )
+            except asyncio.CancelledError:
+                self._set_state(sessions_loading=False)
+                raise
+            except Exception as e:
+                failure = failure or self._error_code(e)
+                items.append(_unknown_session_item(session_id))
+                continue
+            summary = read.summary
+            items.append(
+                SessionListItemView(
+                    session_id=session_id,
+                    title=(summary.title or None),
+                    updated_at=getattr(summary, "updated_at", None),
+                    revision=int(getattr(summary, "revision", 0) or 0),
+                    pinned=bool(getattr(summary, "pinned", False)),
+                    archived=bool(getattr(summary, "archived", False)),
+                    cleaned=getattr(summary, "cleaned_at", None) is not None,
+                    status_unknown=False,
+                )
+            )
+        self._set_state(sessions_loading=False, sessions=tuple(items), sessions_error_code=failure)
+
+    def set_new_session_title(self, text: str) -> None:
+        """记录「新建会话」标题输入（纯状态；空标题提交时如实拒绝）。"""
+
+        self._set_state(new_session_title=text)
+
+    async def create_session(self) -> None:
+        """新建空会话并导航到它（标题必填；不派发研究、不写草稿）。"""
+
+        if self._service is None or not self._state.available:
+            self._set_state(
+                session_action_error_key=self._state.unavailable_reason_key or UNAVAILABLE_NOT_WIRED,
+                session_action_error_code=None,
+            )
+            return
+        title = self._state.new_session_title.strip()
+        if not title:
+            self._set_state(
+                session_action_error_key="agent_research_session_title_required",
+                session_action_error_code=None,
+            )
+            return
+        session_id = f"ui-session-{uuid.uuid4().hex}"
+        receipt = await self._change_session_metadata(
+            session_id,
+            SessionAction.CREATE,
+            expected_revision=0,
+            title=title,
+        )
+        if receipt is None:
+            return
+        self._set_state(new_session_title="")
+        await self.open_session(session_id)
+        if not any(item.session_id == session_id for item in self._state.sessions):
+            # 新会话尚无消息/成果，历史搜索不会命中：按创建回执补一条（版来自回执）。
+            self._set_state(
+                sessions=(
+                    SessionListItemView(
+                        session_id=session_id,
+                        title=title,
+                        updated_at=None,
+                        revision=int(getattr(receipt, "current_revision", 0) or 0),
+                        pinned=False,
+                        archived=False,
+                        cleaned=False,
+                    ),
+                    *self._state.sessions,
+                )
+            )
+
+    def begin_rename(self, session_id: str) -> None:
+        """进入改名编辑（目标必须已在列表中；预填当前标题，不猜标题）。"""
+
+        item = next((entry for entry in self._state.sessions if entry.session_id == session_id), None)
+        if item is None:
+            self._set_state(
+                session_action_error_key="agent_research_session_unknown",
+                session_action_error_code=None,
+            )
+            return
+        self._set_state(
+            rename_target_session_id=session_id,
+            rename_text=item.title or "",
+            session_action_error_key=None,
+            session_action_error_code=None,
+        )
+
+    def set_rename_text(self, text: str) -> None:
+        self._set_state(rename_text=text)
+
+    def cancel_rename(self) -> None:
+        self._set_state(rename_target_session_id=None, rename_text="")
+
+    async def commit_rename(self) -> None:
+        """提交改名（CAS 预期版取自列表摘要；版本未知则拒绝，不猜版覆盖）。"""
+
+        target = self._state.rename_target_session_id
+        item = next((entry for entry in self._state.sessions if entry.session_id == target), None)
+        if target is None or item is None:
+            self._set_state(
+                session_action_error_key="agent_research_session_unknown",
+                session_action_error_code=None,
+                rename_target_session_id=None,
+                rename_text="",
+            )
+            return
+        title = self._state.rename_text.strip()
+        if not title:
+            self._set_state(
+                session_action_error_key="agent_research_session_title_required",
+                session_action_error_code=None,
+            )
+            return
+        if item.revision is None:
+            self._set_state(
+                session_action_error_key="agent_research_session_revision_unknown",
+                session_action_error_code=None,
+            )
+            return
+        receipt = await self._change_session_metadata(
+            target,
+            SessionAction.RENAME,
+            expected_revision=item.revision,
+            title=title,
+        )
+        if receipt is not None:
+            self._set_state(rename_target_session_id=None, rename_text="")
+
+    async def pin_session(self, session_id: str) -> None:
+        """置顶会话（元数据 CAS；不改变研究执行）。"""
+
+        await self._run_session_action(session_id, SessionAction.PIN)
+
+    async def archive_session(self, session_id: str) -> None:
+        """归档会话（只改元数据，不终止执行；§9.3）。"""
+
+        await self._run_session_action(session_id, SessionAction.ARCHIVE)
+
+    async def _run_session_action(self, session_id: str, action: SessionAction) -> None:
+        item = next((entry for entry in self._state.sessions if entry.session_id == session_id), None)
+        if item is None or item.revision is None:
+            self._set_state(
+                session_action_error_key="agent_research_session_revision_unknown",
+                session_action_error_code=None,
+            )
+            return
+        await self._change_session_metadata(session_id, action, expected_revision=item.revision)
+
+    async def _change_session_metadata(
+        self,
+        session_id: str,
+        action: SessionAction,
+        *,
+        expected_revision: int,
+        title: str | None = None,
+    ) -> Any | None:
+        """执行会话元数据动作（唯一写入口 ``change_session``）；失败返回 None 并报码。"""
+
+        service = self._service
+        change = getattr(service, "change_session", None) if service is not None else None
+        if not callable(change):
+            self._set_state(session_action_error_key=UNAVAILABLE_NOT_WIRED, session_action_error_code=None)
+            return None
+        if action is not SessionAction.CREATE and expected_revision < 1:
+            self._set_state(
+                session_action_error_key="agent_research_session_revision_unknown",
+                session_action_error_code=None,
+            )
+            return None
+        if self._state.session_action_pending:
+            return None
+        command_id = f"ui-session-{action.value}:{session_id}:{expected_revision}:{title or ''}"
+        self._set_state(
+            session_action_pending=True,
+            session_action_error_key=None,
+            session_action_error_code=None,
+            last_error_code=None,
+        )
+        try:
+            receipt = await cast("Callable[..., Awaitable[Any]]", change)(
+                SessionChangeCommand(
+                    command=CommandRef(
+                        user_scope=self._user_scope,
+                        source_module="ui",
+                        business_request_id=command_id,
+                        command_id=command_id,
+                        expected_revision=expected_revision,
+                    ),
+                    action=action,
+                    session_id=session_id,
+                    expected_session_revision=expected_revision,
+                    title=title,
+                )
+            )
+        except asyncio.CancelledError:
+            self._set_state(session_action_pending=False)
+            raise
+        except Exception as e:
+            code = self._error_code(e)
+            self._set_state(
+                session_action_pending=False,
+                session_action_error_key=None,
+                session_action_error_code=code,
+                last_error_code=code,
+            )
+            return None
+        self._set_state(session_action_pending=False)
+        await self.load_sessions()
+        if session_id == self._state.session_id:
+            await self.refresh()
+        return receipt
+
     async def _resolve_session(self, target: str | None) -> str | None:
         """解析要读取的会话：显式目标优先，其次当前会话，最后历史最新一条。
 
@@ -818,6 +1154,15 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             pending_items_truncated=False,
             pending_scope=PENDING_SCOPE_SESSION,
             last_updated_at=read_moment,
+            # 会话级 UI 状态随会话消失（首问正文属于面板输入，不在此清空）。
+            session_revision=0,
+            last_answer_text="",
+            last_dispatch_reason=None,
+            plan_steps=(),
+            plan_reference=None,
+            plan_error_key=None,
+            rename_target_session_id=None,
+            rename_text="",
         )
 
     async def _read_pending_overview(self) -> tuple[PendingAnswerPage | None, str | None]:
@@ -910,10 +1255,26 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             artifact_bodies = ()
         else:
             artifact_bodies = tuple(body for body in self._state.artifact_bodies if body.key not in cleaned_keys)
+        # 切换会话即隔离草稿与上一会话的直答/计划：正文与计划属于具体会话，
+        # 不随后续发送串到另一会话（W-14）；无会话时的首问草稿不在此清空。
+        switch_changes: dict[str, Any] = (
+            {
+                "composer_text": "",
+                "composer_error_key": None,
+                "last_answer_text": "",
+                "last_dispatch_reason": None,
+                "plan_steps": (),
+                "plan_reference": None,
+                "plan_error_key": None,
+            }
+            if session_changed
+            else {}
+        )
         self._set_state(
             loading=False,
             session_id=session_id,
             session_title=read.summary.title,
+            session_revision=int(getattr(read.summary, "revision", 0) or 0),
             executions=tuple((execution.execution_id, execution.display_state) for execution in read.executions),
             decisions=pending,
             pending_count=pending_count,
@@ -932,6 +1293,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             artifact_bodies=artifact_bodies,
             session_draft=loaded_draft,
             draft_error_code=None,
+            **switch_changes,
             **self._projection_changes(selected=selected, collapsed=collapsed),
         )
 

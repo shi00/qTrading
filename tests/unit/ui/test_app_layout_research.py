@@ -259,11 +259,29 @@ def _render_panel(
     monkeypatch: Any,
     callbacks: dict | None = None,
 ) -> ft.Container:
-    from ui.views import research_observer_panel as panel_mod
+    from ui.views import (
+        research_observer_artifacts as artifacts_mod,
+        research_observer_composer as composer_mod,
+        research_observer_conversation as conversation_mod,
+        research_observer_decisions as decisions_mod,
+        research_observer_panel as panel_mod,
+        research_observer_session_list as sessions_mod,
+        research_observer_widgets as widgets_mod,
+    )
 
     mock_i18n = MagicMock()
     mock_i18n.get.side_effect = lambda key, *a, **kw: key
-    monkeypatch.setattr(panel_mod, "I18n", mock_i18n)
+    # 面板已拆分为多个子视图模块：替身需覆盖全部渲染模块，否则子视图取到真实文案。
+    for module in (
+        panel_mod,
+        artifacts_mod,
+        composer_mod,
+        conversation_mod,
+        decisions_mod,
+        sessions_mod,
+        widgets_mod,
+    ):
+        monkeypatch.setattr(module, "I18n", mock_i18n)
     cbs = callbacks or {}
     component = make_component(
         panel_mod.ResearchObserverPanel,
@@ -369,6 +387,55 @@ class TestShellResearchEntry:
         assert layout_env["page"].run_task.call_args.args[0] == vm.load_artifact
         assert layout_env["service"].answer_calls == [], "观察面入口不得触发决定提交"
 
+    def test_session_callbacks_route_to_vm_commands(self, layout_env) -> None:
+        _open_panel(layout_env)
+        _drive_last_run_task(layout_env)
+        _rerender(layout_env)
+        panel = _observation_control(layout_env)
+        assert panel is not None
+        vm = _shared_vm()
+        page = layout_env["page"]
+
+        before = page.run_task.call_count
+        panel.kwargs["on_load_sessions"]()
+        assert page.run_task.call_count == before + 1
+        assert page.run_task.call_args.args[0] == vm.load_sessions
+        _drive_last_run_task(layout_env)
+        assert vm.state.sessions, "会话列表入口应把列表读进状态"
+
+        panel.kwargs["on_new_session_title"]("新会话")
+        assert vm.state.new_session_title == "新会话"
+        panel.kwargs["on_begin_rename"](vm.state.sessions[0].session_id)
+        panel.kwargs["on_rename_text"]("改名后的标题")
+        assert vm.state.rename_text == "改名后的标题"
+        panel.kwargs["on_cancel_rename"]()
+        assert vm.state.rename_target_session_id is None
+
+        for name, command, arg in (
+            ("on_open_session", vm.open_session, "s-1"),
+            ("on_create_session", vm.create_session, None),
+            ("on_commit_rename", vm.commit_rename, None),
+            ("on_pin_session", vm.pin_session, "s-1"),
+            ("on_archive_session", vm.archive_session, "s-1"),
+        ):
+            before = page.run_task.call_count
+            if arg is None:
+                panel.kwargs[name]()
+                expected = [command]
+            else:
+                panel.kwargs[name](arg)
+                expected = [command, arg]
+            assert page.run_task.call_count == before + 1
+            assert list(page.run_task.call_args.args) == expected
+
+        panel.kwargs["on_draft_change"]("d-1", "草稿")
+        assert vm.state.draft_for("d-1") == "草稿"
+
+        before = page.run_task.call_count
+        panel.kwargs["on_retry_delivery"]("d-1")
+        assert page.run_task.call_count == before + 1
+        assert list(page.run_task.call_args.args) == [vm.retry_delivery, "d-1"]
+
 
 class TestCollapseKeepsDraftAndExecution:
     def test_nav_click_collapses_without_clearing_draft(self, layout_env) -> None:
@@ -415,6 +482,20 @@ class TestObservationPanelView:
             decisions=decisions,
             pending_count=len(decisions),
         )
+
+    def test_panel_header_shows_current_session_title(self, monkeypatch) -> None:
+        panel = _render_panel(
+            ResearchObserverState(
+                available=True,
+                session_id="s-1",
+                session_title="研究 A",
+                composer_available=True,
+            ),
+            monkeypatch=monkeypatch,
+        )
+        header = panel.content.controls[0]
+        header_texts = [control.value for control in _iter_controls(header) if isinstance(control, ft.Text)]
+        assert "agent_research_session_fmt" in header_texts, "当前会话标题必须在面板标题区渲染"
 
     def test_unavailable_state_is_honest(self, monkeypatch) -> None:
         panel = _render_panel(
@@ -1227,3 +1308,12 @@ class TestDesktopInputLatencyBaseline:
 
         samples = self._samples_ms(lambda: _render_panel(state, monkeypatch=monkeypatch))
         self._assert_p95("ResearchObserverPanel render", samples, self._PANEL_RENDER_P95_LIMIT_MS)
+
+
+def test_shortcut_key_normalization_tolerates_blank_and_variants() -> None:
+    from ui.app_layout import _normalize_shortcut_key
+
+    assert _normalize_shortcut_key(None) == ""
+    assert _normalize_shortcut_key("   ") == "", "空白按键标签应归一化为空（不匹配任何快捷键）"
+    assert _normalize_shortcut_key("Numpad3") == "3"
+    assert _normalize_shortcut_key("KeyA") == "A"

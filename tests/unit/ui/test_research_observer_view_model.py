@@ -6,8 +6,12 @@ from typing import Any, cast
 
 import pytest
 
-from core.agent_types import DraftPayload, DraftRead, MCPServiceIdentity, Mode, Purpose
+from core.agent_types import DraftPayload, DraftRead, MCPServiceIdentity, Mode, Purpose, SessionAction
 from ui.viewmodels.research_observer_view_model import (
+    SESSION_STATUS_ACTIVE,
+    SESSION_STATUS_ARCHIVED,
+    SESSION_STATUS_CLEANED,
+    SESSION_STATUS_UNKNOWN,
     UNAVAILABLE_NOT_READY,
     UNAVAILABLE_NOT_WIRED,
     DispatchReasonView,
@@ -127,6 +131,9 @@ def _session_read(
     artifacts_has_more: bool = False,
     draft_revision: int = 0,
     cleaned_at: str | None = None,
+    revision: int = 3,
+    pinned: bool = False,
+    archived: bool = False,
 ) -> Any:
     return SimpleNamespace(
         summary=SimpleNamespace(
@@ -134,6 +141,9 @@ def _session_read(
             updated_at="2026-11-17T02:00:00.000000Z",
             draft_revision=draft_revision,
             cleaned_at=cleaned_at,
+            revision=revision,
+            pinned=pinned,
+            archived=archived,
         ),
         executions=(_execution(),) if executions is None else executions,
         messages=SimpleNamespace(items=messages, has_more=messages_has_more, next_cursor=None),
@@ -240,6 +250,9 @@ class _FakeService:
         pending_error: Exception | None = None,
         deliver_error: Exception | None = None,
         delivery_state: str = "delivered",
+        session_reads: dict[str, Any] | None = None,
+        read_errors: dict[str, Exception] | None = None,
+        change_error: Exception | None = None,
     ) -> None:
         self.hits = hits
         self.read = read if read is not None else _session_read()
@@ -262,6 +275,9 @@ class _FakeService:
         self.pending_error = pending_error
         self.deliver_error = deliver_error
         self.delivery_state = delivery_state
+        self.session_reads = session_reads or {}
+        self.read_errors = read_errors or {}
+        self.change_error = change_error
         self.search_calls: list[Any] = []
         self.read_calls: list[Any] = []
         self.answer_calls: list[Any] = []
@@ -269,6 +285,7 @@ class _FakeService:
         self.draft_calls: list[Any] = []
         self.pending_calls: list[Any] = []
         self.deliver_calls: list[Any] = []
+        self.change_calls: list[Any] = []
 
     async def search(self, query: Any, *, user_scope: str) -> Any:
         self.search_calls.append((query, user_scope))
@@ -278,7 +295,19 @@ class _FakeService:
 
     async def read_session(self, query: Any, *, user_scope: str) -> Any:
         self.read_calls.append((query, user_scope))
-        return self.read
+        error = self.read_errors.get(query.session_id)
+        if error is not None:
+            raise error
+        return self.session_reads.get(query.session_id, self.read)
+
+    async def change_session(self, command: Any) -> Any:
+        self.change_calls.append(command)
+        if self.change_error is not None:
+            raise self.change_error
+        return SimpleNamespace(
+            command_record_id="cmd-session",
+            current_revision=int(getattr(command, "expected_session_revision", 0)) + 1,
+        )
 
     async def read_artifact(self, query: Any, *, user_scope: str) -> Any:
         self.artifact_calls.append((query, user_scope))
@@ -1546,3 +1575,207 @@ class _MainTurnComposerTests:
         await vm.send_first_question()
 
         assert vm.state.plan_reference == ("execution-0", 2)
+
+
+def _hit(session_id: str) -> Any:
+    """历史命中替身：列表只依赖 session_id。"""
+
+    return SimpleNamespace(session_id=session_id)
+
+
+class TestSessionListAndMetadata:
+    """W-14: 会话列表（标题/时间/状态）与元数据动作入口（只读列表 + CAS 写入）。"""
+
+    @pytest.mark.asyncio
+    async def test_load_sessions_dedupes_newest_first_and_projects_metadata(self) -> None:
+        service = _FakeService(
+            hits=(_hit("s-2"), _hit("s-1"), _hit("s-2")),
+            session_reads={
+                "s-2": _session_read(title="研究 B", revision=5, archived=True),
+                "s-1": _session_read(title="研究 A", revision=4, cleaned_at="2026-11-17T06:00:00.000000Z"),
+            },
+        )
+        vm = ResearchObserverViewModel(service)
+
+        await vm.load_sessions()
+
+        state = vm.state
+        assert [item.session_id for item in state.sessions] == ["s-2", "s-1"]
+        assert [item.title for item in state.sessions] == ["研究 B", "研究 A"]
+        assert state.sessions[0].revision == 5
+        assert state.sessions[0].status_key == SESSION_STATUS_ARCHIVED
+        assert state.sessions[1].status_key == SESSION_STATUS_CLEANED
+        assert state.sessions_loading is False
+        assert state.sessions_error_code is None
+        # 列表按历史最新优先、扫描上限封顶；逐会话仅 limit=1 的轻量摘要读取。
+        assert service.search_calls[0][0].scope == "all_saved"
+        assert service.search_calls[0][0].limit == 50
+        assert [call[0].session_id for call in service.read_calls] == ["s-2", "s-1"]
+        assert all(call[0].limit == 1 for call in service.read_calls)
+
+    @pytest.mark.asyncio
+    async def test_load_sessions_marks_failed_read_unknown_instead_of_faking(self) -> None:
+        service = _FakeService(
+            hits=(_hit("s-2"), _hit("s-1")),
+            session_reads={"s-1": _session_read(title="研究 A")},
+            read_errors={"s-2": _FakeError("PERSISTENCE_UNAVAILABLE")},
+        )
+        vm = ResearchObserverViewModel(service)
+
+        await vm.load_sessions()
+
+        failed, ok = vm.state.sessions
+        assert failed.status_unknown is True
+        assert failed.title is None
+        assert failed.revision is None
+        assert failed.status_key == SESSION_STATUS_UNKNOWN
+        assert ok.status_key == SESSION_STATUS_ACTIVE
+        assert vm.state.sessions_error_code == "PERSISTENCE_UNAVAILABLE"
+
+    @pytest.mark.asyncio
+    async def test_load_sessions_search_failure_reports_code_and_leaves_list_empty(self) -> None:
+        service = _FakeService(search_error=_FakeError("PERSISTENCE_UNAVAILABLE"))
+        vm = ResearchObserverViewModel(service)
+
+        await vm.load_sessions()
+
+        assert vm.state.sessions == ()
+        assert vm.state.sessions_loading is False
+        assert vm.state.sessions_error_code == "PERSISTENCE_UNAVAILABLE"
+
+    @pytest.mark.asyncio
+    async def test_create_session_rejects_blank_title_without_write(self) -> None:
+        service = _FakeService(hits=())
+        vm = ResearchObserverViewModel(service)
+        vm.set_new_session_title("   ")
+
+        await vm.create_session()
+
+        assert vm.state.session_action_error_key == "agent_research_session_title_required"
+        assert service.change_calls == []
+
+    @pytest.mark.asyncio
+    async def test_create_session_commits_create_then_navigates_to_new_session(self) -> None:
+        service = _FakeService(hits=())
+        vm = ResearchObserverViewModel(service)
+        vm.set_new_session_title(" 新研究 ")
+
+        await vm.create_session()
+
+        command = service.change_calls[0]
+        assert command.action is SessionAction.CREATE
+        assert command.expected_session_revision == 0
+        assert command.title == "新研究"
+        assert command.command.source_module == "ui"
+        new_id = vm.state.session_id
+        assert new_id is not None
+        assert new_id.startswith("ui-session-")
+        assert vm.state.sessions[0].session_id == new_id
+        assert vm.state.sessions[0].title == "新研究"
+        assert vm.state.new_session_title == ""
+
+    @pytest.mark.asyncio
+    async def test_rename_uses_list_revision_and_sends_title(self) -> None:
+        service = _FakeService(
+            hits=(_hit("s-1"),),
+            session_reads={"s-1": _session_read(title="研究 A", revision=4)},
+        )
+        vm = ResearchObserverViewModel(service)
+        await vm.load_sessions()
+
+        vm.begin_rename("s-1")
+        assert vm.state.rename_text == "研究 A"
+        vm.set_rename_text("研究 A·改")
+        await vm.commit_rename()
+
+        command = service.change_calls[0]
+        assert command.action is SessionAction.RENAME
+        assert command.expected_session_revision == 4
+        assert command.title == "研究 A·改"
+        assert vm.state.rename_target_session_id is None
+        assert vm.state.rename_text == ""
+
+    @pytest.mark.asyncio
+    async def test_rename_rejects_blank_title_and_unknown_revision(self) -> None:
+        service = _FakeService(
+            hits=(_hit("s-1"),),
+            session_reads={"s-1": _session_read(title="研究 A", revision=0)},
+        )
+        vm = ResearchObserverViewModel(service)
+        await vm.load_sessions()
+
+        vm.begin_rename("s-1")
+        vm.set_rename_text("   ")
+        await vm.commit_rename()
+        assert vm.state.session_action_error_key == "agent_research_session_title_required"
+
+        vm.set_rename_text("研究 A·改")
+        await vm.commit_rename()
+        assert vm.state.session_action_error_key == "agent_research_session_revision_unknown"
+        assert service.change_calls == []
+
+    @pytest.mark.asyncio
+    async def test_pin_and_archive_forward_metadata_actions(self) -> None:
+        service = _FakeService(
+            hits=(_hit("s-1"),),
+            session_reads={"s-1": _session_read(title="研究 A", revision=4)},
+        )
+        vm = ResearchObserverViewModel(service)
+        await vm.load_sessions()
+
+        await vm.pin_session("s-1")
+        await vm.archive_session("s-1")
+
+        assert [call.action for call in service.change_calls] == [SessionAction.PIN, SessionAction.ARCHIVE]
+        assert all(call.expected_session_revision == 4 for call in service.change_calls)
+
+    @pytest.mark.asyncio
+    async def test_metadata_failure_reports_code_and_releases_pending(self) -> None:
+        service = _FakeService(
+            hits=(_hit("s-1"),),
+            session_reads={"s-1": _session_read(title="研究 A", revision=4)},
+            change_error=_FakeError("REVISION_CONFLICT"),
+        )
+        vm = ResearchObserverViewModel(service)
+        await vm.load_sessions()
+
+        await vm.pin_session("s-1")
+
+        assert vm.state.session_action_error_code == "REVISION_CONFLICT"
+        assert vm.state.session_action_pending is False
+        assert vm.state.last_error_code == "REVISION_CONFLICT"
+
+    @pytest.mark.asyncio
+    async def test_switch_session_clears_session_scoped_draft_and_keeps_answer_drafts(self) -> None:
+        service = _FakeService(
+            hits=(_hit("s-1"),),
+            session_reads={
+                "s-1": _session_read(title="研究 A"),
+                "s-2": _session_read(title="研究 B"),
+            },
+        )
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+        vm.set_composer_text("未发送的首问")
+        vm.set_answer_draft("d-1", "答复草稿")
+
+        await vm.open_session("s-2")
+
+        assert vm.state.session_id == "s-2"
+        assert vm.state.session_title == "研究 B"
+        assert vm.state.composer_text == "", "切换会话不得把上一会话的首问草稿串到新会话"
+        assert vm.state.draft_for("d-1") == "答复草稿", "按决定身份保存的答复草稿不应被会话切换清空"
+
+    @pytest.mark.asyncio
+    async def test_no_session_refresh_clears_session_scoped_state_but_keeps_first_question_draft(self) -> None:
+        service = _FakeService(hits=())
+        vm = ResearchObserverViewModel(service)
+        vm.set_composer_text("草稿")
+
+        await vm.refresh()
+
+        assert vm.state.session_id is None
+        assert vm.state.session_title is None
+        assert vm.state.session_revision == 0
+        assert vm.state.rename_target_session_id is None
+        assert vm.state.composer_text == "草稿"
