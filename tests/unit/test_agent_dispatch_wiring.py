@@ -464,6 +464,25 @@ def test_dispatch_closed_gate_is_zero_dispatch() -> None:
 
     assert outcome.submitted is False
     assert outcome.reason == DISPATCH_CLOSED
+    assert outcome.reason_code == DISPATCH_CLOSED
+    assert outcome.reason_params == ()
+    assert submit.calls == []
+
+
+def test_dispatch_plan_unavailable_reason_is_structured() -> None:
+    """无计划不投递，且原因是稳定原因码 + 参数（UI 按码 i18n，不拼自由文本）。"""
+
+    async def _no_plan(user_scope: str, execution_id: str) -> None:
+        return None
+
+    submit = _RecordingSubmitter()
+    dispatcher = _dispatcher(gate=_FakeGate(closed=False), submit=submit, plan_provider=_no_plan)
+
+    outcome = asyncio.run(dispatcher.dispatch(_receipt(), user_scope=_USER_SCOPE, mode=Mode.EXECUTE))
+
+    assert outcome.submitted is False
+    assert outcome.reason_code == PLAN_UNAVAILABLE
+    assert outcome.reason_params == (("cause", "plan_not_saved"),)
     assert submit.calls == []
 
 
@@ -663,6 +682,21 @@ def test_submit_and_dispatch_returns_receipt_and_dispatch_facts() -> None:
     assert [workflow_id for workflow_id, _ in submit.calls] == [_WORKFLOW_ID]
     result = asyncio.run(service.read_research_result(_WORKFLOW_ID))
     assert result.output == {"summary": "ok"}
+
+
+def test_accept_commits_without_dispatching() -> None:
+    """仅受理不派发：执行模式首问先产出计划，再由入口显式派发（不自动启动）。"""
+
+    submit = _RecordingSubmitter()
+    dispatcher = _dispatcher(gate=_FakeGate(closed=False), submit=submit)
+    dao = _FakeDao(_receipt())
+    service = AgentService(cast(Any, dao), dispatcher=dispatcher)
+
+    receipt = asyncio.run(service.accept(_accept_request(), command=cast(Any, _receipt().command)))
+
+    assert dao.accept_calls == 1
+    assert receipt.execution_id == _EXECUTION_ID
+    assert submit.calls == []
 
 
 def test_submit_and_dispatch_without_dispatcher_is_zero_dispatch() -> None:

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final, Protocol, cast
@@ -71,6 +71,10 @@ PENDING_SCOPE_SESSION = "session_only"
 UNAVAILABLE_NOT_WIRED = "agent_research_not_wired"
 UNAVAILABLE_NOT_READY = "agent_research_not_ready"
 
+#: 派发原因码：受理端口未接线派发器 / 派发器已接线但未给出原因码。
+DISPATCH_REASON_NOT_WIRED = "not_wired"
+DISPATCH_REASON_UNKNOWN = "zero_dispatch"
+
 #: 首问可选模式（三值；直答是循环动作，不作为第四模式）。
 COMPOSER_MODES: Final[tuple[str, ...]] = ("discuss", "plan", "execute")
 #: 缺省模式：执行（F21 默认执行）。
@@ -90,6 +94,9 @@ class MainTurnIntakePort(Protocol):
         session_id: str | None = None,
         session_title: str | None = None,
         expected_revision: int | None = None,
+        role_prompt_refs: Sequence[tuple[str, str]] = (),
+        skill_refs: Sequence[tuple[str, str]] = (),
+        mcp_scope_digest: str | None = None,
     ) -> MainTurnIntakeResult: ...
 
     async def start_plan(
@@ -275,6 +282,14 @@ class PendingAnswerView:
 
 
 @dataclass(frozen=True)
+class DispatchReasonView:
+    """零派发的结构化原因（稳定原因码 + 键值参数；View 按码 i18n，不拼接自由文本）。"""
+
+    code: str
+    params: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
 class ResearchObserverState:
     """观察层不可变快照。
 
@@ -323,9 +338,9 @@ class ResearchObserverState:
     composer_mode: str = DEFAULT_COMPOSER_MODE
     composer_pending: bool = False
     composer_error_key: str | None = None
-    #: 最近一次受理的派发事实：``submitted=False`` 的 ``reason``（讨论/计划为零派发，
-    #: 属预期，不当作错误；执行模式零派发如实展示原因，不伪造成已启动）。
-    last_dispatch_reason: str | None = None
+    #: 最近一次受理的派发事实：``submitted=False`` 的结构化原因码 + 参数（讨论/计划
+    #: 为零派发，属预期，不当作错误；执行模式零派发如实展示原因，不伪造成已启动）。
+    last_dispatch_reason: DispatchReasonView | None = None
     #: 主回合直答（讨论/执行直答）；为空表示尚未产生或未接线，不以占位文本伪装。
     last_answer_text: str = ""
     plan_steps: tuple[PlanStepView, ...] = ()
@@ -1197,16 +1212,25 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         )
 
     @staticmethod
-    def _dispatch_reason(result: Any) -> str | None:
-        """受理结果的派发事实：已派发为 None；未接线/零派发如实返回原因。"""
+    def _dispatch_reason(result: Any) -> DispatchReasonView | None:
+        """受理结果的派发事实：已派发为 None；未接线/零派发返回结构化原因。"""
 
         dispatch = getattr(result, "dispatch", None)
         if dispatch is None:
-            return UNAVAILABLE_NOT_WIRED
+            return DispatchReasonView(code=DISPATCH_REASON_NOT_WIRED)
         if getattr(dispatch, "submitted", False):
             return None
-        reason = getattr(dispatch, "reason", None)
-        return reason if isinstance(reason, str) and reason else "agent_research_dispatch_zero"
+        code = getattr(dispatch, "reason_code", None)
+        raw_params = getattr(dispatch, "reason_params", ())
+        params: tuple[tuple[str, str], ...] = ()
+        if isinstance(raw_params, tuple | list):
+            params = tuple(
+                (name, value) for name, value in raw_params if isinstance(name, str) and isinstance(value, str)
+            )
+        return DispatchReasonView(
+            code=code if isinstance(code, str) and code else DISPATCH_REASON_UNKNOWN,
+            params=params,
+        )
 
     def _projection_changes(self, *, selected: str | None, collapsed: tuple[str, ...]) -> dict[str, Any]:
         """按观察位置重算树/消息/成果（纯函数投影，不发任何请求）。"""
