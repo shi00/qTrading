@@ -947,6 +947,53 @@ def _command_input_replays(
     return json_doc(stored_payload) == json_doc(json.loads(manifest_payload))
 
 
+#: 修订后需随新输入版重新登记成员边的来源类别（N24）：与受理期资产来源准入集合
+#: 同语义；``user_message`` 的新版源边由 M2/S2 步骤写入，``mcp_return`` 不属用户
+#: 手选资料集合，均不在本处登记。
+_REVISED_INPUT_SOURCE_KINDS: Final = frozenset(
+    {SourceKind.BUSINESS_SNAPSHOT, SourceKind.ATTACHMENT, SourceKind.RESULT, SourceKind.SUMMARY}
+)
+
+
+def _revised_input_source_refs(manifest_payload: CanonicalJson, identity: str) -> tuple[SourceVersionRef, ...]:
+    """修订 manifest 中仍选的资产来源版本引用（去重保序；无 ``source_refs`` 即空）。
+
+    只解释冻结 manifest **显式声明**的清单：缺键不推断历史源集，移除项便不会被
+    借旧边读取。``shared`` 块存在但不是对象、清单不是列表或引用不合契约 →
+    ``INPUT_INVALID``（manifest 是修订输入的一部分，坏形状不得静默按空处理）。
+    """
+
+    try:
+        document = decode_json_doc(manifest_payload)
+    except AgentValidationError as exc:
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "frozen manifest is not valid JSON", identity) from exc
+    if not isinstance(document, dict):
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "frozen manifest must be an object", identity)
+    section: Any = document
+    if "shared" in document:
+        if not isinstance(document["shared"], dict):
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID, "frozen manifest shared section must be an object", identity
+            )
+        section = document["shared"]
+    raw_refs = section.get("source_refs")
+    if raw_refs is None:
+        return ()
+    if not isinstance(raw_refs, list):
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "frozen manifest source_refs must be a list", identity)
+    decoded: list[SourceVersionRef] = []
+    for position, raw in enumerate(raw_refs):
+        try:
+            ref = decode_source_version_ref(raw, f"$.manifest_payload.source_refs[{position}]")
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID, "frozen manifest source ref is invalid", identity
+            ) from exc
+        if ref.source_kind in _REVISED_INPUT_SOURCE_KINDS:
+            decoded.append(ref)
+    return tuple(dict.fromkeys(decoded))
+
+
 def _assert_command_key_binding(existing: Any | None, execution_id: str, request: AcceptRequest) -> None:
     """同命令键必须绑定本次重放的目标执行（P1-03/§3.2）。
 
@@ -4994,6 +5041,9 @@ class AgentDao(BaseDao):
         **源自身版与执行输入版分列**：新消息/新源 id 是不可变新源，自身
         ``message_version`` / ``source_version`` 恒为 "1"（AR-07），execution
         输入版 N 只由源边的 ``consumer_version`` 承载（检视 D13）。
+        仍选资料（新版 manifest ``source_refs`` 中的资产来源）同在事务内登记到
+        输入版 N（N24）：只登记本执行已受理记录过的来源版本，移除项不登记、
+        旧版边不删不改，故精确读取只按新输入版成员放行仍选资料。
         归档与清理 fence 门（R2-I22 / D08）：取 session 行锁后先核已提交清理
         fence（清理后保留会话不得追加新正文/新源边），再核 ``archived``（归档
         会话不得修改待发输入，须先解档）；二者均 ``POLICY_DENIED``、零新事实，
@@ -5025,6 +5075,8 @@ class AgentDao(BaseDao):
         command_record_id = stable_id("command", [request.user_scope, request.execution_id, request.client_command_id])
         message_id = stable_id("user_message", [request.user_scope, request.session_id, command_record_id])
         source_id = stable_id("message_source", [request.user_scope, request.session_id, message_id])
+        # 修订 manifest 中仍选的资产来源（N24）：解析先于事务，坏 manifest 零 DB 写入。
+        revised_source_refs = _revised_input_source_refs(request.manifest_payload, identity)
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
         async with engine.begin() as conn:
@@ -5298,6 +5350,17 @@ class AgentDao(BaseDao):
                         relation_kind=relation.value,
                     )
                 )
+            # 9b. 仍选资料登记到新输入版（N24）：只登记本执行已受理记录过的来源版本，
+            #     未记录的新来源拒绝（不借修订绕过受理期准入）；移除项不在 manifest
+            #     中，旧输入版边保持不变（旧版历史不改）。
+            await self._register_revised_input_sources(
+                conn,
+                user_scope=request.user_scope,
+                execution_id=request.execution_id,
+                input_revision=input_revision,
+                refs=revised_source_refs,
+                identity=identity,
+            )
             # 10. revise 命令（target=execution_id；保存=committed，待投递事实）。
             await conn.execute(
                 sa.insert(AgentCommand).values(
@@ -5337,6 +5400,83 @@ class AgentDao(BaseDao):
                 input_revision=input_revision,
                 execution_revision=request.expected_execution_revision + 1,
                 session_seq=session_seq,
+            )
+
+    async def _register_revised_input_sources(
+        self,
+        conn: AsyncConnection,
+        *,
+        user_scope: str,
+        execution_id: str,
+        input_revision: int,
+        refs: tuple[SourceVersionRef, ...],
+        identity: str,
+    ) -> None:
+        """修订事务内把仍选资料登记到新输入版成员边（N24）。
+
+        精确读取按「准确输入版」核成员（``consumer_version=N``），故修订只改正文时
+        仍选资料也必须有新输入版成员边，否则按新版本读取被拒。
+
+        - 只登记**本执行已受理记录过**的来源版本（任一旧输入版的 execution 边）：
+          未被记录的新来源 ``INPUT_INVALID``，不借修订绕过受理期准入（R21/R24）；
+        - 摘要与存量资产版本不符同样 fail-closed（不静默登记与事实不同的版本）；
+        - 已存在本输入版成员边则跳过（幂等）；旧输入版边不删不改（旧版历史不变）；
+        - 移除项不在新 manifest 中，自然不登记，不可借旧边读取。
+
+        调用方须在同一显式事务内调用（失败即整体回滚，不留下半套边）。
+        """
+
+        for ref in refs:
+            prior_rows = (
+                await conn.execute(
+                    sa.select(AgentSourceLink.consumer_version, AgentSourceLink.locator_payload).where(
+                        AgentSourceLink.user_scope == user_scope,
+                        AgentSourceLink.consumer_kind == "execution",
+                        AgentSourceLink.execution_id == execution_id,
+                        AgentSourceLink.source_id == ref.source_id,
+                        AgentSourceLink.source_version == ref.source_version,
+                    )
+                )
+            ).all()
+            if not prior_rows:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "revised manifest references a source version not accepted for this execution",
+                    identity,
+                )
+            if str(input_revision) in {str(row.consumer_version) for row in prior_rows}:
+                continue
+            asset = (
+                await conn.execute(
+                    sa.select(AgentAssetVersion.digest).where(
+                        AgentAssetVersion.user_scope == user_scope,
+                        AgentAssetVersion.asset_id == ref.source_id,
+                        AgentAssetVersion.asset_version == ref.source_version,
+                    )
+                )
+            ).first()
+            if asset is None or asset.digest != ref.source_digest:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "revised source digest does not match stored source version",
+                    identity,
+                )
+            await conn.execute(
+                sa.insert(AgentSourceLink).values(
+                    user_scope=user_scope,
+                    link_id=stable_id(
+                        "source_link",
+                        [user_scope, ref.source_id, ref.source_version, "execution", execution_id, str(input_revision)],
+                    ),
+                    source_id=ref.source_id,
+                    source_version=ref.source_version,
+                    consumer_kind="execution",
+                    consumer_id=execution_id,
+                    consumer_version=str(input_revision),
+                    execution_id=execution_id,
+                    locator_payload=prior_rows[0].locator_payload,
+                    relation_kind=SourceRelationKind.ACCEPTED_INPUT.value,
+                )
             )
 
     # ------------------------------------------------------------------
