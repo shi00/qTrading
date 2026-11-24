@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, cast
@@ -25,6 +26,8 @@ from pydantic_ai_harness.compaction import SummarizingCompaction
 from pydantic_ai_harness.planning import PlanItem, Planning, PlanStore, TaskStatus
 
 from core.agent_types import AgentErrorCode, AgentServiceError, Mode, PlanItemSnapshot, PlanProposal
+
+logger = logging.getLogger(__name__)
 
 
 class PlanProposalDao(Protocol):
@@ -344,6 +347,9 @@ class ResearchBoundaryPolicy:
       由能力按最终请求全输入自测兜底，不用测试字节数代替；
     - ``output_reserve_tokens``：本轮必须为模型输出预留的 token（按真实授权模型
       的响应预算）；窗口门判定的是「输入 + 输出预留」，不把整窗都当作可用输入。
+    - ``tokenizer_model``：冻结连接的实际模型引用（``provider/model``），用于按该
+      模型的 tokenizer 计数；``None`` 表示无法证明模型，计数只能按保守估算并如实
+      标记未核。不得传绑定别名（别名无法对应 tokenizer，等于用默认分词器冒充已核）。
     """
 
     mode: Mode
@@ -354,6 +360,7 @@ class ResearchBoundaryPolicy:
     estimated_input_tokens: int | None
     candidate_context_windows: tuple[int, ...] = ()
     output_reserve_tokens: int = 0
+    tokenizer_model: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.mode, Mode):
@@ -364,6 +371,9 @@ class ResearchBoundaryPolicy:
                 continue
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive int or None")
+        tokenizer_model = self.tokenizer_model
+        if tokenizer_model is not None and (not isinstance(tokenizer_model, str) or not tokenizer_model):
+            raise ValueError("tokenizer_model must be a non-empty text model reference or None")
         reserve = self.output_reserve_tokens
         if isinstance(reserve, bool) or not isinstance(reserve, int) or reserve < 0:
             raise ValueError("output_reserve_tokens must be a non-negative int")
@@ -401,22 +411,29 @@ def _contains_binary_content(messages: Sequence[Any]) -> bool:
     return False
 
 
-def _estimate_request_input_tokens(request_context: ModelRequestContext) -> int | None:
+def _estimate_request_input_tokens(
+    request_context: ModelRequestContext, *, tokenizer_model: str | None = None
+) -> tuple[int | None, bool]:
     """按最终待发请求估算输入 token 下限（I47 窗口门，与费用预估同源）。
 
     覆盖 ``messages`` 全部分型（SDK 确定性序列化）+ ``function_tools`` /
     ``output_tools`` 的 name/description/schema + ``instruction_parts`` +
-    ``output_object`` schema。含二进制内容或序列化失败 → ``None``（不可估，
+    ``output_object`` schema。含二进制内容或序列化失败 → ``(None, False)``（不可估，
     拒绝放行，不以正文估算冒充完整输入，R21）。
+
+    ``tokenizer_model`` 为冻结连接的实际模型引用：只有它才对应真实 tokenizer；
+    缺失时不得回退到 ``request_context.model.model_name``（叶模型桥的固定别名
+    ``qtrading:bound`` 不映射任何 tokenizer，等于用默认分词器冒充已核）。返回值
+    第二项如实标注本次计数是否已按该模型 tokenizer 核定。
     """
 
     from pydantic_ai.messages import ModelMessagesTypeAdapter
 
-    from services.ai_service.token_budget import _estimate_tokens
+    from services.ai_service.token_budget import count_tokens_with_basis
 
     messages = request_context.messages
     if _contains_binary_content(messages):
-        return None
+        return None, False
     parameters = request_context.model_request_parameters
     try:
         messages_text = ModelMessagesTypeAdapter.dump_json(messages).decode("utf-8")
@@ -439,12 +456,16 @@ def _estimate_request_input_tokens(request_context: ModelRequestContext) -> int 
             else ""
         )
     except (TypeError, ValueError):
-        return None
+        return None, False
     instructions_text = "\n".join(part.content for part in (parameters.instruction_parts or []))
-    model = getattr(request_context.model, "model_name", None)
-    return sum(
-        _estimate_tokens(text, model) for text in (messages_text, tools_text, output_schema_text, instructions_text)
-    )
+    texts = (messages_text, tools_text, output_schema_text, instructions_text)
+    total = 0
+    verified = True
+    for text in texts:
+        count, part_verified = count_tokens_with_basis(text, tokenizer_model)
+        total += count
+        verified = verified and part_verified
+    return total, verified
 
 
 def evaluate_research_boundary(
@@ -498,12 +519,20 @@ class ResearchBoundary(AbstractCapability[Any]):
                     request_context,
                     model_request_parameters=replace(parameters, function_tools=allowed),
                 )
-        measured = _estimate_request_input_tokens(candidate_context)
+        measured, measured_verified = _estimate_request_input_tokens(
+            candidate_context, tokenizer_model=policy.tokenizer_model
+        )
         if measured is None:
             raise AgentServiceError(
                 AgentErrorCode.POLICY_DENIED,
                 "request input size unestimable (binary or unencodable input); refusing to guess before dispatch",
                 "research_boundary",
+            )
+        if not measured_verified:
+            # R21：模型 tokenizer 不可证明时只做保守估算，不把它当作已核事实。
+            logger.warning(
+                "[ResearchBoundary] input token count is an estimate (no verified tokenizer: model=%r)",
+                policy.tokenizer_model,
             )
         reason = evaluate_research_boundary(policy, measured_input_tokens=measured)
         if reason == "source_disabled":
@@ -524,7 +553,8 @@ class ResearchBoundary(AbstractCapability[Any]):
                 AgentErrorCode.POLICY_DENIED,
                 f"context window exceeded: estimated={max(estimates)} "
                 f"+output_reserve={policy.output_reserve_tokens} "
-                f"window={policy.strictest_context_window_tokens()}",
+                f"window={policy.strictest_context_window_tokens()} "
+                f"measured_basis={'verified' if measured_verified else 'estimated'}",
                 "research_boundary",
             )
         return candidate_context

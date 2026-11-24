@@ -23,6 +23,7 @@ from services.agent_service.capability_wiring import (
     build_leaf_boundary,
     resolve_leaf_context_window,
     resolve_leaf_context_windows,
+    resolve_leaf_tokenizer_model,
 )
 from services.agent_service.leaf_agent import LeafAgentDeps
 from services.ai_service.token_budget import OUTPUT_RESERVE_TOKENS
@@ -125,6 +126,57 @@ class TestResolveLeafContextWindows:
         assert evaluate_research_boundary(policy, measured_input_tokens=allowed + 1) == "context_window_exceeded"
 
 
+class TestResolveLeafTokenizerModel:
+    def test_first_candidate_connection_model(self) -> None:
+        snapshot = _snapshot(
+            connections=({"connection_id": "conn-1", "context_window": 8192, "provider": "openai", "model": "gpt-4o"},)
+        )
+
+        assert resolve_leaf_tokenizer_model(snapshot, scenario_id="agent_research") == "openai/gpt-4o"
+
+    def test_authorized_connection_model_selected(self) -> None:
+        snapshot = _snapshot(
+            routes=(
+                {
+                    "scenario_id": "agent_research",
+                    "candidates": ({"connection_id": "conn-1"}, {"connection_id": "conn-2"}),
+                },
+            ),
+            connections=(
+                {"connection_id": "conn-1", "context_window": 65_536, "provider": "openai", "model": "gpt-4o"},
+                {"connection_id": "conn-2", "context_window": 8192, "provider": "deepseek", "model": "deepseek-chat"},
+            ),
+        )
+
+        assert (
+            resolve_leaf_tokenizer_model(snapshot, scenario_id="agent_research", connection_id="conn-2")
+            == "deepseek/deepseek-chat"
+        )
+
+    def test_model_without_provider_used_as_is(self) -> None:
+        snapshot = _snapshot(connections=({"connection_id": "conn-1", "context_window": 8192, "model": "gpt-4o"},))
+
+        assert resolve_leaf_tokenizer_model(snapshot, scenario_id="agent_research") == "gpt-4o"
+
+    def test_missing_model_is_unknown(self) -> None:
+        assert resolve_leaf_tokenizer_model(_snapshot(), scenario_id="agent_research") is None
+        blank = _snapshot(connections=({"connection_id": "conn-1", "context_window": 8192, "model": ""},))
+        assert resolve_leaf_tokenizer_model(blank, scenario_id="agent_research") is None
+
+    def test_connection_outside_route_is_unknown(self) -> None:
+        assert (
+            resolve_leaf_tokenizer_model(
+                _snapshot(connections=({"connection_id": "conn-1", "context_window": 8192, "model": "gpt-4o"},)),
+                scenario_id="agent_research",
+                connection_id="conn-other",
+            )
+            is None
+        )
+
+    def test_blank_scenario_is_unknown(self) -> None:
+        assert resolve_leaf_tokenizer_model(_snapshot(), scenario_id="") is None
+
+
 class TestBuildLeafBoundary:
     async def test_unknown_window_policy_is_denied(self) -> None:
         dao = _Dao()
@@ -149,6 +201,19 @@ class TestBuildLeafBoundary:
         assert policy.context_window_tokens == 8192
         assert evaluate_research_boundary(policy, measured_input_tokens=10) is None
         assert dao.calls == 1
+
+    async def test_policy_carries_frozen_connection_model(self) -> None:
+        dao = _Dao()
+        snapshot = _snapshot(
+            connections=(
+                {"connection_id": "conn-1", "context_window": 8192, "provider": "deepseek", "model": "deepseek-chat"},
+            )
+        )
+        boundary = build_leaf_boundary(dao, snapshot=snapshot, scenario_id="agent_research")
+
+        policy = await boundary.policy_provider(cast(Any, SimpleNamespace(deps=_deps())))
+        # 计数按冻结连接实际模型，而非叶模型桥的固定别名。
+        assert policy.tokenizer_model == "deepseek/deepseek-chat"
 
     def test_boundary_host_is_wired(self) -> None:
         assert BOUNDARY_HOST_WIRED is True
