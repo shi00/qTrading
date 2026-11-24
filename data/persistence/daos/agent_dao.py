@@ -6426,9 +6426,11 @@ class AgentDao(BaseDao):
     ) -> bool:
         """事务内追加纯 session 可靠事件（检视 D29：让写入族成为唯一可靠事件生产者）。
 
-        - 调用方必须**已在本事务持有该 session 行锁**（``FOR UPDATE``）并已通过
-          D08 清理 fence 门；本助手不重复取 session 锁、不重复查 fence（同一事务内
-          门禁结论不变，避免额外 ``FOR SHARE`` 与重复查询）；
+        - 调用方必须**已在本事务持有该 session 行锁**（``FOR UPDATE``；本事务内
+          新建的会话视同持锁）；产生正文/新引用的写入族还须已通过 D08 清理 fence
+          门，只含元数据的 ``session_changed``（无正文/凭据）可在保留的清理
+          tombstone 会话上追加。本助手不重复取 session 锁、不重复查 fence（同一
+          事务内门禁结论不变，避免额外 ``FOR SHARE`` 与重复查询）；
         - 水位 ``session_seq = session.event_seq + 1``，写回 ``GREATEST`` 保持单调（R22）；
         - ``event_id`` 由调用方按既有身份规则派生；同 (session, event_id) 已存在即
           视为重放，返回 ``False`` 且不写第二条事件（崩溃重放不漏投、不重复）；
@@ -13216,7 +13218,10 @@ class AgentDao(BaseDao):
           消息/成果正文、不迁 workflow/批准**；
         - ``rename`` / ``pin`` / ``archive`` / ``unarchive``：会话行锁下 CAS
           （``expected_session_revision`` 必须等于行 ``revision``），成功
-          ``revision+1``；归档不改执行（§9.3「归档不终止执行」）；
+          ``revision+1``；归档不改执行（§9.3「归档不终止执行」）；提交后同事务
+          追加一条 ``session_changed`` 可靠事件（N22，元数据动作各一条、含准确
+          动作与结果值），观察侧 ``read_events`` / ``observe_session_events``
+          按 ``after_seq`` 即可从原水位追平；同命令键重放/预期版冲突零新事件；
         - ``revise``：核原消息属于本会话且版本匹配，并解析（校验）新因果前缀
           （源消息之前最近一条，或显式截点）；**不改会话因果头、不改原消息/成果、
           不建消息、不派发**（R2-I25：编辑旧问题只准备新稿；取消编辑不改变既有
@@ -13225,7 +13230,10 @@ class AgentDao(BaseDao):
         - 同命令键同输入 → 查回原回执；异输入 → ``INPUT_CONFLICT``；
         - 会话/原消息不存在或不在调用用户域 → ``INPUT_INVALID``；原消息版本
           不符 → ``REVISION_CONFLICT``（零新事实）；
-        - 动作本身不改草稿、不派发、不产生费用（元数据 CAS 与运行分离）。
+        - 动作本身不改草稿、不派发、不产生费用（元数据 CAS 与运行分离）；
+        - 事件只覆盖可观察元数据变更（``rename`` / ``pin`` / ``archive`` /
+          ``unarchive``）：``revise`` 只推进 CAS 令牌、不改元数据，``create`` /
+          ``branch`` 由目录快照发现新会话，均不追加事件。
 
         Raises:
             AgentServiceError: INPUT_INVALID / INPUT_CONFLICT / REVISION_CONFLICT /
@@ -13251,7 +13259,7 @@ class AgentDao(BaseDao):
             if command.action not in (SessionAction.CREATE, SessionAction.BRANCH):
                 locked_row = (
                     await conn.execute(
-                        sa.select(AgentSession.revision)
+                        sa.select(AgentSession.revision, AgentSession.event_seq)
                         .where(
                             AgentSession.user_scope == user_scope,
                             AgentSession.session_id == command.session_id,
@@ -13290,6 +13298,10 @@ class AgentDao(BaseDao):
                     ) from exc
 
             now = datetime.now(UTC)
+            # 事件水位（行锁内读取，仅元数据动作使用）与本次实际改写的字段：
+            # ``changed`` 非空即需追加一条 ``session_changed``（N22）。
+            session_event_seq: int | None = None
+            changed: dict[str, Any] = {}
             if command.action in (SessionAction.CREATE, SessionAction.BRANCH):
                 parent_session_id: str | None = None
                 branch_metadata: dict[str, Any] | None = None
@@ -13421,16 +13433,16 @@ class AgentDao(BaseDao):
                         AgentErrorCode.REVISION_CONFLICT, "session revision does not match expected", identity
                     )
                 current_revision = int(locked_row.revision) + 1
+                session_event_seq = int(locked_row.event_seq)
                 values: dict[str, Any] = {"revision": current_revision, "updated_at": now}
                 if command.action is SessionAction.RENAME:
-                    values["title"] = command.title
-                    values["title_user_set"] = True
+                    changed = {"title": command.title, "title_user_set": True}
                 elif command.action is SessionAction.PIN:
-                    values["pinned"] = True
+                    changed = {"pinned": True}
                 elif command.action is SessionAction.ARCHIVE:
-                    values["archived"] = True
+                    changed = {"archived": True}
                 elif command.action is SessionAction.UNARCHIVE:
-                    values["archived"] = False
+                    changed = {"archived": False}
                 elif command.action is SessionAction.REVISE:
                     source = (
                         await conn.execute(
@@ -13475,7 +13487,7 @@ class AgentDao(BaseDao):
                         AgentSession.user_scope == user_scope,
                         AgentSession.session_id == command.session_id,
                     )
-                    .values(**values)
+                    .values(**values, **changed)
                 )
 
             receipt = CommandReceipt(
@@ -13507,6 +13519,45 @@ class AgentDao(BaseDao):
                     verified_at=now,
                 )
             )
+            # 同事务可靠事件（N22）：元数据动作提交后必须留下一条 ``session_changed``，
+            # 观察侧提交即按 ``after_seq`` 从原水位追平（不再只能靠完整快照发现）；
+            # 会话行锁内读到的 ``event_seq`` 是本次追加的起点（水位单调由
+            # ``_append_session_event`` 的 GREATEST 保护，R22）；同命令键重放/预期版
+            # 冲突已在上面返回或抛出，不走到这里，故不重复追加。``changed`` 只含
+            # 本次实际改写的元数据字段（``revise`` 为空 → 不写事件）。事件载荷不含
+            # 正文/凭据，清理 tombstone 会话上的元数据事件因此不触碰 D08 正文门。
+            if changed:
+                assert session_event_seq is not None
+                await self._append_session_event(
+                    conn,
+                    user_scope=user_scope,
+                    session_id=command.session_id,
+                    message_id=stable_id(
+                        "event_message",
+                        [user_scope, command.session_id, "session_changed", command.command.command_id],
+                    ),
+                    event_id=derive_event_identity(
+                        execution_id=None,
+                        round_id=None,
+                        node_id=None,
+                        native_event_id=f"session_changed:{command.command.command_id}",
+                    ),
+                    event_kind=EventKind.SESSION_CHANGED,
+                    payload_kind="session_changed",
+                    subject_id=command.session_id,
+                    subject_revision=current_revision,
+                    payload={
+                        "schema_version": 1,
+                        "session_id": command.session_id,
+                        "action": command.action.value,
+                        "session_revision": current_revision,
+                        "command_record_id": command_record_id,
+                        "input_digest": digest,
+                        **changed,
+                    },
+                    occurred_at=now,
+                    session_event_seq=session_event_seq,
+                )
             return receipt
 
     async def _resolve_causal_cutoff(

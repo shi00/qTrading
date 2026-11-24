@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -27,6 +28,8 @@ from core.agent_types import (
     AgentServiceError,
     CommandRef,
     CommitState,
+    EventKind,
+    EventReadQuery,
     SessionAction,
     SessionChangeCommand,
 )
@@ -341,3 +344,49 @@ class TestMetadataActions:
         row = await _session_row(real_embedded_pg.url)
         assert row.revision == 1
         assert await _command_rows(real_embedded_pg.url) == []
+
+
+class TestMetadataEvents:
+    """N22：元数据动作提交后从原水位可追平一条准确 ``session_changed`` 事件。"""
+
+    async def test_rename_pin_archive_append_accurate_watermarked_events(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        await dao.change_session(
+            _command(action=SessionAction.RENAME, expected=1, title="改名后", command_id="c-rename")
+        )
+        await dao.change_session(_command(action=SessionAction.PIN, expected=2, title=None, command_id="c-pin"))
+        await dao.change_session(_command(action=SessionAction.ARCHIVE, expected=3, title=None, command_id="c-arc"))
+
+        page = await dao.read_events(EventReadQuery(user_scope=_USER, session_id="s1", after_seq=0))
+        assert [event.session_seq for event in page.events] == [1, 2, 3]
+        assert all(event.event_kind is EventKind.SESSION_CHANGED for event in page.events)
+        assert all(event.payload_kind == "session_changed" for event in page.events)
+        assert [event.subject_revision for event in page.events] == [2, 3, 4]
+        payloads = [json.loads(event.payload_canonical_json) for event in page.events]
+        assert [payload["action"] for payload in payloads] == ["rename", "pin", "archive"]
+        assert [payload["session_revision"] for payload in payloads] == [2, 3, 4]
+        assert payloads[0]["title"] == "改名后" and payloads[0]["title_user_set"] is True
+        assert payloads[1]["pinned"] is True
+        assert payloads[2]["archived"] is True
+
+        # 水位推进：从 seq=2 续读只得到第 3 条（增量订阅不再漏报）。
+        tail = await dao.read_events(EventReadQuery(user_scope=_USER, session_id="s1", after_seq=2))
+        assert [event.session_seq for event in tail.events] == [3]
+
+    async def test_replay_and_conflict_append_no_extra_events(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        command = _command(action=SessionAction.RENAME, expected=1, title="改名后")
+        first = await dao.change_session(command)
+        assert await dao.change_session(command) == first
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.change_session(_command(action=SessionAction.PIN, expected=1, title=None, command_id="c-stale"))
+        _expect_error(excinfo, AgentErrorCode.REVISION_CONFLICT)
+
+        page = await dao.read_events(EventReadQuery(user_scope=_USER, session_id="s1", after_seq=0))
+        assert [event.session_seq for event in page.events] == [1]
+        assert json.loads(page.events[0].payload_canonical_json)["session_revision"] == 2
