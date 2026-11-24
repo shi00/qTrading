@@ -316,6 +316,8 @@ class MCPConfigStorePort(Protocol):
 
     async def save(self, config: MCPServerConfig) -> None: ...
 
+    async def delete(self, identity: MCPServiceIdentity) -> bool: ...
+
 
 class MCPFrozenUsagePort(Protocol):
     """已冻结该配置版的研究查询端口（I59：必须读持久化记录，不得用内存计数代答）。
@@ -760,6 +762,51 @@ class SharedMCPConnectionManager:
             if self._dispatch_gate is not None:
                 await self._dispatch_gate.resume(identity)
             raise
+
+    async def frozen_users(self, identity: MCPServiceIdentity) -> tuple[str, ...]:
+        """持久化引用该配置版且未终结的研究标识；查询不可用即拒绝（fail-closed）。"""
+
+        label = _identity_text(identity)
+        try:
+            return tuple(sorted(await self._usage.frozen_users(identity)))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "mcp config frozen users are unverifiable",
+                label,
+            ) from exc
+
+    async def delete_config(self, identity: MCPServiceIdentity) -> bool:
+        """删除服务配置（不关闭连接、不删除授权）：调用方须先确认可安全删除。
+
+        fail-closed 前置：仍连接（须先显式断开）、连接测试/关闭残留未确认（收尾未知
+        不得用删除覆盖）、持久化仍有排队/暂停/可恢复研究引用，一律拒删；全部通过才
+        删除配置，返回是否实际删除了一行（``False`` 仅当配置已不存在）。
+        """
+
+        label = _identity_text(identity)
+        if label in self._sessions:
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                "disconnect the mcp service before deleting it",
+                label,
+            )
+        if self._test_residue.get(label):
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                "connection test residue close is unconfirmed; retry close before deleting",
+                label,
+            )
+        if self._closing.get(label):
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                "previous mcp session close is unconfirmed; confirm close before deleting",
+                label,
+            )
+        await self._require_no_frozen_users(identity, label, "delete")
+        return await self._store.delete(identity)
 
     def is_connected(self, identity: MCPServiceIdentity) -> bool:
         return _identity_text(identity) in self._sessions

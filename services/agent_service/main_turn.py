@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -50,14 +51,17 @@ from core.agent_types import (
     SessionAction,
     SessionChangeCommand,
     SourceVersionRef,
+    MCPServiceIdentity,
     SubmissionReceipt,
     decode_json_doc,
     decode_plan_proposal,
     decode_source_version_ref,
     derive_round_id,
+    encode_mcp_service_identity,
     is_digest,
     json_doc,
     normalize_plan_proposal,
+    sha256_hex,
 )
 from services.agent_service.capabilities import PlanProposalStore
 from services.agent_service.dispatch import (
@@ -628,12 +632,12 @@ class MainTurnIntake:
         expected_revision: int | None = None,
         role_prompt_refs: Sequence[tuple[str, str]] = (),
         skill_refs: Sequence[tuple[str, str]] = (),
-        mcp_scope_digest: str | None = None,
+        mcp_selection: Sequence[MCPServiceIdentity] = (),
     ) -> MainTurnIntakeResult:
         """首问：必要时新建会话，冻结本次手选集合后受理。
 
         讨论/计划零研究派发；执行模式受理后先产出计划再派发。``role_prompt_refs``
-        / ``skill_refs`` / ``mcp_scope_digest`` 为本次显式手选集（未选择即空集，
+        / ``skill_refs`` / ``mcp_selection`` 为本次显式手选集（未选择即空集，
         能力来源据此 fail-closed；不由本入口补默认角色/能力）。
         """
 
@@ -668,7 +672,7 @@ class MainTurnIntake:
             purpose=Purpose.CONCEPT,
             role_prompt_refs=role_prompt_refs,
             skill_refs=skill_refs,
-            mcp_scope_digest=mcp_scope_digest,
+            mcp_selection=mcp_selection,
         )
         if mode is Mode.EXECUTE:
             return await self._start_execute_question(
@@ -930,15 +934,29 @@ class MainTurnIntake:
         purpose: Purpose,
         role_prompt_refs: Sequence[tuple[str, str]] = (),
         skill_refs: Sequence[tuple[str, str]] = (),
-        mcp_scope_digest: str | None = None,
+        mcp_selection: Sequence[MCPServiceIdentity] = (),
     ) -> CanonicalJson:
         """首问冻结 manifest（仅写入调用方显式手选集合；能力来源据此 fail-closed）。
 
         首问用途固定为概念用途：研究用途/数据窗口在草稿/业务对象入口按 F20 冻结，
         本入口不替用户决定研究截止日。执行模式额外冻结 ``plan_source=auto``：首问
         计划由主回合产出并经严格校验保存，派发侧只读取该已保存计划版。
+        ``mcp_selection`` 为空表示未选择（不解释为全部允许，§6 默认拒绝）；非空时
+        按服务身份排序冻结并写入规范摘要 ``mcp_scope_digest``，供能力策略派生
+        ``mcp_scope:<digest>``。
         """
 
+        selected = {identity.stable_key(): identity for identity in mcp_selection}
+        ordered = tuple(selected[key] for key in sorted(selected))
+        digest: str | None = None
+        if ordered:
+            canonical = json.dumps(
+                [encode_mcp_service_identity(identity) for identity in ordered],
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            digest = sha256_hex(canonical.encode("utf-8"))
         manifest: dict[str, Any] = {
             "schema_version": 1,
             "text": text,
@@ -950,7 +968,8 @@ class MainTurnIntake:
             "visible_history_artifact_refs": [],
             "role_prompt_refs": [[role_id, revision] for role_id, revision in role_prompt_refs],
             "skill_refs": [[skill_id, revision] for skill_id, revision in skill_refs],
-            "mcp_scope_digest": mcp_scope_digest,
+            "mcp_selection": [encode_mcp_service_identity(identity) for identity in ordered],
+            "mcp_scope_digest": digest,
             "output_requirements": {},
         }
         if mode is Mode.EXECUTE:

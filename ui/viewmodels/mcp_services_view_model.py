@@ -24,10 +24,14 @@ from dataclasses import dataclass, replace
 
 from core.agent_types import (
     MCP_BUDGET_FIELDS,
+    AgentValidationError,
     MCPBudgetProfile,
     MCPReadOnlyAudit,
     MCPServiceIdentity,
     MCPTransportKind,
+    RoleMCPAssignment,
+    RoleMCPServiceBinding,
+    validate_role_mcp_assignment,
 )
 from services.agent_service.mcp import MCPConnectionTestReceipt, MCPServerConfig, MCPTransportConfig
 from services.agent_service.mcp_config_store import (
@@ -35,7 +39,7 @@ from services.agent_service.mcp_config_store import (
     LISTING_PATH_UNAVAILABLE,
     MCPConfigListEntry,
 )
-from services.agent_service.mcp_lifecycle import MCPServiceLifecycle
+from services.agent_service.mcp_lifecycle import MCPServiceDeleteBlocked, MCPServiceLifecycle
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -155,6 +159,28 @@ class MCPServiceRow:
 
 
 @dataclass(frozen=True)
+class MCPRoleAssignmentRow:
+    """角色 MCP 分配投影（只读展示）。"""
+
+    role_id: str
+    role_version: str
+    available_keys: tuple[str, ...]
+    default_key: str | None
+
+
+@dataclass(frozen=True)
+class MCPRoleDraft:
+    """角色分配表单草稿（服务可用集合 + 默认服务 + 每服务工具白名单文本）。"""
+
+    role_id: str = ""
+    role_version: str = "1"
+    available_keys: tuple[str, ...] = ()
+    default_key: str | None = None
+    #: ``(identity_key, 工具名逐行文本)``；只含当前可用服务。
+    tools_text: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
 class MCPConfigDraft:
     """配置表单草稿（全部为字符串/布尔，解析在保存时一次完成）。"""
 
@@ -199,6 +225,12 @@ class MCPServicesState:
     discovered_tools: tuple[str, ...] = ()
     #: 用户勾选的核准工具（必须是 discovered_tools 的子集）。
     approved_tools: tuple[str, ...] = ()
+    #: 角色分配存储是否接线（未接线时如实提示，不展示可编辑的假象）。
+    roles_available: bool = False
+    role_assignments: tuple[MCPRoleAssignmentRow, ...] = ()
+    role_draft: MCPRoleDraft = MCPRoleDraft()
+    #: 删除确认（两步：请求 → 确认；避免误触不可逆操作）。
+    delete_pending: bool = False
     status: Message | None = None
     status_level: str = STATUS_INFO
 
@@ -209,22 +241,28 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
     def __init__(self, lifecycle: MCPServiceLifecycle | None) -> None:
         self._lifecycle = lifecycle
         self._configs: dict[str, MCPServerConfig] = {}
+        #: 已保存角色分配（角色标识 → 分配），供选中后回填表单。
+        self._role_assignments: dict[tuple[str, str], RoleMCPAssignment] = {}
         #: 本轮连接测试回执（启连凭它核对配置/代次/目录，漂移即拒绝）。
         self._test_receipt: MCPConnectionTestReceipt | None = None
-        self._state = MCPServicesState(available=lifecycle is not None)
+        self._state = MCPServicesState(
+            available=lifecycle is not None,
+            roles_available=lifecycle is not None and hasattr(lifecycle, "list_role_assignments"),
+        )
         self._init_mixin_fields()
 
     # -- 读取 ---------------------------------------------------------------
 
     @log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def load(self) -> None:
-        """读取已保存配置与连接状态；未接线时保持不可用（不伪造空列表）。"""
+        """读取已保存配置、连接状态与角色分配；未接线时保持不可用（不伪造空列表）。"""
 
         if self._lifecycle is None or self._state.busy:
             return
         self._set_state(busy=True)
         try:
             entries = await self._lifecycle.list_services()
+            roles = await self._list_role_assignments()
         except asyncio.CancelledError:
             self._set_state(busy=False)
             raise
@@ -234,12 +272,14 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
         self._configs = {
             entry.config.identity.stable_key(): entry.config for entry in entries if entry.config is not None
         }
+        self._role_assignments = {(item.role_id, item.role_version): item for item in roles}
         self._set_state(
             rows=self._build_rows(entries),
             loaded=True,
             unreadable_count=sum(1 for entry in entries if entry.config is None),
             busy=False,
             draft_saved=self._is_draft_saved(),
+            role_assignments=self._build_role_rows(roles),
         )
 
     def select_service(self, identity_key: str) -> None:
@@ -254,6 +294,7 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
             draft_saved=True,
             discovered_tools=(),
             approved_tools=(),
+            delete_pending=False,
             status=None,
             status_level=STATUS_INFO,
         )
@@ -310,6 +351,120 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
         else:
             approved.add(name)
         self._set_state(approved_tools=tuple(sorted(approved)))
+
+    # -- 角色分配编辑（可用服务 / 默认服务 / 工具白名单） -------------------
+
+    def select_role_assignment(self, role_id: str, role_version: str) -> None:
+        """把已保存角色分配载入表单（不连接、不写库）。"""
+
+        assignment = self._role_assignments.get((role_id, role_version))
+        if assignment is None:
+            return
+        tools_map = {binding.identity.stable_key(): "\n".join(binding.tools) for binding in assignment.available}
+        self._set_state(
+            role_draft=MCPRoleDraft(
+                role_id=assignment.role_id,
+                role_version=assignment.role_version,
+                available_keys=tuple(sorted(tools_map)),
+                default_key=(None if assignment.default_service is None else assignment.default_service.stable_key()),
+                tools_text=tuple(sorted(tools_map.items())),
+            ),
+            status=None,
+            status_level=STATUS_INFO,
+        )
+
+    def begin_role_new(self) -> None:
+        """清空角色表单进入新建态（不写库）。"""
+
+        self._set_state(role_draft=MCPRoleDraft(), status=None, status_level=STATUS_INFO)
+
+    def set_role_text(self, field: str, value: str) -> None:
+        """更新角色标识字段（仅 role_id / role_version）。"""
+
+        if field not in {"role_id", "role_version"}:
+            return
+        self._set_state(role_draft=replace(self._state.role_draft, **{field: value}))
+
+    def toggle_role_service(self, identity_key: str) -> None:
+        """勾选/取消角色的可用服务；取消默认服务时一并清除默认值。"""
+
+        if identity_key not in self._configs:
+            return
+        draft = self._state.role_draft
+        available = set(draft.available_keys)
+        tools = dict(draft.tools_text)
+        if identity_key in available:
+            available.discard(identity_key)
+            tools.pop(identity_key, None)
+            default_key = None if draft.default_key == identity_key else draft.default_key
+        else:
+            available.add(identity_key)
+            tools.setdefault(identity_key, "")
+            default_key = draft.default_key
+        self._set_state(
+            role_draft=replace(
+                draft,
+                available_keys=tuple(sorted(available)),
+                default_key=default_key,
+                tools_text=tuple(sorted(tools.items())),
+            )
+        )
+
+    def set_role_default(self, identity_key: str) -> None:
+        """设默认服务（必须属于当前可用集合；空串表示未设默认）。"""
+
+        draft = self._state.role_draft
+        if identity_key and identity_key not in draft.available_keys:
+            return
+        self._set_state(role_draft=replace(draft, default_key=identity_key or None))
+
+    def set_role_tools(self, identity_key: str, text: str) -> None:
+        """更新某可用服务的工具白名单文本（未勾选的服务忽略）。"""
+
+        draft = self._state.role_draft
+        if identity_key not in draft.available_keys:
+            return
+        tools = dict(draft.tools_text)
+        tools[identity_key] = text
+        self._set_state(role_draft=replace(draft, tools_text=tuple(sorted(tools.items()))))
+
+    @log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
+    async def save_role_assignment(self) -> None:
+        """保存角色分配；一致性（默认∈可用、工具∈服务声明范围）由服务层校验。"""
+
+        if not self._guard() or not self._state.roles_available:
+            return
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            return
+        try:
+            assignment = self._build_role_assignment()
+        except ValueError as exc:
+            self._set_state(
+                status=Message("mcp_status_invalid_draft", {"field": str(exc)}),
+                status_level=STATUS_ERROR,
+            )
+            return
+        self._set_state(busy=True, status=None)
+        try:
+            await lifecycle.save_role_assignment(assignment)
+            roles = await self._list_role_assignments()
+        except asyncio.CancelledError:
+            self._set_state(busy=False)
+            raise
+        except Exception as exc:
+            self._fail(exc)
+            return
+        self._role_assignments = {(item.role_id, item.role_version): item for item in roles}
+        self._set_state(
+            busy=False,
+            role_assignments=self._build_role_rows(roles),
+            status=Message(
+                "mcp_status_role_saved",
+                {"role": f"{assignment.role_id}@{assignment.role_version}"},
+            ),
+            status_level=STATUS_SUCCESS,
+        )
 
     # -- 操作 ---------------------------------------------------------------
 
@@ -450,6 +605,70 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
             status_level=STATUS_INFO,
         )
         await self._refresh_rows()
+
+    def request_delete(self) -> None:
+        """请求删除当前草稿对应的已保存服务（进入确认态，不做任何写操作）。"""
+
+        identity = self._require_saved_identity()
+        if identity is None:
+            return
+        self._set_state(delete_pending=True, status=None, status_level=STATUS_INFO)
+
+    def cancel_delete(self) -> None:
+        """取消删除确认。"""
+
+        self._set_state(delete_pending=False)
+
+    @log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
+    async def confirm_delete(self) -> None:
+        """确认删除服务：被角色/研究会话引用时如实列出并保留配置（不静默强删）。"""
+
+        if not self._guard() or not self._state.delete_pending:
+            return
+        lifecycle = self._lifecycle
+        identity = self._draft_identity()
+        if lifecycle is None or identity is None:
+            self._set_state(delete_pending=False)
+            return
+        self._set_state(busy=True, status=None, delete_pending=False)
+        try:
+            receipt = await lifecycle.delete_service(identity, confirmation=True)
+        except asyncio.CancelledError:
+            self._set_state(busy=False)
+            raise
+        except MCPServiceDeleteBlocked as exc:
+            self._set_state(
+                busy=False,
+                status=Message(
+                    "mcp_status_delete_blocked",
+                    {
+                        "service_id": identity.service_id,
+                        "roles": ", ".join(exc.role_refs) or "-",
+                        "researches": ", ".join(exc.research_ids) or "-",
+                    },
+                ),
+                status_level=STATUS_WARNING,
+            )
+            return
+        except Exception as exc:
+            self._fail(exc)
+            return
+        await self._refresh_rows()
+        self._set_state(
+            busy=False,
+            draft_saved=False,
+            discovered_tools=(),
+            approved_tools=(),
+            status=Message(
+                "mcp_status_deleted" if receipt.deleted_config else "mcp_status_delete_missing",
+                {
+                    "service_id": identity.service_id,
+                    "grant": "true" if receipt.deleted_grant else "false",
+                    "credentials": ", ".join(receipt.credential_references) or "-",
+                },
+            ),
+            status_level=STATUS_SUCCESS if receipt.deleted_config else STATUS_WARNING,
+        )
 
     @log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def retry_test_residue_close(self) -> None:
@@ -595,6 +814,72 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
                 )
             )
         return tuple(rows)
+
+    async def _list_role_assignments(self) -> tuple[RoleMCPAssignment, ...]:
+        """读取角色分配；存储未接线返回空（按钮按 ``roles_available`` 禁用）。"""
+
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            return ()
+        lister = getattr(lifecycle, "list_role_assignments", None)
+        if lister is None:
+            return ()
+        return tuple(await lister())
+
+    @staticmethod
+    def _build_role_rows(assignments: tuple[RoleMCPAssignment, ...]) -> tuple[MCPRoleAssignmentRow, ...]:
+        return tuple(
+            MCPRoleAssignmentRow(
+                role_id=item.role_id,
+                role_version=item.role_version,
+                available_keys=tuple(sorted(binding.identity.stable_key() for binding in item.available)),
+                default_key=None if item.default_service is None else item.default_service.stable_key(),
+            )
+            for item in assignments
+        )
+
+    def _build_role_assignment(self) -> RoleMCPAssignment:
+        """草稿 → ``RoleMCPAssignment``；非法时抛 ``ValueError``（值为字段名）。"""
+
+        draft = self._state.role_draft
+        role_id = draft.role_id.strip()
+        if not role_id:
+            raise ValueError("role_id")
+        try:
+            role_version = int(draft.role_version.strip())
+        except ValueError:
+            raise ValueError("role_version") from None
+        if role_version < 1:
+            raise ValueError("role_version")
+        tools_map = dict(draft.tools_text)
+        bindings: list[RoleMCPServiceBinding] = []
+        for key in draft.available_keys:
+            config = self._configs.get(key)
+            if config is None:
+                raise ValueError("available")
+            bindings.append(
+                RoleMCPServiceBinding(
+                    identity=config.identity,
+                    tools=_split_lines(tools_map.get(key, "")),
+                )
+            )
+        default = None
+        if draft.default_key is not None:
+            config = self._configs.get(draft.default_key)
+            if config is None or draft.default_key not in draft.available_keys:
+                raise ValueError("default_service")
+            default = config.identity
+        assignment = RoleMCPAssignment(
+            role_id=role_id,
+            role_version=str(role_version),
+            available=tuple(bindings),
+            default_service=default,
+        )
+        try:
+            validate_role_mcp_assignment(assignment)
+        except AgentValidationError as exc:
+            raise ValueError(exc.code) from None
+        return assignment
 
     def _draft_from_config(self, config: MCPServerConfig) -> MCPConfigDraft:
         """已保存配置 → 表单草稿（往返一致，不丢字段）。"""

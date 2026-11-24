@@ -430,6 +430,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             user_scope=str(getattr(agent_wiring, "user_scope", LOCAL_DESKTOP_USER_SCOPE)),
             unavailable_reason_key=research_unavailable_key,
             intake=main_turn_intake,
+            mcp_catalog=getattr(agent_wiring, "mcp_lifecycle", None),
         )
     )
     research_open, set_research_open = ft.use_state(False)
@@ -486,6 +487,12 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         page = _get_page()
         if page is not None and research_vm.state.available:
             page.run_task(research_vm.refresh)
+
+    def _load_mcp_scope() -> None:
+        """观察层挂载时读取 MCP 服务目录（只读；不连接任何服务）。"""
+        page = _get_page()
+        if page is not None:
+            page.run_task(research_vm.load_mcp_scope)
 
     def _on_draft_change(decision_id: str, text: str) -> None:
         research_vm.set_answer_draft(decision_id, text)
@@ -920,6 +927,8 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             on_send=_send_first_question,
             on_start_plan=_start_confirmed_plan,
             on_retry_delivery=_retry_delivery,
+            on_toggle_mcp_scope=research_vm.toggle_mcp_scope,
+            on_load_mcp_scope=_load_mcp_scope,
         )
         if research_open
         else None

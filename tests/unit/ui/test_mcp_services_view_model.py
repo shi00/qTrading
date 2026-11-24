@@ -26,6 +26,8 @@ from core.agent_types import (
     MCPReadOnlyAudit,
     MCPServiceIdentity,
     MCPTransportKind,
+    RoleMCPAssignment,
+    RoleMCPServiceBinding,
 )
 from services.agent_service.mcp import (
     MCPConfigSaveReceipt,
@@ -38,7 +40,12 @@ from services.agent_service.mcp_config_store import (
     LISTING_UNREADABLE,
     MCPConfigListEntry,
 )
-from services.agent_service.mcp_lifecycle import MCPConnectReceipt, MCPServiceLifecycle
+from services.agent_service.mcp_lifecycle import (
+    MCPConnectReceipt,
+    MCPServiceDeleteBlocked,
+    MCPServiceDeletionReceipt,
+    MCPServiceLifecycle,
+)
 from ui.viewmodels import Message
 from ui.viewmodels.mcp_services_view_model import (
     STATUS_ERROR,
@@ -99,6 +106,39 @@ class _FakeLifecycle:
         self.extra_entries: list[MCPConfigListEntry] = []
         #: 使用点仍拒绝的身份（模拟存储读取期的 fail-closed）。
         self.reject_identities: set[str] = set()
+        self.roles: list[object] = []
+        self.role_saved: list[object] = []
+        self.deleted: list[MCPServiceIdentity] = []
+        self.delete_error: BaseException | None = None
+
+    async def list_role_assignments(self) -> tuple[object, ...]:
+        self._maybe_fail()
+        return tuple(self.roles)
+
+    async def save_role_assignment(self, assignment: object) -> object:
+        self._maybe_fail()
+        self.role_saved.append(assignment)
+        self.roles = [
+            existing
+            for existing in self.roles
+            if (getattr(existing, "role_id", None), getattr(existing, "role_version", None))
+            != (getattr(assignment, "role_id", None), getattr(assignment, "role_version", None))
+        ]
+        self.roles.append(assignment)
+        return assignment
+
+    async def delete_service(self, identity: MCPServiceIdentity, *, confirmation: bool = False) -> object:
+        self._maybe_fail()
+        if self.delete_error is not None:
+            raise self.delete_error
+        self.deleted.append(identity)
+        self.configs = [config for config in self.configs if config.identity != identity]
+        return MCPServiceDeletionReceipt(
+            identity=identity,
+            deleted_config=True,
+            deleted_grant=True,
+            credential_references=("keyring:mcp-token",),
+        )
 
     def _maybe_fail(self) -> None:
         if self.fail_with is not None:
@@ -541,3 +581,102 @@ class TestOperations:
             await vm.connection_test()
         assert type(exc.value) is asyncio.CancelledError
         assert vm.state.busy is False
+
+
+class TestDeleteAndRoleAssignments:
+    @pytest.mark.asyncio
+    async def test_delete_blocked_lists_role_and_research_references(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        fake.delete_error = MCPServiceDeleteBlocked(_identity(), role_refs=("main@1",), research_ids=("session-9",))
+        vm = _vm(fake)
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+
+        vm.request_delete()
+        await vm.confirm_delete()
+
+        assert vm.state.delete_pending is False
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_delete_blocked"
+        assert vm.state.status.params["roles"] == "main@1"
+        assert vm.state.status.params["researches"] == "session-9"
+        assert vm.state.status_level == STATUS_WARNING
+        assert fake.deleted == []
+
+    @pytest.mark.asyncio
+    async def test_delete_success_reports_revocation_refs(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        vm = _vm(fake)
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+
+        vm.request_delete()
+        await vm.confirm_delete()
+
+        assert fake.deleted == [_identity()]
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_deleted"
+        assert vm.state.status.params["credentials"] == "keyring:mcp-token"
+        assert vm.state.draft_saved is False
+        assert vm.state.rows == ()
+
+    @pytest.mark.asyncio
+    async def test_role_assignment_saved_with_default_and_tools(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        vm = _vm(fake)
+        await vm.load()
+        vm.begin_role_new()
+        vm.set_role_text("role_id", "main")
+        vm.set_role_text("role_version", "2")
+        vm.toggle_role_service(_identity().stable_key())
+        vm.set_role_default(_identity().stable_key())
+        vm.set_role_tools(_identity().stable_key(), "read_news\nread_quote")
+
+        await vm.save_role_assignment()
+
+        assert len(fake.role_saved) == 1
+        saved = cast(RoleMCPAssignment, fake.role_saved[0])
+        assert saved.role_id == "main"
+        assert saved.role_version == "2"
+        assert saved.default_service == _identity()
+        assert saved.available[0].tools == ("read_news", "read_quote")
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_role_saved"
+        assert vm.state.role_assignments[0].role_id == "main"
+
+    @pytest.mark.asyncio
+    async def test_role_assignment_rejects_missing_role_id(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        vm = _vm(fake)
+        await vm.load()
+        vm.begin_role_new()
+        vm.toggle_role_service(_identity().stable_key())
+
+        await vm.save_role_assignment()
+
+        assert fake.role_saved == []
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_invalid_draft"
+
+    @pytest.mark.asyncio
+    async def test_role_rows_loaded_and_selected(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        fake.roles = [
+            RoleMCPAssignment(
+                role_id="main",
+                role_version="1",
+                available=(RoleMCPServiceBinding(identity=_identity(), tools=("read_quote",)),),
+                default_service=_identity(),
+            )
+        ]
+        vm = _vm(fake)
+        await vm.load()
+
+        assert vm.state.roles_available is True
+        assert vm.state.role_assignments[0].default_key == _identity().stable_key()
+
+        vm.select_role_assignment("main", "1")
+
+        assert vm.state.role_draft.role_id == "main"
+        assert vm.state.role_draft.default_key == _identity().stable_key()
+        assert dict(vm.state.role_draft.tools_text)[_identity().stable_key()] == "read_quote"

@@ -29,6 +29,8 @@ from ui.viewmodels.mcp_services_view_model import (
     STATUS_SUCCESS,
     STATUS_WARNING,
     MCPConfigDraft,
+    MCPRoleAssignmentRow,
+    MCPRoleDraft,
     MCPServiceRow,
     MCPServicesState,
 )
@@ -380,6 +382,63 @@ class TestFieldWiring:
 
         _of(view, ft.Checkbox)[0].on_change(SimpleNamespace(control=ft.Checkbox(value=True)))
         vm.toggle_approved_tool.assert_called_once_with("read")
+
+
+class TestRoleAndDelete:
+    def test_role_store_unwired_shows_hint(
+        self, monkeypatch: pytest.MonkeyPatch, mock_i18n_state: Any, mock_app_colors_state: Any
+    ) -> None:
+        view, _vm, _page = _render(monkeypatch, _state(roles_available=False))
+
+        texts = [control.value for control in _of(view, ft.Text)]
+        assert I18n.get("mcp_role_unavailable") in texts
+
+    def test_role_editor_renders_saved_assignment_and_tools(
+        self, monkeypatch: pytest.MonkeyPatch, mock_i18n_state: Any, mock_app_colors_state: Any
+    ) -> None:
+        state = _state(
+            rows=(_row("svc-a", connected=False),),
+            roles_available=True,
+            role_assignments=(MCPRoleAssignmentRow("main", "1", ("svc-a",), "svc-a"),),
+            role_draft=MCPRoleDraft(
+                role_id="main",
+                role_version="1",
+                available_keys=("svc-a",),
+                default_key="svc-a",
+                tools_text=(("svc-a", "read_quote"),),
+            ),
+        )
+        view, vm, page = _render(monkeypatch, state)
+
+        assert "main@1" in [str(button.content) for button in _of(view, ft.TextButton)]
+        tools_label = I18n.get("mcp_role_tools_fmt").format(service="svc-a-name")
+        tools_field = next(control for control in _of(view, ft.TextField) if control.label == tools_label)
+        assert tools_field.value == "read_quote"
+
+        save_button = next(
+            button for button in _of(view, ft.Button) if str(button.content) == I18n.get("mcp_role_save")
+        )
+        save_button.on_click(SimpleNamespace(control=None))
+        assert vm.save_role_assignment in [handler for handler, _args, _kwargs in page.tasks]
+
+    def test_delete_requires_confirm_and_dispatches_vm(
+        self, monkeypatch: pytest.MonkeyPatch, mock_i18n_state: Any, mock_app_colors_state: Any
+    ) -> None:
+        view, vm, _page = _render(monkeypatch, _state(draft_saved=True))
+        delete_button = next(
+            button for button in _of(view, ft.OutlinedButton) if str(button.content) == I18n.get("mcp_btn_delete")
+        )
+        delete_button.on_click(SimpleNamespace(control=None))
+        vm.request_delete.assert_called_once_with()
+
+        view, vm, page = _render(monkeypatch, _state(draft_saved=True, delete_pending=True))
+        texts = [control.value for control in _of(view, ft.Text)]
+        assert I18n.get("mcp_delete_confirm") in texts
+        confirm_button = next(
+            button for button in _of(view, ft.Button) if str(button.content) == I18n.get("mcp_delete_confirm_action")
+        )
+        confirm_button.on_click(SimpleNamespace(control=None))
+        assert vm.confirm_delete in [handler for handler, _args, _kwargs in page.tasks]
 
 
 def test_mount_effect_schedules_single_load(

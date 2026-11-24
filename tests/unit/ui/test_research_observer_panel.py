@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import flet as ft
 import pytest
 
@@ -70,6 +72,48 @@ def test_composer_renders_three_modes_and_send_button() -> None:
     assert labels == ["讨论", "计划", "执行"]
     send_row = next(row for row in rows if isinstance(row, ft.Row) and len(row.controls) == 1)
     assert isinstance(send_row.controls[0], ft.FilledButton)
+
+
+def test_composer_renders_mcp_scope_checkboxes_and_error() -> None:
+    toggled: list[str] = []
+    state = ResearchObserverState(
+        available=True,
+        composer_available=True,
+        mcp_scope_available=True,
+        mcp_scope_options=(("svc-a@1", "行情服务"), ("svc-b@2", "新闻服务")),
+        mcp_scope_selected=("svc-a@1",),
+    )
+
+    control = _build_composer(
+        state,
+        on_composer_text=_noop_text,
+        on_composer_mode=_noop_mode,
+        on_send=_noop,
+        on_toggle_mcp_scope=toggled.append,
+    )
+    assert isinstance(control, ft.Container)
+    rows = control.content.controls
+    checkboxes = [row for row in rows if isinstance(row, ft.Checkbox)]
+    assert [(box.label, box.value) for box in checkboxes] == [("行情服务", True), ("新闻服务", False)]
+    callback = checkboxes[1].on_change
+    assert callable(callback)
+    cast(Any, callback)(None)
+    assert toggled == ["svc-b@2"]
+
+    failed = _build_composer(
+        ResearchObserverState(
+            available=True,
+            composer_available=True,
+            mcp_scope_available=True,
+            mcp_scope_error_key="agent_research_mcp_scope_error",
+        ),
+        on_composer_text=_noop_text,
+        on_composer_mode=_noop_mode,
+        on_send=_noop,
+    )
+    assert isinstance(failed, ft.Container)
+    texts = [row.value for row in failed.content.controls if isinstance(row, ft.Text)]
+    assert "MCP 服务目录读取失败，请稍后重试。" in texts
 
 
 def test_plan_preview_hidden_without_plan() -> None:

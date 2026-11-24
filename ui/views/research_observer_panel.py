@@ -126,12 +126,54 @@ def _section_title(key: str) -> ft.Text:
     )
 
 
+def _build_mcp_scope(state: ResearchObserverState, on_toggle: Callable[[str], None]) -> list[ft.Control]:
+    """研究侧 MCP 范围：本次允许的服务子集（空选择 = 不使用 MCP，不解释为全部）。"""
+
+    rows: list[ft.Control] = [
+        _section_title("agent_research_mcp_scope"),
+        ft.Text(
+            I18n.get("agent_research_mcp_scope_hint"),
+            size=AppStyles.FONT_SIZE_CAPTION,
+            color=AppColors.TEXT_HINT,
+        ),
+    ]
+    if state.mcp_scope_error_key:
+        rows.append(
+            ft.Text(
+                I18n.get(state.mcp_scope_error_key),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.ERROR,
+            )
+        )
+        return rows
+    if not state.mcp_scope_options:
+        rows.append(
+            ft.Text(
+                I18n.get("agent_research_mcp_scope_empty"),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.TEXT_HINT,
+            )
+        )
+        return rows
+    for identity_key, label in state.mcp_scope_options:
+        rows.append(
+            ft.Checkbox(
+                label=label,
+                value=identity_key in state.mcp_scope_selected,
+                disabled=state.composer_pending,
+                on_change=lambda _e, key=identity_key: on_toggle(key),
+            )
+        )
+    return rows
+
+
 def _build_composer(
     state: ResearchObserverState,
     *,
     on_composer_text: Callable[[str], None],
     on_composer_mode: Callable[[str], None],
     on_send: Callable[[], None],
+    on_toggle_mcp_scope: Callable[[str], None] = _ignore_text,
 ) -> ft.Control:
     """首问输入区：正文 + 模式 + 发送（发送只经注入回调，组件不拼装服务请求）。
 
@@ -178,6 +220,8 @@ def _build_composer(
             )
         )
     rows.append(ft.Row(mode_row, spacing=AppStyles.SPACING_XS, wrap=True))
+    if state.mcp_scope_available:
+        rows.extend(_build_mcp_scope(state, on_toggle_mcp_scope))
     send_label = "agent_research_sending" if state.composer_pending else "agent_research_send"
     rows.append(
         ft.Row(
@@ -686,6 +730,7 @@ def _build_body(
     on_send: Callable[[], None],
     on_start_plan: Callable[[], None],
     on_retry_delivery: Callable[[str], None] = _ignore_decision,
+    on_toggle_mcp_scope: Callable[[str], None] = _ignore_text,
 ) -> ft.Control:
     """面板主体：首问 / 计划预览 / 主会话 / 子任务树 / 成果 / 待处理决定。"""
 
@@ -701,6 +746,7 @@ def _build_body(
             on_composer_text=on_composer_text,
             on_composer_mode=on_composer_mode,
             on_send=on_send,
+            on_toggle_mcp_scope=on_toggle_mcp_scope,
         )
     ]
     preview = _build_plan_preview(state, on_start_plan=on_start_plan)
@@ -1100,8 +1146,12 @@ def ResearchObserverPanel(
     on_send: Callable[[], None] = _ignore_click,
     on_start_plan: Callable[[], None] = _ignore_click,
     on_retry_delivery: Callable[[str], None] = _ignore_decision,
+    on_toggle_mcp_scope: Callable[[str], None] = _ignore_text,
+    on_load_mcp_scope: Callable[[], None] = _ignore_click,
 ) -> ft.Container:
     """非模态研究观察层（右侧公共区；收起只隐藏，不卸载业务页、不清草稿）。"""
+
+    ft.use_effect(lambda: on_load_mcp_scope(), dependencies=[])
 
     header = ft.Row(
         [
@@ -1150,6 +1200,7 @@ def ResearchObserverPanel(
             on_send=on_send,
             on_start_plan=on_start_plan,
             on_retry_delivery=on_retry_delivery,
+            on_toggle_mcp_scope=on_toggle_mcp_scope,
         )
     )
     return ft.Container(
