@@ -1892,3 +1892,43 @@ class TestGroupStopExecution:
         assert by_lane[lane_a.lane_ref].action == "preserve_result"
         assert by_lane[lane_a.lane_ref].verified is True
         assert by_lane[lane_b.lane_ref].verified is False
+
+
+# ---------------------------------------------------------------------------
+# 第四类验收证据：共享 MCP 断线的影响清单（受影响路逐路列出，未受影响路不得被误标）
+# ---------------------------------------------------------------------------
+
+_MCP_DISCONNECT_REASON = "shared_mcp_disconnected"
+
+
+class TestSharedMCPDisconnectImpact:
+    def test_shared_mcp_disconnect_lists_only_affected_lanes(self) -> None:
+        group = _group((_selection("conn-a"), _selection("conn-b"), _selection("conn-c")))
+        lane_done, lane_running, lane_queued = group.lanes
+        plan = plan_group_stop(
+            group,
+            (
+                ComparisonLaneObservation(lane_ref=lane_done.lane_ref, display_state="complete", reliable_result=True),
+                ComparisonLaneObservation(lane_ref=lane_running.lane_ref, display_state="running"),
+                ComparisonLaneObservation(lane_ref=lane_queued.lane_ref, display_state="queued"),
+            ),
+            reason=_MCP_DISCONNECT_REASON,
+        )
+
+        # 影响清单按冻结路序逐路列出（不是只给计数）。
+        assert [decision.lane_ref for decision in plan.decisions] == [lane.lane_ref for lane in group.lanes]
+        assert plan.dispatch_closed is True
+
+        # 受影响路 = 需停新派发/撤回的路；已完成且有可靠成果的路保留原结果。
+        affected = [decision.lane_ref for decision in plan.decisions if decision.action != "preserve_result"]
+        assert affected == [lane_running.lane_ref, lane_queued.lane_ref]
+
+        decisions = {decision.lane_ref: decision for decision in plan.decisions}
+        assert decisions[lane_done.lane_ref].action == "preserve_result"
+        # 未受影响路不得被误标为失败/未知：原因即已完成本身。
+        assert decisions[lane_done.lane_ref].reason == f"{_MCP_DISCONNECT_REASON}:complete"
+        # 受影响路原因可解释：稳定断线原因 + 该路当时状态。
+        assert decisions[lane_running.lane_ref].reason == f"{_MCP_DISCONNECT_REASON}:in_flight"
+        assert decisions[lane_queued.lane_ref].reason == f"{_MCP_DISCONNECT_REASON}:not_dispatched"
+        assert all(decision.reason.startswith(f"{_MCP_DISCONNECT_REASON}:") for decision in plan.decisions)
+        assert not any("failed" in decision.reason or "unknown" in decision.reason for decision in plan.decisions)
