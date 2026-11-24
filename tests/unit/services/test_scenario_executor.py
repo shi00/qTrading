@@ -38,7 +38,7 @@ import dataclasses
 
 import pytest
 
-from core.errors import AIContentRefusedError
+from core.errors import AIContentRefusedError, AIProviderParamsRejectedError
 from core.i18n import Message
 from core.model_management_types import (
     AdapterResponse,
@@ -2080,6 +2080,41 @@ class TestF27FailureClassification:
         )
         adapter.invoke.assert_awaited_once()
         assert result.candidate_decisions[0].reason == "CONTENT_REFUSED"
+
+    @pytest.mark.asyncio
+    async def test_params_rejected_stable_code_across_ledger_diagnosis_and_receipt(self):
+        """N20：严格出口 HTTP 422 参数被拒 → 账本终态 / 用户诊断 / 业务回执同源稳定码。
+
+        三处消费同一脱敏码 ``provider_params_rejected``（与适配器外发审计
+        error_category 一致），不以异常类名代替；不放宽重试（同连接单次出站）。
+        """
+        adapter = MagicMock()
+
+        async def _invoke(*args, **kwargs):
+            raise AIProviderParamsRejectedError(detail="Provider rejected request parameters with HTTP 422")
+
+        adapter.invoke = AsyncMock(side_effect=_invoke)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            _validator_ok,
+        )
+        # 不放宽重试：参数被拒不重试同一连接（单次出站）
+        adapter.invoke.assert_awaited_once()
+        assert result.status == "failed"
+        # 候选终态（模型管理明细 / 业务回执消费同一 reason）
+        decision = result.candidate_decisions[0]
+        assert decision.reason == "provider_params_rejected"
+        # 业务回执（新闻分类失败原因由候选终态 reason 拼装）同源稳定码
+        assert "; ".join(d.reason for d in result.candidate_decisions) == "provider_params_rejected"
+        # 账本终态错误码同源
+        terminal_call = recorder.submit_terminal.await_args
+        assert terminal_call.args[0].status == "failed"
+        assert terminal_call.args[0].error_code == "provider_params_rejected"
+        # R9：稳定码不含异常类名，也不含原始提供方正文
+        assert "AIProviderParamsRejectedError" not in decision.reason
 
     @pytest.mark.asyncio
     async def test_no_retry_switchable_moves_to_next_candidate(self):
