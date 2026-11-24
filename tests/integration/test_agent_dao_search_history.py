@@ -34,7 +34,7 @@ from datetime import UTC, datetime
 
 import pytest
 from alembic import command
-from sqlalchemy import func, insert, select, text
+from sqlalchemy import delete, func, insert, select, text
 
 from core.agent_types import (
     AgentErrorCode,
@@ -829,7 +829,9 @@ class TestDateBoundsAndStateFilter:
 
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, "s-a")
-        bad_cursor = f"h:{'a' * 64}:9999-99-99T12:00:00.000000Z:9999-99-99T12:00:00.000000Z:message:anchor:0"
+        bad_cursor = (
+            f"h:{'a' * 64}:9999-99-99T12:00:00.000000Z:9999-99-99T12:00:00.000000Z:message:anchor:0:0123456789abcdef"
+        )
         with pytest.raises(AgentServiceError) as exc:
             await dao.search_history(
                 _q(scope="current_session", session_id="s-a", cursor=bad_cursor), user_scope=USER_SCOPE
@@ -1048,9 +1050,9 @@ class TestFullOrderKeysetPaging:
             )
 
         first = await dao.search_history(_q(scope="current_session", session_id="s-a", limit=1), user_scope=USER_SCOPE)
-        digest, upper, sort_moment, _kind, _anchor, _version = parse_history_cursor(first.next_cursor or "")
+        digest, upper, sort_moment, _kind, _anchor, _version, window = parse_history_cursor(first.next_cursor or "")
         # 同锚 ID 但版本不存在：锚行不唯一命中即覆盖域已修订（不放行错位游标）
-        bad_cursor = f"h:{digest}:{upper}:{sort_moment}:artifact:art-multi:99"
+        bad_cursor = f"h:{digest}:{upper}:{sort_moment}:artifact:art-multi:99:{window}"
         with pytest.raises(AgentServiceError) as exc:
             await dao.search_history(
                 _q(scope="current_session", session_id="s-a", limit=1, cursor=bad_cursor), user_scope=USER_SCOPE
@@ -1115,7 +1117,8 @@ class TestCursorQueryBinding:
 
 
 class TestCursorUpperBoundAndLiveness:
-    """检视 D16：固定上界从游标继承；成员变化只经指纹漂移，不阻断同查询续翻。"""
+    """检视 D16/T-05：固定上界从游标继承；窗口内命中集合修订 → 失效重首读，
+    窗口外追加不阻断续翻（V01 活性）。"""
 
     async def test_cursor_inherits_fixed_upper_bound(self, real_embedded_pg) -> None:
         dao = await _setup(real_embedded_pg.url)
@@ -1132,11 +1135,8 @@ class TestCursorUpperBoundAndLiveness:
         page1 = await dao.search_history(query, user_scope=USER_SCOPE)
         assert [hit.message_id for hit in page1.hits] == ["m-u1", "m-u2"]
         cursor_value = page1.next_cursor or ""
-        digest, _upper, sort_moment, hit_kind, anchor, version = parse_history_cursor(cursor_value)
-        early_upper = "2026-06-02T12:00:00.000000Z"
-        narrowed_cursor = f"h:{digest}:{early_upper}:{sort_moment}:{hit_kind}:{anchor}:{version}"
-        # 续读前新增更晚数据；游标上界不让位于「当前时刻」
-        await _seed_message(dao, "s-a", "u4", body_text="消息4", occurred_at="2026-06-04T12:00:00.000000Z")
+        # 续读前追加「晚于首读上界」的数据（未来时刻）：游标上界不让位于当前时刻
+        await _seed_message(dao, "s-a", "u4", body_text="消息4", occurred_at="2030-01-01T12:00:00.000000Z")
         page2 = await dao.search_history(
             _q(
                 scope="current_session",
@@ -1144,20 +1144,40 @@ class TestCursorUpperBoundAndLiveness:
                 time_basis="message",
                 sort="oldest_first",
                 limit=2,
-                cursor=narrowed_cursor,
+                cursor=cursor_value,
             ),
             user_scope=USER_SCOPE,
         )
-        assert page2.fixed_upper_bound == early_upper
-        assert page2.hits == ()
-        # 新首读（上界=now）可见被续读上界挡住的晚数据：证明是上界继承而非数据缺失
-        fresh = await dao.search_history(
-            _q(scope="current_session", session_id="s-a", time_basis="message", sort="oldest_first", limit=10),
-            user_scope=USER_SCOPE,
-        )
-        assert [hit.message_id for hit in fresh.hits] == ["m-u1", "m-u2", "m-u3", "m-u4"]
+        assert page2.fixed_upper_bound == page1.fixed_upper_bound
+        # 上界之外的追加不改变窗口命中集合：续翻推进到末页且不含 u4
+        assert [hit.message_id for hit in page2.hits] == ["m-u3"]
+        assert page2.next_cursor is None
 
-    async def test_same_query_continuation_survives_member_change(self, real_embedded_pg) -> None:
+    async def test_rewritten_upper_bound_cursor_rejected(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        for index in range(1, 4):
+            await _seed_message(
+                dao,
+                "s-a",
+                f"w{index}",
+                body_text=f"消息{index}",
+                occurred_at=f"2026-06-0{index}T12:00:00.000000Z",
+            )
+        page1 = await dao.search_history(
+            _q(scope="current_session", session_id="s-a", time_basis="message", limit=2), user_scope=USER_SCOPE
+        )
+        digest, _upper, sort_moment, hit_kind, anchor, version, window = parse_history_cursor(page1.next_cursor or "")
+        tampered = f"h:{digest}:2026-06-02T12:00:00.000000Z:{sort_moment}:{hit_kind}:{anchor}:{version}:{window}"
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.search_history(
+                _q(scope="current_session", session_id="s-a", time_basis="message", limit=2, cursor=tampered),
+                user_scope=USER_SCOPE,
+            )
+        # 改写上界即改变窗口覆盖域：与集合摘要不一致 → 显式失效（须重首读）
+        assert _code_of(exc) == AgentErrorCode.REVISION_CONFLICT
+
+    async def test_member_change_within_window_invalidates_and_restart_recovers(self, real_embedded_pg) -> None:
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, "s-a")
         for index in range(1, 4):
@@ -1168,17 +1188,71 @@ class TestCursorUpperBoundAndLiveness:
                 body_text=f"消息{index}",
                 occurred_at=f"2026-06-0{index}T12:00:00.000000Z",
             )
-        page1 = await dao.search_history(_q(scope="current_session", session_id="s-a", limit=2), user_scope=USER_SCOPE)
+        page1 = await dao.search_history(
+            _q(scope="current_session", session_id="s-a", time_basis="message", limit=2), user_scope=USER_SCOPE
+        )
         assert [hit.message_id for hit in page1.hits] == ["m-v3", "m-v2"]
         cursor_value = page1.next_cursor or ""
-        # 翻页间成员变化（同会话新增消息）：指纹漂移，但同查询续翻照常推进
+        # 翻页间窗口内命中集合改变（同会话新增落在上界内的消息）：不得静默续翻
         await _seed_message(dao, "s-a", "v4", body_text="翻页间新增", occurred_at="2026-06-04T12:00:00.000000Z")
-        page2 = await dao.search_history(
-            _q(scope="current_session", session_id="s-a", limit=2, cursor=cursor_value), user_scope=USER_SCOPE
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.search_history(
+                _q(scope="current_session", session_id="s-a", time_basis="message", limit=2, cursor=cursor_value),
+                user_scope=USER_SCOPE,
+            )
+        assert _code_of(exc) == AgentErrorCode.REVISION_CONFLICT
+        # 规定的恢复路径：重首读，完整覆盖且 ID 准确不重不漏
+        fresh = await dao.search_history(
+            _q(scope="current_session", session_id="s-a", time_basis="message", limit=10), user_scope=USER_SCOPE
         )
-        assert [hit.message_id for hit in page2.hits] == ["m-v1"]
+        assert [hit.message_id for hit in fresh.hits] == ["m-v4", "m-v3", "m-v2", "m-v1"]
+        assert fresh.next_cursor is None
+
+    async def test_deleted_hit_within_window_invalidates(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        for index in range(1, 4):
+            await _seed_message(
+                dao,
+                "s-a",
+                f"d{index}",
+                body_text=f"消息{index}",
+                occurred_at=f"2026-06-0{index}T12:00:00.000000Z",
+            )
+        page1 = await dao.search_history(_q(scope="current_session", session_id="s-a", limit=2), user_scope=USER_SCOPE)
+        assert [hit.message_id for hit in page1.hits] == ["m-d3", "m-d2"]
+        # 翻页间窗口内命中被删除（增删改变集合）：旧游标显式失效
+        async with dao.engine.begin() as conn:
+            await conn.execute(
+                delete(AgentMessage).where(AgentMessage.user_scope == USER_SCOPE, AgentMessage.message_id == "m-d1")
+            )
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.search_history(
+                _q(scope="current_session", session_id="s-a", limit=2, cursor=page1.next_cursor), user_scope=USER_SCOPE
+            )
+        assert _code_of(exc) == AgentErrorCode.REVISION_CONFLICT
+
+    async def test_other_session_append_does_not_invalidate_continuation(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        await _seed_session(dao, "s-b")
+        for index in range(1, 4):
+            await _seed_message(
+                dao,
+                "s-a",
+                f"x{index}",
+                body_text=f"甲{index}",
+                occurred_at=f"2026-06-0{index}T12:00:00.000000Z",
+            )
+        page1 = await dao.search_history(_q(scope="current_session", session_id="s-a", limit=2), user_scope=USER_SCOPE)
+        assert [hit.message_id for hit in page1.hits] == ["m-x3", "m-x2"]
+        # V01 活性：每页前另一会话可靠追加（落在窗口内也不属于本查询覆盖域）
+        await _seed_message(dao, "s-b", "y1", body_text="另一会话", occurred_at="2026-06-02T12:00:00.000000Z")
+        page2 = await dao.search_history(
+            _q(scope="current_session", session_id="s-a", limit=2, cursor=page1.next_cursor), user_scope=USER_SCOPE
+        )
+        assert [hit.message_id for hit in page2.hits] == ["m-x1"]
         assert page2.next_cursor is None
-        assert page2.revision_fingerprint != page1.revision_fingerprint
 
 
 class TestAllSavedExecutionFingerprint:

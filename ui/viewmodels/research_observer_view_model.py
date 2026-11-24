@@ -661,6 +661,8 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         self._raw_executions: tuple[Any, ...] = ()
         self._raw_messages: tuple[Any, ...] = ()
         self._raw_artifacts: tuple[Any, ...] = ()
+        # 已读到的会话清理事实：清理后到达的正文/草稿读取结果不再落 state（T-05）。
+        self._session_cleaned = False
         self._state = ResearchObserverState(
             available=service is not None,
             unavailable_reason_key=unavailable_reason_key if service is None else "",
@@ -761,6 +763,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         self._raw_executions = ()
         self._raw_messages = ()
         self._raw_artifacts = ()
+        self._session_cleaned = False
         self._set_state(
             loading=False,
             session_id=None,
@@ -844,20 +847,35 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             pending_truncated = False
         previous_session_id = self._state.session_id
         session_changed = previous_session_id is not None and previous_session_id != session_id
+        # 清理事实优先于缓存复用（T-05）：同一会话刷新读到清理状态时，已加载的
+        # 正文/草稿缓存不得继续重画（清理只把库内文本换成 tombstone，缓存里的旧
+        # 内容仍是可读明文，保留即把「已清理」伪装成「仍可读」）。
+        session_cleaned = read.summary.cleaned_at is not None
+        self._session_cleaned = session_cleaned
         self._raw_executions = tuple(read.executions)
         self._raw_messages = tuple(read.messages.items)
         self._raw_artifacts = tuple(read.artifacts.items)
         selected = _normalized_selection(self._raw_executions, self._state.selected_execution_id)
         collapsed = _normalized_collapsed(self._raw_executions, self._state.collapsed_execution_ids)
         artifact_keys = {f"{item.artifact_id}:{item.artifact_version}" for item in self._raw_artifacts}
-        pending_keys = tuple(key for key in self._state.artifact_body_pending_keys if key in artifact_keys)
-        # R2-I23：已载入草稿只在新快照仍指向同一会话同一稿版时保留；稿版已推进或
-        # 切了会话即丢弃，避免把旧稿正文冒充当前可继续编辑的内容。
+        cleaned_keys = {
+            f"{item.artifact_id}:{item.artifact_version}" for item in self._raw_artifacts if item.cleaned_at is not None
+        }
+        pending_keys = tuple(
+            key for key in self._state.artifact_body_pending_keys if key in artifact_keys and key not in cleaned_keys
+        )
+        # R2-I23：已载入草稿只在新快照仍指向同一会话同一稿版时保留；稿版已推进、
+        # 切了会话或会话已清理即丢弃，避免把旧稿正文冒充当前可继续编辑的内容。
         loaded_draft = self._state.session_draft
-        if loaded_draft is not None and (
-            loaded_draft.session_id != session_id or loaded_draft.draft_revision != read.summary.draft_revision
+        if session_cleaned or (
+            loaded_draft is not None
+            and (loaded_draft.session_id != session_id or loaded_draft.draft_revision != read.summary.draft_revision)
         ):
             loaded_draft = None
+        if session_changed or session_cleaned:
+            artifact_bodies = ()
+        else:
+            artifact_bodies = tuple(body for body in self._state.artifact_bodies if body.key not in cleaned_keys)
         self._set_state(
             loading=False,
             session_id=session_id,
@@ -876,8 +894,8 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             selected_execution_id=selected,
             collapsed_execution_ids=collapsed,
             artifact_body_pending_keys=pending_keys,
-            # 换会话时不复用上一会话的正文缓存（同 id 跨会话也不冒充当前会话成果）
-            artifact_bodies=() if session_changed else self._state.artifact_bodies,
+            # 换会话或读到清理状态时不复用正文缓存（同 id 跨会话/已清理也不冒充可读成果）
+            artifact_bodies=artifact_bodies,
             session_draft=loaded_draft,
             draft_error_code=None,
             **self._projection_changes(selected=selected, collapsed=collapsed),
@@ -973,6 +991,15 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             unavailable_reason=getattr(read, "unavailable_reason", None),
             truncated=getattr(read, "next_cursor", None) is not None,
         )
+        if self._session_cleaned or self._artifact_is_cleaned(key):
+            # 清理事实先于本次读取到达：读回的是清理前内容，不得作为当前可读正文
+            # 重画（T-05；并发刷新竞态）。
+            self._set_state(
+                artifact_body_pending_keys=tuple(
+                    pending for pending in self._state.artifact_body_pending_keys if pending != key
+                )
+            )
+            return
         bodies = tuple(body for body in self._state.artifact_bodies if body.key != key)
         self._set_state(
             artifact_bodies=(*bodies, loaded),
@@ -1013,14 +1040,22 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         except Exception as e:
             self._set_state(draft_pending=False, draft_error_code=self._error_code(e))
             return
-        # 并发刷新已切走会话/推进稿版时，读回的旧稿不再属于当前观察位置。
+        # 并发刷新已切走会话/推进稿版/读到清理时，读回的旧稿不再属于当前观察位置。
         current = self._state
         session_mismatch = current.session_id is not None and current.session_id != read.session_id
         revision_mismatch = current.session_id is not None and current.session_draft_revision != read.draft_revision
-        if session_mismatch or revision_mismatch:
+        if session_mismatch or revision_mismatch or self._session_cleaned:
             self._set_state(draft_pending=False)
             return
         self._set_state(draft_pending=False, session_draft=_session_draft_view(read))
+
+    def _artifact_is_cleaned(self, key: str) -> bool:
+        """当前首读投影中该成果版本是否已清理（清理只换 tombstone 文本）。"""
+
+        return any(
+            f"{item.artifact_id}:{item.artifact_version}" == key and item.cleaned_at is not None
+            for item in self._raw_artifacts
+        )
 
     def set_composer_text(self, text: str) -> None:
         """记录首问正文（纯状态；收起观察层不清稿）。"""

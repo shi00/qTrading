@@ -433,13 +433,13 @@ def test_session_read_query_draft_revision_rejected(bad_draft_revision: object) 
 
 @pytest.mark.parametrize(
     "bad_cursor",
-    ["", "x:1", "m:", "m:01", "m:1.5", "m:1 ", "session_seq"],
+    ["", "x:1", "m:", "m:01", "m:1.5", "m:1 ", "session_seq", "m:0123456789abcde:1", "m:0123456789abcdefg:1"],
 )
 def test_session_read_query_message_cursor_rejected(bad_cursor: str) -> None:
     _reject(decode_session_read_query, _query_wire(message_cursor=bad_cursor), "invalid_cursor", "$.message_cursor")
 
 
-@pytest.mark.parametrize("cursor", ["m:0", "m:12"])
+@pytest.mark.parametrize("cursor", ["m:0123456789abcdef:0", "m:0123456789abcdef:12"])
 def test_session_read_query_message_cursor_accepted(cursor: str) -> None:
     query = decode_session_read_query(_query_wire(message_cursor=cursor), "$")
     validate_session_read_query(query)
@@ -456,6 +456,7 @@ def test_session_read_query_message_cursor_accepted(cursor: str) -> None:
         "a:2026-11-12T08:00:00.000000Z:artifact_a1:01",
         "a:2026-11-12T08:00:00Z:artifact_a1:1",
         "a:not-a-time:artifact_a1:1",
+        "a:0123456789abcdefg:2026-11-12T08:00:00.000000Z:artifact_a1:1",
     ],
 )
 def test_session_read_query_artifact_cursor_rejected(bad_cursor: str) -> None:
@@ -463,7 +464,7 @@ def test_session_read_query_artifact_cursor_rejected(bad_cursor: str) -> None:
 
 
 def test_session_read_query_artifact_cursor_accepted() -> None:
-    cursor = "a:2026-11-12T08:00:00.000000Z:artifact_a1:3"
+    cursor = "a:0123456789abcdef:2026-11-12T08:00:00.000000Z:artifact_a1:3"
     query = decode_session_read_query(_query_wire(artifact_cursor=cursor), "$")
     validate_session_read_query(query)
     assert query.artifact_cursor == cursor

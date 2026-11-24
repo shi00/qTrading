@@ -4,8 +4,9 @@
 current_session 必带主 session_id/current_child 必带 child_target）；round_selection
 两 kind；agent_filter 两 kind 不互换（exact 版本必携、all_versions 禁带）；
 query_digest 规范化（全部条件/空值含义入 digest、limit 与游标不入）；游标
-h:{查询摘要}:{上界ts}:{排序键ts}:{命中类型}:{锚ID}:{版本} 语法（命中类型与版本
-承载全序键后两段：消息恒 0、成果 >= 1）；HistoryHit 地址组互斥归属；
+h:{查询摘要}:{上界ts}:{排序键ts}:{命中类型}:{锚ID}:{版本}:{集合摘要} 语法（命中类型与版本
+承载全序键后两段：消息恒 0、成果 >= 1；集合摘要绑定固定上界内命中集合，续读
+前核对）；HistoryHit 地址组互斥归属；
 HistoryPage 指纹摘要。
 """
 
@@ -36,7 +37,7 @@ from core.agent_types import (
 
 ALL_ROUNDS = HistoryRoundSelection(kind="all_rounds")
 EXACT_ROUND = HistoryRoundSelection(kind="exact", execution_id="exec-leaf", round_id="round-1")
-NEW_CURSOR = f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:message:m-1:0"
+NEW_CURSOR = f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:message:m-1:0:0123456789abcdef"
 
 
 def base_query(**overrides: object) -> HistoryQuery:
@@ -101,7 +102,9 @@ def wire_history_page(**overrides: object) -> dict[str, object]:
         "fixed_upper_bound": "2026-06-01T12:00:00.000000Z",
         "revision_fingerprint": "b" * 64,
         "hits": [wire_history_hit()],
-        "next_cursor": f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:message:m-3:0",
+        "next_cursor": (
+            f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:message:m-3:0:0123456789abcdef"
+        ),
         "read_moment": "2026-06-01T12:00:01.000000Z",
     }
     values.update(overrides)
@@ -337,14 +340,18 @@ class TestValueSetsAndBounds:
             # 5 段旧格式（无命中类型/版本）不再接受（检视 D19）
             f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:m-1",
             # 命中类型非 message/artifact
-            f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:tool:m-1:0",
+            f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:tool:m-1:0:0123456789abcdef",
             # 消息侧版本必须为 0
-            f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:message:m-1:1",
+            f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:message:m-1:1:0123456789abcdef",
             # 成果版本必须 >= 1
-            f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:artifact:a-1:0",
+            f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:artifact:a-1:0:0123456789abcdef",
             # 版本不得带前导零 / 多一段
-            f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:artifact:a-1:01",
+            f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:artifact:a-1:01:0123456789abcdef",
             f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:artifact:a-1:1:x",
+            # 集合摘要必须 16 位十六进制（缺段/过短/过大写均拒绝）
+            f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:message:m-1:0",
+            f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:message:m-1:0:012345",
+            f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:message:m-1:0:0123456789ABCDEF",
         ],
     )
     def test_cursor_syntax_rejected(self, bad_cursor: str) -> None:
@@ -355,7 +362,9 @@ class TestValueSetsAndBounds:
     def test_valid_cursor_accepted(self) -> None:
         query = base_query(session_id="s-1", cursor=NEW_CURSOR)
         validate_history_query(query)
-        artifact_cursor = f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:artifact:a-1:7"
+        artifact_cursor = (
+            f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:artifact:a-1:7:fedcba9876543210"
+        )
         validate_history_query(base_query(session_id="s-1", cursor=artifact_cursor))
 
     def test_parse_cursor_returns_digest_and_keyset(self) -> None:
@@ -366,12 +375,15 @@ class TestValueSetsAndBounds:
             "message",
             "m-1",
             0,
+            "0123456789abcdef",
         )
 
     def test_parse_cursor_rejects_kind_version_mismatch(self) -> None:
         # 正则放过非负整数，语义收紧在 parse：可解析但错位的组合必须拒绝
         with pytest.raises(AgentValidationError, match="invalid_cursor"):
-            parse_history_cursor(f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:message:m-1:2")
+            parse_history_cursor(
+                f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:message:m-1:2:0123456789abcdef"
+            )
 
 
 class TestDigest:

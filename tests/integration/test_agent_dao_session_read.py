@@ -306,7 +306,10 @@ class TestMessagePaging:
         page1 = await _read(dao, session_id=session_id, limit=2)
         assert [m.session_seq for m in page1.messages.items] == [4, 3]
         assert page1.messages.has_more is True
-        assert page1.messages.next_cursor == "m:3"
+        target = AgentDao._session_cursor_target(
+            user_scope=USER_SCOPE, session_id=session_id, execution_id=None, round_id=None
+        )
+        assert page1.messages.next_cursor == f"m:{target}:3"
 
         page2 = await _read(
             dao,
@@ -323,7 +326,7 @@ class TestMessagePaging:
             dao,
             session_id=session_id,
             limit=2,
-            message_cursor="m:1",
+            message_cursor=f"m:{target}:1",
         )
         assert page3.messages.items == ()
         assert page3.messages.has_more is False
@@ -335,6 +338,31 @@ class TestMessagePaging:
             with pytest.raises(AgentServiceError) as exc:
                 await _read(dao, session_id=session_id, message_cursor=bad_cursor)
             assert _code_of(exc) == AgentErrorCode.INPUT_INVALID
+
+    async def test_cursor_from_other_target_rejected(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        session_a, _, _ = await _seed_chain(dao, session_id="s-a", execution_id="exec-a", round_id="round-a")
+        session_b, _, _ = await _seed_chain(dao, session_id="s-b", execution_id="exec-b", round_id="round-b")
+        for index in range(1, 4):
+            await _seed_message(dao, session_a, f"a{index}", body_text=f"甲{index}")
+            await _seed_message(dao, session_b, f"b{index}", body_text=f"乙{index}")
+        page1 = await _read(dao, session_id=session_a, limit=2)
+        cursor = page1.messages.next_cursor
+        assert cursor is not None
+        # 跨会话复用同一游标 → 显式失效（不静默套用他会话的翻页位置）
+        with pytest.raises(AgentServiceError) as exc:
+            await _read(dao, session_id=session_b, limit=2, message_cursor=cursor)
+        assert _code_of(exc) == AgentErrorCode.REVISION_CONFLICT
+        # 同会话但目标过滤改变（限定执行）→ 目标摘要不同，同样失效
+        with pytest.raises(AgentServiceError) as exc2:
+            await _read(
+                dao,
+                session_id=session_a,
+                limit=2,
+                execution_id="exec-a",
+                message_cursor=cursor,
+            )
+        assert _code_of(exc2) == AgentErrorCode.REVISION_CONFLICT
 
     async def test_limit_bounds(self, real_embedded_pg) -> None:
         dao = await _setup(real_embedded_pg.url)
@@ -386,7 +414,10 @@ class TestArtifactPaging:
         page1 = await _read(dao, session_id=session_id, limit=2)
         assert [a.artifact_id for a in page1.artifacts.items] == ["art-late", "art-mid"]
         assert page1.artifacts.has_more is True
-        assert page1.artifacts.next_cursor == "a:2026-06-02T08:00:00.000000Z:art-mid:1"
+        target = AgentDao._session_cursor_target(
+            user_scope=USER_SCOPE, session_id=session_id, execution_id=None, round_id=None
+        )
+        assert page1.artifacts.next_cursor == f"a:{target}:2026-06-02T08:00:00.000000Z:art-mid:1"
 
         page2 = await _read(
             dao,

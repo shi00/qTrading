@@ -75,6 +75,7 @@ def _artifact(
     version: int = 1,
     summary: str | None = "候选 A 评分",
     body_text: str | None = None,
+    cleaned_at: str | None = None,
 ) -> Any:
     return SimpleNamespace(
         artifact_id=artifact_id,
@@ -88,6 +89,7 @@ def _artifact(
         body_ref=None if body_text is not None else "chunk-ref",
         result_payload=None,
         published_at="2026-11-17T01:40:00.000000Z",
+        cleaned_at=cleaned_at,
     )
 
 
@@ -123,12 +125,14 @@ def _session_read(
     messages_has_more: bool = False,
     artifacts_has_more: bool = False,
     draft_revision: int = 0,
+    cleaned_at: str | None = None,
 ) -> Any:
     return SimpleNamespace(
         summary=SimpleNamespace(
             title=title,
             updated_at="2026-11-17T02:00:00.000000Z",
             draft_revision=draft_revision,
+            cleaned_at=cleaned_at,
         ),
         executions=(_execution(),) if executions is None else executions,
         messages=SimpleNamespace(items=messages, has_more=messages_has_more, next_cursor=None),
@@ -1111,6 +1115,82 @@ class TestSessionDraftRead:
 
         assert vm.state.session_draft is None, "稿版已推进，旧稿不得继续显示"
         assert vm.state.session_draft_revision == 3
+
+    @pytest.mark.asyncio
+    async def test_refresh_after_cleanup_drops_cached_bodies_and_draft(self) -> None:
+        service = _FakeService(read=_session_read(draft_revision=2))
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+        await vm.load_artifact(artifact_id="a-1", artifact_version=1, execution_id="e-1", round_id="r-1")
+        await vm.load_draft("s-1", 2)
+        assert vm.state.artifact_bodies
+        assert vm.state.session_draft is not None
+
+        cleaned = "2026-11-17T06:00:00.000000Z"
+        service.read = _session_read(
+            artifacts=(_artifact("a-1", body_text=None, cleaned_at=cleaned),), draft_revision=2, cleaned_at=cleaned
+        )
+        await vm.refresh()
+
+        assert vm.state.artifact_bodies == (), "同会话读到清理状态后不得重画旧正文缓存"
+        assert vm.state.session_draft is None, "已清理会话的旧稿正文不得继续显示"
+        assert vm.state.artifact_body_pending_keys == ()
+
+    @pytest.mark.asyncio
+    async def test_refresh_drops_body_only_for_cleaned_artifact(self) -> None:
+        service = _FakeService(
+            read=_session_read(artifacts=(_artifact("a-1"), _artifact("a-2", version=2)), draft_revision=2)
+        )
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+        await vm.load_artifact(artifact_id="a-1", artifact_version=1, execution_id="e-1", round_id="r-1")
+        await vm.load_artifact(artifact_id="a-2", artifact_version=2, execution_id="e-1", round_id="r-1")
+        assert {body.key for body in vm.state.artifact_bodies} == {"a-1:1", "a-2:2"}
+
+        service.read = _session_read(
+            artifacts=(
+                _artifact("a-1", cleaned_at="2026-11-17T06:00:00.000000Z"),
+                _artifact("a-2", version=2),
+            ),
+            draft_revision=2,
+        )
+        await vm.refresh()
+
+        assert {body.key for body in vm.state.artifact_bodies} == {"a-2:2"}, "仅被清理成果的正文缓存失效"
+
+    @pytest.mark.asyncio
+    async def test_late_artifact_read_after_cleanup_is_not_rendered(self) -> None:
+        cleaned = "2026-11-17T06:00:00.000000Z"
+        body_read = SimpleNamespace(
+            body_text="清理前正文", body_available=True, unavailable_reason=None, next_cursor=None
+        )
+        service = _FakeService(
+            read=_session_read(artifacts=(_artifact("a-1", body_text=None, cleaned_at=cleaned),), cleaned_at=cleaned),
+            artifact_read=body_read,
+        )
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+
+        # 清理事实先到，本次读取返回的清理前正文不得落 state（并发刷新竞态）
+        await vm.load_artifact(artifact_id="a-1", artifact_version=1, execution_id="e-1", round_id="r-1")
+
+        assert vm.state.artifact_bodies == ()
+        assert vm.state.artifact_body_pending_keys == ()
+
+    @pytest.mark.asyncio
+    async def test_late_draft_read_after_cleanup_is_not_rendered(self) -> None:
+        cleaned = "2026-11-17T06:00:00.000000Z"
+        service = _FakeService(
+            read=_session_read(draft_revision=2, cleaned_at=cleaned),
+            draft_read=_draft_read(draft_revision=2),
+        )
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+
+        await vm.load_draft("s-1", 2)
+
+        assert vm.state.session_draft is None
+        assert vm.state.draft_pending is False
 
     @pytest.mark.asyncio
     async def test_refresh_drops_loaded_draft_when_session_switches(self) -> None:

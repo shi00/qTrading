@@ -243,6 +243,8 @@ class _FakeDao:
         self.session = object()
         self.snapshot = object()
         self.events = object()
+        self.event_pages: list[EventPage] | None = None
+        self.event_page_delay_s = 0.0
         self.observed = object()
         self.receipt = _SUBMISSION_RECEIPT
         self.revision_receipt = object()
@@ -328,6 +330,10 @@ class _FakeDao:
 
     async def read_events(self, query: EventReadQuery) -> EventPage:
         self.calls.append(("read_events", (query,), {}))
+        if self.event_pages is not None:
+            if self.event_page_delay_s:
+                await asyncio.sleep(self.event_page_delay_s)
+            return self.event_pages.pop(0)
         return cast(EventPage, self.events)
 
     def observe_session_events(self, session_id: str, **kwargs: Any) -> Any:
@@ -405,8 +411,8 @@ class TestReadDelegation:
             user_scope="u1",
             limit=10,
             round_id="round_1",
-            message_cursor="m:3",
-            artifact_cursor="a:2026-11-14T00:00:00.000000Z:art_1:2",
+            message_cursor="m:0123456789abcdef:3",
+            artifact_cursor="a:0123456789abcdef:2026-11-14T00:00:00.000000Z:art_1:2",
         )
         assert snapshot is fake.snapshot
         call = fake.calls[0]
@@ -416,8 +422,8 @@ class TestReadDelegation:
             "user_scope": "u1",
             "limit": 10,
             "round_id": "round_1",
-            "message_cursor": "m:3",
-            "artifact_cursor": "a:2026-11-14T00:00:00.000000Z:art_1:2",
+            "message_cursor": "m:0123456789abcdef:3",
+            "artifact_cursor": "a:0123456789abcdef:2026-11-14T00:00:00.000000Z:art_1:2",
         }
 
     @pytest.mark.asyncio
@@ -1108,6 +1114,47 @@ class TestWaitResult:
         event_call = next(call for call in fake.calls if call[0] == "read_events")
         assert event_call[1][0].session_id == "s1"
         assert event_call[1][0].after_seq == 0
+
+    @pytest.mark.asyncio
+    async def test_drains_all_event_pages_before_converged(self) -> None:
+        fake = _FakeDao()
+        fake.snapshot = _snapshot("complete")
+        first_event: Any = object()
+        last_event: Any = object()
+        fake.event_pages = [
+            EventPage(events=(first_event,), last_seq=1, has_more=True),
+            EventPage(events=(last_event,), last_seq=2, has_more=False),
+        ]
+        result = await _service(fake).wait_result("execution-1", user_scope="u1", timeout_s=1, poll_interval_s=0.01)
+        # 终态返回前必须追平全部增量页，末事件不得漏（T-05）
+        assert result.converged is True
+        assert result.events == (first_event, last_event)
+        after_seqs = [call[1][0].after_seq for call in fake.calls if call[0] == "read_events"]
+        assert after_seqs == [0, 1]
+
+    @pytest.mark.asyncio
+    async def test_event_page_claiming_more_without_events_fails_closed(self) -> None:
+        fake = _FakeDao()
+        fake.snapshot = _snapshot("complete")
+        fake.event_pages = [EventPage(events=(), last_seq=0, has_more=True)]
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _service(fake).wait_result("execution-1", user_scope="u1", timeout_s=1, poll_interval_s=0.01)
+        assert excinfo.value.code is AgentErrorCode.OPERATION_UNKNOWN
+
+    @pytest.mark.asyncio
+    async def test_event_drain_is_bounded_by_timeout(self) -> None:
+        fake = _FakeDao()
+        fake.snapshot = _snapshot("running")
+        page_event: Any = object()
+        fake.event_pages = [EventPage(events=(page_event,), last_seq=index + 1, has_more=True) for index in range(5)]
+        fake.event_page_delay_s = 0.06
+        result = await _service(fake).wait_result("execution-1", user_scope="u1", timeout_s=0.05, poll_interval_s=0.01)
+        # 期限到达即停止续读：不得把超时等待拖成无界追平
+        assert result.converged is False
+        assert result.timed_out is True
+        # 未追平全部 5 页：期限到达即停（具体页数取决于调度，只需证明有界）
+        assert 0 < len(result.events) < 5
+        assert fake.event_pages
 
     @pytest.mark.asyncio
     async def test_timeout_returns_unconverged_fact_without_write(self) -> None:
