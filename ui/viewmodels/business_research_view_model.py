@@ -10,6 +10,8 @@
 - **不重跑业务**：本 VM 只读现存对象，不回放选股/回测；返回原业务现场由既有页面
   状态保持（本 VM 不导航、不改业务页状态）；
 - **保稿**：来源失效/重复发起时不删除、不覆盖既有草稿，如实给出原因 key；
+- **写结果未知**：提交已发起但确认中断只报「未知」并保留原写键待查回，不换键补写、
+  不先清草稿（N12）；确定未写才报一般失败（可同键重试）；
 - VM 不 import flet / 不感知 locale（只产出 i18n key）。
 """
 
@@ -22,6 +24,7 @@ from typing import Any, Protocol
 from core.agent_types import Purpose
 from services.agent_service.business_research import (
     BusinessDraftAlreadyPrepared,
+    BusinessDraftCommitUnknown,
     BusinessObjectSnapshot,
     BusinessResearchPreparer,
     BusinessSourceUnavailable,
@@ -39,6 +42,7 @@ UNAVAILABLE_NOT_READY = "agent_research_not_ready"
 NOTICE_DRAFT_PREPARED = "agent_research_draft_prepared"
 NOTICE_DRAFT_EXISTS = "agent_research_draft_exists"
 NOTICE_SOURCE_UNAVAILABLE = "agent_research_source_unavailable"
+NOTICE_COMMIT_UNKNOWN = "agent_research_draft_commit_unknown"
 NOTICE_PREPARE_FAILED = "agent_research_prepare_failed"
 
 #: 业务入口对象类别（与草稿 object_context.object_kind 同值域）。
@@ -162,6 +166,17 @@ class BusinessResearchViewModel(ObservableViewModelMixin[BusinessResearchState])
         except BusinessSourceUnavailable as exc:
             # 来源失效/时点未知：如实说明，不生成空草稿（R21）；既有草稿不受影响。
             self._set_state(preparing=False, notice_key=NOTICE_SOURCE_UNAVAILABLE, last_error_code=exc.reason)
+            return
+        except BusinessDraftCommitUnknown as exc:
+            # 提交已发起但确认中断：结果未知（草稿可能已保存），保原写键按原身份查回；
+            # 不换键补写、不先清草稿（N12）。
+            cause = exc.__cause__
+            self._set_state(
+                preparing=False,
+                notice_key=NOTICE_COMMIT_UNKNOWN,
+                last_session_id=exc.session_id,
+                last_error_code=self._error_code(cause if isinstance(cause, Exception) else exc),
+            )
             return
         except Exception as exc:  # facade 已脱敏；未知错误如实报码
             self._set_state(

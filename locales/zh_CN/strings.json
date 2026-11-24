@@ -621,6 +621,7 @@
     "agent_research_draft_prepared": "已准备研究草稿（未发送）；确认对象与截止时点后再发送",
     "agent_research_draft_exists": "该对象已有研究草稿，已保留原稿，未覆盖",
     "agent_research_source_unavailable": "来源不可用或时点未知，未生成草稿；原草稿不受影响",
+    "agent_research_draft_commit_unknown": "写入结果未知（草稿可能已保存）：原草稿不受影响；再次发起会按原请求查回，不会重复创建",
     "agent_research_prepare_failed": "准备研究草稿失败，原草稿不受影响",
     "agent_research_pending_fmt": "待处理 {count}",
     "agent_research_not_wired": "研究运行时未接线（零派发）",

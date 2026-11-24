@@ -750,6 +750,7 @@
     "agent_research_draft_prepared": "Research draft prepared (not sent). Confirm the object and cutoff before sending",
     "agent_research_draft_exists": "A research draft already exists for this object; the original draft was kept",
     "agent_research_source_unavailable": "Source unavailable or availability time unknown; no draft was created and existing drafts are untouched",
+    "agent_research_draft_commit_unknown": "Write outcome unknown (the draft may already be saved): existing drafts are untouched; retrying will look up the original request instead of creating a duplicate",
     "agent_research_prepare_failed": "Failed to prepare the research draft; existing drafts are untouched",
     "agent_research_pending_fmt": "{count} pending",
     "agent_research_not_wired": "Research runtime is not wired (zero dispatch)",
