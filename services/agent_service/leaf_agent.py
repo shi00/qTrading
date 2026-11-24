@@ -30,6 +30,7 @@ from typing import Any, Final, Literal, Protocol, cast
 
 from pydantic_ai import Agent, DeferredToolRequests, UnexpectedModelBehavior
 from pydantic_ai.agent import EventStreamHandler
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import RunTimedOut
 from pydantic_ai.messages import (
     FinalResultEvent,
@@ -51,6 +52,7 @@ from core.agent_types import (
 )
 from core.model_management_types import ModelTurnProtocolError
 from services.agent_service.capability_wiring import build_leaf_boundary
+from services.agent_service.context_compaction import build_leaf_compaction
 from services.agent_service.leaf_runtime import (
     AGENT_RESEARCH_SCENARIO_ID,
     AdmissionCountingToolExecutor,
@@ -553,6 +555,16 @@ async def run_leaf_agent(
             )
             return _failed(context, LEAF_TOOL_SETUP_FAILED)
     tools = tool_runtime.tools if tool_runtime is not None else ()
+    # 长上下文压缩：预算取真实授权连接窗口并预留输出；摘要回合复用本叶
+    # 绑定模型（同一账本），摘要期限取本回合剩余冻结期限。
+    compaction = build_leaf_compaction(
+        binding,
+        scenario_id=AGENT_RESEARCH_SCENARIO_ID,
+        timeout_seconds=lambda: require_leaf_turn_timeout(binding),
+    )
+    capabilities: tuple[AbstractCapability[Any], ...] = (
+        (boundary, compaction) if compaction is not None else (boundary,)
+    )
     agent: Agent[LeafAgentDeps, Any] = Agent(
         model,
         name=LEAF_AGENT_NAME,
@@ -562,7 +574,7 @@ async def run_leaf_agent(
         retries=0,
         instructions=_leaf_instructions(context, role_prompt),
         tools=tools,
-        capabilities=(boundary,),
+        capabilities=capabilities,
     )
     deps = LeafAgentDeps(
         user_scope=facts.user_scope,
