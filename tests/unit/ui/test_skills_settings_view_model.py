@@ -164,12 +164,12 @@ async def test_load_groups_versions_by_skill() -> None:
 
 
 @pytest.mark.asyncio
-async def test_preview_error_is_reported_without_preview() -> None:
+async def test_preview_error_is_reported_without_preview(tmp_path: Path) -> None:
     service = _FakeService()
     service.preview_error = AgentServiceError(AgentErrorCode.INPUT_INVALID, "invalid_skill_package", "scope")
     vm = _vm(service)
     vm.set_import_kind(IMPORT_KIND_DIRECTORY)
-    vm.set_import_path("C:/skills/demo")
+    vm.set_import_path(str(tmp_path / "demo"))
     await vm.preview_import()
     assert vm.state.preview is None
     assert vm.state.status_level == STATUS_ERROR
@@ -177,11 +177,11 @@ async def test_preview_error_is_reported_without_preview() -> None:
 
 
 @pytest.mark.asyncio
-async def test_preview_then_confirm_sends_confirmed_update() -> None:
+async def test_preview_then_confirm_sends_confirmed_update(tmp_path: Path) -> None:
     service = _FakeService()
     vm = _vm(service)
     vm.set_import_kind(IMPORT_KIND_DIRECTORY)
-    vm.set_import_path("C:/skills/demo")
+    vm.set_import_path(str(tmp_path / "demo"))
     await vm.preview_import()
     assert vm.state.preview is not None and vm.state.preview.requires_confirmation is True
     assert service.preview_requests[0].confirm_update is False
@@ -191,11 +191,11 @@ async def test_preview_then_confirm_sends_confirmed_update() -> None:
 
 
 @pytest.mark.asyncio
-async def test_confirm_requires_preview_first() -> None:
+async def test_confirm_requires_preview_first(tmp_path: Path) -> None:
     service = _FakeService()
     vm = _vm(service)
     vm.set_import_kind(IMPORT_KIND_DIRECTORY)
-    vm.set_import_path("C:/skills/demo")
+    vm.set_import_path(str(tmp_path / "demo"))
     await vm.confirm_import()
     assert service.import_requests == []
     assert vm.state.status is not None and vm.state.status.key == "skills_status_need_preview"
@@ -205,6 +205,17 @@ async def test_confirm_requires_preview_first() -> None:
 async def test_empty_import_path_is_reported() -> None:
     service = _FakeService()
     vm = _vm(service)
+    await vm.preview_import()
+    assert vm.state.status is not None and vm.state.status.key == "skills_status_invalid_path"
+    assert service.preview_requests == []
+
+
+@pytest.mark.asyncio
+async def test_relative_directory_path_is_rejected_as_invalid() -> None:
+    service = _FakeService()
+    vm = _vm(service)
+    vm.set_import_kind(IMPORT_KIND_DIRECTORY)
+    vm.set_import_path("relative/demo")
     await vm.preview_import()
     assert vm.state.status is not None and vm.state.status.key == "skills_status_invalid_path"
     assert service.preview_requests == []
@@ -327,12 +338,12 @@ async def test_invalid_import_kind_is_ignored() -> None:
 
 
 @pytest.mark.asyncio
-async def test_confirm_import_failure_is_reported() -> None:
+async def test_confirm_import_failure_is_reported(tmp_path: Path) -> None:
     service = _FakeService()
     service.import_error = AgentServiceError(AgentErrorCode.INPUT_INVALID, "bad package", "scope")
     vm = _vm(service)
     vm.set_import_kind(IMPORT_KIND_DIRECTORY)
-    vm.set_import_path("C:/skills/demo")
+    vm.set_import_path(str(tmp_path / "demo"))
     await vm.preview_import()
     await vm.confirm_import()
     assert vm.state.status is not None and vm.state.status.key == "skills_status_error"
