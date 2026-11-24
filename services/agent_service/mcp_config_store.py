@@ -58,10 +58,12 @@ class AppStateMCPConfigStore(MCPConfigStorePort):
         read: Callable[[str], Awaitable[str | None]],
         write: Callable[[str, str], Awaitable[None]],
         scan: Callable[[str], Awaitable[Mapping[str, str]]] | None = None,
+        delete: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
         self._read = read
         self._write = write
         self._scan = scan
+        self._delete = delete
 
     @classmethod
     def key_for(cls, identity: MCPServiceIdentity) -> str:
@@ -150,3 +152,14 @@ class AppStateMCPConfigStore(MCPConfigStorePort):
             field = exc.field_path.partition(":")[0].rstrip().rsplit(".", 1)[-1]
             return LISTING_PATH_UNAVAILABLE if field in {"command", "cwd"} else LISTING_INVALID
         return LISTING_INVALID
+
+    async def delete(self, identity: MCPServiceIdentity) -> bool:
+        """删除已保存配置；未接线删除端口即显式拒绝（不伪装已删除）。"""
+
+        if self._delete is None:
+            raise AgentServiceError(
+                AgentErrorCode.CONFIG_UNAVAILABLE,
+                "mcp config deletion is not wired",
+                identity.stable_key(),
+            )
+        return await self._delete(self.key_for(identity))

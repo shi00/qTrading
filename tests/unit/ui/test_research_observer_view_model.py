@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import pytest
 
-from core.agent_types import DraftPayload, DraftRead, Mode, Purpose
+from core.agent_types import DraftPayload, DraftRead, MCPServiceIdentity, Mode, Purpose
 from ui.viewmodels.research_observer_view_model import (
     UNAVAILABLE_NOT_READY,
     UNAVAILABLE_NOT_WIRED,
@@ -1267,7 +1267,7 @@ class _FakeIntake:
     ) -> None:
         self.dispatch = dispatch
         self.error = error
-        self.question_calls: list[tuple[str, Any, str | None]] = []
+        self.question_calls: list[tuple[str, Any, str | None, int | None, tuple[Any, ...]]] = []
         self.plan_calls: list[tuple[Any, str, int]] = []
 
     async def start_question(
@@ -1280,9 +1280,9 @@ class _FakeIntake:
         expected_revision: int | None = None,
         role_prompt_refs: Any = (),
         skill_refs: Any = (),
-        mcp_scope_digest: str | None = None,
+        mcp_selection: tuple[Any, ...] = (),
     ) -> Any:
-        self.question_calls.append((text, mode, session_id, expected_revision))
+        self.question_calls.append((text, mode, session_id, expected_revision, mcp_selection))
         if self.error is not None:
             raise self.error
         return SimpleNamespace(receipt=object(), dispatch=self.dispatch, plan_reference=None)
@@ -1333,7 +1333,7 @@ class TestComposer:
 
         await vm.send_first_question()
 
-        assert intake.question_calls == [("研究银行股", Mode.DISCUSS, None, 0)]
+        assert intake.question_calls == [("研究银行股", Mode.DISCUSS, None, 0, ())]
         assert vm.state.composer_text == ""
         assert vm.state.composer_pending is False
         assert vm.state.last_dispatch_reason == DispatchReasonView(code="mode_research_disabled")
@@ -1443,6 +1443,65 @@ class TestComposer:
         assert vm.state.plan_steps == ()
         assert vm.state.plan_reference is None
         assert vm.state.plan_error_key == "PERSISTENCE_UNAVAILABLE"
+
+
+class _FakeCatalog:
+    def __init__(self, *, error: Exception | None = None) -> None:
+        self.error = error
+        self.identity = MCPServiceIdentity(service_id="svc-quote", config_version=1)
+        self.other = MCPServiceIdentity(service_id="svc-news", config_version=2)
+
+    async def list_services(self) -> tuple[Any, ...]:
+        if self.error is not None:
+            raise self.error
+        return (
+            SimpleNamespace(identity=self.identity, display_name="行情服务"),
+            SimpleNamespace(identity=self.other, display_name="新闻服务"),
+        )
+
+
+class TestMCPResearchScope:
+    @pytest.mark.asyncio
+    async def test_scope_options_loaded_and_selection_forwarded(self) -> None:
+        catalog = _FakeCatalog()
+        intake = _FakeIntake()
+        vm = ResearchObserverViewModel(_FakeService(), intake=intake, mcp_catalog=catalog)
+        await vm.load_mcp_scope()
+
+        assert vm.state.mcp_scope_available is True
+        assert vm.state.mcp_scope_options == (
+            (catalog.identity.stable_key(), "行情服务"),
+            (catalog.other.stable_key(), "新闻服务"),
+        )
+
+        vm.toggle_mcp_scope(catalog.identity.stable_key())
+        vm.set_composer_text("研究问题")
+        await vm.send_first_question()
+
+        assert intake.question_calls[0][4] == (catalog.identity,)
+
+    @pytest.mark.asyncio
+    async def test_catalog_failure_is_reported_not_empty_success(self) -> None:
+        vm = ResearchObserverViewModel(
+            _FakeService(), intake=_FakeIntake(), mcp_catalog=_FakeCatalog(error=RuntimeError("boom"))
+        )
+
+        await vm.load_mcp_scope()
+
+        assert vm.state.mcp_scope_error_key == "agent_research_mcp_scope_error"
+        assert vm.state.mcp_scope_options == ()
+
+    @pytest.mark.asyncio
+    async def test_selection_dropped_when_catalog_changes(self) -> None:
+        catalog = _FakeCatalog()
+        vm = ResearchObserverViewModel(_FakeService(), intake=_FakeIntake(), mcp_catalog=catalog)
+        await vm.load_mcp_scope()
+        vm.toggle_mcp_scope(catalog.identity.stable_key())
+
+        catalog.identity = MCPServiceIdentity(service_id="svc-new", config_version=1)
+        await vm.load_mcp_scope()
+
+        assert vm.state.mcp_scope_selected == ()
 
 
 class _MainTurnIntake:

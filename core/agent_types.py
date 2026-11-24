@@ -7983,6 +7983,125 @@ def role_skill_assignment_digest(assignment: RoleSkillAssignment) -> str:
 
 
 # ---------------------------------------------------------------------------
+# E-03-4b MCP 服务与角色版本的引用（F14 残余 / F15 / AC11 / J25）
+# ---------------------------------------------------------------------------
+
+#: 角色版本对 MCP 服务引用（可用集合/默认服务/工具白名单）的 wire 版本。
+ROLE_MCP_ASSIGNMENT_VERSION: Final = 1
+
+_ROLE_MCP_ASSIGNMENT_KEYS: Final = frozenset(
+    {"schema_version", "role_id", "role_version", "available", "default_service"}
+)
+_ROLE_MCP_SERVICE_BINDING_KEYS: Final = frozenset({"service", "tools"})
+
+
+@dataclass(frozen=True, slots=True)
+class RoleMCPServiceBinding:
+    """角色可用的一个 MCP 服务版本 + 该服务上允许调用的工具白名单。
+
+    空 ``tools`` 表示「该服务可用但零工具」（不解释为全部工具，§6 默认拒绝）。
+    """
+
+    identity: MCPServiceIdentity
+    tools: tuple[str, ...] = ()
+
+    def wire(self) -> dict[str, Any]:
+        return {
+            "service": encode_mcp_service_identity(self.identity),
+            "tools": list(self.tools),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RoleMCPAssignment:
+    """角色版本对 MCP 服务的引用（F14 残余 / J25）。
+
+    ``available`` 是本次角色可选的完整服务集合（按 ``stable_key`` 唯一）；
+    ``default_service`` 必须属于该集合或为 ``None``（未设默认）。工具白名单只表达
+    「角色允许」，实际可调用还需该服务已启连且工具在声明范围内（服务层保存时校验）。
+    """
+
+    role_id: str
+    role_version: str
+    available: tuple[RoleMCPServiceBinding, ...]
+    default_service: MCPServiceIdentity | None = None
+
+    def wire(self) -> dict[str, Any]:
+        """规范 wire（键排序由 CanonicalJson 承担；集合按服务身份排序稳定）。"""
+
+        return {
+            "schema_version": ROLE_MCP_ASSIGNMENT_VERSION,
+            "role_id": require_identity(self.role_id, "$.role.role_id"),
+            "role_version": require_identity(self.role_version, "$.role.role_version"),
+            "available": [
+                binding.wire() for binding in sorted(self.available, key=lambda item: item.identity.stable_key())
+            ],
+            "default_service": (
+                None if self.default_service is None else encode_mcp_service_identity(self.default_service)
+            ),
+        }
+
+
+def validate_role_mcp_assignment(assignment: RoleMCPAssignment) -> None:
+    """校验角色 MCP 分配：身份非空、服务唯一、默认⊆可用、工具名唯一合法。"""
+
+    require_identity(assignment.role_id, "$.role.role_id")
+    require_identity(assignment.role_version, "$.role.role_version")
+    seen: set[str] = set()
+    for index, binding in enumerate(assignment.available):
+        key = binding.identity.stable_key()
+        if key in seen:
+            _fail("duplicate_mcp_service", f"$.role.available[{index}]")
+        seen.add(key)
+        if len(set(binding.tools)) != len(binding.tools):
+            _fail("duplicate_mcp_tool", f"$.role.available[{index}].tools")
+        for tool_index, name in enumerate(binding.tools):
+            require_identity(name, f"$.role.available[{index}].tools[{tool_index}]")
+    if assignment.default_service is not None:
+        assignment.default_service.stable_key()
+        if assignment.default_service.stable_key() not in seen:
+            _fail("default_service_not_available", "$.role.default_service")
+
+
+def decode_role_mcp_assignment(value: object, path: str = "$.role_mcp_assignment") -> RoleMCPAssignment:
+    """严格解码角色 MCP 分配 wire：全键必填、禁额外键、默认⊆可用。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _ROLE_MCP_ASSIGNMENT_KEYS, path)
+    _require_schema_version(value["schema_version"], ROLE_MCP_ASSIGNMENT_VERSION, f"{path}.schema_version")
+    raw_available = value["available"]
+    if not isinstance(raw_available, list):
+        _fail("invalid_type", f"{path}.available")
+    bindings: list[RoleMCPServiceBinding] = []
+    for index, item in enumerate(raw_available):
+        item_path = f"{path}.available[{index}]"
+        if not isinstance(item, dict):
+            _fail("invalid_type", item_path)
+        _require_keys(item, _ROLE_MCP_SERVICE_BINDING_KEYS, item_path)
+        raw_tools = item["tools"]
+        if not isinstance(raw_tools, list) or any(not isinstance(name, str) for name in raw_tools):
+            _fail("invalid_type", f"{item_path}.tools")
+        bindings.append(
+            RoleMCPServiceBinding(
+                identity=decode_mcp_service_identity(item["service"], f"{item_path}.service"),
+                tools=tuple(raw_tools),
+            )
+        )
+    raw_default = value["default_service"]
+    assignment = RoleMCPAssignment(
+        role_id=require_identity(value["role_id"], f"{path}.role_id"),
+        role_version=require_identity(value["role_version"], f"{path}.role_version"),
+        available=tuple(bindings),
+        default_service=(
+            None if raw_default is None else decode_mcp_service_identity(raw_default, f"{path}.default_service")
+        ),
+    )
+    validate_role_mcp_assignment(assignment)
+    return assignment
+
+
+# ---------------------------------------------------------------------------
 # E-06 联合清理契约（§9.11 / §10.7 / SQ-10）——本轮承载静态可验证的准入与状态合同
 # ---------------------------------------------------------------------------
 

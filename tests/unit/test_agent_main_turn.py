@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from types import SimpleNamespace
 from typing import Any, cast
@@ -14,6 +15,7 @@ from core.agent_types import (
     AgentValidationError,
     CommandRef,
     CommitState,
+    MCPServiceIdentity,
     Mode,
     PlanItemSnapshot,
     PlanNodeSpec,
@@ -24,6 +26,7 @@ from core.agent_types import (
     ResearchResultDraft,
     SessionAction,
     SubmissionReceipt,
+    encode_mcp_service_identity,
     json_doc,
 )
 from services.agent_service.dispatch import (
@@ -108,6 +111,32 @@ def test_policy_includes_mcp_scope_digest_as_capability() -> None:
     assert policy is not None
     assert policy.role_key == "researcher"
     assert policy.capabilities == frozenset({f"mcp_scope:{'d' * 16}"})
+
+
+def test_base_manifest_freezes_mcp_selection_sorted_and_deduplicated() -> None:
+    intake = object.__new__(MainTurnIntake)
+    a = MCPServiceIdentity(service_id="svc-a", config_version=1)
+    b = MCPServiceIdentity(service_id="svc-b", config_version=2)
+
+    manifest = json.loads(
+        intake._base_manifest(text="研究问题", mode=Mode.DISCUSS, purpose=Purpose.CONCEPT, mcp_selection=(b, a, b))
+    )
+
+    assert {frozenset(item.items()) for item in manifest["mcp_selection"]} == {
+        frozenset(encode_mcp_service_identity(a).items()),
+        frozenset(encode_mcp_service_identity(b).items()),
+    }
+    canonical = json.dumps(manifest["mcp_selection"], ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    assert manifest["mcp_scope_digest"] == hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def test_base_manifest_empty_mcp_selection_keeps_digest_none() -> None:
+    intake = object.__new__(MainTurnIntake)
+
+    manifest = json.loads(intake._base_manifest(text="研究问题", mode=Mode.DISCUSS, purpose=Purpose.CONCEPT))
+
+    assert manifest["mcp_selection"] == []
+    assert manifest["mcp_scope_digest"] is None
 
 
 def test_policy_empty_selection_is_fail_closed() -> None:

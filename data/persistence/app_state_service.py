@@ -113,6 +113,30 @@ async def set_app_state(engine, key: str, value: str, *, strict: bool = False) -
 
 
 @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+async def delete_app_state(engine, key: str) -> bool:
+    """按键删除 app_state 行（MCP 服务删除收尾）。
+
+    返回是否实际删除了一行；失败向上抛出（删除必须可确认，不能把未删除伪装成
+    已删除，R21）。引擎已释放（R5）与取消（R2）始终传播。
+    """
+
+    if engine is None:
+        return False
+    try:
+        await _guard_engine(engine, "delete")
+        async with engine.begin() as conn:
+            result = await conn.execute(sa.delete(AppState).where(AppState.config_key == key))
+            return bool(result.rowcount)
+    except asyncio.CancelledError:
+        raise
+    except EngineDisposedError:
+        raise
+    except Exception as e:
+        logger.warning("[AppState] Failed to delete key='%s': %s", key, type(e).__name__)
+        raise
+
+
+@log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
 async def set_app_state_max(engine, key: str, value: str, *, strict: bool = False) -> None:
     """单调写入：仅当新值字典序大于现有值时更新。
 

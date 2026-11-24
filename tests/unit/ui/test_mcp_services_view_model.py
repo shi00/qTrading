@@ -26,6 +26,8 @@ from core.agent_types import (
     MCPReadOnlyAudit,
     MCPServiceIdentity,
     MCPTransportKind,
+    RoleMCPAssignment,
+    RoleMCPServiceBinding,
 )
 from services.agent_service.mcp import (
     MCPConfigSaveReceipt,
@@ -38,12 +40,18 @@ from services.agent_service.mcp_config_store import (
     LISTING_UNREADABLE,
     MCPConfigListEntry,
 )
-from services.agent_service.mcp_lifecycle import MCPConnectReceipt, MCPServiceLifecycle
+from services.agent_service.mcp_lifecycle import (
+    MCPConnectReceipt,
+    MCPServiceDeleteBlocked,
+    MCPServiceDeletionReceipt,
+    MCPServiceLifecycle,
+)
 from ui.viewmodels import Message
 from ui.viewmodels.mcp_services_view_model import (
     STATUS_ERROR,
     STATUS_SUCCESS,
     STATUS_WARNING,
+    MCPRoleDraft,
     MCPServicesState,
     MCPServicesViewModel,
 )
@@ -99,6 +107,39 @@ class _FakeLifecycle:
         self.extra_entries: list[MCPConfigListEntry] = []
         #: 使用点仍拒绝的身份（模拟存储读取期的 fail-closed）。
         self.reject_identities: set[str] = set()
+        self.roles: list[object] = []
+        self.role_saved: list[object] = []
+        self.deleted: list[MCPServiceIdentity] = []
+        self.delete_error: BaseException | None = None
+
+    async def list_role_assignments(self) -> tuple[object, ...]:
+        self._maybe_fail()
+        return tuple(self.roles)
+
+    async def save_role_assignment(self, assignment: object) -> object:
+        self._maybe_fail()
+        self.role_saved.append(assignment)
+        self.roles = [
+            existing
+            for existing in self.roles
+            if (getattr(existing, "role_id", None), getattr(existing, "role_version", None))
+            != (getattr(assignment, "role_id", None), getattr(assignment, "role_version", None))
+        ]
+        self.roles.append(assignment)
+        return assignment
+
+    async def delete_service(self, identity: MCPServiceIdentity, *, confirmation: bool = False) -> object:
+        self._maybe_fail()
+        if self.delete_error is not None:
+            raise self.delete_error
+        self.deleted.append(identity)
+        self.configs = [config for config in self.configs if config.identity != identity]
+        return MCPServiceDeletionReceipt(
+            identity=identity,
+            deleted_config=True,
+            deleted_grant=True,
+            credential_references=("keyring:mcp-token",),
+        )
 
     def _maybe_fail(self) -> None:
         if self.fail_with is not None:
@@ -541,3 +582,353 @@ class TestOperations:
             await vm.connection_test()
         assert type(exc.value) is asyncio.CancelledError
         assert vm.state.busy is False
+
+
+class TestGuardAndFailureBranches:
+    async def test_begin_new_resets_and_unknown_select_keeps_state(self) -> None:
+        vm = _vm(_FakeLifecycle([_config()]))
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+
+        before = vm.state.draft
+        vm.select_service("missing-service@1")
+        assert vm.state.draft == before
+        assert vm.state.draft_saved is True
+
+        vm.begin_new()
+        assert vm.state.draft.service_id == ""
+        assert vm.state.draft_saved is False
+
+    async def test_role_edit_ignores_invalid_inputs(self) -> None:
+        vm = _vm(_FakeLifecycle([_config()]))
+        await vm.load()
+
+        vm.set_role_text("display_name", "ignored")
+        vm.toggle_role_service("missing-service@1")
+        vm.set_role_default("missing-service@1")
+        vm.set_role_tools("missing-service@1", "search")
+        vm.select_role_assignment("missing", "1")
+
+        assert vm.state.role_draft == MCPRoleDraft()
+
+    async def test_toggle_role_service_remove_clears_default_and_tools(self) -> None:
+        vm = _vm(_FakeLifecycle([_config()]))
+        await vm.load()
+        key = _identity().stable_key()
+        vm.begin_role_new()
+        vm.toggle_role_service(key)
+        vm.set_role_default(key)
+        vm.set_role_tools(key, "search")
+
+        vm.toggle_role_service(key)
+
+        assert vm.state.role_draft.available_keys == ()
+        assert vm.state.role_draft.default_key is None
+        assert vm.state.role_draft.tools_text == ()
+
+    async def test_role_save_without_store_does_nothing(self) -> None:
+        vm = MCPServicesViewModel(None)
+
+        await vm.save_role_assignment()
+
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_unavailable"
+        assert vm.state.busy is False
+
+    async def test_role_save_cancelled_and_failed(self) -> None:
+        key = _identity().stable_key()
+        fake = _FakeLifecycle([_config()])
+        vm = _vm(fake)
+        await vm.load()
+        vm.begin_role_new()
+        vm.set_role_text("role_id", "main")
+        vm.toggle_role_service(key)
+        fake.fail_with = asyncio.CancelledError()
+
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await vm.save_role_assignment()
+        assert type(exc.value) is asyncio.CancelledError
+        assert vm.state.busy is False
+
+        fake.fail_with = RuntimeError("save failed")
+        await vm.save_role_assignment()
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_error"
+
+    async def test_role_build_rejects_bad_version_and_missing_config(self) -> None:
+        vm = _vm(_FakeLifecycle([_config()]))
+        await vm.load()
+        key = _identity().stable_key()
+
+        vm.begin_role_new()
+        vm.set_role_text("role_id", "main")
+        vm.set_role_text("role_version", "x")
+        await vm.save_role_assignment()
+        assert vm.state.status is not None
+        assert vm.state.status.params["field"] == "role_version"
+
+        vm.set_role_text("role_version", "0")
+        await vm.save_role_assignment()
+        assert vm.state.status.params["field"] == "role_version"
+
+        vm.set_role_text("role_version", "1")
+        vm.toggle_role_service(key)
+        vm._configs.clear()
+        await vm.save_role_assignment()
+        assert vm.state.status.params["field"] == "available"
+
+    async def test_save_config_cancelled_and_failed(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        vm = _vm(fake)
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+        vm.set_draft_text("service_id", "svc-new")
+
+        fake.fail_with = asyncio.CancelledError()
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await vm.save_config()
+        assert type(exc.value) is asyncio.CancelledError
+        assert vm.state.busy is False
+
+        fake.fail_with = RuntimeError("save failed")
+        await vm.save_config()
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_error"
+
+    async def test_deadline_parsing_reports_field(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        vm = _vm(fake)
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+
+        for raw in ("", "x", "0"):
+            vm.set_draft_text("connect_deadline_s", raw)
+            await vm.save_config()
+            assert vm.state.status is not None
+            assert vm.state.status.params["field"] == "connect_deadline_s"
+        assert fake.saved == []
+
+    async def test_budget_parsing_optional_and_invalid(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        vm = _vm(fake)
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+        index = MCP_BUDGET_FIELDS[0]
+
+        vm.set_budget_value(0, "")
+        await vm.save_config()
+        assert fake.saved[-1].budget is not None
+        assert getattr(fake.saved[-1].budget, index) is None
+
+        vm.set_budget_value(0, "x")
+        await vm.save_config()
+        assert vm.state.status is not None
+        assert vm.state.status.params["field"] == f"budget.{index}"
+
+        vm.set_budget_value(0, "-1")
+        await vm.save_config()
+        assert vm.state.status.params["field"] == f"budget.{index}"
+
+    async def test_connection_test_failure_and_connect_cancel_or_fail(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        vm = _vm(fake)
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+        fake.fail_with = RuntimeError("test failed")
+
+        await vm.connection_test()
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_error"
+
+        fake.fail_with = None
+        await vm.connection_test()
+        fake.fail_with = asyncio.CancelledError()
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await vm.connect()
+        assert type(exc.value) is asyncio.CancelledError
+        assert vm.state.busy is False
+
+        fake.fail_with = RuntimeError("connect failed")
+        await vm.connect()
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_error"
+
+    async def test_disconnect_cancelled_and_failed(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        vm = _vm(fake)
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+        fake.fail_with = asyncio.CancelledError()
+
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await vm.disconnect()
+        assert type(exc.value) is asyncio.CancelledError
+        assert vm.state.busy is False
+
+        fake.fail_with = RuntimeError("disconnect failed")
+        await vm.disconnect()
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_error"
+
+    async def test_retry_residue_cancelled_and_failed(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        vm = _vm(fake)
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+        fake.fail_with = asyncio.CancelledError()
+
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await vm.retry_test_residue_close()
+        assert type(exc.value) is asyncio.CancelledError
+        assert vm.state.busy is False
+
+        fake.fail_with = RuntimeError("close failed")
+        await vm.retry_test_residue_close()
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_error"
+
+    async def test_request_delete_without_identity_and_cancel(self) -> None:
+        vm = _vm(_FakeLifecycle([_config()]))
+        await vm.load()
+
+        vm.request_delete()
+        assert vm.state.delete_pending is False
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_invalid_draft"
+
+        vm.select_service(_identity().stable_key())
+        vm.request_delete()
+        assert vm.state.delete_pending is True
+        vm.cancel_delete()
+        assert vm.state.delete_pending is False
+
+    async def test_confirm_delete_ignored_when_not_pending_and_generic_failure(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        vm = _vm(fake)
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+
+        await vm.confirm_delete()
+        assert fake.deleted == []
+
+        vm.request_delete()
+        fake.delete_error = RuntimeError("delete failed")
+        await vm.confirm_delete()
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_error"
+
+    async def test_refresh_rows_failure_and_cancel(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        vm = _vm(fake)
+        await vm.load()
+
+        fake.fail_with = RuntimeError("list failed")
+        await vm._refresh_rows()
+        status = vm.state.status
+        assert status is not None and (status.key, vm.state.status_level) == ("mcp_status_error", STATUS_ERROR)
+
+        fake.fail_with = asyncio.CancelledError()
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await vm._refresh_rows()
+        assert type(exc.value) is asyncio.CancelledError
+
+        await MCPServicesViewModel(None)._refresh_rows()
+
+
+class TestDeleteAndRoleAssignments:
+    @pytest.mark.asyncio
+    async def test_delete_blocked_lists_role_and_research_references(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        fake.delete_error = MCPServiceDeleteBlocked(_identity(), role_refs=("main@1",), research_ids=("session-9",))
+        vm = _vm(fake)
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+
+        vm.request_delete()
+        await vm.confirm_delete()
+
+        assert vm.state.delete_pending is False
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_delete_blocked"
+        assert vm.state.status.params["roles"] == "main@1"
+        assert vm.state.status.params["researches"] == "session-9"
+        assert vm.state.status_level == STATUS_WARNING
+        assert fake.deleted == []
+
+    @pytest.mark.asyncio
+    async def test_delete_success_reports_revocation_refs(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        vm = _vm(fake)
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+
+        vm.request_delete()
+        await vm.confirm_delete()
+
+        assert fake.deleted == [_identity()]
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_deleted"
+        assert vm.state.status.params["credentials"] == "keyring:mcp-token"
+        assert vm.state.draft_saved is False
+        assert vm.state.rows == ()
+
+    @pytest.mark.asyncio
+    async def test_role_assignment_saved_with_default_and_tools(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        vm = _vm(fake)
+        await vm.load()
+        vm.begin_role_new()
+        vm.set_role_text("role_id", "main")
+        vm.set_role_text("role_version", "2")
+        vm.toggle_role_service(_identity().stable_key())
+        vm.set_role_default(_identity().stable_key())
+        vm.set_role_tools(_identity().stable_key(), "read_news\nread_quote")
+
+        await vm.save_role_assignment()
+
+        assert len(fake.role_saved) == 1
+        saved = cast(RoleMCPAssignment, fake.role_saved[0])
+        assert saved.role_id == "main"
+        assert saved.role_version == "2"
+        assert saved.default_service == _identity()
+        assert saved.available[0].tools == ("read_news", "read_quote")
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_role_saved"
+        assert vm.state.role_assignments[0].role_id == "main"
+
+    @pytest.mark.asyncio
+    async def test_role_assignment_rejects_missing_role_id(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        vm = _vm(fake)
+        await vm.load()
+        vm.begin_role_new()
+        vm.toggle_role_service(_identity().stable_key())
+
+        await vm.save_role_assignment()
+
+        assert fake.role_saved == []
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_invalid_draft"
+
+    @pytest.mark.asyncio
+    async def test_role_rows_loaded_and_selected(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        fake.roles = [
+            RoleMCPAssignment(
+                role_id="main",
+                role_version="1",
+                available=(RoleMCPServiceBinding(identity=_identity(), tools=("read_quote",)),),
+                default_service=_identity(),
+            )
+        ]
+        vm = _vm(fake)
+        await vm.load()
+
+        assert vm.state.roles_available is True
+        assert vm.state.role_assignments[0].default_key == _identity().stable_key()
+
+        vm.select_role_assignment("main", "1")
+
+        assert vm.state.role_draft.role_id == "main"
+        assert vm.state.role_draft.default_key == _identity().stable_key()
+        assert dict(vm.state.role_draft.tools_text)[_identity().stable_key()] == "read_quote"

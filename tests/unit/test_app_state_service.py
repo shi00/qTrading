@@ -4,7 +4,13 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from data.persistence import engine_provider
-from data.persistence.app_state_service import get_app_state, set_app_state, set_app_state_max
+from data.persistence.app_state_service import (
+    delete_app_state,
+    get_app_state,
+    list_app_state,
+    set_app_state,
+    set_app_state_max,
+)
 from data.persistence.daos.base_dao import EngineDisposedError
 
 pytestmark = pytest.mark.unit
@@ -94,10 +100,10 @@ class TestSetAppState:
 
         await set_app_state(engine, "theme", "dark")
 
-        engine.begin.assert_called_once()
-        mock_conn.execute.assert_awaited_once()
+        assert engine.begin.call_count == 1
+        assert mock_conn.execute.await_count == 1
         executed_stmt = mock_conn.execute.call_args[0][0]
-        assert executed_stmt is not None
+        assert "app_state" in str(executed_stmt)
 
     @pytest.mark.asyncio
     async def test_handles_exception_gracefully(self, caplog):
@@ -145,6 +151,111 @@ class TestSetAppStateMax:
         assert any("Failed to write max key='key'" in rec.getMessage() for rec in caplog.records)
 
 
+class TestListAppState:
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_engine_is_none(self):
+        assert await list_app_state(None, "agent.mcp.role.") == {}
+
+    @pytest.mark.asyncio
+    async def test_returns_prefix_rows(self):
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(return_value=[("agent.mcp.role.main@1", "{}"), ("agent.mcp.role.sub@1", "{}")])
+        engine = _make_connect_engine(mock_conn)
+
+        result = await list_app_state(engine, "agent.mcp.role.")
+
+        assert result == {"agent.mcp.role.main@1": "{}", "agent.mcp.role.sub@1": "{}"}
+
+    @pytest.mark.asyncio
+    async def test_query_failure_propagates_instead_of_empty(self, caplog):
+        """R21：读取失败不得伪装成「没有任何配置」。"""
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(side_effect=RuntimeError("db down"))
+        engine = _make_connect_engine(mock_conn)
+
+        with pytest.raises(RuntimeError, match="db down"):
+            await list_app_state(engine, "agent.mcp.role.")
+        assert any("Failed to list prefix='agent.mcp.role.'" in rec.getMessage() for rec in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_cancelled_and_disposed_propagate(self):
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(side_effect=asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await list_app_state(_make_connect_engine(mock_conn), "prefix")
+        assert type(exc.value) is asyncio.CancelledError
+
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(side_effect=EngineDisposedError("disposed mid-list"))
+        with pytest.raises(EngineDisposedError, match="disposed mid-list"):
+            await list_app_state(_make_connect_engine(mock_conn), "prefix")
+
+    @pytest.mark.asyncio
+    async def test_disposed_engine_is_rejected_before_query(self):
+        old_engine = _make_connect_engine(MagicMock())
+        _mark_disposed(old_engine)
+
+        with pytest.raises(EngineDisposedError, match="Engine disposed, list rejected"):
+            await list_app_state(old_engine, "prefix")
+        assert old_engine.connect.call_count == 0
+
+
+class TestDeleteAppState:
+    @pytest.mark.asyncio
+    async def test_returns_false_when_engine_is_none(self):
+        assert await delete_app_state(None, "agent.mcp.svc") is False
+
+    @pytest.mark.asyncio
+    async def test_returns_true_when_row_deleted(self):
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(return_value=MagicMock(rowcount=1))
+        engine = _make_begin_engine(mock_conn)
+
+        assert await delete_app_state(engine, "agent.mcp.svc") is True
+        assert engine.begin.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_row_missing(self):
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(return_value=MagicMock(rowcount=0))
+        engine = _make_begin_engine(mock_conn)
+
+        assert await delete_app_state(engine, "agent.mcp.svc") is False
+
+    @pytest.mark.asyncio
+    async def test_failure_propagates_and_logs(self, caplog):
+        """R21：删除失败必须抛错，不得把「未删除」伪装成已删除。"""
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(side_effect=RuntimeError("delete failed"))
+        engine = _make_begin_engine(mock_conn)
+
+        with pytest.raises(RuntimeError, match="delete failed"):
+            await delete_app_state(engine, "agent.mcp.svc")
+        assert any("Failed to delete key='agent.mcp.svc'" in rec.getMessage() for rec in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_cancelled_and_disposed_propagate(self):
+        cancelled_conn = MagicMock()
+        cancelled_conn.execute = AsyncMock(side_effect=asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await delete_app_state(_make_begin_engine(cancelled_conn), "agent.mcp.svc")
+        assert type(exc.value) is asyncio.CancelledError
+
+        disposed_conn = MagicMock()
+        disposed_conn.execute = AsyncMock(side_effect=EngineDisposedError("disposed mid-delete"))
+        with pytest.raises(EngineDisposedError, match="disposed mid-delete"):
+            await delete_app_state(_make_begin_engine(disposed_conn), "agent.mcp.svc")
+
+    @pytest.mark.asyncio
+    async def test_disposed_engine_is_rejected_before_begin(self):
+        old_engine = _make_begin_engine(MagicMock())
+        _mark_disposed(old_engine)
+
+        with pytest.raises(EngineDisposedError, match="Engine disposed, delete rejected"):
+            await delete_app_state(old_engine, "agent.mcp.svc")
+        old_engine.begin.assert_not_called()
+
+
 class TestDisposedEngineGuard:
     """D05-002 / R5：已释放引擎（登记后换新）不得再被 connect/begin/execute。"""
 
@@ -163,7 +274,7 @@ class TestDisposedEngineGuard:
         with pytest.raises(EngineDisposedError, match="Engine disposed, read rejected"):
             await get_app_state(old_engine, "sync_attempted_upto:moneyflow_daily")
 
-        old_engine.connect.assert_not_called()
+        assert old_engine.connect.call_count == 0
         assert await get_app_state(new_engine, "sync_attempted_upto:moneyflow_daily") == "20250901"
 
     @pytest.mark.asyncio

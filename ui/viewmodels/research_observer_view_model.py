@@ -35,6 +35,7 @@ from core.agent_types import (
     HistoryPage,
     HistoryQuery,
     HistoryRoundSelection,
+    MCPServiceIdentity,
     Mode,
     PendingAnswerFact,
     PendingAnswerPage,
@@ -96,7 +97,7 @@ class MainTurnIntakePort(Protocol):
         expected_revision: int | None = None,
         role_prompt_refs: Sequence[tuple[str, str]] = (),
         skill_refs: Sequence[tuple[str, str]] = (),
-        mcp_scope_digest: str | None = None,
+        mcp_selection: tuple[MCPServiceIdentity, ...] = (),
     ) -> MainTurnIntakeResult: ...
 
     async def start_plan(
@@ -106,6 +107,12 @@ class MainTurnIntakePort(Protocol):
         session_id: str,
         expected_revision: int,
     ) -> MainTurnIntakeResult: ...
+
+
+class MCPScopeCatalogPort(Protocol):
+    """研究侧 MCP 范围选择所需的服务目录（组合根注入；UI 不 import app）。"""
+
+    async def list_services(self) -> tuple[Any, ...]: ...
 
 
 class AgentResearchService(Protocol):
@@ -338,6 +345,13 @@ class ResearchObserverState:
     composer_mode: str = DEFAULT_COMPOSER_MODE
     composer_pending: bool = False
     composer_error_key: str | None = None
+    #: 研究侧 MCP 范围选择（J25）：本次允许的服务子集；空选择即「本次不使用 MCP」，
+    #: 不解释为全部允许（§6 默认拒绝）。目录读取失败如实报错，不展示空成功。
+    mcp_scope_available: bool = False
+    #: ``(identity_key, 展示名)``；保持目录返回顺序稳定。
+    mcp_scope_options: tuple[tuple[str, str], ...] = ()
+    mcp_scope_selected: tuple[str, ...] = ()
+    mcp_scope_error_key: str | None = None
     #: 最近一次受理的派发事实：``submitted=False`` 的结构化原因码 + 参数（讨论/计划
     #: 为零派发，属预期，不当作错误；执行模式零派发如实展示原因，不伪造成已启动）。
     last_dispatch_reason: DispatchReasonView | None = None
@@ -664,10 +678,14 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         user_scope: str = LOCAL_DESKTOP_USER_SCOPE,
         unavailable_reason_key: str = UNAVAILABLE_NOT_WIRED,
         intake: MainTurnIntakePort | None = None,
+        mcp_catalog: MCPScopeCatalogPort | None = None,
     ) -> None:
         self._service = service
         self._user_scope = user_scope
         self._intake = intake
+        self._mcp_catalog = mcp_catalog
+        #: 目录身份映射（identity_key → 服务身份）；范围选择提交时据此还原强类型身份。
+        self._mcp_identities: dict[str, MCPServiceIdentity] = {}
         self._session_key: int | None = id(service) if service is not None else None
         # 精确会话导航目标（建稿回执驱动）：仅在读取与目标仍一致时落 state，
         # 读取期间被更新的目标会触发重读，避免壳层退回「历史首条」。
@@ -682,6 +700,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             available=service is not None,
             unavailable_reason_key=unavailable_reason_key if service is None else "",
             composer_available=service is not None and intake is not None,
+            mcp_scope_available=mcp_catalog is not None,
         )
         self._init_mixin_fields()
 
@@ -1083,11 +1102,49 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         if mode in COMPOSER_MODES:
             self._set_state(composer_mode=mode)
 
+    # -- 研究侧 MCP 范围（J25） --------------------------------------------
+
+    async def load_mcp_scope(self) -> None:
+        """读取可选的 MCP 服务目录；目录未接线保持不可用，读取失败如实报错。"""
+
+        catalog = self._mcp_catalog
+        if catalog is None:
+            return
+        try:
+            configs = await catalog.list_services()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._set_state(mcp_scope_error_key="agent_research_mcp_scope_error")
+            return
+        self._mcp_identities = {config.identity.stable_key(): config.identity for config in configs}
+        options = tuple((config.identity.stable_key(), config.display_name) for config in configs)
+        selected = tuple(key for key in self._state.mcp_scope_selected if key in self._mcp_identities)
+        self._set_state(
+            mcp_scope_options=options,
+            mcp_scope_selected=selected,
+            mcp_scope_error_key=None,
+        )
+
+    def toggle_mcp_scope(self, identity_key: str) -> None:
+        """勾选/取消本次允许的 MCP 服务（只接受目录内服务；空选择=不使用 MCP）。"""
+
+        if identity_key not in self._mcp_identities and not any(
+            key == identity_key for key, _label in self._state.mcp_scope_options
+        ):
+            return
+        selected = set(self._state.mcp_scope_selected)
+        if identity_key in selected:
+            selected.discard(identity_key)
+        else:
+            selected.add(identity_key)
+        self._set_state(mcp_scope_selected=tuple(sorted(selected)))
+
     async def send_first_question(self) -> None:
         """发送首问：经注入的受理端口创建会话/受理（讨论/计划零派发属预期）。
 
         未接线受理端口时如实给出不可用 key（R21），不伪造已发送；取消继续传播
-        （R2）；空正文不提交。
+        （R2）；空正文不提交。本次手选的 MCP 服务子集随首问冻结进 manifest。
         """
 
         intake = self._intake
@@ -1102,12 +1159,16 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             return
         self._track_inflight_cancellable()
         self._set_state(composer_pending=True, composer_error_key=None, last_dispatch_reason=None)
+        selection = tuple(
+            self._mcp_identities[key] for key in self._state.mcp_scope_selected if key in self._mcp_identities
+        )
         try:
             result = await intake.start_question(
                 text,
                 mode=Mode(self._state.composer_mode),
                 session_id=self._state.session_id,
                 expected_revision=(self._state.session_draft_revision if self._state.session_id is not None else 0),
+                mcp_selection=selection,
             )
         except asyncio.CancelledError:
             self._set_state(composer_pending=False)
@@ -1438,6 +1499,7 @@ def shared_research_observer(
     user_scope: str = LOCAL_DESKTOP_USER_SCOPE,
     unavailable_reason_key: str = UNAVAILABLE_NOT_WIRED,
     intake: MainTurnIntakePort | None = None,
+    mcp_catalog: MCPScopeCatalogPort | None = None,
 ) -> ResearchObserverViewModel:
     """取本会话共享的观察层 VM（同一 facade/受理端口复用；变化或已销毁则重建）。"""
 
@@ -1448,6 +1510,7 @@ def shared_research_observer(
         or _shared_vm.disposed
         or _shared_vm._session_key != session_key
         or _shared_vm._intake is not intake
+        or _shared_vm._mcp_catalog is not mcp_catalog
     ):
         stale = _shared_vm
         _shared_vm = ResearchObserverViewModel(
@@ -1455,6 +1518,7 @@ def shared_research_observer(
             user_scope=user_scope,
             unavailable_reason_key=unavailable_reason_key,
             intake=intake,
+            mcp_catalog=mcp_catalog,
         )
         if stale is not None and not stale.disposed:
             stale.dispose()

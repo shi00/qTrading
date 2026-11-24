@@ -21,8 +21,11 @@ from datetime import UTC, datetime
 from core.agent_types import (
     AgentErrorCode,
     AgentServiceError,
+    AgentValidationError,
     MCPServiceIdentity,
+    RoleMCPAssignment,
     require_identity,
+    validate_role_mcp_assignment,
 )
 from services.agent_service.mcp import (
     MCPConfigSaveReceipt,
@@ -34,14 +37,29 @@ from services.agent_service.mcp import (
 )
 from services.agent_service.mcp_config_store import AppStateMCPConfigStore, MCPConfigListEntry
 from services.agent_service.mcp_grant import AppStateMCPGrantStore, MCPConnectGrant, MCPToolSets
+from services.agent_service.mcp_role import (
+    AppStateMCPRoleAssignmentStore,
+    validate_assignment_tools_against_configs,
+)
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["MCPConnectReceipt", "MCPServiceLifecycle"]
+__all__ = [
+    "MCPConnectReceipt",
+    "MCPServiceDeleteBlocked",
+    "MCPServiceDeletionReceipt",
+    "MCPServiceLifecycle",
+]
 
 
 def _utc_now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _credential_references(config: MCPServerConfig) -> tuple[str, ...]:
+    """配置中引用的外部凭据（仅安全引用名，不含秘密值；供删除后人工撤销，QAC13）。"""
+
+    return tuple(sorted({value for _name, value in config.transport.headers if value.startswith(("env:", "keyring:"))}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +71,40 @@ class MCPConnectReceipt:
     tools: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class MCPServiceDeletionReceipt:
+    """服务删除回执：删除事实 + 需人工撤销的凭据引用（不含秘密值）。"""
+
+    identity: MCPServiceIdentity
+    deleted_config: bool
+    deleted_grant: bool
+    credential_references: tuple[str, ...]
+
+
+class MCPServiceDeleteBlocked(AgentServiceError):
+    """服务仍被角色配置或研究会话引用（删除被拒，携带可定位标识）。"""
+
+    def __init__(
+        self,
+        identity: MCPServiceIdentity,
+        *,
+        role_refs: tuple[str, ...] = (),
+        research_ids: tuple[str, ...] = (),
+    ) -> None:
+        parts: list[str] = []
+        if role_refs:
+            parts.append(f"roles={','.join(role_refs)}")
+        if research_ids:
+            parts.append(f"researches={','.join(research_ids)}")
+        super().__init__(
+            AgentErrorCode.POLICY_DENIED,
+            f"mcp service is still referenced: {';'.join(parts)}",
+            identity.stable_key(),
+        )
+        self.role_refs = role_refs
+        self.research_ids = research_ids
+
+
 class MCPServiceLifecycle:
     """组合根持有的 MCP 服务生命周期门面。"""
 
@@ -62,10 +114,13 @@ class MCPServiceLifecycle:
         manager: SharedMCPConnectionManager,
         configs: AppStateMCPConfigStore,
         grants: AppStateMCPGrantStore,
+        roles: AppStateMCPRoleAssignmentStore | None = None,
     ) -> None:
         self._manager = manager
         self._configs = configs
         self._grants = grants
+        #: 角色分配存储（删除服务时据此阻删）；未接线时删除显式拒绝（fail-closed）。
+        self._roles = roles
         #: 本进程经 ``connect`` 成功建立的连接（身份与授权缓存）：工具工厂只认这里，
         #: 保证「未显式启连 = 零工具」，且工厂保持同步。
         self._connected: dict[str, MCPServiceIdentity] = {}
@@ -82,6 +137,112 @@ class MCPServiceLifecycle:
         """逐行列出已保存配置（单条失效不使整批失败）；扫描端口不可用时明确失败。"""
 
         return await self._configs.list_configs()
+
+    async def delete_service(
+        self,
+        identity: MCPServiceIdentity,
+        *,
+        confirmation: bool = False,
+    ) -> MCPServiceDeletionReceipt:
+        """删除服务配置与启连授权（被角色配置/研究会话引用即阻删）。
+
+        顺序：确认（调用方显式确认）→ 读取配置（不存在即拒绝，不静默幂等）→ 角色
+        分配引用检查（fail-closed：存储未接线也拒绝）→ 持久化研究引用检查 → 共享
+        连接/测试与关闭残留检查（由管理器执行）→ 删除配置 → 删除授权记录。
+
+        删除前不关闭任何活动连接（须由用户显式断开）；返回回执含配置里引用的外部
+        凭据名（``env:`` / ``keyring:``），供删除后人工撤销（QAC13），不回显秘密值。
+        """
+
+        label = identity.stable_key()
+        if not confirmation:
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                "mcp service deletion requires explicit confirmation",
+                label,
+            )
+        config = await self._configs.load(identity)
+        if config is None:
+            raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "mcp service config not found", label)
+        role_refs = await self._role_references(identity)
+        if role_refs:
+            raise MCPServiceDeleteBlocked(identity, role_refs=role_refs)
+        research_ids = await self._manager.frozen_users(identity)
+        if research_ids:
+            raise MCPServiceDeleteBlocked(identity, research_ids=research_ids)
+        deleted_config = await self._manager.delete_config(identity)
+        deleted_grant = await self._grants.delete(identity)
+        self._connected.pop(label, None)
+        self._grant_cache.pop(label, None)
+        return MCPServiceDeletionReceipt(
+            identity=identity,
+            deleted_config=deleted_config,
+            deleted_grant=deleted_grant,
+            credential_references=_credential_references(config),
+        )
+
+    # -- 角色分配（F14 残余 / J25） -----------------------------------------
+
+    async def save_role_assignment(self, assignment: RoleMCPAssignment) -> RoleMCPAssignment:
+        """保存角色可用/默认服务与工具白名单，并做跨配置一致性校验。
+
+        校验：核心合同（默认⊆可用、服务/工具名唯一）→ 每个服务必须已配置 → 每个
+        白名单工具必须存在于该服务**声明**的只读工具范围（``audit.tool_scope``，
+        未声明即空集）。任一不满足即拒绝且不落库（不静默裁剪）。
+        """
+
+        try:
+            validate_role_mcp_assignment(assignment)
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", "$.role.mcp"
+            ) from exc
+        if self._roles is None:
+            raise AgentServiceError(
+                AgentErrorCode.CONFIG_UNAVAILABLE, "mcp role assignments are not wired", "$.role.mcp"
+            )
+        declared: dict[str, tuple[str, ...]] = {}
+        for binding in assignment.available:
+            key = binding.identity.stable_key()
+            config = await self._configs.load(binding.identity)
+            if config is None:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"mcp service is not configured: {key}", key)
+            declared[key] = config.audit.tool_scope if config.audit is not None else ()
+        try:
+            validate_assignment_tools_against_configs(assignment, declared)
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", "$.role.mcp"
+            ) from exc
+        await self._roles.save(assignment)
+        return assignment
+
+    async def list_role_assignments(self) -> tuple[RoleMCPAssignment, ...]:
+        """列出全部角色 MCP 分配；未接线即显式拒绝（不返回空冒充无分配）。"""
+
+        if self._roles is None:
+            raise AgentServiceError(
+                AgentErrorCode.CONFIG_UNAVAILABLE, "mcp role assignments are not wired", "$.role.mcp"
+            )
+        return await self._roles.list_assignments()
+
+    async def _role_references(self, identity: MCPServiceIdentity) -> tuple[str, ...]:
+        """引用该服务身份的角色版本标识（未接线存储即拒绝删除）。"""
+
+        if self._roles is None:
+            raise AgentServiceError(
+                AgentErrorCode.CONFIG_UNAVAILABLE,
+                "mcp role assignments are unverifiable before deletion",
+                identity.stable_key(),
+            )
+        assignments = await self._roles.list_assignments()
+        refs = [
+            f"{assignment.role_id}@{assignment.role_version}"
+            for assignment in assignments
+            if assignment.default_service == identity
+            or any(binding.identity == identity for binding in assignment.available)
+        ]
+        return tuple(sorted(refs))
 
     # -- 连接测试与启连 -----------------------------------------------------
 
