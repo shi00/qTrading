@@ -51,36 +51,26 @@ class BusinessSourceService:
     def __init__(self, dao: AgentDao | BusinessSourceRegistrar) -> None:
         self._dao = dao
 
+    def precheck(self, request: SourceRegistrationRequest) -> None:
+        """无副作用准入预检（受理前）：只在内存判定，不读不写、不登记、不外发。
+
+        与 :meth:`register` 复用同一 :func:`_evaluate` 判据：重复/重叠选择、时点与
+        截止界（含事后解释的两条界）不合法即抛错。调用方据此在写入受理事实前
+        fail-closed（准入失败不得留下「已受理」痕迹）。
+        """
+
+        if not request.selected:
+            return
+        identity = f"{request.user_scope}/{request.consumer_kind}/{request.consumer_id}@{request.consumer_version}"
+        _evaluate(request, identity)
+
     async def register(self, request: SourceRegistrationRequest) -> BusinessSourceRegistrationReceipt:
         """登记显式选择来源；失败不留下部分登记（DAO 单事务）。"""
 
         identity = f"{request.user_scope}/{request.consumer_kind}/{request.consumer_id}@{request.consumer_version}"
         if not request.selected:
             return BusinessSourceRegistrationReceipt(registered=(), link_ids=(), replayed=False)
-        decision_cutoff, explanation_cutoff = _cutoff_bounds(request, identity)
-        selected_keys = {(item.source.source_id, item.source.version) for item in request.selected}
-        if len(selected_keys) != len(request.selected):
-            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "duplicate selected source", identity)
-        for item in request.unselected:
-            if (item.source.source_id, item.source.version) in selected_keys:
-                raise AgentServiceError(
-                    AgentErrorCode.INPUT_INVALID, "source cannot be both selected and unselected", identity
-                )
-        admission_cutoff = explanation_cutoff or decision_cutoff
-        retrospective: list[SourceVersionRef] = []
-        if admission_cutoff is not None:
-            for item in request.selected:
-                available_at = _ensure_visible_at(item, admission_cutoff, identity)
-                if decision_cutoff is not None and explanation_cutoff is not None and available_at >= decision_cutoff:
-                    # I46：决策界之后才披露 → 可作事后解释资料，但必须显式标注。
-                    retrospective.append(
-                        SourceVersionRef(
-                            source_kind=item.source.source_kind,
-                            source_id=item.source.source_id,
-                            source_version=item.source.version,
-                            source_digest=item.source.digest,
-                        )
-                    )
+        retrospective = _evaluate(request, identity)
         receipt = await self._dao.register_business_sources(
             BusinessSourceRegistrationRequest(
                 user_scope=request.user_scope,
@@ -127,6 +117,40 @@ class BusinessSourceService:
         )
 
 
+def _evaluate(request: SourceRegistrationRequest, identity: str) -> list[SourceVersionRef]:
+    """选择集合与时点准入的唯一判据（``precheck`` 与 ``register`` 复用）。
+
+    返回「决策界之后、解释界之前」披露的事后解释资料（``retrospective``）；不合法
+    即抛错。纯内存判定，不触达 DAO。
+    """
+
+    decision_cutoff, explanation_cutoff = _cutoff_bounds(request, identity)
+    selected_keys = {(item.source.source_id, item.source.version) for item in request.selected}
+    if len(selected_keys) != len(request.selected):
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "duplicate selected source", identity)
+    for item in request.unselected:
+        if (item.source.source_id, item.source.version) in selected_keys:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID, "source cannot be both selected and unselected", identity
+            )
+    admission_cutoff = explanation_cutoff or decision_cutoff
+    retrospective: list[SourceVersionRef] = []
+    if admission_cutoff is not None:
+        for item in request.selected:
+            available_at = _ensure_visible_at(item, admission_cutoff, identity)
+            if decision_cutoff is not None and explanation_cutoff is not None and available_at >= decision_cutoff:
+                # I46：决策界之后才披露 → 可作事后解释资料，但必须显式标注。
+                retrospective.append(
+                    SourceVersionRef(
+                        source_kind=item.source.source_kind,
+                        source_id=item.source.source_id,
+                        source_version=item.source.version,
+                        source_digest=item.source.digest,
+                    )
+                )
+    return retrospective
+
+
 def _ensure_visible_at(item: BusinessSourceItem, cutoff: datetime, identity: str) -> datetime:
     """截止界准入：可得时点未知或恰在/晚于截止（排他）时拒绝；返回可得时点。"""
 
@@ -167,11 +191,11 @@ def _cutoff_bounds(request: SourceRegistrationRequest, identity: str) -> tuple[d
                 identity,
             )
         return decision_cutoff, None
-    explanation_cutoff = (
-        _parse_timestamp(request.explanation_cutoff, identity)
-        if request.explanation_cutoff not in (None, "")
-        else decision_cutoff
-    )
+    if request.explanation_cutoff in (None, ""):
+        # 未声明独立解释资料界时不把决策界冒充成解释界（两条边界的语义必须分开）：
+        # 仅以决策界做排他准入，事后解释资料窗口为空且不产生 retrospective。
+        return decision_cutoff, None
+    explanation_cutoff = _parse_timestamp(request.explanation_cutoff, identity)
     assert explanation_cutoff is not None
     if explanation_cutoff < decision_cutoff:
         raise AgentServiceError(

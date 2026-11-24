@@ -24,7 +24,13 @@ from typing import Any
 _DIGEST = sha256_hex(b"e01-units")
 
 
-def _fact(*, currency: str | None = "CNY", field_key: str = "amount") -> FactValue:
+def _fact(
+    *,
+    currency: str | None = "CNY",
+    field_key: str = "amount",
+    source_unit: str = "million_cny",
+    display_unit: str = "yi_cny",
+) -> FactValue:
     return FactValue(
         field_key=field_key,
         object_ref="600000.SH@2025",
@@ -33,9 +39,9 @@ def _fact(*, currency: str | None = "CNY", field_key: str = "amount") -> FactVal
         '"lexeme":"1.5","exact_decimal":"1.5"}',
         numeric_lexeme="1.5",
         numeric_encoding="agent-number-v1",
-        source_unit="million_cny",
+        source_unit=source_unit,
         currency=currency,
-        display_unit="yi_cny",
+        display_unit=display_unit,
         conversion_ref=None,
         period="2025",
         basis=None,
@@ -162,7 +168,11 @@ class TestUnitConversionGateway:
         converter = RecordingConverter(error=StrategyParamError(Message("strategy_unit_unknown", {})))
         with pytest.raises(AgentServiceError) as exc:
             UnitConversionGateway(converter).convert(
-                _fact(), value=1, value_unit="btc", df=object(), declared_unit="million_cny"
+                _fact(currency=None, source_unit="btc", display_unit="btc"),
+                value=1,
+                value_unit="btc",
+                df=object(),
+                declared_unit="btc",
             )
         assert exc.value.code is AgentErrorCode.INPUT_INVALID
         assert "unit_rejected:strategy_unit_unknown" in str(exc.value)
@@ -170,12 +180,46 @@ class TestUnitConversionGateway:
     def test_quantity_evidence_missing_is_unverified_not_zero(self) -> None:
         converter = RecordingConverter(error=StrategyParamError(Message("strategy_unit_evidence_missing", {})))
         outcome = UnitConversionGateway(converter).convert(
-            _fact(field_key="vol", currency=None), value=200, value_unit="share", df=object(), declared_unit="lot"
+            _fact(field_key="vol", currency=None, source_unit="lot", display_unit="share"),
+            value=200,
+            value_unit="share",
+            df=object(),
+            declared_unit="lot",
         )
         assert outcome.value is None
         assert outcome.verification is VerificationState.UNVERIFIED
         assert outcome.conversion_ref is None
         assert outcome.reason == "quantity_conversion_not_implemented"
+
+    def test_source_unit_mismatch_rejected_before_conversion(self) -> None:
+        converter = RecordingConverter()
+        with pytest.raises(AgentServiceError) as exc:
+            UnitConversionGateway(converter).convert(
+                _fact(), value=1, value_unit="yi_cny", df=object(), declared_unit="wan_cny"
+            )
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        assert "unit_rejected:source_unit_mismatch" in str(exc.value)
+        assert converter.calls == []
+
+    def test_display_unit_mismatch_rejected_before_conversion(self) -> None:
+        converter = RecordingConverter()
+        with pytest.raises(AgentServiceError) as exc:
+            UnitConversionGateway(converter).convert(
+                _fact(), value=1, value_unit="wan_cny", df=object(), declared_unit="million_cny"
+            )
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        assert "unit_rejected:display_unit_mismatch" in str(exc.value)
+        assert converter.calls == []
+
+    def test_amount_unit_requires_currency(self) -> None:
+        converter = RecordingConverter()
+        with pytest.raises(AgentServiceError) as exc:
+            UnitConversionGateway(converter).convert(
+                _fact(currency=None), value=1, value_unit="yi_cny", df=object(), declared_unit="million_cny"
+            )
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        assert "unit_rejected:currency_required" in str(exc.value)
+        assert converter.calls == []
 
 
 def test_app_wiring_injects_the_unified_entry() -> None:

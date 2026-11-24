@@ -206,6 +206,21 @@ class TestPointInTimeGate:
         assert dao.requests == []
 
     @pytest.mark.asyncio
+    async def test_post_hoc_without_explanation_cutoff_does_not_fabricate_window(self) -> None:
+        # T-08：未声明独立解释界时，不把决策界冒充成解释界；决策界之后披露的资料
+        # 不得以「事后解释」静默放行（两条边界的语义必须分开）。
+        dao = FakeDao()
+        request = _request(
+            purpose=Purpose.POST_HOC_EXPLANATION,
+            cutoff="2026-01-01T00:00:00.000000Z",
+            selected=(_item(available_at="2026-01-15T00:00:00.000000Z"),),
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await BusinessSourceService(dao).register(request)
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert dao.requests == []
+
+    @pytest.mark.asyncio
     async def test_explanation_cutoff_rejected_for_historical_purpose(self) -> None:
         dao = FakeDao()
         request = _request(

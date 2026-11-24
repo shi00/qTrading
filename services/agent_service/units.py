@@ -29,6 +29,8 @@ from core.errors import StrategyParamError
 
 #: 已知的金额币种（事实 currency 为空表示不适用/未知，由调用方决定）。
 _SUPPORTED_CURRENCIES = frozenset({"CNY"})
+#: 金额单位（与 strategies.utils 的金额分支一致；不 import strategies，避免跨层依赖）。
+_AMOUNT_UNITS = frozenset({"yuan", "wan_cny", "million_cny", "yi_cny"})
 #: 数量单位（与 strategies.utils 的数量分支一致）。
 _QUANTITY_UNITS = frozenset({"lot", "share"})
 #: 统一换算入口的版本化引用（写入 FactValue.conversion_ref 的谱系前缀）。
@@ -142,6 +144,27 @@ class UnitConversionGateway:
             raise AgentServiceError(
                 AgentErrorCode.INPUT_INVALID,
                 f"unit_rejected:unsupported_currency:{fact.currency}",
+                fact.field_key,
+            )
+        # 声明与换算谱系必须一致（R20）：调用方传入的数据/展示单位须与事实自身声明
+        # 的 source_unit/display_unit 相符，否则谱系会记录一个与事实相矛盾的换算。
+        if fact.source_unit is not None and fact.source_unit != declared_unit:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                "unit_rejected:source_unit_mismatch",
+                fact.field_key,
+            )
+        if fact.display_unit is not None and fact.display_unit != value_unit:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                "unit_rejected:display_unit_mismatch",
+                fact.field_key,
+            )
+        if declared_unit in _AMOUNT_UNITS and fact.currency is None:
+            # 金额单位已声明却未声明币种：不能按「不适用」放行（R20/R21）。
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                "unit_rejected:currency_required",
                 fact.field_key,
             )
         try:

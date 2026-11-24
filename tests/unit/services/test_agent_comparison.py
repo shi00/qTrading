@@ -26,14 +26,21 @@ from core.agent_types import (
     AgentErrorCode,
     AgentServiceError,
     AgentValidationError,
+    BusinessSourceItem,
+    BusinessSourceRegistrationReceipt,
     CommitState,
     CommandRef,
     CostProjection,
     Mode,
     Purpose,
+    ReadState,
+    Selection,
     SourceKind,
+    SourceLocator,
+    SourceRef,
     SourceVersionRef,
     SubmissionReceipt,
+    VerificationState,
     derive_accept_identity,
     json_doc,
 )
@@ -91,22 +98,29 @@ def _selection(connection_id: str, *, revision: int = 3, name: str = "提供方-
     )
 
 
-def _source(source_id: str = "src-1") -> SourceVersionRef:
+def _source(source_id: str = "src-1", *, source_kind: SourceKind = SourceKind.USER_MESSAGE) -> SourceVersionRef:
     return SourceVersionRef(
-        source_kind=SourceKind.USER_MESSAGE,
+        source_kind=source_kind,
         source_id=source_id,
         source_version="1",
         source_digest=_digest(source_id[-1] if source_id[-1] in "abcdef" else "b"),
     )
 
 
-def _shared(*, text: str = "分析同一任务", source_id: str = "src-1") -> ComparisonSharedInput:
+def _shared(
+    *,
+    text: str = "分析同一任务",
+    source_id: str = "src-1",
+    purpose: Purpose = Purpose.CONCEPT,
+    cutoff: str = "2026-11-16",
+    source_kind: SourceKind = SourceKind.USER_MESSAGE,
+) -> ComparisonSharedInput:
     return ComparisonSharedInput(
         text=text,
         mode=Mode.DISCUSS,
-        purpose=Purpose.CONCEPT,
-        cutoff="2026-11-16",
-        source_refs=(_source(source_id),),
+        purpose=purpose,
+        cutoff=cutoff,
+        source_refs=(_source(source_id, source_kind=source_kind),),
         visible_history_message_ids=("m-1",),
         visible_history_artifact_refs=(("art-1", "2"),),
         role_prompt_refs=(("role-main", "1"),),
@@ -419,6 +433,55 @@ class _FakeReadDao:
         )
 
 
+class _AssetAdmissionDao(_FakeReadDao):
+    """比较组来源准入替身：记录读取/受理/登记的顺序（T-08）。"""
+
+    def __init__(self, items: tuple[BusinessSourceItem, ...]) -> None:
+        super().__init__(None, ())
+        self.items = items
+        self.registered: list[Any] = []
+
+    async def read_business_source_items(self, *, user_scope: str, refs: tuple[SourceVersionRef, ...]):
+        self.calls.append("read_business_source_items")
+        return self.items
+
+    async def register_business_sources(self, request: Any) -> Any:
+        self.calls.append("register_business_sources")
+        self.registered.append(request)
+        return BusinessSourceRegistrationReceipt(registered=(), link_ids=(), replayed=False)
+
+
+def _biz_item(*, available_at: str) -> BusinessSourceItem:
+    return BusinessSourceItem(
+        source=SourceRef(
+            user_scope="u1",
+            source_id="backtest:run-1",
+            version="1",
+            digest=_digest("e"),
+            source_kind=SourceKind.BUSINESS_SNAPSHOT,
+            display_name="回测结果 run-1",
+            object_ref="backtest:run-1",
+            locator=SourceLocator(
+                locator_kind="source_range",
+                origin_ref=SourceVersionRef(
+                    source_kind=SourceKind.BUSINESS_SNAPSHOT,
+                    source_id="backtest:run-1",
+                    source_version="1",
+                    source_digest=_digest("e"),
+                ),
+                selection=Selection(kind="all"),
+            ),
+            available_at=available_at,
+            period=None,
+            unit_note=None,
+            read_state=ReadState.READY,
+            missing_reason=None,
+            provenance_refs=(),
+        ),
+        verification=VerificationState.PROGRAM_VERIFIED,
+    )
+
+
 class TestServiceComparison:
     @pytest.mark.asyncio
     async def test_read_and_export_only_touch_read_paths(self) -> None:
@@ -465,6 +528,61 @@ class TestServiceComparison:
         assert receipt.all_accepted is True
         # 组受理前先按组键读权威 manifest（无既有组 → 本组首版）。
         assert fake.calls == ["read_comparison_manifest", "accept_request", "accept_request"]
+
+    @pytest.mark.asyncio
+    async def test_admission_precheck_blocks_all_lanes_before_accept(self) -> None:
+        # T-08：带资料的比较在受理前做同一批准入预检；失败即整组零受理。
+        fake = _AssetAdmissionDao((_biz_item(available_at="2026-11-20T18:00:00+08:00"),))
+        service = AgentService(cast(AgentDao, fake))
+        request = ComparisonSubmissionRequest(
+            user_scope="u1",
+            session_id="s1",
+            source_module="ui",
+            group_command_id="cmp-1",
+            shared=_shared(
+                purpose=Purpose.END_OF_DAY_RESEARCH,
+                cutoff="2026-11-20T17:00:00+08:00",
+                source_kind=SourceKind.BUSINESS_SNAPSHOT,
+                source_id="backtest:run-1",
+            ),
+            lanes=(_selection("conn-a"), _selection("conn-b")),
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await service.submit_comparison(request)
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert "accept_request" not in fake.calls
+        assert fake.registered == []
+
+    @pytest.mark.asyncio
+    async def test_admitted_comparison_registers_sources_per_lane_after_accept(self) -> None:
+        fake = _AssetAdmissionDao((_biz_item(available_at="2026-11-20T16:00:00+08:00"),))
+        service = AgentService(cast(AgentDao, fake))
+        request = ComparisonSubmissionRequest(
+            user_scope="u1",
+            session_id="s1",
+            source_module="ui",
+            group_command_id="cmp-1",
+            shared=_shared(
+                purpose=Purpose.END_OF_DAY_RESEARCH,
+                cutoff="2026-11-20T17:00:00+08:00",
+                source_kind=SourceKind.BUSINESS_SNAPSHOT,
+                source_id="backtest:run-1",
+            ),
+            lanes=(_selection("conn-a"), _selection("conn-b")),
+        )
+        receipt = await service.submit_comparison(request)
+        assert receipt.all_accepted is True
+        assert [call for call in fake.calls if call != "read_comparison_manifest"] == [
+            "read_business_source_items",
+            "accept_request",
+            "register_business_sources",
+            "accept_request",
+            "register_business_sources",
+        ]
+        assert [row.consumer_id for row in fake.registered] == [
+            receipt.lanes[0].execution_id,
+            receipt.lanes[1].execution_id,
+        ]
 
     @pytest.mark.asyncio
     async def test_observations_from_executions_keep_unknown(self) -> None:
