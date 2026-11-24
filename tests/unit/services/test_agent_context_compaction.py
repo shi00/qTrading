@@ -5,15 +5,20 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.messages import (
+    BinaryContent,
+    ImageUrl,
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    RetryPromptPart,
     SystemPromptPart,
     TextContent,
     TextPart,
@@ -24,8 +29,9 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 
-from core.agent_types import is_digest
-from core.model_management_types import ExecutionSnapshot
+import services.agent_service.context_compaction as compaction
+from core.agent_types import AgentErrorCode, AgentServiceError, is_digest
+from core.model_management_types import ExecutionSnapshot, ModelTurnProtocolError
 from services.agent_service.context_compaction import (
     COMPACTION_BOUNDARY_UNCUTTABLE,
     COMPACTION_BUDGET_INSUFFICIENT,
@@ -33,6 +39,8 @@ from services.agent_service.context_compaction import (
     COMPACTION_DISABLED,
     COMPACTION_NOTHING_TO_SUMMARIZE,
     COMPACTION_SUMMARY_EMPTY,
+    COMPACTION_SUMMARY_FAILED,
+    COMPACTION_SUMMARY_MODEL_UNBOUND,
     COMPACTION_SUMMARY_NO_MODEL,
     COMPACTION_SUMMARY_TIMEOUT,
     COMPACTION_SUMMARY_TIMEOUT_UNAVAILABLE,
@@ -41,6 +49,7 @@ from services.agent_service.context_compaction import (
     CompactionBudget,
     CompactionConfig,
     CompactionOutcome,
+    CompactionPlan,
     ContextCompaction,
     SummaryLineage,
     build_leaf_compaction,
@@ -540,19 +549,371 @@ class _LeafBinding:
         self.binding = binding
 
 
-def _leaf_binding() -> _LeafBinding:
-    return _LeafBinding(
-        _snapshot(
-            routes=(
-                {
-                    "scenario_id": "agent_research",
-                    "candidates": ({"connection_id": "conn-1"}, {"connection_id": "conn-2"}),
-                },
-            ),
-            connections=(
-                {"connection_id": "conn-1", "context_window": 65_536},
-                {"connection_id": "conn-2", "context_window": 8192},
-            ),
+def _two_candidate_snapshot() -> ExecutionSnapshot:
+    return _snapshot(
+        routes=(
+            {
+                "scenario_id": "agent_research",
+                "candidates": ({"connection_id": "conn-1"}, {"connection_id": "conn-2"}),
+            },
         ),
-        {"data_consent": {"connection_id": "conn-2"}},
+        connections=(
+            {"connection_id": "conn-1", "context_window": 65_536},
+            {"connection_id": "conn-2", "context_window": 8192},
+        ),
     )
+
+
+def _leaf_binding() -> _LeafBinding:
+    return _LeafBinding(_two_candidate_snapshot(), {"data_consent": {"connection_id": "conn-2"}})
+
+
+# ---------------------------------------------------------------------------
+# F. 构造期不变量（配置 / 预算 / 计划 / 谱系 / 结果）
+# ---------------------------------------------------------------------------
+
+
+class TestConfigurationInvariants:
+    def test_config_rejects_non_bool_enabled(self) -> None:
+        with pytest.raises(ValueError, match="enabled must be bool"):
+            CompactionConfig(enabled=cast(Any, 1))
+
+    def test_config_rejects_non_positive_keep_messages(self) -> None:
+        with pytest.raises(ValueError, match="keep_messages must be an int >= 1"):
+            CompactionConfig(keep_messages=0)
+
+    def test_budget_rejects_non_positive_window(self) -> None:
+        with pytest.raises(ValueError, match="context_window_tokens must be a positive int or None"):
+            CompactionBudget(context_window_tokens=0)
+
+    def test_budget_rejects_non_int_reserve(self) -> None:
+        with pytest.raises(ValueError, match="output_reserve_tokens must be an int"):
+            CompactionBudget(context_window_tokens=8192, output_reserve_tokens=cast(Any, "1024"))
+
+    def test_budget_rejects_negative_reserve(self) -> None:
+        with pytest.raises(ValueError, match="output_reserve_tokens must be non-negative"):
+            CompactionBudget(context_window_tokens=8192, output_reserve_tokens=-1)
+
+    def test_budget_rejects_non_positive_candidate_window(self) -> None:
+        with pytest.raises(ValueError, match="candidate_context_windows entries must be positive ints"):
+            CompactionBudget(context_window_tokens=8192, candidate_context_windows=(0,))
+
+    def test_plan_requires_reason_when_uncuttable(self) -> None:
+        with pytest.raises(ValueError, match="requires a reason"):
+            CompactionPlan(cutoff=None)
+
+    def test_plan_rejects_non_positive_cutoff(self) -> None:
+        with pytest.raises(ValueError, match="cutoff must be a positive int or None"):
+            CompactionPlan(cutoff=0)
+
+    def test_plan_rejects_invalid_keep_messages(self) -> None:
+        with pytest.raises(ValueError, match="keep_messages must be an int >= 1"):
+            plan_compaction([_user("a")], keep_messages=0)
+
+
+class TestLineageInvariants:
+    @staticmethod
+    def _kwargs(**overrides: Any) -> dict[str, Any]:
+        base: dict[str, Any] = {
+            "source_start_index": 0,
+            "source_end_index": 2,
+            "source_message_ids": ("request#0", "response#1"),
+            "created_at": "2026-11-24T08:00:00+00:00",
+            "model_binding_ref": "test",
+            "summary_digest": "a" * 64,
+        }
+        base.update(overrides)
+        return base
+
+    def test_start_index_must_be_int(self) -> None:
+        with pytest.raises(ValueError, match="source_start_index must be an int"):
+            SummaryLineage(**self._kwargs(source_start_index=cast(Any, "0")))
+
+    def test_start_index_must_be_non_negative(self) -> None:
+        with pytest.raises(ValueError, match="source_start_index must be non-negative"):
+            SummaryLineage(**self._kwargs(source_start_index=-1))
+
+    def test_end_index_must_be_int(self) -> None:
+        with pytest.raises(ValueError, match="source_end_index must be an int"):
+            SummaryLineage(**self._kwargs(source_end_index=cast(Any, "2")))
+
+    def test_end_index_must_exceed_start(self) -> None:
+        with pytest.raises(ValueError, match="source_end_index must be greater than source_start_index"):
+            SummaryLineage(**self._kwargs(source_end_index=0))
+
+    def test_message_ids_must_cover_span(self) -> None:
+        with pytest.raises(ValueError, match="source_message_ids must cover the declared span exactly"):
+            SummaryLineage(**self._kwargs(source_message_ids=("request#0",)))
+
+    def test_message_ids_must_be_non_empty(self) -> None:
+        with pytest.raises(ValueError, match="source_message_ids entries must be non-empty text"):
+            SummaryLineage(**self._kwargs(source_message_ids=("", "response#1")))
+
+    def test_created_at_must_be_non_empty(self) -> None:
+        with pytest.raises(ValueError, match="created_at must be non-empty ISO 8601 text"):
+            SummaryLineage(**self._kwargs(created_at=""))
+
+    def test_created_at_must_parse_as_iso(self) -> None:
+        with pytest.raises(ValueError, match="created_at must be ISO 8601 text"):
+            SummaryLineage(**self._kwargs(created_at="yesterday"))
+
+    def test_model_binding_ref_must_be_non_empty(self) -> None:
+        with pytest.raises(ValueError, match="model_binding_ref must be non-empty text"):
+            SummaryLineage(**self._kwargs(model_binding_ref=""))
+
+    def test_summary_digest_must_be_sha256(self) -> None:
+        with pytest.raises(ValueError, match="summary_digest must be a lowercase sha256 digest"):
+            SummaryLineage(**self._kwargs(summary_digest="A" * 64))
+
+
+class TestOutcomeInvariants:
+    def test_compressed_flag_must_be_bool(self) -> None:
+        with pytest.raises(ValueError, match="compressed must be bool"):
+            CompactionOutcome(messages=(), compressed=cast(Any, 1))
+
+    def test_compressed_requires_lineage(self) -> None:
+        with pytest.raises(ValueError, match="a compressed outcome requires lineage"):
+            CompactionOutcome(messages=(), compressed=True)
+
+    def test_compressed_rejects_reason(self) -> None:
+        with pytest.raises(ValueError, match="a compressed outcome must not carry a failure reason"):
+            CompactionOutcome(messages=(), compressed=True, lineage=_lineage(), reason="x")
+
+    def test_uncompressed_requires_reason(self) -> None:
+        with pytest.raises(ValueError, match="an uncompressed outcome requires a reason code"):
+            CompactionOutcome(messages=(), compressed=False)
+
+    def test_uncompressed_rejects_lineage(self) -> None:
+        with pytest.raises(ValueError, match="an uncompressed outcome must not carry lineage"):
+            CompactionOutcome(messages=(), compressed=False, reason="x", lineage=_lineage())
+
+
+# ---------------------------------------------------------------------------
+# G. 配对守卫与摘要回合失败分支
+# ---------------------------------------------------------------------------
+
+
+class TestToolPairingGuards:
+    def test_edge_cutoffs_are_safe(self) -> None:
+        messages: list[ModelMessage] = [_user("a"), _call("c1"), _result("c1")]
+
+        assert is_tool_pair_safe_cut(messages, 0) is True
+        assert is_tool_pair_safe_cut(messages, len(messages)) is True
+
+    def test_unknown_message_kind_is_ignored(self) -> None:
+        messages = cast(list[ModelMessage], [SimpleNamespace(), _call("c1"), _result("c1")])
+
+        assert is_tool_pair_safe_cut(messages, 1) is True
+
+    def test_tool_return_without_call_id_is_ignored(self) -> None:
+        messages: list[ModelMessage] = [
+            _user("a"),
+            ModelRequest(parts=[ToolReturnPart(tool_name="query_kline", content="r", tool_call_id="")]),
+            _user("b"),
+        ]
+
+        assert is_tool_pair_safe_cut(messages, 2) is True
+
+    def test_orphan_tool_return_is_ignored(self) -> None:
+        messages: list[ModelMessage] = [_user("a"), _result("missing"), _user("b")]
+
+        assert is_tool_pair_safe_cut(messages, 2) is True
+
+
+class TestSummaryTurnFailures:
+    async def test_cancellation_propagates(self) -> None:
+        async def _fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            raise asyncio.CancelledError
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await compact_messages(FunctionModel(_fn), _long_history(), budget=_budget(), timeout_seconds=5.0)
+
+        assert type(exc_info.value) is asyncio.CancelledError
+
+    async def test_protocol_error_becomes_summary_failed(self) -> None:
+        async def _fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            raise ModelTurnProtocolError("invalid_part", "parts[0]")
+
+        outcome = await compact_messages(FunctionModel(_fn), _long_history(), budget=_budget(), timeout_seconds=5.0)
+
+        assert outcome.compressed is False
+        assert outcome.reason == COMPACTION_SUMMARY_FAILED
+
+    async def test_service_error_becomes_summary_failed(self) -> None:
+        async def _fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            raise AgentServiceError(AgentErrorCode.POLICY_DENIED, "denied", "compaction")
+
+        outcome = await compact_messages(FunctionModel(_fn), _long_history(), budget=_budget(), timeout_seconds=5.0)
+
+        assert outcome.compressed is False
+        assert outcome.reason == COMPACTION_SUMMARY_FAILED
+
+    async def test_unexpected_error_becomes_summary_failed(self) -> None:
+        async def _fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            raise RuntimeError("boom")
+
+        messages = _long_history()
+        outcome = await compact_messages(FunctionModel(_fn), messages, budget=_budget(), timeout_seconds=5.0)
+
+        assert outcome.compressed is False
+        assert outcome.reason == COMPACTION_SUMMARY_FAILED
+        assert outcome.messages == tuple(messages)
+
+
+# ---------------------------------------------------------------------------
+# H. 边界输入 / 增量锚点 / 内容渲染 / 绑定回退 / 授权连接
+# ---------------------------------------------------------------------------
+
+
+class TestCompactMessagesEdgeCases:
+    async def test_invalid_estimate_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="estimated_input_tokens must be a non-negative int or None"):
+            await compact_messages(
+                TestModel(custom_output_text="摘要"),
+                _long_history(),
+                budget=_budget(),
+                timeout_seconds=5.0,
+                estimated_input_tokens=-1,
+            )
+
+    async def test_uncuttable_boundary_keeps_history(self) -> None:
+        messages: list[ModelMessage] = [_call("c1"), _result("c1")]
+
+        outcome = await compact_messages(
+            TestModel(custom_output_text="摘要"),
+            messages,
+            budget=_budget(),
+            timeout_seconds=5.0,
+            estimated_input_tokens=10_000,
+            config=CompactionConfig(keep_messages=1),
+        )
+
+        assert outcome.compressed is False
+        assert outcome.reason == COMPACTION_BOUNDARY_UNCUTTABLE
+        assert outcome.messages == tuple(messages)
+
+    async def test_unbound_model_binding_keeps_history(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(compaction, "_model_binding_ref", lambda model, response: None)
+        messages = _long_history()
+
+        outcome = await compact_messages(
+            TestModel(custom_output_text="摘要"), messages, budget=_budget(), timeout_seconds=5.0
+        )
+
+        assert outcome.compressed is False
+        assert outcome.reason == COMPACTION_SUMMARY_MODEL_UNBOUND
+        assert outcome.messages == tuple(messages)
+
+    def test_model_binding_falls_back_to_instance_name(self) -> None:
+        response = ModelResponse(parts=[TextPart(content="x")], model_name=None)
+
+        assert compaction._model_binding_ref(TestModel(), response) == "test"
+
+    async def test_second_compaction_uses_previous_summary_anchor(self) -> None:
+        prompts: list[str] = []
+
+        def _fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            prompts.append(_render_text(messages))
+            return ModelResponse(parts=[TextPart(content="增量摘要")])
+
+        first = await compact_messages(FunctionModel(_fn), _long_history(), budget=_budget(), timeout_seconds=5.0)
+        assert first.compressed is True
+
+        second = await compact_messages(
+            FunctionModel(_fn),
+            first.messages,
+            budget=_budget(),
+            timeout_seconds=5.0,
+            estimated_input_tokens=10_000,
+        )
+
+        assert second.compressed is True
+        assert "<previous-summary>" in prompts[-1]
+        assert "增量摘要" in prompts[-1]
+
+    async def test_summary_prompt_renders_tool_and_retry_parts(self) -> None:
+        prompts: list[str] = []
+
+        def _fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            prompts.append(_render_text(messages))
+            return ModelResponse(parts=[TextPart(content="摘要")])
+
+        messages: list[ModelMessage] = [
+            _user("x" * 20_000),
+            _call("c1"),
+            _result("c1", "K线结果"),
+            ModelRequest(parts=[RetryPromptPart(content="请改用代码", tool_name="query_kline", tool_call_id="c1")]),
+            _user("继续"),
+            _assistant("好"),
+            _user("结论"),
+        ]
+
+        outcome = await compact_messages(
+            FunctionModel(_fn),
+            messages,
+            budget=_budget(),
+            timeout_seconds=5.0,
+            estimated_input_tokens=10_000,
+            config=CompactionConfig(keep_messages=2),
+        )
+
+        assert outcome.compressed is True
+        prompt = next(item for item in prompts if "<messages>" in item)
+        assert "[tool_call#1:query_kline]" in prompt
+        assert "[tool_return#2:query_kline]" in prompt
+        assert "[retry_feedback#3]" in prompt
+
+    def test_non_text_content_is_marked_not_dropped(self) -> None:
+        content = [
+            TextContent(content="说明"),
+            BinaryContent(data=b"\x00", media_type="application/octet-stream"),
+            ImageUrl(url="https://example.com/x.png"),
+        ]
+
+        assert compaction._text_of_content(content) == "说明\n[非文本内容]\n[未知内容]"
+        assert compaction._text_of_content(TextContent(content="纯文本")) == "纯文本"
+        assert compaction._text_of_content(cast(Any, 42)) == "[非文本内容]"
+
+
+class TestLeafCompactionConsent:
+    def test_non_mapping_consent_uses_first_candidate_window(self) -> None:
+        binding = _LeafBinding(_two_candidate_snapshot(), {"data_consent": "none"})
+
+        capability = build_leaf_compaction(binding, scenario_id="agent_research", timeout_seconds=lambda: 5.0)
+
+        assert isinstance(capability, ContextCompaction)
+        assert capability.budget.context_window_tokens == 65_536
+
+    def test_non_text_connection_id_uses_first_candidate_window(self) -> None:
+        binding = _LeafBinding(_two_candidate_snapshot(), {"data_consent": {"connection_id": 123}})
+
+        capability = build_leaf_compaction(binding, scenario_id="agent_research", timeout_seconds=lambda: 5.0)
+
+        assert isinstance(capability, ContextCompaction)
+        assert capability.budget.context_window_tokens == 65_536
+
+
+class TestCapabilityBudgetUnknown:
+    async def test_unknown_budget_leaves_request_untouched(self) -> None:
+        outcomes: list[CompactionOutcome] = []
+        calls: list[list[ModelMessage]] = []
+
+        def _fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            calls.append(list(messages))
+            return ModelResponse(parts=[TextPart(content="最终答复")])
+
+        agent: Agent[None, str] = Agent(
+            FunctionModel(_fn),
+            output_type=str,
+            capabilities=(
+                ContextCompaction(budget=_budget(None), timeout_seconds=lambda: 5.0, on_outcome=outcomes.append),
+            ),
+        )
+
+        result = await agent.run("继续", message_history=_long_history(), model_settings={"timeout": 5.0})
+
+        assert result.output == "最终答复"
+        assert len(calls) == 1  # 预算未知不发起摘要回合
+        assert outcomes[-1].compressed is False
+        assert outcomes[-1].reason == COMPACTION_BUDGET_UNKNOWN
+        assert "x" * 100 in _render_text(calls[0])  # 原文未被改写
