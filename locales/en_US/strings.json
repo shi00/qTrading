@@ -316,6 +316,7 @@
     "screener_preset_overwrite_no_params": "(no parameters recorded in the existing preset)",
     "screener_preset_delete_title": "Delete preset",
     "screener_preset_delete_body": "Preset \"{name}\" will be deleted. This cannot be undone. The current parameter draft is not affected.",
+    "screener_preset_delete_failed": "Failed to delete preset \"{name}\": settings could not be saved. Please retry.",
     "screener_preset_missing": "Preset does not exist or has been deleted",
     "screener_loading_data": "Initializing/Reloading Database...",
     "screener_data_loaded": "Data Loaded",

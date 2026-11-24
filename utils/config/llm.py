@@ -12,7 +12,7 @@ import os
 
 from utils import config_handler as cfg
 from utils.config import storage
-from utils.config_models import DEFAULT_AI_PROMPT, DEFAULT_NEWS_PROMPT
+from utils.config_models import DEFAULT_AI_PROMPT, DEFAULT_NEWS_PROMPT, PresetDeleteOutcome
 from utils.llm_providers import AZURE_DEFAULT_API_VERSION
 
 DEFAULTS = cfg.ConfigHandler.DEFAULT_CONFIG
@@ -500,14 +500,16 @@ def save_strategy_preset(strategy_key: str, name: str, params: dict) -> bool:
     return storage.update_config_key(key, _merge)
 
 
-def delete_strategy_preset(strategy_key: str, name: str) -> bool:
+def delete_strategy_preset(strategy_key: str, name: str) -> PresetDeleteOutcome:
     """删除命名参数预设 (Task 4.1).
 
     D02-F06：存在性在文件锁内基于磁盘判定，不依据锁外缓存——他进程已删除的
     条目不会因本进程旧快照而被复活。
 
     Returns:
-        bool: 删除成功 (磁盘上预设存在且落盘成功) 返回 True, 不存在 / 写失败返回 False.
+        ``DELETED`` 磁盘上预设存在且落盘成功；``NOT_FOUND`` 锁内判定目标不存在；
+        ``WRITE_FAILED`` 目标存在但存储未能提交（读盘失败 / 锁超时 / 原子写失败等）。
+        后两者磁盘与缓存均保持已提交值，调用方可据此区分「不存在」与「需要重试」。
     """
     key = f"strategy_presets_{strategy_key}"
 
@@ -517,7 +519,12 @@ def delete_strategy_preset(strategy_key: str, name: str) -> bool:
         del section[name]
         return True
 
-    return storage.update_config_key(key, _remove)
+    outcome = storage.update_config_key_outcome(key, _remove)
+    if outcome is storage.ConfigMutationOutcome.NOT_APPLIED:
+        return PresetDeleteOutcome.NOT_FOUND
+    if outcome is storage.ConfigMutationOutcome.COMMITTED:
+        return PresetDeleteOutcome.DELETED
+    return PresetDeleteOutcome.WRITE_FAILED
 
 
 def get_ai_max_candidates():

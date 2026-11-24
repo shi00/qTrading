@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 from ui.viewmodels import Message
 from ui.viewmodels.screener_types import PRESET_NAME_MAX_LENGTH, PresetSavePlan, ScreenerState, StrategyDepRow
 from utils.config_handler import ConfigHandler
+from utils.config_models import PresetDeleteOutcome
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -263,15 +264,16 @@ class StrategyMetaMixin:
         presets = ConfigHandler.get_strategy_presets(strategy_key)
         return presets.get(name, {})
 
-    async def delete_preset(self, name: str, strategy_key: str) -> bool:
+    async def delete_preset(self, name: str, strategy_key: str) -> PresetDeleteOutcome:
         """删除命名参数预设 (Task 4.1).
 
         Returns:
-            bool: True 表示已删除, False 表示预设不存在.
+            ``DELETED`` 已删除；``NOT_FOUND`` 预设不存在；``WRITE_FAILED`` 存储写入
+            失败（配置未提交，可重试）。调用方须区分后两者，不得把写失败提示为不存在。
         """
 
-        return bool(
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.delete_strategy_preset, strategy_key, name)
+        return await ThreadPoolManager().run_async(
+            TaskType.IO, ConfigHandler.delete_strategy_preset, strategy_key, name
         )
 
     def get_column_alias(self, table_name: str | None, col: str) -> str:

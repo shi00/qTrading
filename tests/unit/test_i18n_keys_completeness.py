@@ -539,6 +539,7 @@ class TestScreenerPresetMessageRendering:
     _NAME_TEMPLATE_KEYS = (
         "screener_preset_saved",
         "screener_preset_deleted",
+        "screener_preset_delete_failed",
         "screener_preset_loaded",
     )
 

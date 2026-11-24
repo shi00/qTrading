@@ -1042,7 +1042,7 @@ class TestPresetManagement:
     - get_preset_names: 同步读预设名称列表
     - save_preset: 通过 ThreadPoolManager 提交 IO 写盘
     - load_preset: 同步读预设参数 (未命中返回空 dict)
-    - delete_preset: 通过 ThreadPoolManager 提交 IO 删除 (返回 bool)
+    - delete_preset: 通过 ThreadPoolManager 提交 IO 删除 (返回 PresetDeleteOutcome)
     """
 
     def test_get_preset_names_returns_names_list(self, vm):
@@ -1121,28 +1121,46 @@ class TestPresetManagement:
         assert params == {}
 
     @pytest.mark.asyncio
-    async def test_delete_preset_returns_true_when_existed(self, vm):
-        """delete_preset 命中时返回 True (ConfigHandler.delete_strategy_preset 返回 True)."""
+    async def test_delete_preset_returns_deleted_when_existed(self, vm):
+        """delete_preset 命中时返回 DELETED (ConfigHandler.delete_strategy_preset 透传)."""
         from unittest.mock import AsyncMock
+
+        from utils.config_models import PresetDeleteOutcome
 
         with patch("ui.viewmodels.strategy_meta_mixin.ThreadPoolManager") as mock_tpm_cls:
             mock_tpm = mock_tpm_cls.return_value
-            mock_tpm.run_async = AsyncMock(return_value=True)
+            mock_tpm.run_async = AsyncMock(return_value=PresetDeleteOutcome.DELETED)
 
             result = await vm.delete_preset("保守型", "value_strategy")
-        assert result is True
+        assert result is PresetDeleteOutcome.DELETED
 
     @pytest.mark.asyncio
-    async def test_delete_preset_returns_false_when_not_existed(self, vm):
-        """delete_preset 未命中时返回 False (ConfigHandler.delete_strategy_preset 返回 False)."""
+    async def test_delete_preset_returns_not_found_when_not_existed(self, vm):
+        """delete_preset 未命中时返回 NOT_FOUND（非写失败）."""
         from unittest.mock import AsyncMock
+
+        from utils.config_models import PresetDeleteOutcome
 
         with patch("ui.viewmodels.strategy_meta_mixin.ThreadPoolManager") as mock_tpm_cls:
             mock_tpm = mock_tpm_cls.return_value
-            mock_tpm.run_async = AsyncMock(return_value=False)
+            mock_tpm.run_async = AsyncMock(return_value=PresetDeleteOutcome.NOT_FOUND)
 
             result = await vm.delete_preset("不存在", "value_strategy")
-        assert result is False
+        assert result is PresetDeleteOutcome.NOT_FOUND
+
+    @pytest.mark.asyncio
+    async def test_delete_preset_returns_write_failed_when_storage_rejects(self, vm):
+        """delete_preset 存储写入失败时返回 WRITE_FAILED（不得退化为 NOT_FOUND）."""
+        from unittest.mock import AsyncMock
+
+        from utils.config_models import PresetDeleteOutcome
+
+        with patch("ui.viewmodels.strategy_meta_mixin.ThreadPoolManager") as mock_tpm_cls:
+            mock_tpm = mock_tpm_cls.return_value
+            mock_tpm.run_async = AsyncMock(return_value=PresetDeleteOutcome.WRITE_FAILED)
+
+            result = await vm.delete_preset("保守型", "value_strategy")
+        assert result is PresetDeleteOutcome.WRITE_FAILED
 
     # --- R2-I12: 方案名校验 / 重名确认计划 / 载入 / 刷新 ---
 
