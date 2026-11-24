@@ -77,6 +77,7 @@ from core.agent_types import (
     OperationReadQuery,
     PendingAnswerPage,
     PlanProposal,
+    Purpose,
     ReadMarkCommand,
     ReadMarkReceipt,
     ResearchEvent,
@@ -88,6 +89,7 @@ from core.agent_types import (
     SessionReadQuery,
     SessionChangeCommand,
     SkillVersionRef,
+    SourceKind,
     SourceRead,
     SourceReadQuery,
     SourceRegistrationRequest,
@@ -255,6 +257,39 @@ class _LaneDispatchRefused(RuntimeError):
         super().__init__(code)
         self.code = code
         self.note_prefix = note_prefix
+
+
+#: 由资产表承载、可在受理期按冻结引用读回的来源类别；``user_message`` / ``mcp_return``
+#: 的谱系边由 ``accept_request`` 同事务写入，不在来源准入入口重复承载。
+_ASSET_SOURCE_KINDS: frozenset[SourceKind] = frozenset(
+    {SourceKind.BUSINESS_SNAPSHOT, SourceKind.ATTACHMENT, SourceKind.RESULT, SourceKind.SUMMARY}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _SourceAdmission:
+    """受理前预检通过、待受理后登记的业务来源准入事实。"""
+
+    user_scope: str
+    purpose: Purpose
+    decision_cutoff: str | None
+    explanation_cutoff: str | None
+    items: tuple[BusinessSourceItem, ...]
+
+
+def _opt_manifest_text(value: object, field: str, identity: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"frozen manifest {field} must be text", identity)
+    return value
+
+
+def _manifest_frozen_section(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
+    """冻结 manifest 的共享输入段：比较组嵌在 ``shared``，单模型为扁平顶层。"""
+
+    shared = manifest.get("shared")
+    return shared if isinstance(shared, Mapping) else manifest
 
 
 class AnswerSender(Protocol):
@@ -671,9 +706,8 @@ class AgentService:
         lock = self._group_accept_locks().setdefault(group.group_ref, asyncio.Lock())
         async with lock:
             await self._verify_group_authority(group)
-            accepted: list[tuple[str, SubmissionReceipt | None, str | None]] = []
-            for lane in group.lanes:
-                accept = build_lane_accept_request(
+            accepts = [
+                build_lane_accept_request(
                     group,
                     lane,
                     expected_revision=request.expected_revision,
@@ -681,6 +715,13 @@ class AgentService:
                     workflow_id=request.workflow_id,
                     source_display_name=request.source_display_name,
                 )
+                for lane in group.lanes
+            ]
+            # T-08：整组共享同一冻结 manifest，故受理前只做一次无副作用准入预检；
+            # 失败即整组零受理（不静默放行带资料的比较），不写任何受理事实。
+            admission = await self._prepare_source_admission(accepts[0]) if accepts else None
+            accepted: list[tuple[str, SubmissionReceipt | None, str | None]] = []
+            for lane, accept in zip(group.lanes, accepts, strict=True):
                 try:
                     receipt = await self._dao.accept_request(accept)
                 except asyncio.CancelledError:
@@ -688,6 +729,8 @@ class AgentService:
                 except AgentServiceError as exc:
                     accepted.append((lane.lane_ref, None, exc.code.value))
                     continue
+                # 准入已通过；受理后按同一判据登记本路来源（consumer 绑定本路执行）。
+                await self._register_source_admission(admission, receipt)
                 accepted.append((lane.lane_ref, receipt, None))
         return group, tuple(accepted)
 
@@ -912,6 +955,23 @@ class AgentService:
             client_command_id=retry.client_command_id,
         )
         try:
+            # T-08：重试与普通/比较走同一批准入——先无副作用预检，失败即显式拒绝
+            # （零受理），不静默放行带资料的重试。
+            admission = await self._prepare_source_admission(accept)
+        except asyncio.CancelledError:
+            raise
+        except AgentServiceError as exc:
+            return ComparisonLaneRetryOutcome(
+                group_ref=group.group_ref,
+                lane_ref=lane_ref,
+                execution_id=None,
+                command_record_id=None,
+                commit_state=None,
+                error_code=exc.code.value,
+                dispatch=None,
+                view=view,
+            )
+        try:
             receipt = await self._dao.accept_request(accept)
         except asyncio.CancelledError:
             raise
@@ -926,6 +986,7 @@ class AgentService:
                 dispatch=None,
                 view=view,
             )
+        await self._register_source_admission(admission, receipt)
         dispatch: DispatchOutcome | None = None
         if self._dispatcher is not None:
             dispatch = await self._dispatcher.dispatch(receipt, user_scope=query.user_scope, mode=group.shared.mode)
@@ -1139,9 +1200,12 @@ class AgentService:
                 f"command ref does not match request: {','.join(mismatches)}",
                 identity,
             )
+        # I63/T-08：受理前做无副作用的时点/来源准入预检；准入失败即零受理（不留
+        # 「已受理」痕迹），不写受理事实、不发起外发。
+        admission = await self._prepare_source_admission(request)
         receipt = await self._dao.accept_request(request)
-        # I63：受理落定后、派发之前按用户确认的截止界做 PIT 准入（失败即零派发）。
-        await self._admit_business_sources(request, receipt)
+        # 准入通过后才登记已核来源（同一判据重放），consumer 绑定本次执行身份。
+        await self._register_source_admission(admission, receipt)
         dispatcher = self._dispatcher
         if dispatcher is None:
             return receipt, None
@@ -1153,11 +1217,22 @@ class AgentService:
         return receipt, outcome
 
     async def _admit_business_sources(self, request: AcceptRequest, receipt: SubmissionReceipt) -> None:
-        """受理期业务来源 PIT 准入（I63）：按冻结 manifest 的 ``cutoff`` 重判。
+        """受理期业务来源 PIT 准入（I63）：先预检再登记（保留的兼容入口）。
 
-        只登记 manifest 中显式选择的来源集合；准入失败（时点未知/晚于截止/来源
-        缺失）原样抛出，调用方据此中断派发（零派发，R21/R24）。未携带来源的
-        请求不触达数据库。
+        准入失败（时点未知/晚于截止/来源缺失）原样抛出；调用方据此中断派发
+        （零派发，R21/R24）。生产写路径已改为受理前预检 + 受理后登记，本入口
+        供既有调用点与测试沿用。
+        """
+
+        admission = await self._prepare_source_admission(request)
+        await self._register_source_admission(admission, receipt)
+
+    async def _prepare_source_admission(self, request: AcceptRequest) -> _SourceAdmission | None:
+        """无副作用准入预检（受理前）：解析冻结 manifest、只读来源、按截止界判时点。
+
+        不写受理事实、不登记、不外发；未携带来源返回 ``None``。非资产类来源
+        （``user_message`` / ``mcp_return``，其谱系边由 ``accept_request`` 同事务写入）
+        不由本入口承载，跳过。
         """
 
         label = f"{request.user_scope}/{request.session_id}"
@@ -1167,9 +1242,10 @@ class AgentService:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "frozen manifest is not valid JSON", label) from exc
         if not isinstance(manifest, dict):
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "frozen manifest must be an object", label)
-        raw_refs = manifest.get("source_refs")
+        section = _manifest_frozen_section(manifest)
+        raw_refs = section.get("source_refs")
         if raw_refs in (None, []):
-            return
+            return None
         if not isinstance(raw_refs, list):
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "frozen manifest source_refs must be a list", label)
         try:
@@ -1181,21 +1257,50 @@ class AgentService:
             raise AgentServiceError(
                 AgentErrorCode.INPUT_INVALID, f"invalid frozen source ref: {exc.code}", label
             ) from exc
-        cutoff = manifest.get("cutoff")
-        if cutoff is not None and not isinstance(cutoff, str):
-            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "frozen manifest cutoff must be text", label)
+        refs = tuple(ref for ref in refs if ref.source_kind in _ASSET_SOURCE_KINDS)
+        if not refs:
+            return None
+        cutoff = _opt_manifest_text(section.get("cutoff"), "cutoff", label)
+        explanation_cutoff = _opt_manifest_text(section.get("explanation_cutoff"), "explanation_cutoff", label)
         items = await self._dao.read_business_source_items(user_scope=request.user_scope, refs=refs)
         if not items:
-            return
-        await BusinessSourceService(self._dao).register(
+            return None
+        # 无副作用判定：与登记复用同一判据（含事后解释的两条界）；失败即零受理。
+        BusinessSourceService(self._dao).precheck(
             SourceRegistrationRequest(
                 user_scope=request.user_scope,
                 consumer_kind="execution",
-                consumer_id=receipt.execution_id,
+                consumer_id="admission-precheck",
                 consumer_version="1",
                 purpose=request.purpose,
                 decision_cutoff=cutoff,
+                explanation_cutoff=explanation_cutoff,
                 selected=items,
+            )
+        )
+        return _SourceAdmission(
+            user_scope=request.user_scope,
+            purpose=request.purpose,
+            decision_cutoff=cutoff,
+            explanation_cutoff=explanation_cutoff,
+            items=items,
+        )
+
+    async def _register_source_admission(self, admission: _SourceAdmission | None, receipt: SubmissionReceipt) -> None:
+        """受理后登记已核来源（consumer 绑定本次执行身份）；同一判据重放。"""
+
+        if admission is None:
+            return
+        await BusinessSourceService(self._dao).register(
+            SourceRegistrationRequest(
+                user_scope=admission.user_scope,
+                consumer_kind="execution",
+                consumer_id=receipt.execution_id,
+                consumer_version="1",
+                purpose=admission.purpose,
+                decision_cutoff=admission.decision_cutoff,
+                explanation_cutoff=admission.explanation_cutoff,
+                selected=admission.items,
             )
         )
 

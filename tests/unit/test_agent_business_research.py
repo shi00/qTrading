@@ -16,6 +16,7 @@ from services.agent_service.business_research import (
     BusinessResearchPreparer,
     BusinessSourceUnavailable,
     backtest_preparation,
+    snapshot_preparation,
     snapshot_source,
 )
 from services.agent_service.business_sources import BusinessSnapshotRead, read_backtest_snapshot
@@ -85,6 +86,34 @@ def test_snapshot_source_freezes_version_and_marks_unverified():
     assert item.source.available_at == "2026-11-18T01:00:00.000000Z"
     # UI 捕获快照未经程序核验：不得自称 program_verified（R21）
     assert item.verification is VerificationState.UNVERIFIED
+    # T-08：READY 必须带可按原引用读回的正文表示（不再是「READY 却无正文」）。
+    assert item.source.read_state is ReadState.READY
+    assert item.body_text is not None
+    assert "600519.SH" in item.body_text
+
+
+def test_snapshot_source_downgrades_truncated_body_to_partial():
+    item = snapshot_source(
+        _snapshot(summary={"news_id": "9", "content_excerpt": "…", "content_truncated": "true"}),
+        user_scope="local-desktop",
+    )
+
+    assert item.source.read_state is ReadState.PARTIAL
+    assert item.source.missing_reason == "content_truncated"
+    assert item.body_text is not None and "已截断" in item.body_text
+
+
+def test_snapshot_preparation_freezes_batch_reference():
+    preparation = snapshot_preparation(
+        _snapshot(
+            object_kind="screener_candidate",
+            summary={"ts_code": "600519.SH", "trade_date": "2026-11-18", "strategy": "momentum", "run_id": "r-1"},
+        ),
+        user_scope="local-desktop",
+    )
+
+    batch_ref = preparation.object_context.get("batch_ref")
+    assert batch_ref == "trade_date=2026-11-18;strategy=momentum;run_id=r-1"
 
 
 def test_snapshot_source_rejects_unknown_availability():

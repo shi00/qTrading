@@ -68,6 +68,10 @@ _AVAILABILITY_KNOWN = "known"
 _AVAILABILITY_UNKNOWN = "unknown"
 #: 严格读给出的「时区不可证」原因（与 ``business_sources`` 同值域）。
 _AVAILABILITY_ZONE_UNKNOWN = "available_at_zone_unknown"
+#: 摘要自带截断标记时来源降级原因（可按原引用读回的正文仅为截断表示）。
+_SNAPSHOT_TRUNCATED_REASON = "content_truncated"
+#: 冻结摘要字段缺失的显式标注（不填业务上合法的具体值，R21）。
+_MISSING_FIELD = "未提供"
 #: 受限稿正文提示：草稿期可用，发送期会被 PIT 准入拒绝（用户可见、不误导）。
 _RESTRICTED_AVAILABILITY_NOTE = (
     "\n注意：该回测结果的执行时点未带时区（未知），未按 UTC 猜测；发送前须补齐可证时点，否则 PIT 准入会拒绝。"
@@ -193,6 +197,7 @@ def snapshot_source(snapshot: BusinessObjectSnapshot, *, user_scope: str) -> Bus
         )
     )
     object_ref = f"{snapshot.object_kind}:{snapshot.object_id}"
+    body_text, truncated = _render_snapshot_body(snapshot, digest=digest)
     source = SourceRef(
         user_scope=user_scope,
         source_id=object_ref,
@@ -214,12 +219,63 @@ def snapshot_source(snapshot: BusinessObjectSnapshot, *, user_scope: str) -> Bus
         available_at=snapshot.available_at,
         period=snapshot.period,
         unit_note=None,
-        read_state=ReadState.READY,
-        missing_reason=None,
+        # T-08：READY 必须有可按原引用读回的正文表示——此处以内联受管正文承载冻结
+        # 摘要；摘要自带截断标记时降级为 PARTIAL（不把「显示截断」伪装成完整）。
+        read_state=ReadState.PARTIAL if truncated else ReadState.READY,
+        missing_reason=_SNAPSHOT_TRUNCATED_REASON if truncated else None,
         provenance_refs=(),
     )
     # UI 捕获的业务快照未经程序读取核验：不得自称 program_verified（R21）。
-    return BusinessSourceItem(source=source, verification=VerificationState.UNVERIFIED)
+    return BusinessSourceItem(source=source, verification=VerificationState.UNVERIFIED, body_text=body_text)
+
+
+def _render_snapshot_body(snapshot: BusinessObjectSnapshot, *, digest: str) -> tuple[str, bool]:
+    """把冻结的业务快照渲染为确定性内联正文（可按源版引用读回）。
+
+    只输出已冻结字段（键排序，缺失显式标注），不推断业务语义、不回填 0。若摘要
+    自带 ``content_truncated=true``（如资讯正文被截断），返回 ``truncated=True``，
+    由调用方把来源降级为 ``PARTIAL``。
+    """
+
+    truncated = str(snapshot.summary.get("content_truncated", "")).strip().lower() == "true"
+    lines = [
+        f"# 业务对象快照：{snapshot.display_name}",
+        f"- 来源模块：{snapshot.source_module}",
+        f"- 对象类别：{snapshot.object_kind}",
+        f"- 对象标识：{snapshot.object_id}",
+        f"- 可得时点（UTC）：{snapshot.available_at or _AVAILABILITY_UNKNOWN}",
+        f"- 周期：{snapshot.period or _MISSING_FIELD}",
+        f"- 来源版本（内容摘要前缀）：{digest[:12]}",
+        "",
+        "## 冻结摘要",
+    ]
+    for key in sorted(snapshot.summary, key=str):
+        lines.append(f"- {key}：{_snapshot_field_text(snapshot.summary[key])}")
+    if truncated:
+        lines.append("")
+        lines.append("- 注意：该对象正文已截断，未按完整正文登记（PARTIAL）。")
+    return "\n".join(lines) + "\n", truncated
+
+
+def _snapshot_field_text(value: Any) -> str:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return _MISSING_FIELD
+    return str(value)
+
+
+def _batch_reference(summary: Mapping[str, Any]) -> str | None:
+    """从冻结摘要提取原批次定位（筛选日期/策略/运行/模式）；缺失返回 ``None``。
+
+    只组合已冻结的字段，不推断、不补默认（缺哪项就不声称有该项）。
+    """
+
+    parts: list[str] = []
+    for key in ("trade_date", "screening_date", "strategy", "strategy_name", "run_id", "screener_mode"):
+        value = summary.get(key)
+        if value is None or not str(value).strip():
+            continue
+        parts.append(f"{key}={value}")
+    return ";".join(parts) or None
 
 
 def snapshot_preparation(snapshot: BusinessObjectSnapshot, *, user_scope: str) -> BusinessDraftPreparation:
@@ -238,6 +294,10 @@ def snapshot_preparation(snapshot: BusinessObjectSnapshot, *, user_scope: str) -
         "availability_state": _AVAILABILITY_KNOWN,
         "summary": json.loads(json_doc(dict(snapshot.summary))),
     }
+    batch_ref = _batch_reference(snapshot.summary)
+    if batch_ref is not None:
+        # 原批次引用：候选/资讯取自哪一次筛选运行的定位（不重跑、不按「当前快照」冒充）。
+        context["batch_ref"] = batch_ref
     return BusinessDraftPreparation(
         item=item,
         object_context=context,

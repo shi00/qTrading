@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from core.agent_types import (
@@ -24,6 +22,7 @@ from core.agent_types import (
     SubmissionReceipt,
     VerificationState,
     encode_source_version_ref,
+    json_doc,
 )
 from services.agent_service.service import AgentService
 
@@ -91,7 +90,7 @@ def _request(*, purpose: Purpose = Purpose.END_OF_DAY_RESEARCH, cutoff: str | No
         mode=Mode.EXECUTE,
         purpose=purpose,
         text="研究该回测",
-        manifest_payload=json.dumps(manifest),
+        manifest_payload=json_doc(manifest),
         source_display_name="用户消息",
     )
 
@@ -115,12 +114,19 @@ class _Dao:
         self.items = items
         self.registered: list[BusinessSourceRegistrationRequest] = []
         self.reads = 0
+        self.order: list[str] = []
 
     async def read_business_source_items(self, *, user_scope: str, refs: tuple[SourceVersionRef, ...]):
         self.reads += 1
+        self.order.append("read_business_source_items")
         return self.items
 
+    async def accept_request(self, request):
+        self.order.append("accept_request")
+        return _receipt()
+
     async def register_business_sources(self, request: BusinessSourceRegistrationRequest):
+        self.order.append("register_business_sources")
         self.registered.append(request)
         return BusinessSourceRegistrationReceipt(
             registered=tuple(
@@ -186,3 +192,28 @@ class TestAcceptSourceAdmission:
         dao = _Dao((_item(),))
         await _admit(dao, _request(purpose=Purpose.CONCEPT, cutoff=None))
         assert len(dao.registered) == 1
+
+
+class TestAdmissionOrdering:
+    """T-08：受理事实不得先于准入结论落库（准入失败零受理）。"""
+
+    @pytest.mark.asyncio
+    async def test_admission_failure_precedes_fact_write(self) -> None:
+        dao = _Dao((_item("2026-11-20T18:00:00+08:00"),))
+        service = AgentService(dao, None)  # type: ignore[arg-type]  # [reason: 本用例只触达来源准入]
+        with pytest.raises(AgentServiceError) as exc:
+            await service.submit_and_dispatch(_request(), command=CommandRef("u1", "backtest", "br-1", "cmd-1", 1))
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        # 预检失败：只读过来源，未写受理事实、未登记。
+        assert dao.order == ["read_business_source_items"]
+        assert dao.registered == []
+
+    @pytest.mark.asyncio
+    async def test_admitted_source_registers_after_fact_write(self) -> None:
+        dao = _Dao((_item(),))
+        service = AgentService(dao, None)  # type: ignore[arg-type]  # [reason: 本用例只触达来源准入]
+        receipt = await service.submit_and_dispatch(
+            _request(), command=CommandRef("u1", "backtest", "br-1", "cmd-1", 1)
+        )
+        assert receipt.receipt.execution_id == "ex-1"
+        assert dao.order == ["read_business_source_items", "accept_request", "register_business_sources"]

@@ -21,6 +21,7 @@ import logging
 import math
 import os
 import typing
+from collections.abc import Mapping
 
 import flet as ft
 import pandas as pd
@@ -2811,12 +2812,16 @@ def ScreenerView(
             sent_vm.select_stock(ts_code, name)
 
     def _make_research_request(
-        raw: dict,
+        raw: Mapping[str, typing.Any],
         *,
         object_kind: str,
         extra_summary: tuple[tuple[str, str], ...] = (),
     ) -> BusinessResearchRequest | None:
-        """把当前展示的候选/个股行冻结为准确对象（缺失 ts_code 时不可发起）。"""
+        """把当前展示的候选/个股行冻结为准确对象（缺失 ts_code 时不可发起）。
+
+        ``raw`` 必须是源行（``_raw`` 行原始投影），不是格式化后的显示行：冻结源值
+        与批次定位，避免把舍入后的显示值当研究对象（R21/R24）。
+        """
         ts_code = raw.get("ts_code")
         if not isinstance(ts_code, str) or not ts_code:
             return None
@@ -2825,10 +2830,13 @@ def ScreenerView(
         summary: list[tuple[str, str]] = [("ts_code", ts_code)]
         if isinstance(name, str) and name:
             summary.append(("name", name))
-        for key in ("score", "ai_score", "trade_date"):
+        for key in ("score", "ai_score", "trade_date", "run_id"):
             value = raw.get(key)
-            if value is not None and str(value) != "":
-                summary.append((key, str(value)))
+            if value is None or (isinstance(value, float) and math.isnan(value)):
+                continue
+            if str(value) == "":
+                continue
+            summary.append((key, str(value)))
         summary.extend(extra_summary)
         # 可得时点取「用户看到该行」的抓取时刻（保守：不声称更早可得，R24）
         captured_at = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
@@ -2845,15 +2853,17 @@ def ScreenerView(
         """候选列表行 → 准备研究草稿（只准备不发送；不重跑选股）。"""
         if on_start_research is None:
             return
-        raw = row_data.get("_raw") if isinstance(row_data, dict) else None
-        source = raw if isinstance(raw, dict) else row_data
+        raw = row_data.get("_raw") if isinstance(row_data, Mapping) else None
+        if not isinstance(raw, Mapping):
+            # 无源行（只有格式化显示值）时不冻结：不把舍入后的显示值当源值（R21/R24）。
+            return
         extra: list[tuple[str, str]] = []
         if state.selected_strategy:
             extra.append(("strategy", str(state.selected_strategy)))
         if state.mode:
             extra.append(("screener_mode", str(state.mode)))
         request = _make_research_request(
-            source,
+            raw,
             object_kind=OBJECT_KIND_CANDIDATE,
             extra_summary=tuple(extra),
         )
@@ -2864,7 +2874,11 @@ def ScreenerView(
         """股票详情 → 准备研究草稿（详情现场保持打开，不自动发送）。"""
         if on_start_research is None:
             return
-        request = _make_research_request(stock_data, object_kind=OBJECT_KIND_STOCK)
+        raw = stock_data.get("_raw") if isinstance(stock_data, Mapping) else None
+        source = raw if isinstance(raw, Mapping) else stock_data
+        if not isinstance(source, Mapping):
+            return
+        request = _make_research_request(source, object_kind=OBJECT_KIND_STOCK)
         if request is not None:
             on_start_research(request)
 
