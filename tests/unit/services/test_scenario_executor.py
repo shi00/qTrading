@@ -529,6 +529,50 @@ class TestHappyPath:
         assert any(d.decision == "rejected" for d in decisions)
 
 
+class TestN04CleanupStatusSingleColumn:
+    """N04：适配器收尾（注入 SDK client 关闭）失败只降级，成功结果与用量照常入账。
+
+    适配器已返回响应 + 报告用量后，关闭失败以 ``cleanup_status`` 单列进 attempt
+    元数据；attempt 终态仍为 succeeded，用量观察照常发生（不伪装成失败/未知）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_cleanup_failure_keeps_usage_and_succeeded_terminal(self):
+        usage = NormalizedLLMUsage(
+            input_total_tokens=10,
+            uncached_input_tokens=10,
+            cache_read_tokens=None,
+            cache_write_tokens=None,
+            output_tokens=5,
+        )
+        adapter = MagicMock()
+        adapter.invoke = AsyncMock(
+            return_value=AdapterResponse(
+                content="ok",
+                usage=usage,
+                actual_model="glm-4-air",
+                metadata={"cleanup_status": "close_failed"},
+            )
+        )
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder)
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+
+        assert result.status == "succeeded"
+        # 结果与报告用量不因收尾失败丢失
+        assert recorder.observe_usage.call_count == 1
+        obs_arg = recorder.observe_usage.call_args.args[0]
+        assert obs_arg.usage == usage
+        assert obs_arg.metadata["cleanup_status"] == "close_failed"
+        # 终态仍为 succeeded；收尾状态单列在元数据（不覆盖主状态）
+        terminal = recorder.submit_terminal.call_args.args[0]
+        assert terminal.status == "succeeded"
+        assert terminal.usage == usage
+        assert terminal.metadata["cleanup_status"] == "close_failed"
+
+
 class TestFailover:
     @pytest.mark.asyncio
     async def test_switch_to_second_candidate_on_failure(self):
