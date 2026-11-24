@@ -22,9 +22,10 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 from core.agent_types import (
@@ -39,6 +40,7 @@ from core.agent_types import (
     HistoryQuery,
     HistoryRoundSelection,
     MCPServiceIdentity,
+    MessageRole,
     Mode,
     PendingAnswerFact,
     PendingAnswerPage,
@@ -49,7 +51,11 @@ from core.agent_types import (
     SessionReadQuery,
     json_doc,
 )
+from ui.viewmodels.ai_brain_settings_view_model import ROLE_PROMPT_NAME_KEYS
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
+from utils.config_handler import ConfigHandler
+from utils.config_models import ROLE_PROMPT_DEFAULTS
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 if TYPE_CHECKING:
     # N01：``services.agent_service`` 包初始化会拉入 Agent 专用依赖（DBOS / pydantic_ai）。
@@ -103,6 +109,52 @@ SESSION_STATUS_CLEANED = "agent_research_session_status_cleaned"
 SESSION_STATUS_ARCHIVED = "agent_research_session_status_archived"
 SESSION_STATUS_ACTIVE = "agent_research_session_status_active"
 
+# --- W-12 研究侧模型/角色选择、费用透明与耗时分段 ---
+
+#: 研究场景 id（与 ``resolve_agent_model_binding`` 解算的连接来源同一配置域）。
+AGENT_RESEARCH_SCENARIO_ID: Final[str] = "agent_research"
+
+#: 研究角色候选（与设置页角色 Prompt 同一来源；子角色只执行主角色分配的单任务，
+#: 不能作为首问主研究角色，选择即显式拒绝）。
+RESEARCH_ROLE_KEYS: Final[tuple[str, ...]] = ("main", "sub")
+
+#: 角色是否可作为首问主研究角色（子角色仅由主角色分配执行）。
+_RESEARCH_MAIN_ROLE: Final[str] = "main"
+
+#: 费用投影状态 → i18n key（未知/未计价/预留分列，不合并成伪零）。
+COST_STATE_KEYS: Final[Mapping[str, str]] = {
+    "known": "agent_research_cost_state_known",
+    "partial": "agent_research_cost_state_partial",
+    "unpriced": "agent_research_cost_state_unpriced",
+    "reserved": "agent_research_cost_state_reserved",
+    "unknown": "agent_research_cost_state_unknown",
+    "failed": "agent_research_cost_state_failed",
+}
+
+#: 发送前预算状态。
+BUDGET_ESTIMATED = "estimated"
+BUDGET_UNPRICED = "unpriced"
+BUDGET_UNKNOWN = "unknown"
+
+#: 五段耗时（排队/用户等待/实际工作/模型等待/保存）与来源字段说明 key。
+#: 来源字段取自既有只读投影，不新增持久化字段、不做估算（R21）。
+DURATION_SEGMENTS: Final[tuple[tuple[str, str, str], ...]] = (
+    ("queue", "agent_research_duration_queue", "agent_research_duration_source_queue"),
+    ("user_wait", "agent_research_duration_user_wait", "agent_research_duration_source_user_wait"),
+    ("work", "agent_research_duration_work", "agent_research_duration_source_work"),
+    ("model_wait", "agent_research_duration_model_wait", "agent_research_duration_source_model_wait"),
+    ("save", "agent_research_duration_save", "agent_research_duration_source_save"),
+)
+DURATION_UNKNOWN_KEY: Final[str] = "agent_research_duration_unknown"
+
+#: 耗时分段推导所需的执行级快照页大小：消息页按 session_seq DESC 取最近 N 条，
+#: 首个用户提问超出该页时「排队」保持未知（不凭空估算）。
+# NOTE(lazy): 排队段依赖首个用户消息落在快照消息页内. ceiling: 单执行消息超过 20 条且首个用户消息在页外时该段为未知. upgrade: 服务层提供执行级受理时间投影（如 execution.accepted_at）后改为直接读取该字段.
+_DURATION_MESSAGE_PAGE_LIMIT: Final[int] = 20
+
+#: 累计费用覆盖的执行数上限（每个执行需一次快照 + 一次费用投影；超出如实标注截断）。
+CUMULATIVE_EXECUTION_LIMIT: Final[int] = 10
+
 
 class MainTurnIntakePort(Protocol):
     """首问/开始计划受理端口（组合根注入；UI 不 import app）。"""
@@ -133,6 +185,12 @@ class MCPScopeCatalogPort(Protocol):
     """研究侧 MCP 范围选择所需的服务目录（组合根注入；UI 不 import app）。"""
 
     async def list_services(self) -> tuple[Any, ...]: ...
+
+
+class ModelCatalogPort(Protocol):
+    """既有模型连接目录读取面（``ModelConfigurationService`` 子集，只读快照）。"""
+
+    async def get_snapshot(self) -> Any: ...
 
 
 class AgentResearchService(Protocol):
@@ -348,6 +406,85 @@ class DispatchReasonView:
 
 
 @dataclass(frozen=True)
+class ModelConnectionOption:
+    """工具栏可选的模型连接（研究场景路由候选的只读投影 + 资格判定）。
+
+    ``position`` 为路由候选序（1 起）；``effective`` 为真正承载本次研究的连接
+    （``resolve_agent_model_binding`` 按场景路由首选解算）。非首选候选仍可选定
+    （仅在首选不可用时按路由回退顺序生效）；资格不合法的连接带 ``reject_key``，
+    由命令显式拒绝而不是静默隐藏。
+    """
+
+    connection_id: str
+    display_name: str
+    model: str
+    context_window: int | None
+    position: int
+    effective: bool
+    reject_key: str | None
+
+    @property
+    def eligible(self) -> bool:
+        return self.reject_key is None
+
+
+@dataclass(frozen=True)
+class RoleOption:
+    """可选的研究角色（与设置页角色 Prompt 同一来源，版本随首问冻结）。"""
+
+    role_key: str
+    name_key: str
+    version: str | None
+    reject_key: str | None
+
+    @property
+    def eligible(self) -> bool:
+        return self.reject_key is None
+
+
+@dataclass(frozen=True)
+class BudgetEstimate:
+    """发送前预算提示：可估算时给金额与单位，不可估时显式未计价/未知（R21）。
+
+    ``amount_cny`` 为 ``None`` 时不得在界面显示 0；仅 ``estimated`` 状态携带金额；
+    ``basis_key`` 说明估算口径（仅正文 + 输出预留，不含系统提示/资料/工具）。
+    """
+
+    state: str
+    state_key: str
+    amount_cny: Decimal | None
+    unit_key: str
+    basis_key: str | None
+    input_tokens: int | None
+    output_reserve_tokens: int | None
+    tokens_verified: bool
+
+
+@dataclass(frozen=True)
+class CostUsageView:
+    """费用只读投影（本轮/累计）：已知、未计价、预留中、未知、读取失败分列。"""
+
+    state: str
+    state_key: str
+    known_cny: Decimal | None
+    reserved_cny: Decimal | None
+    unpriced_attempts: int | None
+    truncated: bool
+    read_error: str | None
+
+
+@dataclass(frozen=True)
+class DurationSegment:
+    """单段耗时：有来源事实给毫秒 + 来源字段 key，缺来源显式未知（不以 0 冒充）。"""
+
+    segment: str
+    label_key: str
+    source_key: str
+    value_ms: int | None
+    unknown_key: str | None
+
+
+@dataclass(frozen=True)
 class ResearchObserverState:
     """观察层不可变快照。
 
@@ -424,6 +561,41 @@ class ResearchObserverState:
     rename_text: str = ""
     #: 当前会话的元数据版（会话 CAS 动作的预期版；读取失败保持 0，动作被拒绝）。
     session_revision: int = 0
+
+    # --- W-12 研究侧模型/角色选择、费用透明与耗时分段 ---
+    model_selection_available: bool = False
+    model_options: tuple[ModelConnectionOption, ...] = ()
+    model_selection_error_key: str | None = None
+    role_options: tuple[RoleOption, ...] = ()
+    role_selection_error_key: str | None = None
+    #: 当前待发送选择（未随首问发送前可改）。
+    model_selection: str | None = None
+    role_selection: str | None = None
+    #: 已随首问冻结的选择（首问成功后记录；同会话内不再静默改写）。
+    model_selection_frozen: str | None = None
+    role_selection_frozen: str | None = None
+    budget: BudgetEstimate | None = None
+    usage_round: CostUsageView | None = None
+    usage_cumulative: CostUsageView | None = None
+    usage_error_key: str | None = None
+    durations: tuple[DurationSegment, ...] = ()
+    durations_execution_id: str | None = None
+
+    def model_option(self, connection_id: str | None) -> ModelConnectionOption | None:
+        """按连接 id 读取工具栏选项（不存在返回 None，不猜近似连接）。"""
+
+        for option in self.model_options:
+            if option.connection_id == connection_id:
+                return option
+        return None
+
+    def role_option(self, role_key: str | None) -> RoleOption | None:
+        """按角色 key 读取选项（不存在返回 None）。"""
+
+        for option in self.role_options:
+            if option.role_key == role_key:
+                return option
+        return None
 
     def draft_for(self, decision_id: str) -> str:
         """读取某决定的答复草稿（收起/重渲染后仍在）。"""
@@ -746,6 +918,419 @@ def _normalized_collapsed(executions: tuple[Any, ...], collapsed: tuple[str, ...
     return tuple(sorted(execution_id for execution_id in collapsed if execution_id in ids))
 
 
+def _research_route(snapshot: Any) -> Mapping[str, Any] | None:
+    """从连接目录快照取研究场景路由（缺失/停用/无候选返回 None，不猜默认）。"""
+
+    for route in getattr(snapshot, "scenario_routes", ()) or ():
+        if not isinstance(route, Mapping) or route.get("scenario_id") != AGENT_RESEARCH_SCENARIO_ID:
+            continue
+        if not route.get("enabled") or not route.get("candidates"):
+            return None
+        return route
+    return None
+
+
+def _research_connections(snapshot: Any) -> dict[str, Mapping[str, Any]]:
+    """连接目录快照 → connection_id → 连接定义（非映射行跳过，不臆造字段）。"""
+
+    connections: dict[str, Mapping[str, Any]] = {}
+    for connection in getattr(snapshot, "connections", ()) or ():
+        if not isinstance(connection, Mapping):
+            continue
+        connection_id = connection.get("connection_id")
+        if isinstance(connection_id, str) and connection_id:
+            connections.setdefault(connection_id, connection)
+    return connections
+
+
+def _positive_int(value: object) -> int | None:
+    """正整数读取（布尔/非法值 → None）。"""
+
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
+def build_model_connection_options(snapshot: Any) -> tuple[ModelConnectionOption, ...]:
+    """研究场景路由候选 → 工具栏连接选项（全序保留，非法候选带拒绝 key）。
+
+    只投影 ``resolve_agent_model_binding`` 实际会解算的同一条路径
+    （``scenario_routes[agent_research].candidates``）；不在该路由内的连接不出现在
+    选项里（选了也不生效，选择时显式拒绝）。
+    """
+
+    route = _research_route(snapshot)
+    if route is None:
+        return ()
+    connections = _research_connections(snapshot)
+    options: list[ModelConnectionOption] = []
+    seen: set[str] = set()
+    for index, raw_id in enumerate(route.get("candidates") or (), start=1):
+        if not isinstance(raw_id, str) or not raw_id or raw_id in seen:
+            continue
+        seen.add(raw_id)
+        connection = connections.get(raw_id)
+        if connection is None:
+            options.append(
+                ModelConnectionOption(
+                    connection_id=raw_id,
+                    display_name=raw_id,
+                    model="",
+                    context_window=None,
+                    position=index,
+                    effective=False,
+                    reject_key="agent_research_model_selection_unknown",
+                )
+            )
+            continue
+        name = connection.get("name")
+        model = connection.get("model")
+        enabled = bool(connection.get("enabled", True))
+        options.append(
+            ModelConnectionOption(
+                connection_id=raw_id,
+                display_name=name if isinstance(name, str) and name else raw_id,
+                model=model if isinstance(model, str) else "",
+                context_window=_positive_int(connection.get("context_window")),
+                position=index,
+                effective=not options,
+                reject_key=None if enabled else "agent_research_model_selection_disabled",
+            )
+        )
+    return tuple(options)
+
+
+def _frozen_role_version(role_key: str) -> str | None:
+    """角色 Prompt 版本：优先设置页已保存版本，缺省用默认版本（与叶运行同源）。"""
+
+    defaults = ROLE_PROMPT_DEFAULTS.get(role_key)
+    if defaults is None:
+        return None
+    default_version = defaults[1]
+    saved = ConfigHandler.get_ai_role_prompt_version(role_key)
+    version = saved if isinstance(saved, str) and saved.strip() else default_version
+    return version if isinstance(version, str) and version.strip() else None
+
+
+def build_role_options() -> tuple[RoleOption, ...]:
+    """研究角色选项：主角色可选；子角色仅由主角色分配执行，选择即显式拒绝。"""
+
+    options: list[RoleOption] = []
+    for role_key in RESEARCH_ROLE_KEYS:
+        version = _frozen_role_version(role_key)
+        reject_key: str | None = None
+        if role_key not in ROLE_PROMPT_DEFAULTS:
+            reject_key = "agent_research_role_selection_unknown"
+        elif version is None:
+            reject_key = "agent_research_role_selection_version_missing"
+        elif role_key != _RESEARCH_MAIN_ROLE:
+            reject_key = "agent_research_role_selection_child_role"
+        options.append(
+            RoleOption(
+                role_key=role_key,
+                name_key=ROLE_PROMPT_NAME_KEYS.get(role_key, "agent_research_role_name_unknown"),
+                version=version,
+                reject_key=reject_key,
+            )
+        )
+    return tuple(options)
+
+
+def _decimal_amount(value: object) -> Decimal | None:
+    """金额读取：非法/缺失 → None（未知不填 0）。"""
+
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    return amount if amount.is_finite() else None
+
+
+def cost_state_view(
+    state: str,
+    *,
+    known_cny: Decimal | None = None,
+    reserved_cny: Decimal | None = None,
+    unpriced_attempts: int | None = None,
+    truncated: bool = False,
+    read_error: str | None = None,
+) -> CostUsageView:
+    """费用状态 → 只读视图（未知/未计价不提升为已知金额）。"""
+
+    return CostUsageView(
+        state=state,
+        state_key=COST_STATE_KEYS.get(state, COST_STATE_KEYS["unknown"]),
+        known_cny=known_cny,
+        reserved_cny=reserved_cny,
+        unpriced_attempts=unpriced_attempts,
+        truncated=truncated,
+        read_error=read_error,
+    )
+
+
+def unavailable_cost_view(error_key: str | None = None) -> CostUsageView:
+    """费用读取面不可用/失败（不显示 0，不冒充已结算）。"""
+
+    return cost_state_view("failed" if error_key else "unknown", read_error=error_key)
+
+
+def _parse_wire_moment(value: object) -> datetime | None:
+    """wire 时间戳（``...Z``）→ 带时区时间；非字符串/非法文案 → None（未知不猜）。"""
+
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _delta_ms(later: object, earlier: object) -> int | None:
+    """两时间戳差（毫秒）：任一端缺失/非法或出现负值 → None（不臆造区间）。"""
+
+    end = _parse_wire_moment(later)
+    start = _parse_wire_moment(earlier)
+    if end is None or start is None:
+        return None
+    delta_ms = int((end - start).total_seconds() * 1000)
+    return delta_ms if delta_ms >= 0 else None
+
+
+def _user_intake_moment(snapshot: Any) -> object:
+    """本执行首个用户提问的提交时刻（消息页内最早 ``role=user`` 的 committed_at）。"""
+
+    items = getattr(getattr(snapshot, "messages_page", None), "items", ()) or ()
+    candidates: list[object] = []
+    for item in items:
+        if getattr(item, "role", None) != MessageRole.USER:
+            continue
+        committed_at = getattr(item, "committed_at", None)
+        if _parse_wire_moment(committed_at) is not None:
+            candidates.append(committed_at)
+    if not candidates:
+        return None
+    return min(candidates, key=lambda value: cast(datetime, _parse_wire_moment(value)))
+
+
+def _user_wait_ms(snapshot: Any) -> int | None:
+    """用户等待：需要答复→答复被消费的累计时长（任一答复缺失/未消费 → 未知）。"""
+
+    decisions = tuple(getattr(snapshot, "decisions", ()) or ())
+    answered = [
+        decision
+        for decision in decisions
+        if getattr(decision, "answer_schema", None) is not None
+        or getattr(decision, "answer_consumed_at", None) is not None
+    ]
+    if not answered:
+        return None
+    total = 0
+    for decision in answered:
+        waited = _delta_ms(
+            getattr(decision, "answer_consumed_at", None),
+            getattr(decision, "created_at", None),
+        )
+        if waited is None:
+            return None
+        total += waited
+    return total
+
+
+def _save_ms(snapshot: Any) -> int | None:
+    """保存：工作结束（execution.ended_at）→ 成果发布（published_at 最大值）。"""
+
+    execution = getattr(snapshot, "execution", None)
+    ended_at = getattr(execution, "ended_at", None)
+    items = getattr(getattr(snapshot, "artifacts_page", None), "items", ()) or ()
+    published: list[str] = [
+        item.published_at
+        for item in items
+        if isinstance(getattr(item, "published_at", None), str) and getattr(item, "published_at", "")
+    ]
+    if not published:
+        return None
+    latest = max(published, key=lambda value: cast(datetime, _parse_wire_moment(value)))
+    return _delta_ms(latest, ended_at)
+
+
+def derive_duration_values(snapshot: Any) -> dict[str, int | None]:
+    """执行快照 → 五段耗时毫秒值（无来源/不可解算的段为 None，由视图显式未知）。
+
+    来源字段：
+    - 排队：``message.committed_at``(role=user 最早) → ``execution.created_at``；
+    - 用户等待：``decision.created_at`` → ``decision.answer_consumed_at``（逐条求和）；
+    - 实际工作：``execution.active_ms``（既有累计活跃时长）；
+    - 模型等待：无可见 attempt 时间戳投影 → 未知；
+    - 保存：``execution.ended_at`` → ``artifact.published_at``（最大值）。
+    """
+
+    execution = getattr(snapshot, "execution", None)
+    return {
+        "queue": _delta_ms(getattr(execution, "created_at", None), _user_intake_moment(snapshot)),
+        "user_wait": _user_wait_ms(snapshot),
+        "work": getattr(getattr(snapshot, "usage", None), "active_ms", None),
+        "model_wait": None,
+        "save": _save_ms(snapshot),
+    }
+
+
+def build_duration_segments(
+    *,
+    active_ms: int | None = None,
+    queue_ms: int | None = None,
+    user_wait_ms: int | None = None,
+    model_wait_ms: int | None = None,
+    save_ms: int | None = None,
+) -> tuple[DurationSegment, ...]:
+    """五段耗时投影：有来源事实给毫秒，缺来源显式未知（R21，不以 0 冒充）。"""
+
+    values: Mapping[str, int | None] = {
+        "queue": queue_ms,
+        "user_wait": user_wait_ms,
+        "work": active_ms,
+        "model_wait": model_wait_ms,
+        "save": save_ms,
+    }
+    return tuple(
+        DurationSegment(
+            segment,
+            label_key,
+            source_key,
+            values.get(segment),
+            None if values.get(segment) is not None else DURATION_UNKNOWN_KEY,
+        )
+        for segment, label_key, source_key in DURATION_SEGMENTS
+    )
+
+
+def _billing_of(connection: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    """连接计费子域（缺失按空映射；不臆造单价）。"""
+
+    billing = connection.get("billing") if connection is not None else None
+    return billing if isinstance(billing, Mapping) else {}
+
+
+def estimate_budget(
+    *,
+    text: str,
+    connection: Mapping[str, Any] | None,
+    token_counter: Callable[[str, str | None], tuple[int, bool]],
+) -> BudgetEstimate:
+    """发送前预算：按连接计费快照 + 正文 token 估算（不可估即显式未计价/未知）。
+
+    估算口径如实标注（仅正文 + 输出预留），不把「未含系统提示/资料/工具」的
+    小计伪装成整次请求的确定费用；单价缺失或按用量计费时不给金额（R21）。
+    """
+
+    billing = _billing_of(connection)
+    unit_key = "agent_research_budget_unit_per_request"
+    if connection is None:
+        return BudgetEstimate(
+            state=BUDGET_UNKNOWN,
+            state_key="agent_research_budget_unknown_no_model",
+            amount_cny=None,
+            unit_key=unit_key,
+            basis_key=None,
+            input_tokens=None,
+            output_reserve_tokens=None,
+            tokens_verified=False,
+        )
+    if billing.get("mode") != "estimate_cost":
+        return BudgetEstimate(
+            state=BUDGET_UNPRICED,
+            state_key="agent_research_budget_unpriced_usage_only",
+            amount_cny=None,
+            unit_key=unit_key,
+            basis_key=None,
+            input_tokens=None,
+            output_reserve_tokens=None,
+            tokens_verified=False,
+        )
+    if billing.get("pricing_unit") != "llm_tokens":
+        return BudgetEstimate(
+            state=BUDGET_UNPRICED,
+            state_key="agent_research_budget_unpriced_encoder",
+            amount_cny=None,
+            unit_key=unit_key,
+            basis_key=None,
+            input_tokens=None,
+            output_reserve_tokens=None,
+            tokens_verified=False,
+        )
+    input_price = _decimal_amount(billing.get("input_price_per_m"))
+    output_price = _decimal_amount(billing.get("output_price_per_m"))
+    if input_price is None or output_price is None:
+        return BudgetEstimate(
+            state=BUDGET_UNPRICED,
+            state_key="agent_research_budget_unpriced_price_missing",
+            amount_cny=None,
+            unit_key=unit_key,
+            basis_key=None,
+            input_tokens=None,
+            output_reserve_tokens=None,
+            tokens_verified=False,
+        )
+    stripped = text.strip()
+    if not stripped:
+        return BudgetEstimate(
+            state=BUDGET_UNKNOWN,
+            state_key="agent_research_budget_unknown_no_text",
+            amount_cny=None,
+            unit_key=unit_key,
+            basis_key=None,
+            input_tokens=None,
+            output_reserve_tokens=None,
+            tokens_verified=False,
+        )
+    model_ref = connection.get("model") if connection is not None else None
+    provider = connection.get("provider") if connection is not None else None
+    tokenizer_model = (
+        f"{provider}/{model_ref}"
+        if isinstance(provider, str) and provider and isinstance(model_ref, str) and model_ref
+        else (model_ref if isinstance(model_ref, str) and model_ref else None)
+    )
+    input_tokens, verified = token_counter(stripped, tokenizer_model)
+    # 惰性 import：避免 UI 模块导入期拉入 AI 服务组合根重依赖。
+    from services.ai_service.token_budget import OUTPUT_RESERVE_TOKENS
+
+    total = (
+        Decimal(input_tokens) / Decimal(1_000_000) * input_price
+        + Decimal(OUTPUT_RESERVE_TOKENS) / Decimal(1_000_000) * output_price
+    )
+    return BudgetEstimate(
+        state=BUDGET_ESTIMATED,
+        state_key="agent_research_budget_estimated",
+        amount_cny=total,
+        unit_key=unit_key,
+        basis_key="agent_research_budget_basis",
+        input_tokens=input_tokens,
+        output_reserve_tokens=OUTPUT_RESERVE_TOKENS,
+        tokens_verified=verified,
+    )
+
+
+def _default_model_catalog() -> ModelCatalogPort | None:
+    """生产缺省连接目录（惰性 import：UI 不 import app，只依赖服务层只读快照）。"""
+
+    from services.model_configuration_service import ModelConfigurationService
+
+    return cast(ModelCatalogPort, ModelConfigurationService())
+
+
+def _default_token_counter(text: str, model: str | None) -> tuple[int, bool]:
+    """生产缺省 token 计数（惰性 import：避免 UI 模块导入期拉入 AI 服务重依赖）。"""
+
+    from services.ai_service.token_budget import count_tokens_with_basis
+
+    return count_tokens_with_basis(text, model)
+
+
 class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState]):
     """壳层公共研究观察层 VM（共享实例；观察不控制执行）。"""
 
@@ -757,11 +1342,19 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         unavailable_reason_key: str = UNAVAILABLE_NOT_WIRED,
         intake: MainTurnIntakePort | None = None,
         mcp_catalog: MCPScopeCatalogPort | None = None,
+        model_catalog: ModelCatalogPort | None = None,
+        token_counter: Callable[[str, str | None], tuple[int, bool]] | None = None,
     ) -> None:
         self._service = service
         self._user_scope = user_scope
         self._intake = intake
         self._mcp_catalog = mcp_catalog
+        #: 既有模型连接目录（缺省按 ``ModelConfigurationService`` 只读快照；UI 不 import app）。
+        self._model_catalog = model_catalog if model_catalog is not None else _default_model_catalog()
+        #: 正文 token 计数（可注入替身；生产按 litellm tokenizer，经 CPU 池执行）。
+        self._token_counter = token_counter if token_counter is not None else _default_token_counter
+        #: 连接定义快照（预算估算读计费子域；不缓存秘密，仅含展示/计价字段）。
+        self._connection_rows: dict[str, Mapping[str, Any]] = {}
         #: 目录身份映射（identity_key → 服务身份）；范围选择提交时据此还原强类型身份。
         self._mcp_identities: dict[str, MCPServiceIdentity] = {}
         self._session_key: int | None = id(service) if service is not None else None
@@ -774,11 +1367,14 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         self._raw_artifacts: tuple[Any, ...] = ()
         # 已读到的会话清理事实：清理后到达的正文/草稿读取结果不再落 state（T-05）。
         self._session_cleaned = False
+        #: 预算估算票据：文本变化期间的旧估算结果不得覆盖新估算。
+        self._budget_ticket = 0
         self._state = ResearchObserverState(
             available=service is not None,
             unavailable_reason_key=unavailable_reason_key if service is None else "",
             composer_available=service is not None and intake is not None,
             mcp_scope_available=mcp_catalog is not None,
+            model_selection_available=self._model_catalog is not None,
         )
         self._init_mixin_fields()
 
@@ -819,6 +1415,8 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
                 self._apply_session_read(chosen, read, overview=overview, overview_error=overview_error)
                 if self._preferred_session_id == chosen:
                     self._preferred_session_id = None
+                # 费用与耗时投影是只读附加读面：失败不清空会话快照，只如实标注。
+                await self.refresh_usage()
                 return
             # 目标连续变化超过上限：保留既有快照，如实报码（不伪装成已导航）
             self._set_state(loading=False, last_error_code="REFRESH_TARGET_CHANGED")
@@ -1168,6 +1766,14 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             plan_error_key=None,
             rename_target_session_id=None,
             rename_text="",
+            # 费用/耗时/冻结选择随会话消失（模型与角色的待发送选择保留在工具栏）。
+            usage_round=None,
+            usage_cumulative=None,
+            usage_error_key=None,
+            durations=(),
+            durations_execution_id=None,
+            model_selection_frozen=None,
+            role_selection_frozen=None,
         )
 
     async def _read_pending_overview(self) -> tuple[PendingAnswerPage | None, str | None]:
@@ -1507,11 +2113,299 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             selected.add(identity_key)
         self._set_state(mcp_scope_selected=tuple(sorted(selected)))
 
+    # -- 研究侧模型/角色选择（F16/F27/J23） --------------------------------
+
+    async def load_model_selection(self) -> None:
+        """读取研究场景候选连接与角色选项（只读；目录缺失/失败如实报 key）。
+
+        模型选项只来自 ``scenario_routes[agent_research].candidates``——与
+        ``resolve_agent_model_binding`` 解算连接的同一路径；不在该路由内的连接
+        不进入选项，选中即显式拒绝（不静默换成默认模型）。
+        """
+
+        role_options = build_role_options()
+        current_role = self._state.role_selection
+        role_selection = current_role
+        if role_selection is None or self._role_option(role_options, role_selection) is None:
+            role_selection = next((option.role_key for option in role_options if option.eligible), None)
+        catalog = self._model_catalog
+        if catalog is None:
+            self._set_state(
+                role_options=role_options,
+                role_selection=role_selection,
+                role_selection_error_key=None,
+                model_selection_available=False,
+            )
+            return
+        try:
+            snapshot = await catalog.get_snapshot()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._set_state(
+                role_options=role_options,
+                role_selection=role_selection,
+                role_selection_error_key=None,
+                model_selection_error_key="agent_research_model_selection_error",
+            )
+            return
+        options = build_model_connection_options(snapshot)
+        self._connection_rows = _research_connections(snapshot)
+        current_model = self._state.model_selection
+        model_selection = current_model if self._option(options, current_model) is not None else None
+        if model_selection is None:
+            model_selection = next((option.connection_id for option in options if option.eligible), None)
+        self._set_state(
+            model_selection_available=True,
+            model_options=options,
+            model_selection=model_selection,
+            model_selection_error_key=None if options else "agent_research_model_selection_route_unavailable",
+            role_options=role_options,
+            role_selection=role_selection,
+            role_selection_error_key=None,
+        )
+
+    @staticmethod
+    def _option(options: Sequence[ModelConnectionOption], connection_id: str | None) -> ModelConnectionOption | None:
+        for option in options:
+            if option.connection_id == connection_id:
+                return option
+        return None
+
+    @staticmethod
+    def _role_option(options: Sequence[RoleOption], role_key: str | None) -> RoleOption | None:
+        for option in options:
+            if option.role_key == role_key:
+                return option
+        return None
+
+    async def select_model_connection(self, connection_id: str) -> None:
+        """选择模型连接：仅接受研究场景路由候选且已启用；非法选择显式拒绝。"""
+
+        option = self._option(self._state.model_options, connection_id)
+        if option is None:
+            self._set_state(model_selection_error_key="agent_research_model_selection_unknown")
+            return
+        if option.reject_key is not None:
+            self._set_state(model_selection_error_key=option.reject_key)
+            return
+        self._set_state(model_selection=connection_id, model_selection_error_key=None)
+        await self.refresh_budget_hint()
+
+    def select_role(self, role_key: str) -> None:
+        """选择研究角色：未知/子角色/版本缺失显式拒绝，不静默替换为默认角色。"""
+
+        option = self._role_option(self._state.role_options, role_key)
+        if option is None:
+            self._set_state(role_selection_error_key="agent_research_role_selection_unknown")
+            return
+        if option.reject_key is not None:
+            self._set_state(role_selection_error_key=option.reject_key)
+            return
+        self._set_state(role_selection=role_key, role_selection_error_key=None)
+
+    def _selected_connection(self) -> Mapping[str, Any] | None:
+        """当前选择的连接定义（未选择/目录未载入 → None，不猜候选）。"""
+
+        connection_id = self._state.model_selection
+        if connection_id is None:
+            return None
+        return self._connection_rows.get(connection_id)
+
+    async def refresh_budget_hint(self) -> None:
+        """发送前预算提示：按当前选择与正文估算（token 计数经 CPU 池，R16）。
+
+        文本/选择在计数期间变化时以最新票据为准，旧结果丢弃（不落过期估算）。
+        """
+
+        self._budget_ticket += 1
+        ticket = self._budget_ticket
+        connection = self._selected_connection()
+        text = self._state.composer_text
+        if self._model_catalog is None:
+            self._set_state(budget=None)
+            return
+        counter = self._token_counter
+        estimate = await ThreadPoolManager().run_async(
+            TaskType.CPU, estimate_budget, text=text, connection=connection, token_counter=counter
+        )
+        if ticket != self._budget_ticket:
+            return
+        self._set_state(budget=estimate)
+
+    # -- 费用与耗时分段（F27/NFR-P06） -------------------------------------
+
+    async def refresh_usage(self) -> None:
+        """读取本轮与累计费用、五段耗时（只读投影；读取面不可用如实未知）。"""
+
+        service = self._service
+        reader = getattr(service, "get_snapshot", None) if service is not None else None
+        if not callable(reader):
+            self._set_state(
+                usage_round=None,
+                usage_cumulative=None,
+                durations=(),
+                durations_execution_id=None,
+                usage_error_key="agent_research_usage_unavailable",
+            )
+            return
+        executions = self._state.executions
+        target = self._state.selected_execution_id or (executions[0][0] if executions else None)
+        if target is None:
+            self._set_state(
+                usage_round=None,
+                usage_cumulative=None,
+                durations=(),
+                durations_execution_id=None,
+                usage_error_key=None,
+            )
+            return
+        get_snapshot = cast("Callable[..., Awaitable[Any]]", reader)
+        try:
+            # 消息页用于解算「排队」的受理时刻；页大小见 ``_DURATION_MESSAGE_PAGE_LIMIT``。
+            snapshot = await get_snapshot(target, user_scope=self._user_scope, limit=_DURATION_MESSAGE_PAGE_LIMIT)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self._set_state(
+                usage_round=unavailable_cost_view(self._error_code(e)),
+                usage_cumulative=None,
+                durations=build_duration_segments(),
+                durations_execution_id=target,
+                usage_error_key="agent_research_usage_error",
+            )
+            return
+        round_view = await self._project_execution_cost(snapshot)
+        cumulative = await self._project_cumulative_cost(executions, prefetched={target: round_view})
+        values = derive_duration_values(snapshot)
+        self._set_state(
+            usage_round=round_view,
+            usage_cumulative=cumulative,
+            usage_error_key=None,
+            durations=build_duration_segments(
+                queue_ms=values["queue"],
+                user_wait_ms=values["user_wait"],
+                active_ms=values["work"],
+                model_wait_ms=values["model_wait"],
+                save_ms=values["save"],
+            ),
+            durations_execution_id=target,
+        )
+
+    async def _project_execution_cost(self, snapshot: Any) -> CostUsageView:
+        """单个执行快照 → 费用投影（未知/未计价/预留分列，不拼成伪零）。"""
+
+        usage = getattr(snapshot, "usage", None)
+        cost_state = getattr(usage, "cost_state", None)
+        attempt_count = getattr(usage, "model_attempt_count", None)
+        ledger_refs = tuple(
+            dict.fromkeys(
+                operation.invocation_id
+                for operation in getattr(snapshot, "operation_summaries", ()) or ()
+                if isinstance(getattr(operation, "invocation_id", None), str)
+                and getattr(operation, "invocation_id", "")
+            )
+        )
+        if cost_state == "known" and not ledger_refs:
+            # 账本无引用且模型调用计数为 0：确实零费用（已知零，与未知可区分）。
+            if attempt_count == 0:
+                return cost_state_view("known", known_cny=Decimal("0"), reserved_cny=Decimal("0"))
+            return cost_state_view("unknown")
+        if cost_state in ("unpriced", "reserved", "unknown"):
+            return cost_state_view(cast(str, cost_state))
+        if cost_state != "known":
+            return cost_state_view("unknown")
+        service = self._service
+        reader = getattr(service, "read_cost_projection", None) if service is not None else None
+        if not callable(reader):
+            return unavailable_cost_view("ledger_unavailable")
+        read_projection = cast("Callable[..., Awaitable[Any]]", reader)
+        try:
+            projection = await read_projection(ledger_refs=ledger_refs)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            return unavailable_cost_view(self._error_code(e))
+        if getattr(projection, "read_state", None) != "ok":
+            return unavailable_cost_view(getattr(projection, "read_error", None) or "read_failed")
+        known = _decimal_amount(getattr(projection, "known_cny", None))
+        unpriced = getattr(projection, "unpriced_attempts", None)
+        if known is None:
+            return cost_state_view("unknown", unpriced_attempts=unpriced if isinstance(unpriced, int) else None)
+        if isinstance(unpriced, int) and unpriced > 0:
+            return cost_state_view(
+                "partial",
+                known_cny=known,
+                reserved_cny=_decimal_amount(getattr(projection, "reserved_cny", None)),
+                unpriced_attempts=unpriced,
+            )
+        return cost_state_view(
+            "known",
+            known_cny=known,
+            reserved_cny=_decimal_amount(getattr(projection, "reserved_cny", None)),
+            unpriced_attempts=unpriced if isinstance(unpriced, int) else None,
+        )
+
+    async def _project_cumulative_cost(
+        self,
+        executions: tuple[tuple[str, str], ...],
+        *,
+        prefetched: Mapping[str, CostUsageView] | None = None,
+    ) -> CostUsageView:
+        """会话累计费用：逐执行只读投影求和；任一执行未知即不冒充完整总额。
+
+        ``prefetched`` 为已为本轮算过的执行视图（避免同一执行重复读取账本）。
+        """
+
+        if not executions:
+            return cost_state_view("unknown")
+        service = self._service
+        reader = getattr(service, "get_snapshot", None) if service is not None else None
+        if not callable(reader):
+            return unavailable_cost_view("ledger_unavailable")
+        get_snapshot = cast("Callable[..., Awaitable[Any]]", reader)
+        known_views = prefetched or {}
+        limit = min(len(executions), CUMULATIVE_EXECUTION_LIMIT)
+        truncated = len(executions) > limit
+        total: Decimal | None = None
+        unpriced_total = 0
+        complete = True
+        for execution_id, _label in executions[:limit]:
+            view = known_views.get(execution_id)
+            if view is None:
+                try:
+                    snapshot = await get_snapshot(execution_id, user_scope=self._user_scope, limit=1)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    return unavailable_cost_view(self._error_code(e))
+                view = await self._project_execution_cost(snapshot)
+            if view.state in ("failed", "unknown", "unpriced", "reserved"):
+                complete = False
+                if view.unpriced_attempts:
+                    unpriced_total += view.unpriced_attempts
+                continue
+            if view.known_cny is not None:
+                total = view.known_cny if total is None else total + view.known_cny
+            if view.state == "partial":
+                complete = False
+                unpriced_total += view.unpriced_attempts or 0
+        if not complete:
+            if total is None:
+                return cost_state_view("unknown", truncated=truncated)
+            return cost_state_view("partial", known_cny=total, unpriced_attempts=unpriced_total, truncated=truncated)
+        return cost_state_view(
+            "known",
+            known_cny=total if total is not None else Decimal("0"),
+            truncated=truncated,
+        )
+
     async def send_first_question(self) -> None:
         """发送首问：经注入的受理端口创建会话/受理（讨论/计划零派发属预期）。
 
         未接线受理端口时如实给出不可用 key（R21），不伪造已发送；取消继续传播
-        （R2）；空正文不提交。本次手选的 MCP 服务子集随首问冻结进 manifest。
+        （R2）；空正文不提交。本次手选的 MCP 服务子集与角色随首问冻结进 manifest；
+        角色/连接选择非法时显式拒绝发送（不静默回退默认角色或默认模型）。
         """
 
         intake = self._intake
@@ -1522,6 +2416,18 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         if not text:
             self._set_state(composer_error_key="agent_research_empty_draft")
             return
+        role_refs: tuple[tuple[str, str], ...] = ()
+        role_key = self._state.role_selection
+        if role_key is not None:
+            role_option = self._role_option(self._state.role_options, role_key)
+            if role_option is None or role_option.reject_key is not None or role_option.version is None:
+                self._set_state(
+                    composer_error_key=role_option.reject_key
+                    if role_option is not None and role_option.reject_key is not None
+                    else "agent_research_role_selection_unknown"
+                )
+                return
+            role_refs = ((role_key, role_option.version),)
         if self._state.composer_pending:
             return
         self._track_inflight_cancellable()
@@ -1535,6 +2441,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
                 mode=Mode(self._state.composer_mode),
                 session_id=self._state.session_id,
                 expected_revision=(self._state.session_draft_revision if self._state.session_id is not None else 0),
+                role_prompt_refs=role_refs,
                 mcp_selection=selection,
             )
         except asyncio.CancelledError:
@@ -1544,7 +2451,13 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             self._set_state(composer_pending=False, composer_error_key=self._error_code(e))
             return
         main_turn = getattr(result, "main_turn", None)
-        changes: dict[str, Any] = {"composer_pending": False, "composer_text": ""}
+        changes: dict[str, Any] = {
+            "composer_pending": False,
+            "composer_text": "",
+            # 选择随首问冻结（同会话内展示冻结值，不被后续点选静默改写）。
+            "model_selection_frozen": self._state.model_selection,
+            "role_selection_frozen": self._state.role_selection,
+        }
         if main_turn is None:
             changes["last_dispatch_reason"] = self._dispatch_reason(result)
         else:
@@ -1562,6 +2475,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             await self.load_plan_preview(reference[0], reference[1])
         if self._service is not None and self._state.available:
             await self.refresh()
+        await self.refresh_budget_hint()
 
     async def start_confirmed_plan(self) -> None:
         """开始已审计划：按界面呈现的计划版发起新执行意图（新意图排队）。
@@ -1869,6 +2783,7 @@ def shared_research_observer(
     unavailable_reason_key: str = UNAVAILABLE_NOT_WIRED,
     intake: MainTurnIntakePort | None = None,
     mcp_catalog: MCPScopeCatalogPort | None = None,
+    model_catalog: ModelCatalogPort | None = None,
 ) -> ResearchObserverViewModel:
     """取本会话共享的观察层 VM（同一 facade/受理端口复用；变化或已销毁则重建）。"""
 
@@ -1880,6 +2795,8 @@ def shared_research_observer(
         or _shared_vm._session_key != session_key
         or _shared_vm._intake is not intake
         or _shared_vm._mcp_catalog is not mcp_catalog
+        # 未显式注入目录时由 VM 自建只读目录实例，重复调用不得因 None 反复重建。
+        or (model_catalog is not None and _shared_vm._model_catalog is not model_catalog)
     ):
         stale = _shared_vm
         _shared_vm = ResearchObserverViewModel(
@@ -1888,6 +2805,7 @@ def shared_research_observer(
             unavailable_reason_key=unavailable_reason_key,
             intake=intake,
             mcp_catalog=mcp_catalog,
+            model_catalog=model_catalog,
         )
         if stale is not None and not stale.disposed:
             stale.dispose()

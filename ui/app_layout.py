@@ -519,6 +519,30 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         if page is not None:
             page.run_task(research_vm.load_mcp_scope)
 
+    def _load_model_selection() -> None:
+        """观察层挂载时读取研究场景模型候选与角色选项（只读；不改任何配置）。"""
+        page = _get_page()
+        if page is not None:
+            page.run_task(research_vm.load_model_selection)
+
+    def _select_model(connection_id: str) -> None:
+        """选择研究模型连接（异步校验命令；非法选择由 VM 显式拒绝）。"""
+        page = _get_page()
+        if page is not None and connection_id:
+            page.run_task(research_vm.select_model_connection, connection_id)
+
+    def _refresh_usage() -> None:
+        """刷新本轮/累计费用与五段耗时（只读投影）。"""
+        page = _get_page()
+        if page is not None:
+            page.run_task(research_vm.refresh_usage)
+
+    def _refresh_budget() -> None:
+        """重算发送前预算提示（token 计数在 VM 内经 CPU 池执行）。"""
+        page = _get_page()
+        if page is not None:
+            page.run_task(research_vm.refresh_budget_hint)
+
     def _load_sessions() -> None:
         """观察层挂载时读取会话列表（只读；不创建、不切换会话）。"""
         page = _get_page()
@@ -1045,6 +1069,11 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             on_retry_delivery=_retry_delivery,
             on_toggle_mcp_scope=research_vm.toggle_mcp_scope,
             on_load_mcp_scope=_load_mcp_scope,
+            on_select_model=_select_model,
+            on_select_role=research_vm.select_role,
+            on_load_model_selection=_load_model_selection,
+            on_refresh_usage=_refresh_usage,
+            on_refresh_budget=_refresh_budget,
             on_load_sessions=_load_sessions,
             on_open_session=_open_session,
             on_new_session_title=research_vm.set_new_session_title,
