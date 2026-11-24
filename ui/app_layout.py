@@ -19,7 +19,7 @@
 import asyncio
 import logging
 from enum import IntEnum
-from typing import Any
+from typing import Any, cast
 
 import flet as ft
 
@@ -54,6 +54,8 @@ from ui.viewmodels.research_observer_view_model import (
 from ui.views.backtest_view import BacktestView
 from ui.views.data_view import DataExplorerView
 from ui.views.home_view import HomeView
+from ui.viewmodels.research_comparison_view_model import ComparisonServicePort, ResearchComparisonViewModel
+from ui.views.research_comparison_panel import ResearchComparisonPanel
 from ui.views.research_observer_panel import ResearchObserverPanel
 from ui.views.screener_view import ScreenerView
 from ui.views.settings_view import SETTINGS_SUBTAB_INDEX, SettingsView
@@ -434,6 +436,15 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         )
     )
     research_open, set_research_open = ft.use_state(False)
+    # F37: 多模型对比接线（独立面板；不改动研究观察层热点文件）
+    comparison_state, comparison_vm = use_viewmodel(
+        factory=lambda: ResearchComparisonViewModel(
+            cast(ComparisonServicePort | None, research_service),
+            user_scope=str(getattr(agent_wiring, "user_scope", LOCAL_DESKTOP_USER_SCOPE)),
+            unavailable_reason_key=research_unavailable_key,
+        )
+    )
+    comparison_open, set_comparison_open = ft.use_state(False)
     decision_notice: str | None = None
     decision_notice, set_decision_notice = ft.use_state(lambda: decision_notice)
     # R2-I06: 业务对象 → 研究草稿准备（只准备不发送；与观察层共用同一 facade）
@@ -529,6 +540,27 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         page = _get_page()
         if page is not None and research_vm.state.available:
             page.run_task(research_vm.archive_session, session_id)
+
+    def _toggle_comparison(_e: ft.ControlEvent | None = None) -> None:
+        """展开/收起对比面板；展开时只读加载连接目录并同步当前会话。"""
+
+        opening = not comparison_open
+        set_comparison_open(opening)
+        if not opening:
+            return
+        comparison_vm.set_session(research_state.session_id)
+        page = _get_page()
+        if page is not None and comparison_state.available:
+            page.run_task(comparison_vm.load_connections)
+            if comparison_state.group_ref:
+                page.run_task(comparison_vm.refresh)
+
+    def _schedule_comparison(command: Any, *args: Any) -> None:
+        """异步命令统一经 page.run_task 调度（事件处理器内不做同步 IO，R16）。"""
+
+        page = _get_page()
+        if page is not None:
+            page.run_task(command, *args)
 
     def _on_draft_change(decision_id: str, text: str) -> None:
         research_vm.set_answer_draft(decision_id, text)
@@ -888,6 +920,14 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         on_click=safe_on_click(_toggle_research),
     )
     research_toggle_holder.current = research_toggle
+    # F37: 公共区多模型对比入口（独立面板；两路连接选择 + 只读组投影）
+    comparison_toggle = ft.IconButton(
+        icon=ft.Icons.COMPARE_ARROWS,
+        selected=comparison_open,
+        icon_size=AppStyles.FONT_SIZE_HEADLINE,
+        tooltip=I18n.get("agent_comparison_toggle"),
+        on_click=safe_on_click(_toggle_comparison),
+    )
     brand_text = ft.Text(
         I18n.get("app_brand"),
         size=AppStyles.FONT_SIZE_LG,
@@ -908,6 +948,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
                 brand_text,
                 # P02: 公共区研究入口（不新增第八业务导航；展开非模态观察层）
                 research_toggle,
+                comparison_toggle,
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             spacing=5,
@@ -979,6 +1020,24 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         if research_open
         else None
     )
+    # F37: 对比面板（并列/表格；动作全部显式点击，异步命令经 run_task 调度）
+    comparison_panel = (
+        ResearchComparisonPanel(
+            state=comparison_state,
+            on_close=lambda: _toggle_comparison(None),
+            on_lane=comparison_vm.set_lane,
+            on_text=comparison_vm.set_text,
+            on_mode=comparison_vm.set_mode,
+            on_view_mode=comparison_vm.set_view_mode,
+            on_submit=lambda: _schedule_comparison(comparison_vm.submit),
+            on_refresh=lambda: _schedule_comparison(comparison_vm.refresh),
+            on_retry_lane=lambda lane_ref: _schedule_comparison(comparison_vm.retry_lane, lane_ref),
+            on_stop=lambda: _schedule_comparison(comparison_vm.stop_group),
+            on_mcp_disconnect=comparison_vm.report_shared_mcp_disconnect,
+        )
+        if comparison_open
+        else None
+    )
 
     # --- SEC-03 状态栏指示器: 底部轻量「本会话外发 N 次」---
     # 数据源 egress_status_state.count（内存读, 无阻塞, R16）; 会话计数进程内单调、重启归零。
@@ -1028,6 +1087,8 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
     body_controls: list[ft.Control] = [nav_rail, ft.VerticalDivider(width=1), body]
     if research_panel is not None:
         body_controls.append(research_panel)
+    if comparison_panel is not None:
+        body_controls.append(comparison_panel)
     body_region = ft.Container(
         content=ft.Row(safe_controls(body_controls), expand=True),
         expand=True,
