@@ -378,7 +378,9 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
         identity = self._require_saved_identity()
         if lifecycle is None or identity is None:
             return
-        if not self._state.discovered_tools or self._test_receipt is None:
+        # 以「本轮测试回执存在」判定测试通过；测试成功但目录为空是合法回执，
+        # 不得用工具列表非空代替成功（N19）。
+        if self._test_receipt is None:
             self._set_state(status=Message("mcp_status_need_test"), status_level=STATUS_WARNING)
             return
         self._set_state(busy=True, status=None)

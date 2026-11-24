@@ -85,6 +85,7 @@ class _FakeLifecycle:
         self.disconnected: list[MCPServiceIdentity] = []
         self.residue_retries: list[MCPServiceIdentity] = []
         self.residue_closed = 1
+        self.tool_names: tuple[str, ...] = _TOOL_NAMES
         self.fail_with: BaseException | None = None
 
     def _maybe_fail(self) -> None:
@@ -107,7 +108,7 @@ class _FakeLifecycle:
         self.tested.append(identity)
         return MCPConnectionTestReceipt(
             identity=identity,
-            tool_names=_TOOL_NAMES,
+            tool_names=self.tool_names,
             catalog_digest="d" * 64,
             research_calls=0,
             closed=True,
@@ -334,6 +335,72 @@ class TestOperations:
         vm = _vm(fake)
         await vm.load()
         vm.select_service(_identity().stable_key())
+
+        await vm.connect()
+
+        assert fake.connect_calls == []
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_need_test"
+
+    @pytest.mark.asyncio
+    async def test_zero_tool_test_counts_as_tested_and_allows_connect(self) -> None:
+        """N19：测试成功但目录为空是合法回执，不得被当成「从未测试」。"""
+
+        fake = _FakeLifecycle([_config()])
+        fake.tool_names = ()
+        vm = _vm(fake)
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+
+        await vm.connection_test()
+
+        assert vm.state.discovered_tools == ()
+        assert vm.state.approved_tools == ()
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_tested"
+        assert vm.state.status.params["count"] == "0"
+        assert vm.state.status_level == STATUS_SUCCESS
+
+        await vm.connect()
+
+        assert fake.connect_calls == [(_identity(), ())]
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_connected"
+        assert vm.state.status.params["count"] == "0"
+        assert vm.state.status_level == STATUS_SUCCESS
+
+    @pytest.mark.asyncio
+    async def test_zero_tool_catalog_never_fabricates_tools(self) -> None:
+        """零工具只如实呈现空目录：不生成可勾选工具、不产生假工具名。"""
+
+        fake = _FakeLifecycle([_config()])
+        fake.tool_names = ()
+        vm = _vm(fake)
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+        await vm.connection_test()
+
+        vm.toggle_approved_tool("read_quote")
+
+        assert vm.state.discovered_tools == ()
+        assert vm.state.approved_tools == ()
+
+    @pytest.mark.asyncio
+    async def test_failed_test_still_blocks_connect(self) -> None:
+        """测试失败不产生回执，启连仍必须重新测试。"""
+
+        fake = _FakeLifecycle([_config()])
+        fake.tool_names = ()
+        vm = _vm(fake)
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+        fake.fail_with = RuntimeError("connection refused")
+
+        await vm.connection_test()
+
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_error"
+        fake.fail_with = None
 
         await vm.connect()
 
