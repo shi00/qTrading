@@ -1,4 +1,4 @@
-"""MCP 服务删除阻删与角色分配（W-06 / F14 残余 / F15 / J25）。"""
+"""MCP 服务删除阻删与角色分配（F14 残余 / F15 / J25）。"""
 
 from __future__ import annotations
 
