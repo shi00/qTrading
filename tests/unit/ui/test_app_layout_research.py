@@ -259,11 +259,29 @@ def _render_panel(
     monkeypatch: Any,
     callbacks: dict | None = None,
 ) -> ft.Container:
-    from ui.views import research_observer_panel as panel_mod
+    from ui.views import (
+        research_observer_artifacts as artifacts_mod,
+        research_observer_composer as composer_mod,
+        research_observer_conversation as conversation_mod,
+        research_observer_decisions as decisions_mod,
+        research_observer_panel as panel_mod,
+        research_observer_session_list as sessions_mod,
+        research_observer_widgets as widgets_mod,
+    )
 
     mock_i18n = MagicMock()
     mock_i18n.get.side_effect = lambda key, *a, **kw: key
-    monkeypatch.setattr(panel_mod, "I18n", mock_i18n)
+    # 面板已拆分为多个子视图模块：替身需覆盖全部渲染模块，否则子视图取到真实文案。
+    for module in (
+        panel_mod,
+        artifacts_mod,
+        composer_mod,
+        conversation_mod,
+        decisions_mod,
+        sessions_mod,
+        widgets_mod,
+    ):
+        monkeypatch.setattr(module, "I18n", mock_i18n)
     cbs = callbacks or {}
     component = make_component(
         panel_mod.ResearchObserverPanel,
@@ -415,6 +433,20 @@ class TestObservationPanelView:
             decisions=decisions,
             pending_count=len(decisions),
         )
+
+    def test_panel_header_shows_current_session_title(self, monkeypatch) -> None:
+        panel = _render_panel(
+            ResearchObserverState(
+                available=True,
+                session_id="s-1",
+                session_title="研究 A",
+                composer_available=True,
+            ),
+            monkeypatch=monkeypatch,
+        )
+        header = panel.content.controls[0]
+        header_texts = [control.value for control in _iter_controls(header) if isinstance(control, ft.Text)]
+        assert "agent_research_session_fmt" in header_texts, "当前会话标题必须在面板标题区渲染"
 
     def test_unavailable_state_is_honest(self, monkeypatch) -> None:
         panel = _render_panel(

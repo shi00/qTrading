@@ -494,6 +494,42 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         if page is not None:
             page.run_task(research_vm.load_mcp_scope)
 
+    def _load_sessions() -> None:
+        """观察层挂载时读取会话列表（只读；不创建、不切换会话）。"""
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.load_sessions)
+
+    def _open_session(session_id: str) -> None:
+        """切换到列表中的精确会话（只读导航；不派发研究）。"""
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.open_session, session_id)
+
+    def _create_session() -> None:
+        """新建空会话（标题来自列表输入框；不派发研究）。"""
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.create_session)
+
+    def _commit_rename() -> None:
+        """提交会话改名（CAS 动作；异步调度，事件处理器内不做同步 IO）。"""
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.commit_rename)
+
+    def _pin_session(session_id: str) -> None:
+        """置顶会话（只改元数据；不改变研究执行）。"""
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.pin_session, session_id)
+
+    def _archive_session(session_id: str) -> None:
+        """归档会话（只改元数据；不终止执行）。"""
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.archive_session, session_id)
+
     def _on_draft_change(decision_id: str, text: str) -> None:
         research_vm.set_answer_draft(decision_id, text)
 
@@ -929,6 +965,16 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             on_retry_delivery=_retry_delivery,
             on_toggle_mcp_scope=research_vm.toggle_mcp_scope,
             on_load_mcp_scope=_load_mcp_scope,
+            on_load_sessions=_load_sessions,
+            on_open_session=_open_session,
+            on_new_session_title=research_vm.set_new_session_title,
+            on_create_session=_create_session,
+            on_begin_rename=research_vm.begin_rename,
+            on_rename_text=research_vm.set_rename_text,
+            on_commit_rename=_commit_rename,
+            on_cancel_rename=research_vm.cancel_rename,
+            on_pin_session=_pin_session,
+            on_archive_session=_archive_session,
         )
         if research_open
         else None
