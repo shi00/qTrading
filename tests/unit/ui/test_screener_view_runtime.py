@@ -2220,6 +2220,27 @@ class TestOnRowClickAndDetailClose:
         # on_close 回调被清除 (StockDetailDialog 不再渲染)
         assert env["captured_callbacks"]["on_close"] is None
 
+    def test_detail_reopens_after_research_close(self, screener_view_env) -> None:
+        """N15: 详情收起后仍可从结果行重开详情（不残留旧实例/旧回调）。"""
+        env = screener_view_env
+
+        on_row_click = env["captured_callbacks"]["on_row_click"]
+        _invoke(on_row_click, {"ts_code": "000001.SZ"})
+        _rerender(env)
+        first_on_close = env["captured_callbacks"]["on_close"]
+        assert callable(first_on_close)
+
+        # 从详情发起研究后由详情自身收起 → 消费方 on_close 清空数据
+        _invoke(first_on_close)
+        _rerender(env)
+
+        # 其他入口（结果行点击）重开 → 构造新的详情实例
+        _invoke(on_row_click, {"ts_code": "000002.SZ"})
+        _rerender(env)
+        second_on_close = env["captured_callbacks"]["on_close"]
+        assert callable(second_on_close)
+        assert second_on_close is not first_on_close
+
 
 # ============================================================================
 # Handler 测试: _update_param / _on_slider_change
