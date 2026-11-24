@@ -11,13 +11,23 @@ import flet as ft
 import pytest
 
 from ui.i18n import I18n
-from ui.viewmodels.research_observer_view_model import PlanStepView, ResearchObserverState, SessionListItemView
+from ui.viewmodels.research_observer_view_model import (
+    PENDING_SCOPE_ALL,
+    DispatchReasonView,
+    PendingAnswerView,
+    PendingDecision,
+    PlanStepView,
+    ResearchObserverState,
+    SessionListItemView,
+)
 from ui.views.research_observer_artifacts import build_comparison_entry
 from ui.views.research_observer_composer import (
     build_answer_preview as _build_answer_preview,
     build_composer as _build_composer,
     build_plan_preview as _build_plan_preview,
+    dispatch_reason_text,
 )
+from ui.views.research_observer_decisions import build_decisions_section, build_pending_overview
 from ui.views.research_observer_panel import _build_body
 from ui.views.research_observer_session_list import build_session_list
 
@@ -223,8 +233,12 @@ def test_body_omits_answer_preview_when_empty() -> None:
 
 
 def _walk(root: Any) -> Iterator[Any]:
-    """深度遍历控件树（与面板渲染结构一致的三个挂载点）。"""
+    """深度遍历控件树（与面板渲染结构一致的三个挂载点；支持控件列表根）。"""
 
+    if isinstance(root, (list, tuple)):
+        for item in root:
+            yield from _walk(item)
+        return
     if not isinstance(root, ft.Control):
         return
     yield root
@@ -421,3 +435,249 @@ def test_comparison_entry_is_disabled_honest_placeholder() -> None:
 def test_panel_partitioned_into_subview_modules(module_name: str, builder: str) -> None:
     module = importlib.import_module(module_name)
     assert callable(getattr(module, builder))
+
+
+def test_dispatch_reason_unknown_code_falls_back_to_generic_without_fake_success() -> None:
+    reason = DispatchReasonView(code="unmapped_reason")
+
+    assert dispatch_reason_text(reason) == I18n.get("agent_research_dispatch_zero")
+
+
+def test_composer_renders_pending_error_and_structured_dispatch_reason() -> None:
+    state = ResearchObserverState(
+        available=True,
+        composer_available=True,
+        composer_pending=True,
+        composer_error_key="agent_research_empty_draft",
+        last_dispatch_reason=DispatchReasonView(code="dispatch_closed", params=(("mode", "execute"),)),
+    )
+
+    control = _build_composer(
+        state,
+        on_composer_text=_noop_text,
+        on_composer_mode=_noop_mode,
+        on_send=_noop,
+    )
+
+    texts = [item.value for item in _walk(control) if isinstance(item, ft.Text)]
+    assert I18n.get("agent_research_sending") in texts
+    assert I18n.get("agent_research_empty_draft") in texts
+    expected_reason = I18n.get("agent_research_dispatch_reason_detail_fmt").format(
+        reason=I18n.get("agent_research_dispatch_reason_dispatch_closed"),
+        detail="mode=execute",
+    )
+    assert expected_reason in texts
+    field = next(item for item in _walk(control) if isinstance(item, ft.TextField))
+    assert field.disabled is True
+    buttons = [item for item in _walk(control) if isinstance(item, (ft.FilledButton, ft.OutlinedButton))]
+    assert buttons and all(button.disabled for button in buttons), "在途时模式与发送入口都必须禁用"
+
+
+def test_mcp_scope_empty_catalogue_shows_honest_hint() -> None:
+    state = ResearchObserverState(
+        available=True,
+        composer_available=True,
+        mcp_scope_available=True,
+        mcp_scope_options=(),
+    )
+
+    control = _build_composer(
+        state,
+        on_composer_text=_noop_text,
+        on_composer_mode=_noop_mode,
+        on_send=_noop,
+    )
+
+    texts = [item.value for item in _walk(control) if isinstance(item, ft.Text)]
+    assert I18n.get("agent_research_mcp_scope") in texts
+    assert I18n.get("agent_research_mcp_scope_hint") in texts
+    assert I18n.get("agent_research_mcp_scope_empty") in texts
+    assert not any(isinstance(item, ft.Checkbox) for item in _walk(control)), "空选择不得渲染默认勾选"
+
+
+def test_plan_preview_pending_error_and_empty_branches() -> None:
+    pending = _build_plan_preview(ResearchObserverState(available=True, plan_pending=True), on_start_plan=_noop)
+    assert pending is not None
+    assert any(isinstance(item, ft.ProgressRing) for item in _walk(pending))
+
+    failed = _build_plan_preview(
+        ResearchObserverState(available=True, plan_error_key="agent_research_plan_missing"),
+        on_start_plan=_noop,
+    )
+    assert failed is not None
+    failed_texts = [item.value for item in _walk(failed) if isinstance(item, ft.Text)]
+    assert I18n.get("agent_research_plan_missing") in failed_texts
+    assert I18n.get("agent_research_plan_empty") in failed_texts
+
+    empty_with_reference = _build_plan_preview(
+        ResearchObserverState(available=True, plan_reference=("execution-1", 1)),
+        on_start_plan=_noop,
+    )
+    assert empty_with_reference is not None
+    empty_texts = [item.value for item in _walk(empty_with_reference) if isinstance(item, ft.Text)]
+    assert I18n.get("agent_research_plan_empty") in empty_texts
+    start = next(item for item in _walk(empty_with_reference) if isinstance(item, ft.FilledButton))
+    assert start.content.value == I18n.get("agent_research_start_plan")
+
+
+def _decision(decision_id: str = "d-1", *, kind: str = "user_choice", expires_at: str | None = None) -> PendingDecision:
+    return PendingDecision(
+        decision_id=decision_id,
+        execution_id="e-1",
+        round_id="r-1",
+        decision_kind=kind,
+        revision=2,
+        created_at="2026-11-17T02:00:00.000000Z",
+        expires_at=expires_at,
+        question_text="是否继续？",
+    )
+
+
+def test_decisions_section_renders_answerable_card_and_forwards_actions() -> None:
+    typed: list[tuple[str, str]] = []
+    submitted: list[tuple[str, str, str]] = []
+    state = ResearchObserverState(
+        available=True,
+        decisions=(_decision(expires_at="2026-11-17T03:00:00.000000Z"),),
+        answer_drafts=(("d-1", "已有草稿"),),
+        last_answer_delivery_state="delivered",
+    )
+
+    controls = build_decisions_section(
+        state,
+        on_draft_change=lambda decision_id, text: typed.append((decision_id, text)),
+        on_submit=lambda decision_id, execution_id, round_id: submitted.append((decision_id, execution_id, round_id)),
+    )
+
+    texts = [item.value for item in _walk(controls) if isinstance(item, ft.Text)]
+    assert I18n.get("agent_research_decision_expires_fmt").format(expires_at="2026-11-17T03:00:00.000000Z") in texts
+    assert I18n.get("agent_research_delivery_state_fmt").format(state="delivered") in texts
+    field = next(item for item in _walk(controls) if isinstance(item, ft.TextField))
+    assert field.key == "agent_research_answer_d-1"
+    assert field.label == I18n.get("agent_research_answer_label")
+    assert field.value == "已有草稿"
+    _invoke(field.on_change, SimpleNamespace(control=SimpleNamespace(value="改后的草稿")))
+    submit = _find_text_button(controls, I18n.get("agent_research_submit"))
+    _invoke(submit.on_click, SimpleNamespace(control=None))
+
+    assert typed == [("d-1", "改后的草稿")]
+    assert submitted == [("d-1", "e-1", "r-1")]
+
+
+def test_decisions_section_readonly_authorization_and_submitting_state() -> None:
+    readonly = build_decisions_section(
+        ResearchObserverState(available=True, decisions=(_decision(kind="authorization"),)),
+        on_draft_change=lambda _d, _t: None,
+        on_submit=lambda _d, _e, _r: None,
+    )
+    readonly_texts = [item.value for item in _walk(readonly) if isinstance(item, ft.Text)]
+    assert I18n.get("agent_research_decision_dedicated") in readonly_texts
+    assert not any(isinstance(item, ft.TextField) for item in _walk(readonly))
+    assert not any(isinstance(item, ft.TextButton) for item in _walk(readonly))
+
+    submitting = build_decisions_section(
+        ResearchObserverState(available=True, decisions=(_decision(),), submitting=True),
+        on_draft_change=lambda _d, _t: None,
+        on_submit=lambda _d, _e, _r: None,
+    )
+    submit = _find_text_button(submitting, I18n.get("agent_research_submitting"))
+    assert submit.disabled is True
+
+
+def test_decisions_section_renders_delivery_failure_reason() -> None:
+    controls = build_decisions_section(
+        ResearchObserverState(
+            available=True,
+            last_answer_delivery_state="failed",
+            last_answer_delivery_reason="channel_closed",
+        ),
+        on_draft_change=lambda _d, _t: None,
+        on_submit=lambda _d, _e, _r: None,
+    )
+
+    texts = [item.value for item in _walk(controls) if isinstance(item, ft.Text)]
+    assert I18n.get("agent_research_delivery_state_fmt").format(state="failed") in texts
+    assert I18n.get("agent_research_delivery_reason_fmt").format(reason="channel_closed") in texts
+    assert I18n.get("agent_research_no_decisions") in texts
+
+
+def _pending(
+    stage: str,
+    *,
+    session_id: str = "s-2",
+    session_title: str | None = "研究 B",
+    decision_id: str = "d-2",
+    delivery_state: str | None = None,
+    consumption_state: str | None = None,
+) -> PendingAnswerView:
+    return PendingAnswerView(
+        session_id=session_id,
+        session_title=session_title,
+        decision_id=decision_id,
+        execution_id="e-2",
+        round_id="r-2",
+        decision_kind="user_choice",
+        revision=2,
+        stage=stage,
+        created_at="2026-11-17T02:00:00.000000Z",
+        expires_at=None,
+        question_text="继续吗？",
+        command_record_id="cmd-1" if stage != "answer" else None,
+        delivery_state=delivery_state,
+        consumption_state=consumption_state,
+    )
+
+
+def test_pending_overview_lists_other_sessions_and_retry_entry() -> None:
+    retried: list[str] = []
+    state = ResearchObserverState(
+        available=True,
+        session_id="s-1",
+        pending_scope=PENDING_SCOPE_ALL,
+        pending_count=4,
+        pending_items=(
+            _pending("answer", session_id="s-1", session_title="研究 A", decision_id="d-self"),
+            _pending("answer", decision_id="d-other"),
+            _pending("answer", session_title=None, decision_id="d-untitled"),
+            _pending("delivery", decision_id="d-delivery", delivery_state="not_delivered"),
+            _pending("consumption", decision_id="d-consumed", consumption_state="consumed"),
+        ),
+        pending_items_truncated=True,
+    )
+
+    control = build_pending_overview(state, on_retry_delivery=retried.append)
+
+    texts = [item.value for item in _walk(control) if isinstance(item, ft.Text)]
+    assert I18n.get("agent_research_pending_global") in texts
+    assert I18n.get("agent_research_pending_fmt").format(count=4) in texts
+    assert I18n.get("agent_research_pending_item_fmt").format(session="研究 B", kind="user_choice", revision=2) in texts
+    assert (
+        I18n.get("agent_research_pending_item_fmt").format(
+            session=I18n.get("agent_research_pending_unknown_session"),
+            kind="user_choice",
+            revision=2,
+        )
+        in texts
+    )
+    assert I18n.get("agent_research_delivery_state_fmt").format(state="not_delivered") in texts
+    assert I18n.get("agent_research_consumption_state_fmt").format(state="consumed") in texts
+    assert I18n.get("agent_research_pending_truncated") in texts
+    assert (
+        I18n.get("agent_research_pending_item_fmt").format(session="研究 A", kind="user_choice", revision=2)
+        not in texts
+    ), "当前会话的待答复决定由决定卡呈现，概览不得重复"
+    retry = _find_text_button(control, I18n.get("agent_research_delivery_retry"))
+    _invoke(retry.on_click, SimpleNamespace(control=None))
+    assert retried == ["d-delivery"]
+
+
+def test_pending_overview_empty_scope_only() -> None:
+    control = build_pending_overview(
+        ResearchObserverState(available=True, session_id="s-1"),
+        on_retry_delivery=_noop_text,
+    )
+
+    texts = [item.value for item in _walk(control) if isinstance(item, ft.Text)]
+    assert I18n.get("agent_research_pending_session_only") in texts
+    assert I18n.get("agent_research_pending_fmt").format(count=0) in texts
+    assert not any(isinstance(item, ft.TextButton) for item in _walk(control))
