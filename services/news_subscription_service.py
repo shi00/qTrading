@@ -901,6 +901,30 @@ class NewsSubscriptionService:
                         DataSanitizer.sanitize_error(e),
                     )
 
+    async def _resolve_news_id(self, content: str, publish_time: typing.Any) -> int | None:
+        """N07：落库后按 ``(content_hash, publish_time)`` 反查准确 ``market_news.id``。
+
+        身份核对失败（无 ``publish_time`` / 查询异常 / 无匹配）一律返回 ``None``，
+        前端卡片据此保持研究入口禁用。``CancelledError`` 原样传播（R2）；
+        ``EngineDisposedError`` 原样传播以保留优雅停机语义（R5）。
+        """
+        if publish_time is None:
+            return None
+        try:
+            return await self.cache.market_dao.get_market_news_id(content, publish_time)
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            error_info = classify_error(e, context="general")
+            logger.warning(
+                "[NewsService] News id lookup failed (code=%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+            )
+            return None
+
     @log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def _fetch_and_notify(self):
         """Fetch latest news and trigger alert if new"""
@@ -1024,7 +1048,6 @@ class NewsSubscriptionService:
                         self._seen_hashes.move_to_end(h)
                         continue
                     new_items_found = True
-                    new_items.append(item)
 
                     current_news_content = item.get("content", "")
                     current_news_time = item.get("time", "")
@@ -1050,6 +1073,12 @@ class NewsSubscriptionService:
                         },
                     )
                     await self.cache.market_dao.save_market_news(normalized, wait=True)
+
+                    # N07：落库成功后回查准确 DB ID 并随 NEW_ITEM 下发，前端原卡才能
+                    # 用该身份准备研究草稿（无需手刷）；身份未核（查询失败/无匹配）时
+                    # 不带 id，卡片保持禁用（R21：不伪造对象身份）。
+                    news_id = await self._resolve_news_id(clean_content, normalized.get("publish_time"))
+                    new_items.append({**item, "id": news_id} if news_id is not None else item)
 
                     # UIR-F04-001：持久化成功后才标记已见，保存失败项可由下次轮询重试；
                     # 水位仅在整批循环无异常结束后推进，不会被失败项越过。

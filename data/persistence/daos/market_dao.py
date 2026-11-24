@@ -265,6 +265,26 @@ class MarketDao(BaseDao):
             )
         return await self._write_db(sql, params)
 
+    async def get_market_news_id(self, content: str, publish_time: typing.Any) -> int | None:
+        """按唯一键 ``(content_hash, publish_time)`` 反查 ``market_news.id``（N07）。
+
+        实时快讯落库后需要回传准确的数据库 ID，前端原卡片才能以该身份准备研究
+        草稿（无 ID 的卡片仍禁用入口，R21：不伪造对象身份）。``content_hash``
+        口径与 :meth:`save_market_news` 完全一致（sha256 全文 hex）。查询失败
+        （基础设施异常）抑制为空结果 → ``None``，由调用方降级为「身份未核」。
+        """
+        if publish_time is None:
+            return None
+        content_hash = hashlib.sha256((content or "").encode("utf-8")).hexdigest()
+        sql = "SELECT id FROM market_news WHERE content_hash = $1 AND publish_time = $2 LIMIT 1"
+        df = await self._read_db(sql, (content_hash, publish_time))
+        if df is None or df.empty:
+            return None
+        try:
+            return int(df.iloc[0]["id"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
     async def update_market_news_analysis(
         self,
         news_id: int,
