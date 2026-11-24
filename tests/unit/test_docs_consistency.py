@@ -147,7 +147,6 @@ if str(_DOCS_TESTS_DIR) not in sys.path:
 
 from test_consistency import (  # type: ignore[import-not-found]  # tests/docs 目录运行时经 sys.path 动态解析
     TestVersionConsistency,
-    TestSecurityVersion,
     TestRepoUrlConsistency,
     TestEmptyMarkdownLinks,
     TestReadmeRiskDisclaimer,

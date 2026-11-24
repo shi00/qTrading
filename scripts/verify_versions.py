@@ -4,7 +4,8 @@ Checks:
 1. pyright version consistency across pyproject.toml / requirements-dev.txt / ci_cd.yml / package.json
 2. .release-please-manifest.json version matches pyproject.toml version
 3. Repo URL consistency (no stale louis2sin/AStockScreener in docs)
-4. SECURITY.md supported version matches pyproject.toml major.minor
+4. SECURITY.md 支持策略结构：要求 `## Supported Versions` 章节存在，且不得重新引入
+   版本字面量表格行（精确 / 通配均禁止；ADR-0017 Errata 2026-11-24）。
 5. No empty markdown links ]() in README.md
 6. CLAUDE.md reference-style pointers (见 `xxx.py`) target existing files
 7. Flet 四包（flet / flet-desktop / flet-charts / flet-code-editor）版本一致性
@@ -25,7 +26,8 @@ Checks:
 发布构建始终经 ``/DMyAppVersion`` 注入 tag 版本。）
 
 D5（检视 §5.1 职责表）：文档引用检查（Check 5 / Check 6）委托 docs_markdown 统一解析
-视图，不再维护第二套文档解析；产品/依赖/安全支持/Flet/sidecar 版本职责保留在本脚本。
+视图，不再维护第二套文档解析；产品/依赖/Flet/sidecar 版本职责保留在本脚本，SECURITY.md
+仅保留仓库 URL 一致性与支持策略结构检查。
 
 Usage: python scripts/verify_versions.py [--check-sidecar-binary <path>]
        python scripts/verify_versions.py --release-tag <tag>
@@ -67,6 +69,24 @@ SIDECAR_PROTOCOL_PATH = ROOT / "sidecars" / "qtrading-pg-sidecar" / "src" / "pro
 
 STALE_REPO_URL = "louis2sin/AStockScreener"
 EXPECTED_REPO_URL = "shi00/qTrading"
+
+# SECURITY.md 支持策略（ADR-0017 Errata 2026-11-24）：章节必须存在，且不得重新引入
+# 版本字面量表格行（精确版本或 `< major.minor` / `major.minor.x` 通配形态均禁止）。
+_SECURITY_SUPPORTED_HEADING_RE = re.compile(r"^##\s+Supported Versions\s*$", re.MULTILINE)
+# 表格首列版本形态：可带 `< ` 前缀；调用侧先剥离 `v` 前缀与反引号/粗体装饰，
+# 故预发布后缀（`-rc.1`）与 `(latest)` 说明等尾部内容不参与匹配。
+_SECURITY_VERSION_CELL_RE = re.compile(r"^(?:<\s*)?\d+\.\d+(?:\.\d+)?(?:\.x)?\b")
+
+
+def _security_table_first_cell(line: str) -> str | None:
+    """返回 Markdown 表格行首列原文；非表格行返回 None（允许省略前导 `|`）。"""
+    stripped = line.strip()
+    if "|" not in stripped:
+        return None
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    return stripped.split("|", 1)[0].strip()
+
 
 # sidecar version --json 调用超时（秒），与 generate_sidecar_manifest.py 对齐
 SIDECAR_VERSION_TIMEOUT_S = 10
@@ -161,20 +181,30 @@ def check_repo_url_consistency() -> list[str]:
     return errors
 
 
-def check_security_supported_version(pyproject_ver: str) -> list[str]:
-    """Check 4: SECURITY.md supported version matches pyproject major.minor."""
-    errors = []
+def check_security_policy() -> list[str]:
+    """Check 4: SECURITY.md 支持策略结构（ADR-0017 Errata 2026-11-24）。
+
+    支持版本不再登记为版本字面量：要求 ``## Supported Versions`` 章节存在，且不得重新
+    引入表格行形式的版本号（精确 / 通配均禁止）。章节缺失或通配表回归即显式失败；
+    正文缺失 fail-closed（F17/§5.1）。
+    """
     if not SECURITY_PATH.exists():
-        # F17/§5.1：安全支持表所在正文缺失须显式失败，不得静默跳过装通过（fail-closed）
-        errors.append(f"必需正文缺失: {SECURITY_PATH} 不存在，安全支持版本检查无法执行（fail-closed）")
-        return errors
+        return [f"必需正文缺失: {SECURITY_PATH} 不存在，安全支持策略检查无法执行（fail-closed）"]
     content = SECURITY_PATH.read_text(encoding="utf-8")
-    major_minor = ".".join(pyproject_ver.split(".")[:2])
-    pattern = rf"\| {re.escape(major_minor)}\.x\s+\| :white_check_mark:"
-    if not re.search(pattern, content):
-        errors.append(
-            f"SECURITY.md supported version table missing '{major_minor}.x' (pyproject version: {pyproject_ver})"
-        )
+    errors = []
+    if not _SECURITY_SUPPORTED_HEADING_RE.search(content):
+        errors.append("SECURITY.md 缺少 '## Supported Versions' 章节；安全支持策略必须显式声明")
+    for lineno, line in enumerate(content.splitlines(), start=1):
+        cell = _security_table_first_cell(line)
+        if cell is None:
+            continue
+        normalized = cell.replace("`", "").replace("*", "").strip()
+        if normalized[:1].lower() == "v" and normalized[1:2].isdigit():
+            normalized = normalized[1:]
+        if _SECURITY_VERSION_CELL_RE.match(normalized):
+            errors.append(
+                f"SECURITY.md:{lineno} 重新引入版本字面量表格行；支持版本须为策略表述（ADR-0017 Errata 2026-11-24）"
+            )
     return errors
 
 
@@ -620,8 +650,8 @@ def main() -> None:
     # Check 3: Repo URL consistency
     errors.extend(check_repo_url_consistency())
 
-    # Check 4: SECURITY.md supported version
-    errors.extend(check_security_supported_version(pyproject_ver))
+    # Check 4: SECURITY.md 支持策略结构（禁止版本字面量表回归）
+    errors.extend(check_security_policy())
 
     # Check 5: Empty markdown links
     errors.extend(check_empty_markdown_links())
