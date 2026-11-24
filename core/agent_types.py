@@ -7212,7 +7212,10 @@ class OperationRead:
 
     ``phase='unknown'`` 或 ``effect_state=unknown`` 原样返回并置
     ``result_available=False``/``unavailable_reason='effect_unknown'``——不猜成功
-    或失败（§9.9）；``result_ref`` 指向同库正文时按游标分页。清理后结果不可查时
+    或失败（§9.9）；未开始派发（``phase='prepared'`` 且 effect ``not_dispatched``）
+    置 ``unavailable_reason='not_dispatched'``，与已认领/已派发未终结的
+    ``result_pending`` 区分（不把初始态读成「处理中」）；``result_ref`` 指向同库
+    正文时按游标分页。清理后结果不可查时
     置 ``unavailable_reason='result_cleaned'``（与 ``read_artifact`` 的
     ``body_cleaned`` 同构，不把已清当坏行、不用空结果冒充成功）。
     """
