@@ -1693,6 +1693,12 @@ class ScenarioExecutor:
                     "actual_model": response.actual_model,
                     **_encoder_usage_metadata(pricing, identity, connection.model, response),
                 }
+                # N04：适配器收尾（如注入 SDK client 关闭）失败不改写结果/用量，但
+                # 收尾状态单列进 attempt 元数据（R21：已知降级信号不在持久化边界丢失，
+                # 也不覆盖 succeeded 主状态）。
+                response_metadata = getattr(response, "metadata", None)
+                if isinstance(response_metadata, Mapping) and "cleanup_status" in response_metadata:
+                    attempt_metadata["cleanup_status"] = response_metadata["cleanup_status"]
                 scope = _AttemptScope(identity, attempt_id, reservation_id, attempt_metadata, ledger)
                 self._recorder.observe_usage(_observation_from(identity, attempt_id, response, attempt_metadata))
 
