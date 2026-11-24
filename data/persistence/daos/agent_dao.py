@@ -8279,9 +8279,33 @@ class AgentDao(BaseDao):
         escaped = query_text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         return f"%{escaped}%"
 
+    @classmethod
+    def _history_like_patterns(cls, query_text: str) -> tuple[str, ...]:
+        """query_text → LIKE 模式集合：原写法 + 写入侧公开投影（符号中和）。
+
+        公开检索列（消息 ``search_text`` / 成果摘要 / 会话标题）写入时经
+        ``project_public_text`` 中和尖括号（``<``/``>`` → ``‹``/``›``），查询若只
+        用原写法转义会漏掉这些公开行。故原写法与同一投影各生成一个模式（去重后
+        取「任一命中」）：``PE < 20`` 与 ``PE ‹ 20`` 命中同一公开消息。仅扩展查询
+        侧模式，不改变检索列，私有原文仍不进索引。
+        """
+
+        patterns: list[str] = []
+        for candidate in (query_text, project_public_text(query_text)):
+            pattern = cls._history_like_pattern(candidate)
+            if pattern not in patterns:
+                patterns.append(pattern)
+        return tuple(patterns)
+
+    @staticmethod
+    def _history_text_like(column: sa.ColumnElement[Any], patterns: Sequence[str]) -> sa.ColumnElement[bool]:
+        """检索列按模式集合 ILIKE（同一通配符转义语义），任一模式命中即可。"""
+
+        return sa.or_(*(column.ilike(pattern, escape="\\") for pattern in patterns))
+
     @staticmethod
     def _history_session_title_predicate(
-        session_id_column: sa.ColumnElement[Any], *, user_scope: str, pattern: str
+        session_id_column: sa.ColumnElement[Any], *, user_scope: str, patterns: Sequence[str]
     ) -> sa.ColumnElement[bool]:
         """会话标题命中（检视 D18）：标题可搜，中文按 ILIKE 子串（不依赖分词）。
 
@@ -8296,12 +8320,12 @@ class AgentDao(BaseDao):
                 AgentSession.user_scope == user_scope,
                 AgentSession.session_id == session_id_column,
                 AgentSession.cleaned_at.is_(None),
-                AgentSession.title.ilike(pattern, escape="\\"),
+                AgentDao._history_text_like(AgentSession.title, patterns),
             )
         )
 
     @staticmethod
-    def _history_artifact_body_predicate(pattern: str) -> sa.ColumnElement[bool]:
+    def _history_artifact_body_predicate(patterns: Sequence[str]) -> sa.ColumnElement[bool]:
         """成果 ``body_ref`` 载荷公开正文命中（检视 D18：完整公开表示，含尾词）。
 
         正文在 ``agent_body_payload.payload_bytes``（单块 BYTEA；``encoding`` 由表
@@ -8316,7 +8340,7 @@ class AgentDao(BaseDao):
             sa.and_(
                 AgentBodyPayload.user_scope == AgentArtifact.user_scope,
                 AgentBodyPayload.body_ref == AgentArtifact.body_ref,
-                body_text_expr.ilike(pattern, escape="\\"),
+                AgentDao._history_text_like(body_text_expr, patterns),
             )
         )
 
@@ -8469,6 +8493,10 @@ class AgentDao(BaseDao):
           不把大文本拉到 Python）三路任一命中；三者与消息同一通配符转义；
           ④ 未公开（``published_at IS NULL``）与已清理（``cleaned_at`` 非空）的
           成果原件在关键词搜索中**显式排除**，不靠「恰好搜不到」；
+          ⑤ 符号写法等价（N26）：公开检索列写入时经 ``project_public_text`` 中和
+          尖括号（``<``/``>`` → ``‹``/``›``），故查询按原写法与同一投影各生成
+          一个模式（任一命中），``PE < 20`` 与 ``PE ‹ 20`` 命中同一公开消息；检索列
+          不变，私有原文仍不进索引；
         - 缺投影显式失败（检视 D18）：关键词搜索先核对候选范围（与本查询命中同一
           scope/round/type/role/agent/state/date/固定上界，不含关键词与游标）——
           若存在公开消息（``event_kind='public_message_saved'``）已有 ``body_text``
@@ -8745,7 +8773,7 @@ class AgentDao(BaseDao):
                     message_filters.append(message_moment < day_to_excl)
                 message_stmt = sa.select(*message_cols).where(*message_filters)
                 if query.query_text:
-                    pattern = self._history_like_pattern(query.query_text)
+                    patterns = self._history_like_patterns(query.query_text)
                     # 缺投影先于关键词过滤核对：缺失即显式失败，不返回残缺页（检视 D18）
                     await self._history_require_search_projection(
                         conn,
@@ -8754,12 +8782,13 @@ class AgentDao(BaseDao):
                         identity_str=identity_str,
                     )
                     # 关键词命中：消息公开文本投影（含尾词）或所属会话标题（中文按
-                    # ILIKE 子串，不依赖分词）；两路共用同一通配符转义。
+                    # ILIKE 子串，不依赖分词）；原写法与写入侧公开投影（符号中和）
+                    # 两种模式共用同一通配符转义，两种写法命中同一公开消息（N26）。
                     message_stmt = message_stmt.where(
                         sa.or_(
-                            AgentMessage.search_text.ilike(pattern, escape="\\"),
+                            self._history_text_like(AgentMessage.search_text, patterns),
                             self._history_session_title_predicate(
-                                AgentMessage.session_id, user_scope=user_scope, pattern=pattern
+                                AgentMessage.session_id, user_scope=user_scope, patterns=patterns
                             ),
                         )
                     )
@@ -8859,16 +8888,16 @@ class AgentDao(BaseDao):
                     # 公开正文 / 会话标题四路任一命中，同一转义语义；未公开（
                     # published_at IS NULL）与已清理（cleaned_at 非空）原件显式
                     # 排除（不靠「恰好搜不到」），不把不可得结果伪装成可搜。
-                    pattern = self._history_like_pattern(query.query_text)
+                    patterns = self._history_like_patterns(query.query_text)
                     artifact_stmt = artifact_stmt.where(
                         AgentArtifact.published_at.is_not(None),
                         AgentArtifact.cleaned_at.is_(None),
                         sa.or_(
-                            AgentArtifact.summary.ilike(pattern, escape="\\"),
-                            AgentArtifact.body_text.ilike(pattern, escape="\\"),
-                            self._history_artifact_body_predicate(pattern),
+                            self._history_text_like(AgentArtifact.summary, patterns),
+                            self._history_text_like(AgentArtifact.body_text, patterns),
+                            self._history_artifact_body_predicate(patterns),
                             self._history_session_title_predicate(
-                                AgentArtifact.session_id, user_scope=user_scope, pattern=pattern
+                                AgentArtifact.session_id, user_scope=user_scope, patterns=patterns
                             ),
                         ),
                     )
