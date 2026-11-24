@@ -1020,6 +1020,10 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             return
         if self._state.draft_pending:
             return
+        # 卡片已不是当前观察会话（渲染后被切走）：不按旧卡片身份清空/读取当前卡（N16）。
+        current_session = self._state.session_id
+        if current_session is not None and current_session != session_id:
+            return
         self._track_inflight_cancellable()
         self._set_state(
             draft_pending=True,

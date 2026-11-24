@@ -501,10 +501,12 @@ def _build_artifact_card(
 def _build_session_draft_card(
     state: ResearchObserverState,
     *,
-    on_load_draft: Callable[[], None],
+    session_id: str,
+    on_load_draft: Callable[[str, int], None],
 ) -> ft.Control:
-    """会话草稿只读卡（R2-I23）：读取入口 + 正文/选择/稿版；不发送、不建研究。"""
+    """会话草稿只读卡（R2-I23）：读取入口绑定本卡会话/稿版；不发送、不建研究。"""
 
+    revision = state.session_draft_revision
     header: list[ft.Control] = [
         ft.Text(
             I18n.get("agent_research_draft"),
@@ -526,7 +528,7 @@ def _build_session_draft_card(
                 icon=ft.Icons.RESTORE_PAGE,
                 icon_size=AppStyles.FONT_SIZE_TITLE,
                 tooltip=I18n.get("agent_research_draft_load"),
-                on_click=lambda _e: on_load_draft(),
+                on_click=lambda _e, sid=session_id, rev=revision: on_load_draft(sid, rev),
             )
         )
     rows: list[ft.Control] = [ft.Row(header, spacing=AppStyles.SPACING_SM)]
@@ -652,7 +654,7 @@ def _build_body(
     on_toggle_execution: Callable[[str], None],
     on_select_execution: Callable[[str | None], None],
     on_load_artifact: Callable[[str, int, str, str], None],
-    on_load_draft: Callable[[], None],
+    on_load_draft: Callable[[str, int], None],
     on_composer_text: Callable[[str], None],
     on_composer_mode: Callable[[str], None],
     on_send: Callable[[], None],
@@ -698,7 +700,8 @@ def _build_body(
                 color=AppColors.ERROR,
             )
         )
-    if state.session_id is None:
+    session_id = state.session_id
+    if session_id is None:
         if not state.loading:
             rows.append(
                 ft.Text(
@@ -711,14 +714,14 @@ def _build_body(
 
     rows.append(
         ft.Text(
-            I18n.get("agent_research_session_fmt").format(title=state.session_title or state.session_id),
+            I18n.get("agent_research_session_fmt").format(title=state.session_title or session_id),
             size=AppStyles.FONT_SIZE_BODY,
             weight=ft.FontWeight.BOLD,
             color=AppColors.TEXT_PRIMARY,
         )
     )
     if state.session_draft_revision > 0:
-        rows.append(_build_session_draft_card(state, on_load_draft=on_load_draft))
+        rows.append(_build_session_draft_card(state, session_id=session_id, on_load_draft=on_load_draft))
 
     # --- 主会话消息（只读；正文未载入如实标注） ---
     rows.append(_section_title("agent_research_messages"))
@@ -1066,7 +1069,7 @@ def ResearchObserverPanel(
     on_toggle_execution: Callable[[str], None],
     on_select_execution: Callable[[str | None], None],
     on_load_artifact: Callable[[str, int, str, str], None],
-    on_load_draft: Callable[[], None],
+    on_load_draft: Callable[[str, int], None],
     on_composer_text: Callable[[str], None] = _ignore_text,
     on_composer_mode: Callable[[str], None] = _ignore_mode,
     on_send: Callable[[], None] = _ignore_click,

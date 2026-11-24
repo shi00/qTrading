@@ -1206,6 +1206,22 @@ class TestSessionDraftRead:
         assert vm.state.session_draft is None
 
     @pytest.mark.asyncio
+    async def test_load_draft_for_other_session_leaves_current_card_intact(self) -> None:
+        service = _FakeService(read=_session_read(draft_revision=2))
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+        await vm.load_draft("s-1", 2)
+        assert vm.state.session_draft is not None
+
+        # 旧卡片在观察位置被切走后才被点击：不得清空/读入当前卡（N16）
+        await vm.load_draft("s-2", 5)
+
+        assert vm.state.session_draft is not None, "其他会话的读回不影响当前卡"
+        assert vm.state.draft_pending is False
+        assert vm.state.draft_error_code is None
+        assert len(service.draft_calls) == 1, "非当前会话不发起读取"
+
+    @pytest.mark.asyncio
     async def test_cleaned_draft_is_exposed_not_as_empty(self) -> None:
         service = _FakeService(
             read=_session_read(draft_revision=4),
