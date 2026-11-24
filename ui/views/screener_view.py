@@ -2871,7 +2871,7 @@ def ScreenerView(
             on_start_research(request)
 
     def _on_detail_research(stock_data: dict) -> None:
-        """股票详情 → 准备研究草稿（详情现场保持打开，不自动发送）。"""
+        """股票详情 → 准备研究草稿（回执原样转发；详情弹窗由弹窗侧收起，不自动发送）。"""
         if on_start_research is None:
             return
         raw = stock_data.get("_raw") if isinstance(stock_data, Mapping) else None
