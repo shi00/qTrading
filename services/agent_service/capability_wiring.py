@@ -26,6 +26,7 @@ __all__ = [
     "build_research_boundary",
     "resolve_leaf_context_window",
     "resolve_leaf_context_windows",
+    "resolve_leaf_tokenizer_model",
 ]
 
 #: 边界能力是否已有生产宿主（叶 Agent）消费；生产宿主见模块说明。
@@ -62,6 +63,9 @@ class DaoResearchBoundaryPolicyProvider:
     candidate_context_windows: tuple[int, ...] = ()
     #: 输出预留 token（按真实授权模型的响应预算），窗口门比较「输入 + 预留」。
     output_reserve_tokens: int = 0
+    #: 冻结连接的实际模型引用（``provider/model``），供输入 token 按该模型 tokenizer
+    #: 计数；``None`` 表示无法证明（计数按估算并如实标记未核，R21）。
+    tokenizer_model: str | None = None
 
     async def __call__(self, ctx: Any) -> ResearchBoundaryPolicy:
         deps = getattr(ctx, "deps", None)
@@ -83,6 +87,7 @@ class DaoResearchBoundaryPolicyProvider:
             estimated_input_tokens=self.estimated_input_tokens,
             candidate_context_windows=self.candidate_context_windows,
             output_reserve_tokens=self.output_reserve_tokens,
+            tokenizer_model=self.tokenizer_model,
         )
 
 
@@ -90,6 +95,44 @@ def build_research_boundary(provider: DaoResearchBoundaryPolicyProvider) -> Rese
     """叶 Agent 构造处的唯一边界装配入口。"""
 
     return ResearchBoundary(policy_provider=provider)
+
+
+def _leaf_route_candidates(
+    snapshot: ExecutionSnapshot, *, scenario_id: str
+) -> tuple[tuple[str, ...], dict[str, Mapping[str, Any]]]:
+    """场景路由的候选连接序（用户序）+ 连接表；路由/候选缺失即空。
+
+    窗口与 tokenizer 模型必须来自同一次选择：两者共用本解析，避免选到不同连接。
+    """
+
+    if not isinstance(scenario_id, str) or not scenario_id:
+        return (), {}
+    route = next(
+        (item for item in snapshot.routes if isinstance(item, Mapping) and item.get("scenario_id") == scenario_id),
+        None,
+    )
+    if route is None:
+        return (), {}
+    candidates = route.get("candidates")
+    if not isinstance(candidates, Sequence) or isinstance(candidates, (str, bytes)) or not candidates:
+        return (), {}
+    candidate_ids: list[str] = []
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        value = candidate.get("connection_id")
+        if isinstance(value, str) and value:
+            candidate_ids.append(value)
+    if not candidate_ids:
+        return (), {}
+    connections: dict[str, Mapping[str, Any]] = {}
+    for connection in snapshot.connections:
+        if not isinstance(connection, Mapping):
+            continue
+        connection_id = connection.get("connection_id")
+        if isinstance(connection_id, str) and connection_id:
+            connections.setdefault(connection_id, connection)
+    return tuple(candidate_ids), connections
 
 
 def resolve_leaf_context_windows(
@@ -109,24 +152,7 @@ def resolve_leaf_context_windows(
       同样 ``None``（授权连接与场景路由不一致即无法核定）。
     """
 
-    if not isinstance(scenario_id, str) or not scenario_id:
-        return None, ()
-    route = next(
-        (item for item in snapshot.routes if isinstance(item, Mapping) and item.get("scenario_id") == scenario_id),
-        None,
-    )
-    if route is None:
-        return None, ()
-    candidates = route.get("candidates")
-    if not isinstance(candidates, Sequence) or isinstance(candidates, (str, bytes)) or not candidates:
-        return None, ()
-    candidate_ids: list[str] = []
-    for candidate in candidates:
-        if not isinstance(candidate, Mapping):
-            continue
-        value = candidate.get("connection_id")
-        if isinstance(value, str) and value:
-            candidate_ids.append(value)
+    candidate_ids, connections = _leaf_route_candidates(snapshot, scenario_id=scenario_id)
     if not candidate_ids:
         return None, ()
     chosen = connection_id or candidate_ids[0]
@@ -134,14 +160,7 @@ def resolve_leaf_context_windows(
         return None, ()
     windows: dict[str, int] = {}
     for candidate_id in candidate_ids:
-        connection = next(
-            (
-                item
-                for item in snapshot.connections
-                if isinstance(item, Mapping) and item.get("connection_id") == candidate_id
-            ),
-            None,
-        )
+        connection = connections.get(candidate_id)
         if connection is None:
             continue
         window = connection.get("context_window")
@@ -149,6 +168,36 @@ def resolve_leaf_context_windows(
             continue
         windows[candidate_id] = window
     return windows.get(chosen), tuple(window for key, window in windows.items() if key != chosen)
+
+
+def resolve_leaf_tokenizer_model(
+    snapshot: ExecutionSnapshot, *, scenario_id: str, connection_id: str | None = None
+) -> str | None:
+    """解析叶运行所用冻结连接的实际模型引用（``provider/model``，D9 同源）。
+
+    连接选择与 :func:`resolve_leaf_context_windows` 完全一致（同一候选序与同一
+    ``connection_id`` 语义），保证「窗口来自哪条连接」与「tokenizer 来自哪条连接」
+    不漂移。连接未声明 ``model``、路由/候选/连接缺失或 ``connection_id`` 不在路由
+    候选内 → ``None``：调用方只能按估算计数并如实标记未核（R21），不得回退到叶
+    模型桥的固定别名或默认分词器。
+    """
+
+    candidate_ids, connections = _leaf_route_candidates(snapshot, scenario_id=scenario_id)
+    if not candidate_ids:
+        return None
+    chosen = connection_id or candidate_ids[0]
+    if chosen not in candidate_ids:
+        return None
+    connection = connections.get(chosen)
+    if connection is None:
+        return None
+    raw_model = connection.get("model")
+    if not isinstance(raw_model, str) or not raw_model:
+        return None
+    provider = connection.get("provider")
+    if isinstance(provider, str) and provider:
+        return f"{provider}/{raw_model}"
+    return raw_model
 
 
 def resolve_leaf_context_window(snapshot: ExecutionSnapshot, *, scenario_id: str) -> int | None:
@@ -183,5 +232,6 @@ def build_leaf_boundary(
         estimated_input_tokens=None,
         candidate_context_windows=candidate_windows,
         output_reserve_tokens=OUTPUT_RESERVE_TOKENS,
+        tokenizer_model=resolve_leaf_tokenizer_model(snapshot, scenario_id=scenario_id, connection_id=connection_id),
     )
     return build_research_boundary(provider)

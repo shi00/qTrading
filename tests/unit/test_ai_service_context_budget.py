@@ -22,6 +22,7 @@ from services.ai_service import (
     _get_model_context_window,
     _reset_token_estimator,
 )
+from services.ai_service.token_budget import count_tokens_with_basis
 
 pytestmark = pytest.mark.unit
 
@@ -146,6 +147,32 @@ class TestTokenEstimatorFallbackCJK:
         assert _estimate_tokens_fallback(None) == 0  # type: ignore[arg-type]
         assert _estimate_tokens_fallback("a") == 1
         assert _estimate_tokens_fallback("中") == 1
+
+
+# ---------------------------------------------------------------------------
+# count_tokens_with_basis（N36：区分「按模型 tokenizer 已核」与「保守估算」）
+# ---------------------------------------------------------------------------
+class TestCountTokensWithBasis:
+    def test_model_tokenizer_success_is_verified(self):
+        with patch("litellm.token_counter", return_value=42) as mock_tc:
+            count, verified = count_tokens_with_basis("你好世界", "deepseek/deepseek-chat")
+
+        assert count == 42
+        assert verified is True
+        mock_tc.assert_called_once_with(model="deepseek/deepseek-chat", text="你好世界")
+
+    def test_missing_model_is_estimate(self):
+        count, verified = count_tokens_with_basis("你好世界", None)
+
+        assert count > 0
+        assert verified is False
+
+    def test_tokenizer_failure_is_estimate(self):
+        with patch("litellm.token_counter", side_effect=RuntimeError("tokenizer unavailable")):
+            count, verified = count_tokens_with_basis("你好世界", "deepseek/deepseek-chat")
+
+        assert count == _estimate_tokens_fallback("你好世界")
+        assert verified is False
 
 
 # ---------------------------------------------------------------------------
