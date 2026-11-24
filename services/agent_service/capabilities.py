@@ -106,9 +106,12 @@ def _to_plan_item(snapshot: PlanItemSnapshot) -> PlanItem:
 class PlanProposalStore:
     """``PlanStore`` 六方法的应用 DAO 实现（绑定 execution + plan_revision）。
 
-    读固定为当前绑定 revision（无提案 → 空）；写以 ``expected_revision`` CAS
-    推进，成功后绑定 revision 同步前进。冲突原样上抛
-    ``AgentServiceError(REVISION_CONFLICT)``：不静默重试、不覆盖他人新版本。
+    读固定为当前绑定 revision（无提案 → 空）；写以**读取内容时的基线版**作
+    ``expected_revision`` CAS 推进，成功后绑定 revision 同步前进。因此旧内容
+    不可能配上较新的 CAS：同一实例上的并发增量编辑，先提交者成功，另一方以
+    基线版 CAS 明确冲突（``REVISION_CONFLICT``），不会双成功而丢掉先提交者的
+    步骤。冲突原样上抛：不静默重试、不覆盖他人新版本；冲突后绑定版不前移
+    （不静默接受他人版本），调用方须以最新版重建 store 再重试。
     """
 
     def __init__(self, dao: PlanProposalDao, binding: PlanStoreBinding) -> None:
@@ -126,20 +129,26 @@ class PlanProposalStore:
 
         return self._revision
 
-    async def _read(self) -> PlanProposal | None:
-        if self._revision == 0:
-            return None
-        return await self._dao.read_plan_proposal(
+    async def _read_items(self) -> tuple[int, list[PlanItem]]:
+        """读绑定版并返回（内容基线版号, 步骤）；基线版号须随写入一起 CAS。"""
+
+        baseline = self._revision
+        if baseline == 0:
+            return baseline, []
+        proposal = await self._dao.read_plan_proposal(
             user_scope=self._binding.user_scope,
             execution_id=self._binding.execution_id,
-            plan_revision=self._revision,
+            plan_revision=baseline,
         )
+        if proposal is None:
+            return baseline, []
+        return baseline, [_to_plan_item(item) for item in proposal.items]
 
-    async def _write(self, items: Sequence[PlanItemSnapshot]) -> PlanProposal:
+    async def _write(self, items: Sequence[PlanItemSnapshot], *, baseline_revision: int) -> PlanProposal:
         proposal = await self._dao.save_plan_proposal(
             user_scope=self._binding.user_scope,
             execution_id=self._binding.execution_id,
-            expected_revision=self._revision,
+            expected_revision=baseline_revision,
             items=tuple(items),
         )
         self._revision = proposal.plan_revision
@@ -148,15 +157,13 @@ class PlanProposalStore:
     async def get_items(self) -> list[PlanItem]:
         """返回当前绑定版的全部步骤（脱离副本，不别名 store 状态）。"""
 
-        proposal = await self._read()
-        if proposal is None:
-            return []
-        return [_to_plan_item(item) for item in proposal.items]
+        _, items = await self._read_items()
+        return items
 
     async def set_items(self, items: list[PlanItem]) -> None:
         """整表替换（同内容不增版；空列表是合法计划）。"""
 
-        await self._write([_to_snapshot(item) for item in items])
+        await self._write([_to_snapshot(item) for item in items], baseline_revision=self._revision)
 
     async def get_item(self, item_id: str) -> PlanItem | None:
         """按 id 取一个步骤；不存在返回 ``None``。"""
@@ -170,10 +177,10 @@ class PlanProposalStore:
         """追加步骤；id 已存在抛 ``ValueError``（harness 契约，零 DB 写）。"""
 
         snapshot = _to_snapshot(item)
-        current = await self.get_items()
+        baseline, current = await self._read_items()
         if any(existing.id == snapshot.id for existing in current):
             raise ValueError(f"A step with id {snapshot.id!r} is already in this plan.")
-        await self._write([_to_snapshot(existing) for existing in current] + [snapshot])
+        await self._write([_to_snapshot(existing) for existing in current] + [snapshot], baseline_revision=baseline)
         return _to_plan_item(snapshot)
 
     async def update_item(
@@ -188,7 +195,7 @@ class PlanProposalStore:
     ) -> PlanItem | None:
         """按非 ``None`` 字段更新步骤；不存在返回 ``None``（零 DB 写）。"""
 
-        current = await self.get_items()
+        baseline, current = await self._read_items()
         for index, existing in enumerate(current):
             if existing.id != item_id:
                 continue
@@ -205,18 +212,18 @@ class PlanProposalStore:
                 updated.depends_on = list(depends_on)
             snapshots = [_to_snapshot(item) for item in current]
             snapshots[index] = _to_snapshot(updated)
-            await self._write(snapshots)
+            await self._write(snapshots, baseline_revision=baseline)
             return _to_plan_item(_to_snapshot(updated))
         return None
 
     async def remove_item(self, item_id: str) -> bool:
         """删除步骤；不存在返回 ``False``（零 DB 写）。"""
 
-        current = await self.get_items()
+        baseline, current = await self._read_items()
         kept = [item for item in current if item.id != item_id]
         if len(kept) == len(current):
             return False
-        await self._write([_to_snapshot(item) for item in kept])
+        await self._write([_to_snapshot(item) for item in kept], baseline_revision=baseline)
         return True
 
 
