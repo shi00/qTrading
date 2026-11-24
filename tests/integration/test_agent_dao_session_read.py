@@ -104,7 +104,7 @@ async def _seed_chain(
                 round_id=round_id,
                 execution_id=execution_id,
                 round_number=1,
-                workflow_id="wf-read",
+                workflow_id=f"wf-{round_id}",
                 workflow_code_version="wcv-1",
                 run_epoch=1,
                 input_revision=1,
