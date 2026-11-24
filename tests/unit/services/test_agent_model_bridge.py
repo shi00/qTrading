@@ -63,6 +63,7 @@ from pydantic_ai.tools import ToolDefinition
 from services.agent_service.model import (
     BOUND_MODEL_ALIAS,
     GatewayModel,
+    ModelTurnRefusedError,
     _TurnChannel,
     build_chat_turn_request,
     derive_model_call_id,
@@ -747,6 +748,24 @@ class TestOutcomeMapping:
             await model.request([ModelRequest(parts=[UserPromptPart(content="hi")])], _settings(), _params())
         assert "refused" in excinfo.value.message
         assert excinfo.value.body == "敏感内容"  # 拒绝保真：原文一次转出
+        assert isinstance(excinfo.value, ModelTurnRefusedError)  # 拒绝可分类（非协议失败）
+
+    @pytest.mark.asyncio
+    async def test_request_real_executor_refusal_shape_raises_refused(self):
+        """真实 Executor 形状：failed + transport ok + 完整 refused response。
+
+        Executor 对确定拒绝返回 ``status="failed"`` + ``error_code="CONTENT_REFUSED"``
+        + 完整 response；桥层必须把它与协议/传输失败分开（专用异常），且拒绝原文
+        只留在异常 body，不进入 message。
+        """
+        refused = _ok_response(text=None, finish_reason="refused", usage=_USAGE, refusal="敏感内容")
+        executor = _FakeExecutor(_failed_outcome(response=refused, transport_state="ok", error_code="CONTENT_REFUSED"))
+        model = _gateway(executor)
+        with pytest.raises(ModelTurnRefusedError) as excinfo:
+            await model.request([ModelRequest(parts=[UserPromptPart(content="hi")])], _settings(), _params())
+        assert isinstance(excinfo.value, UnexpectedModelBehavior)  # 旧映射兼容（子类）
+        assert excinfo.value.body == "敏感内容"
+        assert "敏感内容" not in excinfo.value.message
 
     @pytest.mark.asyncio
     async def test_request_failed_raises_with_stable_code(self):
@@ -866,12 +885,13 @@ class TestStreamPath:
         events = (ChatStreamEvent(sequence=1, kind="text", text_delta="start"),)
         executor = _FakeExecutor(_failed_outcome(response=refused, transport_state="ok"), events=events)
         model = _gateway(executor)
-        with pytest.raises(UnexpectedModelBehavior) as excinfo:
+        with pytest.raises(ModelTurnRefusedError) as excinfo:
             async with model.request_stream(
                 [ModelRequest(parts=[UserPromptPart(content="hi")])], _settings(), _params()
             ) as streamed:
                 async for _event in streamed:
                     pass
+        assert isinstance(excinfo.value, UnexpectedModelBehavior)  # 旧映射兼容（子类）
         assert excinfo.value.body == "敏感内容"
 
     @pytest.mark.asyncio

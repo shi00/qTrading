@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from types import SimpleNamespace
 from typing import Any, cast
@@ -52,6 +53,7 @@ from services.agent_service.leaf_agent import (
     LEAF_MODEL_FAILED,
     LEAF_MODEL_PROTOCOL_FAILED,
     LEAF_MODEL_REF_UNAVAILABLE,
+    LEAF_MODEL_REFUSED,
     LEAF_POLICY_DENIED,
     LEAF_PREDECESSOR_ARTIFACT_UNAVAILABLE,
     LEAF_RESULT_SAVE_FAILED,
@@ -480,6 +482,24 @@ class TestRunLeafAgentFailures:
         assert outcome.state == "failed"
         assert outcome.error_code == LEAF_MODEL_FAILED
         assert dao.drafts == []
+
+    async def test_model_refusal_maps_to_refused_without_leaking_body(
+        self, _fake_agent: type[_FakeAgent], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """确定拒绝与协议/普通失败分类不同；拒绝原文不进日志/终态（R9/R21）。"""
+        from services.agent_service.model import ModelTurnRefusedError
+
+        _fake_agent.error = ModelTurnRefusedError("chat turn refused by provider policy", "私密拒绝原文")
+        dao = _Dao()
+
+        with caplog.at_level(logging.WARNING):
+            outcome = await run_leaf_agent(_model(), _context(), _binding(), dao=dao)
+
+        assert outcome.state == "failed"
+        assert outcome.error_code == LEAF_MODEL_REFUSED
+        assert outcome.artifact_ref is None
+        assert dao.drafts == []
+        assert "私密拒绝原文" not in caplog.text
 
     async def test_cancelled_error_propagates(self, _fake_agent: type[_FakeAgent]) -> None:
         _fake_agent.error = asyncio.CancelledError()

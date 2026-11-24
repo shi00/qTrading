@@ -19,9 +19,11 @@ pydantic-ai 固定框架（pydantic-ai-slim==2.66.0）与 ScenarioExecutor 聊�
   CancelledError，R2）。
 - **身份与拒绝语义**：``model_call_id`` 经 ``provider_response_id`` 承载（SDK
   请求追踪字段）+ 账本 invocation（invocation_id=model_call_id）双通道稳定
-  关联（HANDOFF §6.1 L197）；refused 完整回合以 ``UnexpectedModelBehavior``
-  抛出（携带 refusal 原文），已公开分片后失败保 partial/unknown（§6.4-5，
-  不拼不同 attempt）——拒绝不换候选规避由 Executor 承载（DD §10.1）。
+  关联（HANDOFF §6.1 L197）；refused 完整回合以 ``ModelTurnRefusedError``
+  （``UnexpectedModelBehavior`` 子类，携带 refusal 原文于 body）抛出——真实
+  Executor 以 failed 终态承载拒绝，与 succeeded 形状统一在此识别；已公开分片
+  后失败保 partial/unknown（§6.4-5，不拼不同 attempt）——拒绝不换候选规避由
+  Executor 承载（DD §10.1）。
 - **调用身份确定性（R2-I41）**：``model_call_id`` 不再是每回合随机值，而由
   **持久执行身份**（``call_identity``，装配侧传入，如叶 workflow 稳定 ID /
   计划身份）经 :func:`derive_model_call_id` + 本实例内回合序号确定性派生。
@@ -120,6 +122,37 @@ class ChatTurnExecutor(Protocol):
         binding: Mapping[str, Any],
         on_event: Any = None,
     ) -> ChatTurnOutcome: ...
+
+
+#: 拒绝回合的稳定异常文案（不含拒绝原文：原文只留在异常 body，R9）。
+_REFUSED_MESSAGE: Final[str] = "chat turn refused by provider policy"
+
+
+class ModelTurnRefusedError(UnexpectedModelBehavior):
+    """提供方确定内容拒绝（完成的模型回合，非协议 / 传输失败）。
+
+    真实 Executor 以 ``status="failed"`` + ``transport_state="ok"`` + 完整
+    ``response``（``finish_reason="refused"``，``error_code`` ``CONTENT_REFUSED``）
+    承载拒绝。桥层以本子类（``UnexpectedModelBehavior`` 子类，旧
+    ``except UnexpectedModelBehavior`` 仍可捕获）让消费方把「确定拒绝」与普通
+    模型 / 协议失败分类；拒绝原文只留在 ``body``（内部事实，调用方不得写入
+    日志 / 用户可见字段，R9/R21），message 不含原文。
+    """
+
+
+def _refused_response(outcome: ChatTurnOutcome) -> ChatTurnResponse | None:
+    """拒绝回合识别：完整 response 且 ``finish_reason == "refused"``。
+
+    真实 Executor 的拒绝是 failed 终态（成功形状分支只覆盖历史替身形状），
+    两种形状统一在此识别；response 畸形（如缺 refusal）由 ``ensure_valid``
+    抛出 ``ModelTurnProtocolError``，不伪装成拒绝（R21）。
+    """
+
+    response = outcome.response
+    if response is not None and response.finish_reason == "refused":
+        response.ensure_valid()
+        return response
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -715,11 +748,12 @@ class GatewayStreamedResponse(StreamedResponse):
         # 流关闭确认（§6.4-4）：终态事实保真——失败回合（拒绝 / 分片后失败）
         # 就地抛出（分片已公开，不拼不同 attempt），不伪装干净结束
         outcome = self.channel.outcome
-        if outcome is not None and outcome.status == "failed":
-            response = outcome.response
-            if response is not None:
-                raise UnexpectedModelBehavior(f"chat turn refused by provider: {response.refusal}", response.refusal)
-            raise UnexpectedModelBehavior(f"chat turn failed: {outcome.error_code}", outcome.partial_text)
+        if outcome is not None:
+            refused = _refused_response(outcome)
+            if refused is not None:
+                raise ModelTurnRefusedError(_REFUSED_MESSAGE, refused.refusal)
+            if outcome.status == "failed":
+                raise UnexpectedModelBehavior(f"chat turn failed: {outcome.error_code}", outcome.partial_text)
         # 截断流（通道干净结束但从未收到 finish 事件）不得当作成功回合：无终止
         # 确认即「未核收尾」，外层结果与账本须按失败收敛（R21，不静默截断）。
         if self.finish_reason is None:
@@ -909,16 +943,18 @@ class GatewayModel(Model):
 
         畸形响应（缺必需字段 / finish_reason 越出核心词汇 / tool_calls 与
         finish 不自洽等）先经 ``ChatTurnResponse.ensure_valid`` 明确拒绝，不以
-        部分字段拼装成功响应（R21 不伪装）。
+        部分字段拼装成功响应（R21 不伪装）。确定拒绝（succeeded / failed 两种
+        形状）统一抛 ``ModelTurnRefusedError``，与协议 / 传输失败分类。
         """
+        refused = _refused_response(outcome)
+        if refused is not None:
+            # 拒绝保真（§6.3）：拒绝语义与原文一次转出——SDK 惯例以异常抛出，
+            # 账本事实已由 Recorder 承载；message 不含原文（R9）
+            raise ModelTurnRefusedError(_REFUSED_MESSAGE, refused.refusal)
         if outcome.status == "succeeded" and outcome.response is not None:
             response = outcome.response
             response.ensure_valid()
             finish = map_finish_reason(response.finish_reason)
-            if finish == "content_filter":
-                # 拒绝保真（§6.3）：拒绝语义与原文一次转出——SDK 惯例以
-                # UnexpectedModelBehavior 抛出，账本事实已由 Recorder 承载
-                raise UnexpectedModelBehavior(f"chat turn refused by provider: {response.refusal}", response.refusal)
             return ModelResponse(
                 parts=map_response_parts(response),
                 usage=map_usage(response.usage),
