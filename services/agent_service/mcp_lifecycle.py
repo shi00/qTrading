@@ -32,7 +32,7 @@ from services.agent_service.mcp import (
     catalog_digest,
     config_snapshot_digest,
 )
-from services.agent_service.mcp_config_store import AppStateMCPConfigStore
+from services.agent_service.mcp_config_store import AppStateMCPConfigStore, MCPConfigListEntry
 from services.agent_service.mcp_grant import AppStateMCPGrantStore, MCPConnectGrant, MCPToolSets
 
 logger = logging.getLogger(__name__)
@@ -78,8 +78,8 @@ class MCPServiceLifecycle:
 
         return await self._manager.save_config(config)
 
-    async def list_services(self) -> tuple[MCPServerConfig, ...]:
-        """列出已保存配置；扫描端口不可用时明确失败（不返回空冒充无配置）。"""
+    async def list_services(self) -> tuple[MCPConfigListEntry, ...]:
+        """逐行列出已保存配置（单条失效不使整批失败）；扫描端口不可用时明确失败。"""
 
         return await self._configs.list_configs()
 

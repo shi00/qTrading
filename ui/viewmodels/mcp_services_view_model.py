@@ -9,6 +9,8 @@
 - 启连核准工具只能来自本次连接测试发现且落入只读审核范围的工具；启连把本轮测试
   回执交给服务层，由服务层核对配置摘要/测试代次/目录摘要，漂移即拒绝（须重新测试）；
 - 测试残留关闭未确认时提供显式「重试关闭残留」命令，不用新连接覆盖未知收尾；
+- **列表逐行容错**：单条配置失效（程序被移动/卸载等）只标注该行（可载入后修复），
+  健康配置照常列出；使用点（读取/测试/启连）仍 fail-closed 拒绝（J25 按身份管理）；
 - VM 不 import flet、不持有控件、不感知 locale（只产出 i18n key/params）；
 - ``CancelledError`` 原样传播（R2）；异常消息经 ``DataSanitizer`` 脱敏后进入状态（R9）。
 """
@@ -17,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 
 from core.agent_types import (
@@ -27,6 +30,11 @@ from core.agent_types import (
     MCPTransportKind,
 )
 from services.agent_service.mcp import MCPConnectionTestReceipt, MCPServerConfig, MCPTransportConfig
+from services.agent_service.mcp_config_store import (
+    LISTING_INVALID,
+    LISTING_PATH_UNAVAILABLE,
+    MCPConfigListEntry,
+)
 from services.agent_service.mcp_lifecycle import MCPServiceLifecycle
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
@@ -42,6 +50,12 @@ STATUS_INFO = "info"
 STATUS_SUCCESS = "success"
 STATUS_WARNING = "warning"
 STATUS_ERROR = "error"
+
+#: 列表项失效原因 → 行标注 i18n key（未登记的原因不标注，避免臆造文案）。
+_ROW_PROBLEM_KEYS: dict[str, str] = {
+    LISTING_PATH_UNAVAILABLE: "mcp_row_path_invalid",
+    LISTING_INVALID: "mcp_row_invalid",
+}
 
 #: 可在表单中直接编辑的文本字段（白名单，避免 View 传入未知字段）。
 DRAFT_TEXT_FIELDS = frozenset(
@@ -136,6 +150,8 @@ class MCPServiceRow:
     display_name: str
     transport_kind: str
     connected: bool
+    #: 本行失效原因（i18n key）；``None`` = 可用。失效行仍可载入编辑以修复。
+    problem_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -173,6 +189,8 @@ class MCPServicesState:
     unavailable_reason_key: str = UNAVAILABLE_KEY
     loaded: bool = False
     rows: tuple[MCPServiceRow, ...] = ()
+    #: 连结构都无法解码的已保存记录数（无法在界面修复，但不静默隐藏）。
+    unreadable_count: int = 0
     busy: bool = False
     draft: MCPConfigDraft = MCPConfigDraft()
     #: 草稿身份是否已保存（仅已保存配置可测试/启连）。
@@ -206,17 +224,20 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
             return
         self._set_state(busy=True)
         try:
-            configs = await self._lifecycle.list_services()
+            entries = await self._lifecycle.list_services()
         except asyncio.CancelledError:
             self._set_state(busy=False)
             raise
         except Exception as exc:
             self._fail(exc)
             return
-        self._configs = {config.identity.stable_key(): config for config in configs}
+        self._configs = {
+            entry.config.identity.stable_key(): entry.config for entry in entries if entry.config is not None
+        }
         self._set_state(
-            rows=self._build_rows(configs),
+            rows=self._build_rows(entries),
             loaded=True,
+            unreadable_count=sum(1 for entry in entries if entry.config is None),
             busy=False,
             draft_saved=self._is_draft_saved(),
         )
@@ -551,21 +572,29 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
             audit=audit,
         )
 
-    def _build_rows(self, configs: tuple[MCPServerConfig, ...]) -> tuple[MCPServiceRow, ...]:
+    def _build_rows(self, entries: Iterable[MCPConfigListEntry]) -> tuple[MCPServiceRow, ...]:
+        """列表项 → 行投影；失效行同样列出（标注原因并允许载入修复）。"""
+
         lifecycle = self._lifecycle
         if lifecycle is None:
             return ()
-        return tuple(
-            MCPServiceRow(
-                identity_key=config.identity.stable_key(),
-                service_id=config.identity.service_id,
-                config_version=config.identity.config_version,
-                display_name=config.display_name,
-                transport_kind=config.transport.kind.value,
-                connected=lifecycle.is_connected(config.identity),
+        rows: list[MCPServiceRow] = []
+        for entry in entries:
+            config = entry.config
+            if config is None:
+                continue
+            rows.append(
+                MCPServiceRow(
+                    identity_key=config.identity.stable_key(),
+                    service_id=config.identity.service_id,
+                    config_version=config.identity.config_version,
+                    display_name=config.display_name,
+                    transport_kind=config.transport.kind.value,
+                    connected=lifecycle.is_connected(config.identity),
+                    problem_key=_ROW_PROBLEM_KEYS.get(entry.problem or ""),
+                )
             )
-            for config in configs
-        )
+        return tuple(rows)
 
     def _draft_from_config(self, config: MCPServerConfig) -> MCPConfigDraft:
         """已保存配置 → 表单草稿（往返一致，不丢字段）。"""
@@ -604,14 +633,20 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
         if self._lifecycle is None:
             return
         try:
-            configs = await self._lifecycle.list_services()
+            entries = await self._lifecycle.list_services()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self._fail(exc)
             return
-        self._configs = {config.identity.stable_key(): config for config in configs}
-        self._set_state(rows=self._build_rows(configs), draft_saved=self._is_draft_saved())
+        self._configs = {
+            entry.config.identity.stable_key(): entry.config for entry in entries if entry.config is not None
+        }
+        self._set_state(
+            rows=self._build_rows(entries),
+            unreadable_count=sum(1 for entry in entries if entry.config is None),
+            draft_saved=self._is_draft_saved(),
+        )
 
     def _fail(self, exc: BaseException) -> None:
         """失败统一出口：脱敏后进状态，不伪装成功（R21/R9）。"""
