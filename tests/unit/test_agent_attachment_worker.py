@@ -381,6 +381,89 @@ class TestJsonExtraction:
         assert exc.value.code == "invalid_structure"
 
 
+class TestJsonRawPreview:
+    """N40：结构化覆盖之外，选中子树必须给出原文表示（原空白/转义/指数写法）与码点偏移。"""
+
+    _DOC = (
+        b'{\n  "a" : { "b" : 1.50e+10, "s" : "x\\u00e9\\n\\"q\\"" },\n  "c" : [ { "d" : -0.0 }, 2 ],\n  "e" : "tail"\n}'
+    )
+
+    def test_all_keeps_exact_source_characters(self) -> None:
+        parsed = _parse(AttachmentKind.JSON, self._DOC)
+        text = self._DOC.decode("utf-8")
+        assert parsed.body_text == text
+        assert parsed.preview_ranges == [{"start": 0, "end": len(text)}]
+        # 结构值仍可独立读：指数写法与转义都不因预览而改变
+        assert json.loads(parsed.blocks[0])["value"]["a"]["b"]["lexeme"] == "1.50e+10"
+
+    def test_pointer_preview_is_exact_subtree_slice_with_offsets(self) -> None:
+        text = self._DOC.decode("utf-8")
+        parsed = _parse(
+            AttachmentKind.JSON,
+            self._DOC,
+            Selection(kind="limited", ranges=(JsonPointerRange(kind="json_pointer", pointer="/a"),)),
+            read_expansion_consent=True,
+        )
+        expected = '{ "b" : 1.50e+10, "s" : "x\\u00e9\\n\\"q\\"" }'
+        start = text.index('{ "b"')
+        assert parsed.body_text == expected
+        assert parsed.preview_ranges == [{"start": start, "end": start + len(expected)}]
+        assert text[start : start + len(expected)] == parsed.body_text
+        # 区外内容不混入预览
+        assert '"c"' not in parsed.body_text
+        assert "tail" not in parsed.body_text
+        # 结构值仍可独立读（含指数词法）
+        assert json.loads(parsed.blocks[0])["value"]["b"]["lexeme"] == "1.50e+10"
+
+    def test_multiple_pointers_keep_each_slice_and_offsets(self) -> None:
+        text = self._DOC.decode("utf-8")
+        parsed = _parse(
+            AttachmentKind.JSON,
+            self._DOC,
+            Selection(
+                kind="limited",
+                ranges=(
+                    JsonPointerRange(kind="json_pointer", pointer="/a"),
+                    JsonPointerRange(kind="json_pointer", pointer="/e"),
+                ),
+            ),
+            read_expansion_consent=True,
+        )
+        assert parsed.preview_ranges is not None
+        assert parsed.body_text is not None
+        parts = parsed.body_text.split("\n")
+        assert len(parts) == len(parsed.preview_ranges) == 2
+        for part, span in zip(parts, parsed.preview_ranges, strict=True):
+            assert text[span["start"] : span["end"]] == part
+        assert parts[0].startswith('{ "b"')
+        assert parts[1] == '"tail"'
+
+    def test_bom_stripped_offsets_are_relative_to_decoded_text(self) -> None:
+        parsed = _parse(AttachmentKind.JSON, b'\xef\xbb\xbf{ "a" : 1 }')
+        assert parsed.body_text == '{ "a" : 1 }'
+        assert parsed.preview_ranges == [{"start": 0, "end": len('{ "a" : 1 }')}]
+
+    def test_empty_selection_yields_empty_preview(self) -> None:
+        parsed = _parse(AttachmentKind.JSON, b'{"a": 1}', Selection(kind="limited", ranges=()))
+        assert parsed.body_text == ""
+        assert parsed.preview_ranges == []
+
+    def test_preview_outside_budget_is_rejected(self) -> None:
+        # 结构化表示会压掉空白；原文预览超预算即拒绝，不以截断冒充完整预览。
+        data = b'{"a": ' + b" " * 200 + b"1}"
+        block_chars = len(_parse(AttachmentKind.JSON, data).blocks[0])
+        assert block_chars < len(data.decode("utf-8"))
+        assert (
+            _limit_of(
+                data,
+                Selection(kind="all"),
+                AttachmentBudget(max_codepoints=block_chars),
+                AttachmentKind.JSON,
+            )
+            == "attachment_codepoints_exceeded"
+        )
+
+
 # ---------------------------------------------------------------------------
 # I70：未选正文零读取（CSV 流式按行 / JSON pointer 定向 + 扩张同意）
 # ---------------------------------------------------------------------------
@@ -2180,6 +2263,59 @@ class TestJsonSupportParity:
         else:
             # 根起始符合法：父进程不越权判定，结论由 worker 同一判据给出。
             assert detect_attachment_kind("a.json", data) is AttachmentKind.JSON
+
+    @pytest.mark.asyncio
+    async def test_json_preview_slice_and_offsets_reach_parent_port(self) -> None:
+        """N40：父端口必须带出选中子树的原文切片与码点偏移，供原选区预览核对。"""
+
+        data = b'{ "a" : { "b" : 1.5e+3 }, "c" : [1] }'
+        text = data.decode("utf-8")
+        selection = Selection(kind="limited", ranges=(JsonPointerRange(kind="json_pointer", pointer="/a"),))
+        # 子进程冷启动的模块导入开销占满默认 30 秒预算与环境无关；此处放宽 worker 时限，
+        # 只验证原文切片与偏移是否经父端口透传（与既有扩张同意用例同口径）。
+        worker = SubprocessAttachmentWorker(
+            budget=AttachmentBudget(extract_timeout_s=180.0),
+            timeout_s=180.0,
+        )
+        result = await worker.extract(
+            replace(
+                _request(data, name="a.json", kind=AttachmentKind.JSON),
+                selection=selection,
+                read_expansion_consent=True,
+            )
+        )
+        expected = '{ "b" : 1.5e+3 }'
+        assert result.body_text == expected
+        assert result.preview_ranges == ((text.index(expected), text.index(expected) + len(expected)),)
+        assert json.loads(result.blocks[0])["value"]["b"]["lexeme"] == "1.5e+3"
+
+    @pytest.mark.asyncio
+    async def test_old_receipt_without_preview_ranges_is_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """旧 worker 回执没有 ``preview_ranges`` 键：协议不得因此判失败（向后兼容）。"""
+
+        data = b'{"a": 1}'
+        payload = _worker_entry(monkeypatch, data, kind=AttachmentKind.JSON, selection=Selection(kind="all"))
+        assert "preview_ranges" in payload["result"]
+        payload["result"].pop("preview_ranges")
+        script = f"import sys\nsys.stdout.buffer.write({json.dumps(payload).encode('utf-8')!r})\n"
+        worker = SubprocessAttachmentWorker(command=(sys.executable, "-c", script), timeout_s=5.0)
+        result = await worker.extract(_request(data, name="a.json", kind=AttachmentKind.JSON))
+        assert result.preview_ranges == ()
+
+    @pytest.mark.asyncio
+    async def test_preview_ranges_outside_body_text_are_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """偏移必须落在原文预览内：越界回执按协议失败处理，不静默截断。"""
+
+        data = b'{"a": 1}'
+        payload = _worker_entry(monkeypatch, data, kind=AttachmentKind.JSON, selection=Selection(kind="all"))
+        body_text = payload["result"]["body_text"]
+        assert isinstance(body_text, str)
+        payload["result"]["preview_ranges"] = [{"start": 0, "end": len(body_text) + 1}]
+        script = f"import sys\nsys.stdout.buffer.write({json.dumps(payload).encode('utf-8')!r})\n"
+        worker = SubprocessAttachmentWorker(command=(sys.executable, "-c", script), timeout_s=5.0)
+        with pytest.raises(AttachmentWorkerError) as exc:
+            await worker.extract(_request(data, name="a.json", kind=AttachmentKind.JSON))
+        assert exc.value.code == "worker_protocol_invalid"
 
 
 # ---------------------------------------------------------------------------
