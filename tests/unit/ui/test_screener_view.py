@@ -212,6 +212,10 @@ class TestHiddenColsContract:
         """G2: 内部退市过滤列（is_st 同组）不得渲染为结果表裸列。"""
         assert "is_delisting" in _HIDDEN_COLS
 
+    def test_stock_agent_call_hidden(self):
+        """N13: 结果行程序字段「调用身份字典」是内部元数据, 不得渲染为可排序列."""
+        assert "stock_agent_call" in _HIDDEN_COLS
+
 
 class TestSectionMetaNeutral:
     """CRITICAL-01: 三分区标题中性化 — 分区标题只表达 AI 处理状态, 不作投资判断。
@@ -252,6 +256,25 @@ class TestBuildTableData:
         assert "symbol" not in col_ids
         assert "ts_code" in col_ids
         assert "name" in col_ids
+
+    def test_stock_agent_call_not_projected_but_kept_in_raw(self):
+        """N13: 身份字典不进列投影/表头, 但原始行保留（归档/追溯身份不被消费）."""
+        identity = {"call_id": "c1", "operation_id": "op1", "ts_code": "000001.SZ"}
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "name": ["平安银行"],
+                "stock_agent_call": [identity],
+            }
+        )
+        cols, rows = _build_table_data(_df_rows(df), self._make_vm())
+        col_ids = [c["id"] for c in cols]
+        assert "stock_agent_call" not in col_ids
+        assert col_ids == ["ts_code", "name"]
+        assert "stock_agent_call" not in rows[0]
+        assert rows[0]["name"] == "平安银行"
+        # 原始行仍携带身份, 归档/导出不被列投影消费
+        assert rows[0]["_raw"]["stock_agent_call"] == identity
 
     def test_uses_custom_width(self):
         df = pd.DataFrame({"ts_code": ["000001.SZ"]})
