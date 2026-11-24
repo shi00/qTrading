@@ -2735,7 +2735,8 @@ class AgentDao(BaseDao):
         - 坏枚举/坏行 → ``OPERATION_UNKNOWN``；``phase='unknown'`` 或
           ``effect_state='unknown'`` 原样返回并置 ``result_available=False``；
         - 返回体优先取 ``result_ref`` 同库正文（核 owner 自洽/编码/长度/SHA-256，
-          按码点分页），否则取 ``result_payload`` 原子；``result_saved`` 却两者皆空
+          按码点分页），否则取 ``result_payload`` 原子（读回保留 JSON number 语义，
+          JSONB 还原的小数仍是数字、不降级为字符串）；``result_saved`` 却两者皆空
           且所属会话已清理（``cleaned_at`` 非空）时按「结果已清理」返回
           （``unavailable_reason='result_cleaned'``），否则按坏行拒绝，不用空结果
           冒充成功（R21）。
@@ -2843,7 +2844,7 @@ class AgentDao(BaseDao):
                         "cursor is not applicable to atomic result payload",
                         identity,
                     )
-                result_text = json_doc(row.result_payload)
+                result_text = json_doc(row.result_payload, allow_finite_floats=True)
             elif row.phase == "result_saved":
                 if await self._operation_owner_is_cleaned(
                     conn, user_scope=user_scope, session_id=row.session_id, execution_id=row.execution_id
@@ -2877,7 +2878,9 @@ class AgentDao(BaseDao):
                 parameter_digest=row.parameter_digest,
                 request_ref=row.request_ref,
                 result_ref=row.result_ref,
-                result_payload=json_doc(row.result_payload) if row.result_payload is not None else None,
+                result_payload=(
+                    json_doc(row.result_payload, allow_finite_floats=True) if row.result_payload is not None else None
+                ),
                 worker_refs=json_doc(row.worker_refs) if row.worker_refs is not None else None,
                 deadline_at=self._opt_wire_time(row.deadline_at),
                 dispatched_at=self._opt_wire_time(row.dispatched_at),

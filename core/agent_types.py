@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Iterable, Mapping, Sequence, Set as AbstractSet
 from dataclasses import dataclass, is_dataclass
@@ -228,24 +229,35 @@ def _fixed_point(value: Decimal, field_path: str = "$") -> str:
     return format(value, "f")
 
 
-def _to_jsonable(value: object, field_path: str) -> Any:
-    """递归转为 JSON 可承载结构；不支持的类型显式拒绝，不走默认 float 转换。"""
+def _to_jsonable(value: object, field_path: str, *, allow_finite_floats: bool = False) -> Any:
+    """递归转为 JSON 可承载结构；不支持的类型显式拒绝，不走默认 float 转换。
+
+    ``allow_finite_floats`` 仅用于「已落库值的再序列化」边界（JSONB 解码把小数
+    还原为 Python ``float``）：有限 ``float`` 按最短可往返词法输出为 JSON number，
+    数值语义保真；默认 False 时仍拒绝 ``float``（须先经 encode_exact_number）。
+    """
 
     if value is None or isinstance(value, (bool, int, str)):
         return value
     if isinstance(value, Decimal):
         return _fixed_point(value, field_path)
     if isinstance(value, float):
+        if allow_finite_floats:
+            if not math.isfinite(value):
+                _fail("non_finite_number", field_path)
+            return value
         # 禁止把原数值直接交给默认 float 转换（§3.1）；须先经 encode_exact_number。
         _fail("invalid_type", field_path)
         return None  # pragma: no cover - _fail 总是抛出
     if isinstance(value, Enum):
-        return _to_jsonable(value.value, field_path)
+        return _to_jsonable(value.value, field_path, allow_finite_floats=allow_finite_floats)
     if isinstance(value, Selection):
         # wire 合同：all 没有 ranges 键（§3.3.1）
         wire: dict[str, Any] = {"kind": value.kind}
         if value.kind == "limited":
-            wire["ranges"] = _to_jsonable(list(value.ranges), f"{field_path}.ranges")
+            wire["ranges"] = _to_jsonable(
+                list(value.ranges), f"{field_path}.ranges", allow_finite_floats=allow_finite_floats
+            )
         return wire
     if isinstance(value, ExactNumber):
         return {
@@ -256,7 +268,7 @@ def _to_jsonable(value: object, field_path: str) -> Any:
         }
     if is_dataclass(value) and not isinstance(value, type):
         return {
-            name: _to_jsonable(getattr(value, name), f"{field_path}.{name}")
+            name: _to_jsonable(getattr(value, name), f"{field_path}.{name}", allow_finite_floats=allow_finite_floats)
             for name in value.__dataclass_fields__  # pyright: ignore[reportAttributeAccessIssue]  # 运行期为 dataclass 实例，字段名由标准库提供
         }
     if isinstance(value, dict):
@@ -264,18 +276,27 @@ def _to_jsonable(value: object, field_path: str) -> Any:
         for key, item in value.items():
             if not isinstance(key, str):
                 _fail("invalid_json", field_path)
-            result[key] = _to_jsonable(item, f"{field_path}.{key}")
+            result[key] = _to_jsonable(item, f"{field_path}.{key}", allow_finite_floats=allow_finite_floats)
         return result
     if isinstance(value, (list, tuple)):
-        return [_to_jsonable(item, f"{field_path}[{index}]") for index, item in enumerate(value)]
+        return [
+            _to_jsonable(item, f"{field_path}[{index}]", allow_finite_floats=allow_finite_floats)
+            for index, item in enumerate(value)
+        ]
     _fail("invalid_json", field_path)
     return None  # pragma: no cover - _fail 总是抛出
 
 
-def json_doc(value: object) -> CanonicalJson:
-    """规范 JSON：UTF-8 语义、键排序、无空白、禁 NaN/Infinity（§3.1）。"""
+def json_doc(value: object, *, allow_finite_floats: bool = False) -> CanonicalJson:
+    """规范 JSON：UTF-8 语义、键排序、无空白、禁 NaN/Infinity（§3.1）。
 
-    encoded = _to_jsonable(value, "$")
+    ``allow_finite_floats`` 仅供「已落库 JSONB 值的再序列化」使用（如
+    ``AgentDao.read_operation`` 读回 ``result_payload``）：JSONB 解码把小数还原为
+    ``float``，此时按最短可往返词法输出为 JSON number，读回仍是数字而非字符串；
+    非有限值与其它不支持类型依旧显式拒绝。构造新 wire 文档不得开启该开关。
+    """
+
+    encoded = _to_jsonable(value, "$", allow_finite_floats=allow_finite_floats)
     return json.dumps(encoded, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
