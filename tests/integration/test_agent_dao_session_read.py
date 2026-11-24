@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from datetime import UTC, datetime
 
@@ -90,11 +91,11 @@ async def _seed_chain(
                 session_id=session_id,
                 execution_kind="root",
                 source_module="ui",
-                business_request_id="req-read",
+                business_request_id=f"req-{execution_id}",
                 node_id="root",
                 display_state="queued",
                 goal_coverage="unknown",
-                intent_digest="a" * 64,
+                intent_digest=hashlib.sha256(execution_id.encode()).hexdigest(),
             )
         )
         await conn.execute(
