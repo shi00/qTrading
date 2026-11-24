@@ -763,6 +763,12 @@ def _parse_answer_payload(answer_payload: CanonicalJson, identity: str) -> dict[
 #: 跨会话待处理聚合的单类上限（P1-05）：达到上限标记截断，不冒充完整集合。
 _PENDING_ANSWER_LIMIT_MAX: Final[int] = 500
 
+#: 命令类型集合：命令行 ``receipt_payload`` 存的是 ``CommandReceipt``（N23）。
+#: 其余命令类型存专用回执（受理/草稿/转移/许可绑定）或不存回执，不得按
+#: ``CommandReceipt`` 解码；``read_command`` 只对这些类型从原回执取
+#: ``current_revision``（CAS 令牌），与同键重放查回的原回执同版。
+_COMMAND_RECEIPT_KINDS: Final[frozenset[str]] = frozenset({"change_session", "data_consent_revoke"})
+
 
 def _pending_answer_facts(rows: Sequence[Any], *, stage: str) -> list[PendingAnswerFact]:
     """聚合行 → 待处理事实（阶段由调用分类给定；命令态仅在命令阶段出现）。"""
@@ -1572,6 +1578,12 @@ class AgentDao(BaseDao):
           ``INPUT_INVALID``，回执不得回显与存行矛盾的引用；
         - 存储状态/错误码不在冻结枚举内 → ``OPERATION_UNKNOWN``（fail-closed，
           R21：坏事实不得被读成确定的保存/投递/消费）；
+        - ``current_revision`` 取该命令**保存时落库的回执版本**（``receipt_payload``），
+          与同键重放查回的原回执同版：改名等 CAS 命令推进的是实体版本（如会话
+          ``revision`` 1→2），而命令行自身 ``revision`` 恒为初值——直接读命令行
+          会把旧 CAS 令牌当当前版，调用方续做归档等操作无故 ``REVISION_CONFLICT``；
+          该类型回执缺失/坏载荷 → ``OPERATION_UNKNOWN``（R21，不把未知读成确定
+          版本）；回执非 ``CommandReceipt`` 的命令类型仍回报命令行自身版本；
         - ``next_action`` 为 None：本方法只回报已存事实，下一步由调用方按命令类型
           决定（不在读取面发明动作）。
         """
@@ -1612,6 +1624,7 @@ class AgentDao(BaseDao):
             candidates = (
                 sa.select(
                     AgentCommand.target_id,
+                    AgentCommand.command_kind,
                     AgentCommand.expected_revision,
                     AgentCommand.revision,
                     AgentCommand.commit_state,
@@ -1619,6 +1632,7 @@ class AgentDao(BaseDao):
                     AgentCommand.consumption_state,
                     AgentCommand.updated_at,
                     AgentCommand.error_code,
+                    AgentCommand.receipt_payload,
                     # 根意图键（source_module/business_request_id）只存于 execution：
                     # 根/比较路非空，叶为 NULL（§9.4）。
                     AgentExecution.source_module.label("intent_source_module"),
@@ -1662,10 +1676,26 @@ class AgentDao(BaseDao):
                 f"unreadable command state: {type(exc).__name__}",
                 identity,
             ) from exc
+        current_revision = int(row.revision)
+        if row.command_kind in _COMMAND_RECEIPT_KINDS:
+            # 命令行 ``revision`` 是命令自身版本（初值），不是被改实体的 CAS 令牌；
+            # 以保存时落库的原回执为准（与重放同版），缺失/坏载荷 fail-closed。
+            if row.receipt_payload is None:
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN, "original command receipt unavailable", identity
+                )
+            try:
+                current_revision = decode_command_receipt(row.receipt_payload).current_revision
+            except AgentValidationError as exc:
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN,
+                    f"stored command receipt invalid: {exc.code}",
+                    identity,
+                ) from exc
         return CommandReceipt(
             command=ref,
             target_id=row.target_id,
-            current_revision=row.revision,
+            current_revision=current_revision,
             commit_state=commit_state,
             delivery_state=delivery_state,
             consumption_state=consumption_state,
