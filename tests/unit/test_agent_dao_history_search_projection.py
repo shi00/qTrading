@@ -279,6 +279,8 @@ class TestMissingProjectionFailsExplicitly:
                     type_filter="main",
                     message_role_filter="user",
                     state_filter="running",
+                    # 消息发生口径（N21：created 口径按会话创建日，不再落在行 created_at）
+                    time_basis="message",
                     date_from="2026-06-01",
                     date_to="2026-06-30",
                 ),
@@ -292,8 +294,8 @@ class TestMissingProjectionFailsExplicitly:
         assert "agent_execution.execution_kind IN ('root')" in preflight
         assert "agent_message.role = 'user'" in preflight
         assert "agent_execution.display_state = 'running'" in preflight
-        assert "agent_message.created_at >= '2026-06-01" in preflight
-        assert "agent_message.created_at < '2026-07-01" in preflight
+        assert "agent_message.occurred_at >= '2026-06-01" in preflight
+        assert "agent_message.occurred_at < '2026-07-01" in preflight
 
 
 class TestExistingFiltersNotBypassed:
@@ -308,6 +310,8 @@ class TestExistingFiltersNotBypassed:
             type_filter="child",
             message_role_filter="user",
             state_filter="running",
+            # 消息发生口径（N21：created 口径按会话创建日，不再落在行 created_at）
+            time_basis="message",
             date_from="2026-06-01",
             date_to="2026-06-30",
             session_row=True,
@@ -315,7 +319,7 @@ class TestExistingFiltersNotBypassed:
         assert sql.count("agent_execution.execution_kind IN ('leaf', 'comparison_lane')") == 2
         assert "agent_message.role = 'user'" in sql
         assert sql.count("agent_execution.display_state = 'running'") == 2
-        assert sql.count("agent_message.created_at >= '2026-06-01") == 1
+        assert sql.count("agent_message.occurred_at >= '2026-06-01") == 1
         assert sql.count("agent_artifact.created_at < '2026-07-01") == 1
 
     @pytest.mark.asyncio

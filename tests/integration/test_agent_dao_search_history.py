@@ -89,11 +89,24 @@ async def _setup(url: str) -> AgentDao:
     return AgentDao(create_test_engine(url))
 
 
-async def _seed_session(dao: AgentDao, session_id: str, *, title: str = "历史会话", archived: bool = False) -> None:
+async def _seed_session(
+    dao: AgentDao,
+    session_id: str,
+    *,
+    title: str = "历史会话",
+    archived: bool = False,
+    created_at: datetime | None = None,
+) -> None:
+    values: dict[str, object] = {
+        "user_scope": USER_SCOPE,
+        "session_id": session_id,
+        "title": title,
+        "archived": archived,
+    }
+    if created_at is not None:
+        values["created_at"] = created_at
     async with dao.engine.begin() as conn:
-        await conn.execute(
-            insert(AgentSession).values(user_scope=USER_SCOPE, session_id=session_id, title=title, archived=archived)
-        )
+        await conn.execute(insert(AgentSession).values(**values))
 
 
 async def _seed_execution(
@@ -582,6 +595,72 @@ class TestFilters:
             user_scope=USER_SCOPE,
         )
         assert [hit.message_id for hit in page.hits] == ["m-d1"]
+
+    async def test_created_basis_uses_session_creation_across_days(self, real_embedded_pg) -> None:
+        """N21：跨两日会话按会话创建日命中次日消息/成果，与消息发生口径不混用。
+
+        会话创建于 06-01，消息发生于 06-02、成果写入于 06-03：created 口径的
+        06-01 窗口必须命中全部命中（会话创建日）；message 口径的 06-02 窗口
+        只命中消息；created 口径的 06-02 窗口不得误纳该会话（其创建日不是 06-02）。
+        """
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a", created_at=datetime(2026, 6, 1, 15, 0, 0, tzinfo=UTC))
+        await _seed_execution(dao, "exec-a", "s-a")
+        await _seed_round(dao, "round-a", "exec-a")
+        await _seed_message(
+            dao,
+            "s-a",
+            "d1",
+            execution_id="exec-a",
+            round_id="round-a",
+            occurred_at="2026-06-02T09:00:00.000000Z",
+            body_text="次日消息",
+        )
+        await _seed_artifact(
+            dao,
+            "art-a",
+            "s-a",
+            "exec-a",
+            "round-a",
+            created_at=datetime(2026, 6, 3, 9, 0, 0, tzinfo=UTC),
+        )
+
+        created_page = await dao.search_history(
+            _q(
+                scope="current_session",
+                session_id="s-a",
+                time_basis="created",
+                date_from="2026-06-01",
+                date_to="2026-06-01",
+            ),
+            user_scope=USER_SCOPE,
+        )
+        assert sorted(hit.hit_kind for hit in created_page.hits) == ["artifact", "message"]
+
+        message_page = await dao.search_history(
+            _q(
+                scope="current_session",
+                session_id="s-a",
+                time_basis="message",
+                date_from="2026-06-02",
+                date_to="2026-06-02",
+            ),
+            user_scope=USER_SCOPE,
+        )
+        assert [hit.message_id for hit in message_page.hits] == ["m-d1"]
+
+        next_day_page = await dao.search_history(
+            _q(
+                scope="current_session",
+                session_id="s-a",
+                time_basis="created",
+                date_from="2026-06-02",
+                date_to="2026-06-02",
+            ),
+            user_scope=USER_SCOPE,
+        )
+        assert next_day_page.hits == ()
 
 
 class TestExactTargetAttribution:

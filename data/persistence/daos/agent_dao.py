@@ -8273,6 +8273,32 @@ class AgentDao(BaseDao):
         return day_from, day_to_excl
 
     @staticmethod
+    def _history_session_created_window_predicate(
+        session_id_column: sa.ColumnElement[Any],
+        *,
+        user_scope: str,
+        day_from: datetime | None,
+        day_to_excl: datetime | None,
+    ) -> sa.ColumnElement[bool]:
+        """time_basis='created' 的日期窗口：所属会话创建时刻（N21/F18）。
+
+        消息/成果行各自的 ``created_at`` 是写入时刻（提交、重放重写都晚于会话
+        创建日），拿它作「会话创建日」筛选会把跨日会话的次日消息/成果漏掉，
+        或按次日误纳该会话。同一用户域的相关 EXISTS（不 JOIN 放大行数），
+        两分支共用同一口径；不排除已清理会话（历史仍可查回）。
+        """
+
+        conditions: list[sa.ColumnElement[bool]] = [
+            AgentSession.user_scope == user_scope,
+            AgentSession.session_id == session_id_column,
+        ]
+        if day_from is not None:
+            conditions.append(AgentSession.created_at >= day_from)
+        if day_to_excl is not None:
+            conditions.append(AgentSession.created_at < day_to_excl)
+        return sa.exists().where(sa.and_(*conditions))
+
+    @staticmethod
     def _history_like_pattern(query_text: str) -> str:
         """query_text → LIKE 子串模式（通配符按字面量转义；各分支共用同一语义）。"""
 
@@ -8452,8 +8478,12 @@ class AgentDao(BaseDao):
           child = ``leaf`` / ``comparison_lane``；消息与成果同口径（成果
           execution_id 为 NOT NULL，不得以 IS NULL 判 main）；关联走相关 EXISTS
           子查询，不 JOIN 放大行数；state_filter 作用于
-          execution.display_state（值集未冻结，留痕）；date 窗口
-          作用于 time_basis 对应列；agent_filter execution_agent 按执行三元组限定；
+          execution.display_state（值集未冻结，留痕）；date 窗口口径由
+          time_basis 决定且不混用（N21/F18）：``created`` = 所属会话创建时刻
+          ``agent_session.created_at``（消息/成果行各自的 created_at 是写入
+          时刻，不得冒充会话创建日），``message`` = 消息发生 ``occurred_at``
+          （成果无发生时刻，取行 created_at），``updated`` = 行 ``updated_at``；
+          agent_filter execution_agent 按执行三元组限定；
           **role_identity 只约束消息**（消息 role_id/role_version）——成果的
           「产生时角色」在持久化层无权威来源（计划持久化形态 PlanProposal 无
           role_key，frozen_manifest/actual_input 为调用方任意 JSON），故成果不按
@@ -8739,10 +8769,23 @@ class AgentDao(BaseDao):
                         )
                     )
                 day_from, day_to_excl = self._history_date_bounds(query, identity_str)
-                if day_from is not None:
-                    message_filters.append(message_moment >= day_from)
-                if day_to_excl is not None:
-                    message_filters.append(message_moment < day_to_excl)
+                if query.time_basis == "created":
+                    # 会话创建口径（N21/F18）：消息行 created_at 是写入时刻，不能
+                    # 当作会话创建日；窗口落在所属会话的 agent_session.created_at。
+                    if day_from is not None or day_to_excl is not None:
+                        message_filters.append(
+                            self._history_session_created_window_predicate(
+                                AgentMessage.session_id,
+                                user_scope=user_scope,
+                                day_from=day_from,
+                                day_to_excl=day_to_excl,
+                            )
+                        )
+                else:
+                    if day_from is not None:
+                        message_filters.append(message_moment >= day_from)
+                    if day_to_excl is not None:
+                        message_filters.append(message_moment < day_to_excl)
                 message_stmt = sa.select(*message_cols).where(*message_filters)
                 if query.query_text:
                     pattern = self._history_like_pattern(query.query_text)
@@ -8883,10 +8926,23 @@ class AgentDao(BaseDao):
                         )
                     )
                 day_from, day_to_excl = self._history_date_bounds(query, identity_str)
-                if day_from is not None:
-                    artifact_stmt = artifact_stmt.where(artifact_moment >= day_from)
-                if day_to_excl is not None:
-                    artifact_stmt = artifact_stmt.where(artifact_moment < day_to_excl)
+                if query.time_basis == "created":
+                    # 与消息分支同一「会话创建日」口径（N21/F18）：成果行 created_at
+                    # 为写入时刻，跨日会话次日成果不得被创建日筛选漏掉或误纳。
+                    if day_from is not None or day_to_excl is not None:
+                        artifact_stmt = artifact_stmt.where(
+                            self._history_session_created_window_predicate(
+                                AgentArtifact.session_id,
+                                user_scope=user_scope,
+                                day_from=day_from,
+                                day_to_excl=day_to_excl,
+                            )
+                        )
+                else:
+                    if day_from is not None:
+                        artifact_stmt = artifact_stmt.where(artifact_moment >= day_from)
+                    if day_to_excl is not None:
+                        artifact_stmt = artifact_stmt.where(artifact_moment < day_to_excl)
                 artifact_base_stmt = artifact_stmt
                 if cursor_window_digest is not None:
                     # 集合修订即显式失效并要求重首读（F-04/V-06）：续读不得在已修订
