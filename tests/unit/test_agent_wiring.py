@@ -528,6 +528,56 @@ class _DirectPool:
         return fn()
 
 
+class _SlowDirectPool:
+    """线程池替身：延迟执行同步关闭（模拟在途关闭），并记录投递次数。"""
+
+    def __init__(self, *, delay: float = 0.05) -> None:
+        self.delay = delay
+        self.calls = 0
+
+    async def run_async(self, task_type: Any, fn: Any) -> Any:
+        self.calls += 1
+        await asyncio.sleep(self.delay)
+        return fn()
+
+
+class _HangingPool:
+    """线程池替身：同步关闭一直不返回（模拟被延迟工作流拖住的退出路径）。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run_async(self, task_type: Any, fn: Any) -> Any:
+        self.calls += 1
+        await asyncio.sleep(3600)
+
+
+class _FailingPool:
+    """线程池替身：同步关闭抛错，并记录投递次数。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run_async(self, task_type: Any, fn: Any) -> Any:
+        self.calls += 1
+        raise RuntimeError("close boom")
+
+
+def _unclosed_wiring(*, handle: Any, guard: Any | None = None) -> AgentWiring:
+    """隔离失败保留句柄的接线替身（无 runtime、无关闭链，只有待收口句柄）。"""
+
+    return AgentWiring(
+        service=cast(Any, _FakeAgentService()),
+        bridge=OwnerLoopBridge.for_running_loop(),
+        unclosed_handle=cast(Any, handle),
+        instance_guard=guard,
+    )
+
+
+def _patch_pool(monkeypatch: pytest.MonkeyPatch, pool: Any) -> None:
+    monkeypatch.setattr("utils.thread_pool.ThreadPoolManager", lambda: pool)
+
+
 def _receipt(*, ready: bool) -> CloseReadinessReceipt:
     from services.agent_service.runtime import CloseCommandIdentity
 
@@ -693,6 +743,108 @@ async def test_mcp_disconnect_retry_success_releases_close_gate() -> None:
     assert wiring.close_ready() is True
     assert lifecycle.disconnects == 2
     assert service.aclose_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# 未收口句柄关闭（N05）：有界、单次投递、可报告的失效/在途结果
+# ---------------------------------------------------------------------------
+
+
+async def test_unclosed_handle_close_is_time_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """延迟的工作流执行不得拖死关闭：单次关闭有界，超时如实报告失效。"""
+    monkeypatch.setattr(wiring_mod, "AGENT_UNCLOSED_HANDLE_CLOSE_TIMEOUT_S", 0.01)
+    pool = _HangingPool()
+    _patch_pool(monkeypatch, pool)
+    guard = _CountingGuard()
+    wiring = _unclosed_wiring(handle=_CloseableHandle(), guard=guard)
+
+    receipt = await asyncio.wait_for(wiring.prepare_close(), timeout=1.0)
+
+    assert receipt is None
+    assert pool.calls == 1
+    assert wiring.close_report.state == "failed"
+    assert wiring.close_report.detail == "close_timeout"
+    assert wiring.close_ready() is False  # 未确认关闭：保锁、不报就绪
+    assert guard.released == 0
+
+
+async def test_concurrent_close_entries_deliver_unclosed_close_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """多入口并发关闭共享同一次投递（窗口/断连不得各关一次）。"""
+    pool = _SlowDirectPool(delay=0.05)
+    _patch_pool(monkeypatch, pool)
+    guard = _CountingGuard()
+    handle = _CloseableHandle()
+    wiring = _unclosed_wiring(handle=handle, guard=guard)
+
+    await asyncio.gather(wiring.prepare_close(), wiring.prepare_close())
+
+    assert pool.calls == 1
+    assert handle.close_calls == 1
+    assert guard.released == 1
+    assert wiring.close_report.state == "closed"
+    assert wiring.close_ready() is True
+
+
+async def test_unclosed_close_reports_in_flight_while_dispatching(monkeypatch: pytest.MonkeyPatch) -> None:
+    """关闭投递在途时结果可报告为 in_flight，不伪装成已关闭/未开始。"""
+    pool = _SlowDirectPool(delay=0.1)
+    _patch_pool(monkeypatch, pool)
+    wiring = _unclosed_wiring(handle=_CloseableHandle(), guard=_CountingGuard())
+
+    task = asyncio.create_task(wiring.prepare_close())
+    await asyncio.sleep(0.02)
+
+    assert wiring.close_report.state == "in_flight"
+    await task
+    assert wiring.close_report.state == "closed"
+
+
+async def test_unclosed_close_failure_is_reported_without_unbounded_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """失效后重试有界：同一句柄只投递一次，后续入口得到同一失效报告。"""
+    pool = _FailingPool()
+    _patch_pool(monkeypatch, pool)
+    guard = _CountingGuard()
+    wiring = _unclosed_wiring(handle=_CloseableHandle(), guard=guard)
+
+    first = await wiring.prepare_close()
+    second = await wiring.prepare_close()
+
+    assert first is None and second is None
+    assert pool.calls == 1  # 一次关闭只投递一次
+    assert wiring.close_report.state == "failed"
+    assert wiring.close_report.detail == "RuntimeError"
+    assert wiring.close_ready() is False
+    assert guard.released == 0
+
+
+async def test_unclosed_close_after_cancellation_reports_exhausted_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """取消后再点关闭：不重投（次数用尽），如实报告失效而非无限等待。"""
+
+    class _CancellingPool:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run_async(self, task_type: Any, fn: Any) -> Any:
+            self.calls += 1
+            raise asyncio.CancelledError()
+
+    pool = _CancellingPool()
+    _patch_pool(monkeypatch, pool)
+    wiring = _unclosed_wiring(handle=_CloseableHandle(), guard=_CountingGuard())
+
+    with pytest.raises(asyncio.CancelledError) as excinfo:
+        await wiring.prepare_close()
+    assert isinstance(excinfo.value, asyncio.CancelledError)
+    assert wiring.close_report.state == "pending"  # 取消不把在途当已关闭
+
+    assert await wiring.prepare_close() is None
+    assert pool.calls == 1  # 一次关闭只投递一次
+    assert wiring.close_report.state == "failed"
+    assert wiring.close_report.detail == "close_attempts_exhausted"
 
 
 async def test_prepare_agent_close_reads_current_wiring_not_startup_copy() -> None:
