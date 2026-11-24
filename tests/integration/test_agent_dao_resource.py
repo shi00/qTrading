@@ -837,7 +837,7 @@ class TestContendedClaimUnderRepeat:
         try:
             for round_index in range(rounds):
                 slot_id = f"slot-race-{round_index:03d}"
-                requests = [_total_request(slot_id=slot_id)]
+                requests = [_total_request(execution_id="root-race", slot_id=slot_id)]
                 requests.extend(
                     _total_request(execution_id=execution_id, node_id=f"lane-{index}", slot_id=slot_id)
                     for index, execution_id in enumerate(contenders, start=1)
