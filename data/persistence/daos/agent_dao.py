@@ -287,7 +287,8 @@ from core.agent_types import (
     validate_role_skill_assignment,
     validate_session_read_query,
 )
-from data.persistence.daos.base_dao import BaseDao
+from data.persistence.daos.base_dao import BaseDao, EngineDisposedError
+from utils.error_classifier import classify_error
 from utils.prompt_guard import (
     UntrustedTextRepresentations,
     convert_untrusted_text,
@@ -978,12 +979,74 @@ def _validate_plan_items_for_save(items: object, *, execution_id: str, identity:
     return item_tuple
 
 
+#: 写事务「确定未提交」说明：COMMIT 未发出（或服务端已回滚），同一命令键重试安全。
+_WRITE_NOT_COMMITTED_MESSAGE = "write transaction not committed; retry with the same command id"
+#: 写事务「提交结果未知」说明：COMMIT 已发出但确认中断，按原身份查回，禁止换键补写。
+_WRITE_COMMIT_UNKNOWN_MESSAGE = "commit outcome unknown; query the original identity, do not resubmit with a new key"
+
+
+def _commit_confirmation_lost(exc: Exception) -> bool:
+    """COMMIT 已发出后的失败是否属于「确认通道中断」（服务端可能已提交）。
+
+    只有传输层中断（连接失效/超时/对端无响应）才可能出现「已提交但客户端收不到
+    确认」；服务端返回的错误（约束冲突、序列化失败等）表示 PostgreSQL 已回滚，
+    属确定未提交。
+    """
+
+    if isinstance(exc, (TimeoutError, OSError)):
+        return True
+    if isinstance(exc, DBAPIError) and exc.connection_invalidated:
+        return True
+    return classify_error(exc, "db")["code"] == "interrupted"
+
+
 class AgentDao(BaseDao):
     """Agent 应用表 DAO（CacheManager.agent_dao）。
 
     引擎经构造注入（BaseDao.__init__）， disposed 守卫与维护门闩由
     BaseDao 基线统一提供；C-02+ 事务方法按上方契约基线逐步落地。
     """
+
+    @contextlib.asynccontextmanager
+    async def _write_transaction(self, *, identity: str) -> AsyncIterator[AsyncConnection]:
+        """受理/存稿写事务信封：区分「确定未提交」与「提交已发起但结果未知」（N12）。
+
+        - 事务体正常结束即退出 ``engine.begin()``（发起 COMMIT）；只有此后的失败才
+          可能是「服务端已提交、确认中断」，按传输层故障判定为
+          ``OPERATION_UNKNOWN``：调用方必须按**原身份**查回，不得换键补写；
+        - 取连接、开事务、语句执行阶段的失败：COMMIT 未发出，PostgreSQL 不会提交
+          （COMMIT 返回服务端错误亦已回滚），按 ``PERSISTENCE_UNAVAILABLE`` 上抛，
+          同一命令键重试安全；
+        - 领域错误 ``AgentServiceError`` 与取消原样传播（R2：取消必须 raise）。
+        """
+
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        body_completed = False
+        try:
+            async with engine.begin() as conn:
+                yield conn
+                # 事务体正常走完（含 return）：退出时将发起 COMMIT，失败即「结果未知」。
+                body_completed = True
+        except AgentServiceError:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except (EngineDisposedError, AgentValidationError):
+            # 引擎已释放（R5）与合同校验失败是明确领域信号，不降级为「存储不可用」。
+            raise
+        except Exception as exc:
+            if body_completed and _commit_confirmation_lost(exc):
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN,
+                    _WRITE_COMMIT_UNKNOWN_MESSAGE,
+                    identity,
+                ) from exc
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                _WRITE_NOT_COMMITTED_MESSAGE,
+                identity,
+            ) from exc
 
     async def accept_request(self, request: AcceptRequest) -> SubmissionReceipt:
         """受理事务（SQ-01/§5.3/§3.3.2）：intent 查重/冲突 + execution + command
@@ -1039,6 +1102,11 @@ class AgentDao(BaseDao):
                 REVISION_CONFLICT（预期草稿版与当前稿版不一致）/
                 OPERATION_UNKNOWN（原回执不可得）/ POLICY_DENIED（目标会话已删除
                 fence 或已归档，新键受理拒绝）。
+
+        写事务失败分列（N12）：事务未提交（取连接/开事务/语句失败，含 COMMIT 返回
+        服务端错误）→ ``PERSISTENCE_UNAVAILABLE``，同一命令键重试安全；COMMIT
+        已发出但确认中断（连接失效/超时）→ ``OPERATION_UNKNOWN``，须按**原身份**
+        查回，不得换键补写（``_write_transaction``）。
         """
 
         self._check_engine()
@@ -1057,7 +1125,7 @@ class AgentDao(BaseDao):
         )
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
-        async with engine.begin() as conn:
+        async with self._write_transaction(identity=_identity_str(request)) as conn:
             # 1. 目标会话存在性 + 行锁（序号分配与草稿版 CAS 的线性化点，§5.4.4）。
             session_row = (
                 await conn.execute(
@@ -12884,6 +12952,10 @@ class AgentDao(BaseDao):
         Raises:
             AgentServiceError: INPUT_INVALID / INPUT_CONFLICT / REVISION_CONFLICT /
                 POLICY_DENIED（目标会话已删除 fence，新键写稿拒绝）。
+
+        写事务失败分列（N12）：未提交 → ``PERSISTENCE_UNAVAILABLE``，同一命令键重试
+        安全；COMMIT 已发出但确认中断 → ``OPERATION_UNKNOWN``，按原身份查回、不换键
+        补写（``_write_transaction``）。
         """
 
         self._check_engine()
@@ -12900,9 +12972,7 @@ class AgentDao(BaseDao):
         digest = draft_save_input_digest(command)
         payload_object = encode_draft_payload(command.payload)
         command_record_id = stable_id("command", [user_scope, command.session_id, command.command.command_id])
-        engine = self.engine
-        assert isinstance(engine, AsyncEngine)
-        async with engine.begin() as conn:
+        async with self._write_transaction(identity=identity) as conn:
             # 1. 会话行锁（草稿 CAS 与命令幂等的线性化点；event_seq 同锁内读取，
             #    供步骤 4 同事务事件分配水位，检视 D29）。
             session_row = (

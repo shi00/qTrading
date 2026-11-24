@@ -1162,6 +1162,11 @@ class AgentService:
         拒绝语义：命令引用与受理输入任一字段不一致 → ``INPUT_INVALID``（不以
         调用方声称的幂等键覆盖真实身份）；受理输入本身不合法 → 由
         ``derive_accept_identity`` 的校验转为 ``INPUT_INVALID``（类型错不吞）。
+
+        受理事务失败分列（N12）：确定未写（事务未提交）→ ``PERSISTENCE_UNAVAILABLE``，
+        可用**同一命令键**重试；提交已发起但确认中断 → ``OPERATION_UNKNOWN``，须按
+        **原身份**（同 user_scope/source_module/business_request_id/命令键）查回，
+        不得换键补写。派发失败只折叠为 ``submitted=False``，不影响本分列。
         """
 
         receipt, _ = await self._accept_and_dispatch(request, command=command)
@@ -1530,6 +1535,10 @@ class AgentService:
         命令在边界处整份校验（全键/标签/集合/基线摘要/禁凭据），失败为
         ``INPUT_INVALID``，不触达 DAO；CAS 冲突、同键异输入与重放语义由 DAO
         事务裁决（``REVISION_CONFLICT`` / ``INPUT_CONFLICT`` / 查回原回执）。
+
+        写事务失败分列（N12）：确定未写（事务未提交）→ ``PERSISTENCE_UNAVAILABLE``，
+        同一命令键重试安全；提交已发起但确认中断 → ``OPERATION_UNKNOWN``，须按原
+        身份查回，不得换键补写、不得先清草稿。
         """
 
         self._require_open("save_draft")
