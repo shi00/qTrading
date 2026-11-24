@@ -63,7 +63,7 @@ from services.agent_service.leaf_runtime import (
     LeafModelBinding,
     require_leaf_turn_timeout,
 )
-from services.agent_service.model import GatewayModel
+from services.agent_service.model import GatewayModel, ModelTurnRefusedError
 from services.agent_service.tool_loop import ToolLoopPorts, run_agent_tool_loop
 from services.agent_service.tool_runtime import ToolRunScope, ToolRuntimeFactory
 from services.agent_service.workflows import NodeOutcome
@@ -80,6 +80,7 @@ __all__ = [
     "LEAF_INPUT_DIGEST_MISSING",
     "LEAF_MODEL_FAILED",
     "LEAF_MODEL_PROTOCOL_FAILED",
+    "LEAF_MODEL_REFUSED",
     "LEAF_MODEL_REF_UNAVAILABLE",
     "LEAF_POLICY_DENIED",
     "LEAF_PREDECESSOR_ARTIFACT_UNAVAILABLE",
@@ -132,6 +133,9 @@ LEAF_TIMEOUT_UNAVAILABLE: Final[str] = "leaf_timeout_unavailable"
 LEAF_DEADLINE_EXHAUSTED: Final[str] = "leaf_deadline_exhausted"
 #: 桥层协议事实失败（如截断流无 finish 确认 / 收尾未核）：不保存成果（R21）。
 LEAF_MODEL_PROTOCOL_FAILED: Final[str] = "leaf_model_protocol_failed"
+#: 提供方确定内容拒绝（完成的模型回合，Executor 已 halt 且保住用量）：与协议 /
+#: 普通模型失败分类不同，不保存成果；拒绝原文不进入终态 / 日志（R9/R21）。
+LEAF_MODEL_REFUSED: Final[str] = "leaf_model_refused"
 
 
 #: 叶模型回合公开事件的受治理类别（不含思考、工具参数、供应商载荷）。
@@ -642,6 +646,15 @@ async def run_leaf_agent(
             context.node.node_id,
         )
         return _failed(context, LEAF_MODEL_PROTOCOL_FAILED)
+    except ModelTurnRefusedError:
+        # 确定拒绝（完成的模型回合）：与协议 / 普通失败区分；拒绝原文只留在
+        # 异常 body，不写入日志 / 终态（R9/R21），用量已由 Executor 落账
+        logger.warning(
+            "[LeafAgent] leaf model turn refused by provider policy (execution=%s node=%s)",
+            context.execution_id,
+            context.node.node_id,
+        )
+        return _failed(context, LEAF_MODEL_REFUSED)
     except AgentServiceError as e:
         if e.code is AgentErrorCode.BUDGET_BLOCKED:
             code = LEAF_TOOL_BUDGET_EXCEEDED
