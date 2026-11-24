@@ -27,6 +27,7 @@ from core.agent_types import (
     SkillAssetRegistration,
     SkillBudget,
     SkillVersionRef,
+    SkillVersionView,
     sha256_hex,
     stable_id,
 )
@@ -156,6 +157,43 @@ class FakeCatalogDao:
                     raise AgentServiceError(AgentErrorCode.POLICY_DENIED, "skill version is referenced by role", "test")
         self.skill_states[key] = desired
         return desired, False
+
+    async def list_skill_version_views(self, *, user_scope: str) -> tuple[SkillVersionView, ...]:
+        views: list[SkillVersionView] = []
+        for (scope, asset_id, version), (digest, metadata) in sorted(self.assets.items()):
+            if scope != user_scope:
+                continue
+            payload = cast(dict[str, Any], metadata)
+            views.append(
+                SkillVersionView(
+                    skill_id=asset_id,
+                    display_name=asset_id,
+                    version=version,
+                    read_state=self.skill_states.get((scope, asset_id, version), "ready"),
+                    content_digest=digest,
+                    file_count=int(payload.get("file_count", 0)),
+                    expanded_bytes=int(payload.get("expanded_bytes", 0)),
+                    license_id=str(payload.get("license", "")),
+                    dependencies=tuple(payload.get("dependencies", [])),
+                    missing_dependencies=tuple(payload.get("missing_dependencies", [])),
+                )
+            )
+        return tuple(views)
+
+    async def remove_skill_version(self, *, user_scope: str, skill_id: str, version: int) -> None:
+        key = (user_scope, skill_id, version)
+        if key not in self.assets:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "skill version does not exist", "test")
+        for (scope, _role_id, _role_version), assignment in self.role_assignments.items():
+            if scope != user_scope:
+                continue
+            if any((ref.skill_id, ref.version) == (skill_id, version) for ref in assignment.enabled):
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    "skill version is referenced by role: role-main@1",
+                    "test",
+                )
+        del self.assets[key]
 
 
 def _service(tmp_path: Path) -> tuple[SkillCatalogService, FakeCatalogDao, ManagedSkillStore]:
@@ -933,6 +971,33 @@ class TestAgentServiceSkillLifecycle:
         selection = await facade.resolve_role_skill_selection(user_scope="scope", role_id="role-main", role_version="1")
         assert selection == ()
 
+        listed = await facade.list_skills(user_scope="scope")
+        assert [(view.skill_id, view.version) for view in listed] == [(imported.skill_id, 1)]
+        preview = await facade.preview_skill_package(
+            SkillPackageImportRequest(user_scope="scope", directory_name="demo-skill", data=_package(body=b"# v2"))
+        )
+        assert preview.status is SkillImportStatus.UPDATE_REQUIRES_CONFIRMATION
+        updated = await facade.import_skill_package(
+            SkillPackageImportRequest(
+                user_scope="scope",
+                directory_name="demo-skill",
+                data=_package(body=b"# v2"),
+                confirm_update=True,
+            )
+        )
+        assert updated.version == 2
+        stored = await facade.read_role_skill_assignment(user_scope="scope", role_id="role-main", role_version="1")
+        assert stored is not None and stored.enabled == ()
+        effective = await facade.validate_role_skill_assignment(
+            RoleSkillAssignment(role_id="role-main", role_version="1", enabled=(), defaults=()),
+            user_scope="scope",
+        )
+        assert effective == ()
+        receipt = await facade.uninstall_skill(ref, user_scope="scope")
+        assert receipt.version == 1
+        remaining = await facade.list_skills(user_scope="scope")
+        assert [view.version for view in remaining] == [2]
+
     async def test_unwired_facade_reports_unavailable(self) -> None:
         facade = AgentService(cast(Any, FakeCatalogDao()))
         with pytest.raises(AgentServiceError) as exc:
@@ -941,3 +1006,107 @@ class TestAgentServiceSkillLifecycle:
         with pytest.raises(AgentServiceError) as exc2:
             await facade.resolve_role_skill_selection(user_scope="scope", role_id="role-main", role_version="1")
         assert exc2.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        with pytest.raises(AgentServiceError) as exc3:
+            await facade.list_skills(user_scope="scope")
+        assert exc3.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        with pytest.raises(AgentServiceError) as exc4:
+            await facade.preview_skill_package(
+                SkillPackageImportRequest(user_scope="scope", directory_name="demo", data=_package())
+            )
+        assert exc4.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        with pytest.raises(AgentServiceError) as exc5:
+            await facade.import_skill_package(
+                SkillPackageImportRequest(user_scope="scope", directory_name="demo", data=_package())
+            )
+        assert exc5.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        with pytest.raises(AgentServiceError) as exc6:
+            await facade.uninstall_skill(SkillVersionRef("a", 1), user_scope="scope")
+        assert exc6.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        with pytest.raises(AgentServiceError) as exc7:
+            await facade.assign_role_skills(
+                RoleSkillAssignment(role_id="role-main", role_version="1", enabled=(), defaults=()),
+                user_scope="scope",
+                display_name="角色",
+            )
+        assert exc7.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        with pytest.raises(AgentServiceError) as exc8:
+            await facade.read_role_skill_assignment(user_scope="scope", role_id="role-main", role_version="1")
+        assert exc8.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        with pytest.raises(AgentServiceError) as exc9:
+            await facade.validate_role_skill_assignment(
+                RoleSkillAssignment(role_id="role-main", role_version="1", enabled=(), defaults=()),
+                user_scope="scope",
+            )
+        assert exc9.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+
+
+class TestSkillManagementService:
+    """W-05：导入预览不发布、列表投影、卸载引用阻删、角色选择保存前校验。"""
+
+    async def test_preview_returns_decision_without_publishing(self, tmp_path: Path) -> None:
+        service, dao, store = _service(tmp_path)
+        receipt = await service.preview_package(
+            SkillPackageImportRequest(user_scope="scope", directory_name="demo-skill", data=_package())
+        )
+        assert receipt.status is SkillImportStatus.NEW
+        assert receipt.version == 1
+        assert dao.assets == {}
+        assert store.current_version(receipt.skill_id) is None
+
+    async def test_list_skills_returns_registered_versions(self, tmp_path: Path) -> None:
+        service, _, _ = _service(tmp_path)
+        imported = await _import(service, _package())
+        views = await service.list_skills(user_scope="scope")
+        assert [(view.skill_id, view.version, view.read_state) for view in views] == [(imported.skill_id, 1, "ready")]
+
+    async def test_uninstall_is_blocked_when_role_references_version(self, tmp_path: Path) -> None:
+        service, _, _ = _service(tmp_path)
+        imported = await _import(service, _package())
+        ref = SkillVersionRef(imported.skill_id, 1)
+        await service.assign_role_skills(
+            RoleSkillAssignment(role_id="role-main", role_version="1", enabled=(ref,), defaults=(ref,)),
+            user_scope="scope",
+            display_name="主研究角色",
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await service.uninstall_version(ref, user_scope="scope")
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert "role-main@1" in str(exc.value)
+
+    async def test_uninstall_removes_registration_and_directory(self, tmp_path: Path) -> None:
+        service, dao, store = _service(tmp_path)
+        imported = await _import(service, _package())
+        ref = SkillVersionRef(imported.skill_id, 1)
+        receipt = await service.uninstall_version(ref, user_scope="scope")
+        assert receipt.files_removed is True
+        assert dao.assets == {}
+        assert store.version_dir(ref).exists() is False
+
+    async def test_validate_role_assignment_rejects_missing_or_disabled_version(self, tmp_path: Path) -> None:
+        service, _, _ = _service(tmp_path)
+        imported = await _import(service, _package())
+        ref = SkillVersionRef(imported.skill_id, 1)
+        missing = RoleSkillAssignment(
+            role_id="role-main",
+            role_version="1",
+            enabled=(SkillVersionRef("missing", 1),),
+            defaults=(),
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await service.validate_role_skill_assignment(missing, user_scope="scope")
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        await service.set_skill_enabled(ref, user_scope="scope", enabled=False)
+        disabled = RoleSkillAssignment(role_id="role-main", role_version="1", enabled=(ref,), defaults=(ref,))
+        with pytest.raises(AgentServiceError) as exc2:
+            await service.validate_role_skill_assignment(disabled, user_scope="scope")
+        assert exc2.value.code is AgentErrorCode.POLICY_DENIED
+
+    async def test_validate_role_assignment_returns_effective_selection(self, tmp_path: Path) -> None:
+        service, _, _ = _service(tmp_path)
+        imported = await _import(service, _package())
+        ref = SkillVersionRef(imported.skill_id, 1)
+        effective = await service.validate_role_skill_assignment(
+            RoleSkillAssignment(role_id="role-main", role_version="1", enabled=(ref,), defaults=(ref,)),
+            user_scope="scope",
+        )
+        assert effective == (ref,)

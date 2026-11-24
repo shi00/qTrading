@@ -32,7 +32,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 
 import sqlalchemy as sa
 from jsonschema.exceptions import SchemaError
@@ -173,6 +173,7 @@ from core.agent_types import (
     SessionSummary,
     SkillAssetReceipt,
     SkillAssetRegistration,
+    SkillVersionView,
     SkillVersionRef,
     SourceClaimBinding,
     SourceClaimFact,
@@ -14977,6 +14978,129 @@ class AgentDao(BaseDao):
             )
         return desired, False
 
+    async def list_skill_version_views(self, *, user_scope: str) -> tuple[SkillVersionView, ...]:
+        """用户域全部已登记 Skill 版本的只读投影（版本升序，供设置页/角色校验）。"""
+
+        self._check_engine()
+        identity = f"{user_scope}/skill"
+        _require_text_field(user_scope, "user_scope", identity)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    sa.select(
+                        AgentAssetVersion.asset_id,
+                        AgentAssetVersion.asset_version,
+                        AgentAssetVersion.display_name,
+                        AgentAssetVersion.digest,
+                        AgentAssetVersion.read_state,
+                        AgentAssetVersion.metadata_payload,
+                    )
+                    .where(
+                        AgentAssetVersion.user_scope == user_scope,
+                        AgentAssetVersion.asset_kind == "skill",
+                    )
+                    .order_by(AgentAssetVersion.asset_id, AgentAssetVersion.asset_version)
+                )
+            ).all()
+        views: list[SkillVersionView] = []
+        for row in rows:
+            try:
+                version = int(row.asset_version)
+            except (TypeError, ValueError) as exc:
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN, "skill asset version is not numeric", identity
+                ) from exc
+            metadata = row.metadata_payload or {}
+            if not isinstance(metadata, dict):
+                raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "skill asset metadata unreadable", identity)
+            views.append(
+                SkillVersionView(
+                    skill_id=str(row.asset_id),
+                    display_name=str(row.display_name),
+                    version=version,
+                    read_state=str(row.read_state),
+                    content_digest=str(row.digest),
+                    file_count=_metadata_int(metadata, "file_count", identity),
+                    expanded_bytes=_metadata_int(metadata, "expanded_bytes", identity),
+                    license_id=_metadata_text(metadata, "license"),
+                    dependencies=_metadata_text_tuple(metadata, "dependencies"),
+                    missing_dependencies=_metadata_text_tuple(metadata, "missing_dependencies"),
+                )
+            )
+        return tuple(views)
+
+    async def remove_skill_version(self, *, user_scope: str, skill_id: str, version: int) -> None:
+        """卸载一个 Skill 版本（单事务；被角色版本或会话冻结请求引用即阻删）。
+
+        - 引用保护在同一事务内核对：``agent_source_link`` 的角色绑定边，以及
+          ``agent_round.frozen_manifest`` 中仍引用该版本的会话请求；
+        - 只删除该准确版本行与指向它的谱系边，不触碰同名其它版本目录；
+        - 目录清理由应用服务在提交后执行，不把「已删登记」伪报成「已删文件」。
+        """
+
+        self._check_engine()
+        identity = f"{user_scope}/skill/{skill_id}@{version}"
+        _require_text_field(user_scope, "user_scope", identity)
+        _require_text_field(skill_id, "skill_id", identity)
+        if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "version must be a positive integer", identity)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(AgentAssetVersion.asset_kind)
+                    .where(
+                        AgentAssetVersion.user_scope == user_scope,
+                        AgentAssetVersion.asset_id == skill_id,
+                        AgentAssetVersion.asset_version == str(version),
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if row is None or row.asset_kind != "skill":
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "skill version does not exist", identity)
+            role_refs = await _lock_role_skill_references(
+                conn,
+                user_scope=user_scope,
+                skill_id=skill_id,
+                source_version=str(version),
+            )
+            if role_refs:
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    f"skill version is referenced by role: {','.join(role_refs)}",
+                    identity,
+                )
+            session_refs = await _session_skill_references(
+                conn,
+                user_scope=user_scope,
+                skill_id=skill_id,
+                source_version=str(version),
+            )
+            if session_refs:
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    f"skill version is referenced by session: {','.join(session_refs)}",
+                    identity,
+                )
+            await conn.execute(
+                sa.delete(AgentSourceLink).where(
+                    AgentSourceLink.user_scope == user_scope,
+                    AgentSourceLink.source_id == skill_id,
+                    AgentSourceLink.source_version == str(version),
+                )
+            )
+            await conn.execute(
+                sa.delete(AgentAssetVersion).where(
+                    AgentAssetVersion.user_scope == user_scope,
+                    AgentAssetVersion.asset_id == skill_id,
+                    AgentAssetVersion.asset_version == str(version),
+                )
+            )
+
     # ------------------------------------------------------------------
     # R2-I08 研究成果保存（唯一执行循环的成果生产者端口）
     # ------------------------------------------------------------------
@@ -15408,6 +15532,55 @@ async def _lock_role_skill_references(
         )
     ).all()
     return tuple(f"{row.consumer_id}@{row.consumer_version}" for row in rows)
+
+
+def _metadata_int(metadata: Mapping[str, Any], key: str, identity: str) -> int:
+    value = metadata.get(key, 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, f"skill metadata {key} unreadable", identity)
+    return value
+
+
+def _metadata_text(metadata: Mapping[str, Any], key: str) -> str:
+    value = metadata.get(key)
+    return value if isinstance(value, str) else ""
+
+
+def _metadata_text_tuple(metadata: Mapping[str, Any], key: str) -> tuple[str, ...]:
+    value = metadata.get(key)
+    if not isinstance(value, list):
+        return ()
+    return tuple(item for item in value if isinstance(item, str))
+
+
+async def _session_skill_references(
+    conn: AsyncConnection, *, user_scope: str, skill_id: str, source_version: str
+) -> tuple[str, ...]:
+    """会话冻结请求中仍引用该 Skill 版本的会话（``agent_round.frozen_manifest``）。"""
+
+    pair = [[skill_id, source_version]]
+    rows = (
+        await conn.execute(
+            sa.select(AgentExecution.session_id)
+            .select_from(AgentRound)
+            .join(
+                AgentExecution,
+                sa.and_(
+                    AgentExecution.user_scope == AgentRound.user_scope,
+                    AgentExecution.execution_id == AgentRound.execution_id,
+                ),
+            )
+            .where(
+                AgentRound.user_scope == user_scope,
+                AgentRound.frozen_manifest.isnot(None),
+                sa.or_(
+                    AgentRound.frozen_manifest["skill_refs"].contains(pair),
+                    AgentRound.frozen_manifest["shared"]["skill_refs"].contains(pair),
+                ),
+            )
+        )
+    ).all()
+    return tuple(sorted({str(row.session_id) for row in rows if isinstance(row.session_id, str)}))
 
 
 def _compare_skill_asset_row(
