@@ -1811,6 +1811,35 @@ class TestXlsxHiddenAttributes:
         parsed = _parse(AttachmentKind.XLSX, _xlsx_sheet1(rows), selection)
         assert "xlsx_hidden_rows" not in self._codes(parsed)
 
+    def test_hidden_rows_outside_selection_do_not_consume_report_sample(self) -> None:
+        # N41：区外隐藏行先占满 256 个上报样本时，选区内的隐藏行仍必须上报。
+        rows = "".join(
+            f'<row r="{index}" hidden="1"><c r="A{index}"><v>{index}</v></c></row>' for index in range(1, 301)
+        )
+        rows += '<row r="301"><c r="A301"><v>301</v></c></row>'
+        rows += '<row r="302" hidden="1"><c r="A302"><v>302</v></c></row>'
+        selection = Selection(kind="limited", ranges=(RowsRange(kind="rows", sheet="S1", start=301, end=302),))
+        parsed = _parse(AttachmentKind.XLSX, _xlsx_sheet1(rows), selection)
+        assert parsed.read_state is ReadState.READY
+        assert "xlsx_hidden_rows" in self._codes(parsed)
+        row_message = next(item["message"] for item in parsed.limitations if item["code"] == "xlsx_hidden_rows")
+        assert "隐藏行：302" in row_message
+        assert "1-300" not in row_message
+
+    def test_hidden_rows_truncation_is_scoped_to_selection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 样本上限后仍须明确标注「仅列前 N 个」，不得因区外样本占满而静默丢弃选区内行。
+        monkeypatch.setattr(attachment_worker, "MAX_REPORTED_HIDDEN_ROWS", 2)
+        rows = "".join(f'<row r="{index}" hidden="1"><c r="A{index}"><v>{index}</v></c></row>' for index in range(1, 4))
+        rows += '<row r="4"><c r="A4"><v>4</v></c></row>'
+        rows += "".join(
+            f'<row r="{index}" hidden="1"><c r="A{index}"><v>{index}</v></c></row>' for index in range(5, 7)
+        )
+        selection = Selection(kind="limited", ranges=(RowsRange(kind="rows", sheet="S1", start=1, end=6),))
+        parsed = _parse(AttachmentKind.XLSX, _xlsx_sheet1(rows), selection)
+        row_message = next(item["message"] for item in parsed.limitations if item["code"] == "xlsx_hidden_rows")
+        assert "隐藏行：1-2" in row_message
+        assert "仅列前 2 个" in row_message
+
     def test_unverifiable_hidden_attributes_are_reported_as_unknown(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # 结构超界时不能把「隐藏属性未知」当成「全部可见」。
         monkeypatch.setattr(attachment_worker, "MAX_SHEET_XML_BYTES", 10)
