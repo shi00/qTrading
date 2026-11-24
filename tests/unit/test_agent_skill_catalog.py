@@ -815,6 +815,55 @@ class TestSkillLifecycleService:
         assert enabled.read_state == "ready"
         assert dao.skill_states[("scope", imported.skill_id, 1)] == "ready"
 
+    async def test_enable_with_missing_dependency_is_denied_with_blocked_items(self, tmp_path: Path) -> None:
+        service, dao, _ = _service(tmp_path)
+        imported = await _import(service, _package(dependencies=("base-skill", "extra-skill")))
+        ref = SkillVersionRef(imported.skill_id, 1)
+        await service.set_skill_enabled(ref, user_scope="scope", enabled=False)
+
+        with pytest.raises(AgentServiceError) as exc:
+            await service.set_skill_enabled(ref, user_scope="scope", enabled=True)
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert "base-skill,extra-skill" in exc.value.sanitized_message
+        assert dao.skill_states[("scope", imported.skill_id, 1)] == "disabled"
+
+    async def test_enable_of_ready_skill_with_missing_dependency_writes_no_fact(self, tmp_path: Path) -> None:
+        service, dao, _ = _service(tmp_path)
+        imported = await _import(service, _package(dependencies=("base-skill",)))
+        ref = SkillVersionRef(imported.skill_id, 1)
+
+        with pytest.raises(AgentServiceError) as exc:
+            await service.set_skill_enabled(ref, user_scope="scope", enabled=True)
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert ("scope", imported.skill_id, 1) not in dao.skill_states
+
+    async def test_disable_with_missing_dependency_stays_allowed(self, tmp_path: Path) -> None:
+        service, dao, _ = _service(tmp_path)
+        imported = await _import(service, _package(dependencies=("base-skill",)))
+        ref = SkillVersionRef(imported.skill_id, 1)
+
+        disabled = await service.set_skill_enabled(ref, user_scope="scope", enabled=False)
+        assert disabled.read_state == "disabled"
+        assert dao.skill_states[("scope", imported.skill_id, 1)] == "disabled"
+
+    async def test_enable_recovers_after_dependency_imported_without_accumulation(self, tmp_path: Path) -> None:
+        service, dao, _ = _service(tmp_path)
+        imported = await _import(service, _package(dependencies=("base-skill",)))
+        ref = SkillVersionRef(imported.skill_id, 1)
+        await service.set_skill_enabled(ref, user_scope="scope", enabled=False)
+        for _ in range(2):
+            with pytest.raises(AgentServiceError) as exc:
+                await service.set_skill_enabled(ref, user_scope="scope", enabled=True)
+            assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert len(dao.assets) == 1
+        assert dao.skill_states[("scope", imported.skill_id, 1)] == "disabled"
+
+        await _import(service, _package(name="base-skill"))
+        enabled = await service.set_skill_enabled(ref, user_scope="scope", enabled=True)
+        assert enabled.read_state == "ready"
+        assert enabled.replayed is False
+        assert len(dao.assets) == 2
+
     async def test_disable_version_bound_to_role_is_denied(self, tmp_path: Path) -> None:
         service, dao, _ = _service(tmp_path)
         imported = await _import(service, _package())
