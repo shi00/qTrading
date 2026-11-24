@@ -146,6 +146,9 @@ _HIDDEN_COLS = frozenset(
         # （exec_warnings 经 warnings 横幅呈现；filter_attribution 供历史回看消费），不上表格。
         "exec_warnings",
         "filter_attribution",
+        # N13: 结果行程序字段「调用身份」字典（strategies/ai_mixin 附加，供归档/回溯），
+        # 内部元数据不上表格 —— 否则原样渲染成可排序的字典列。
+        "stock_agent_call",
     }
 )
 
