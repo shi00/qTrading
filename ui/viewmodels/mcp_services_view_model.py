@@ -11,6 +11,8 @@
 - 测试残留关闭未确认时提供显式「重试关闭残留」命令，不用新连接覆盖未知收尾；
 - **列表逐行容错**：单条配置失效（程序被移动/卸载等）只标注该行（可载入后修复），
   健康配置照常列出；使用点（读取/测试/启连）仍 fail-closed 拒绝（J25 按身份管理）；
+- 断开/启连后的列表刷新失败不覆盖操作回执（成功仍是成功），刷新错误另列于
+  ``refresh_status``，且本地已确认的行连接状态不被旧行覆盖；
 - VM 不 import flet、不持有控件、不感知 locale（只产出 i18n key/params）；
 - ``CancelledError`` 原样传播（R2）；异常消息经 ``DataSanitizer`` 脱敏后进入状态（R9）。
 """
@@ -233,6 +235,8 @@ class MCPServicesState:
     delete_pending: bool = False
     status: Message | None = None
     status_level: str = STATUS_INFO
+    #: 列表刷新失败的独立回执（与 ``status`` 并列展示，不覆盖操作结果）。
+    refresh_status: Message | None = None
 
 
 class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
@@ -280,6 +284,7 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
             busy=False,
             draft_saved=self._is_draft_saved(),
             role_assignments=self._build_role_rows(roles),
+            refresh_status=None,
         )
 
     def select_service(self, identity_key: str) -> None:
@@ -574,6 +579,7 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
             return
         self._set_state(
             busy=False,
+            rows=self._with_row_connected(identity.stable_key(), True),
             status=Message("mcp_status_connected", {"count": str(len(receipt.tools))}),
             status_level=STATUS_SUCCESS,
         )
@@ -601,6 +607,7 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
         self._test_receipt = None
         self._set_state(
             busy=False,
+            rows=self._with_row_connected(identity.stable_key(), False),
             discovered_tools=(),
             approved_tools=(),
             status=Message("mcp_status_disconnected", {"service_id": identity.service_id}),
@@ -883,6 +890,13 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
             raise ValueError(exc.code) from None
         return assignment
 
+    def _with_row_connected(self, identity_key: str, connected: bool) -> tuple[MCPServiceRow, ...]:
+        """把本地已确认的连接状态投影到对应行（列表刷新失败时不回退到旧行）。"""
+
+        return tuple(
+            replace(row, connected=connected) if row.identity_key == identity_key else row for row in self._state.rows
+        )
+
     def _draft_from_config(self, config: MCPServerConfig) -> MCPConfigDraft:
         """已保存配置 → 表单草稿（往返一致，不丢字段）。"""
 
@@ -915,7 +929,11 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
         )
 
     async def _refresh_rows(self) -> None:
-        """只刷新列表连接状态（不重置表单与工具选择）。"""
+        """只刷新列表连接状态（不重置表单与工具选择）。
+
+        刷新失败不覆盖操作回执：操作结果仍由 ``status`` 承担，刷新错误只写入
+        ``refresh_status`` 另列展示；已本地确认的行状态不回退到旧行。
+        """
 
         if self._lifecycle is None:
             return
@@ -924,7 +942,9 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self._fail(exc)
+            sanitized = _format_error(exc)
+            logger.error("[MCPServicesVM] row refresh failed: %s", sanitized)
+            self._set_state(refresh_status=Message("mcp_status_list_refresh_failed", {"reason": sanitized}))
             return
         self._configs = {
             entry.config.identity.stable_key(): entry.config for entry in entries if entry.config is not None
@@ -933,6 +953,7 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
             rows=self._build_rows(entries),
             unreadable_count=sum(1 for entry in entries if entry.config is None),
             draft_saved=self._is_draft_saved(),
+            refresh_status=None,
         )
 
     def _fail(self, exc: BaseException) -> None:

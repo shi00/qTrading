@@ -726,6 +726,7 @@
     "agent_research_mcp_scope_hint": "Check only the MCP services allowed for this run; none checked means MCP is not used.",
     "agent_research_mcp_scope_empty": "No configured MCP services.",
     "agent_research_mcp_scope_error": "Failed to read the MCP service catalog; try again later.",
+    "mcp_status_list_refresh_failed": "List refresh failed: {reason}. The operation result above still stands.",
     "settings_sec_api": "API Connection",
     "settings_ai_api_key_label": "AI API Key",
     "settings_ai_base_url_label": "API Base URL",

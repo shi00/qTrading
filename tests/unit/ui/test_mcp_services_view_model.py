@@ -49,6 +49,7 @@ from services.agent_service.mcp_lifecycle import (
 from ui.viewmodels import Message
 from ui.viewmodels.mcp_services_view_model import (
     STATUS_ERROR,
+    STATUS_INFO,
     STATUS_SUCCESS,
     STATUS_WARNING,
     MCPRoleDraft,
@@ -112,6 +113,8 @@ class _FakeLifecycle:
         self.role_saved: list[object] = []
         self.deleted: list[MCPServiceIdentity] = []
         self.delete_error: BaseException | None = None
+        #: 只让 ``list_services`` 失败（模拟操作成功后的列表刷新失败）。
+        self.list_fail_with: BaseException | None = None
 
     async def list_role_assignments(self) -> tuple[object, ...]:
         self._maybe_fail()
@@ -147,6 +150,8 @@ class _FakeLifecycle:
             raise self.fail_with
 
     async def list_services(self) -> tuple[MCPConfigListEntry, ...]:
+        if self.list_fail_with is not None:
+            raise self.list_fail_with
         self._maybe_fail()
         entries = [
             MCPConfigListEntry(
@@ -655,6 +660,85 @@ class TestOperations:
         assert vm.state.rows[0].connected is False
 
     @pytest.mark.asyncio
+    async def test_disconnect_receipt_survives_row_refresh_failure(self) -> None:
+        """断开已确认时，列表刷新失败另列，不覆盖断开回执、不复现旧已连接行。"""
+
+        fake = _FakeLifecycle([_config()])
+        fake.connected_keys.add(_identity().stable_key())
+        vm = _vm(fake)
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+        fake.list_fail_with = RuntimeError("db is down token=secret")
+
+        await vm.disconnect()
+
+        assert fake.disconnected == [_identity()]
+        assert vm.state.status == Message("mcp_status_disconnected", {"service_id": "svc"})
+        assert vm.state.status_level == STATUS_INFO
+        assert vm.state.refresh_status is not None
+        assert vm.state.refresh_status.key == "mcp_status_list_refresh_failed"
+        assert "token=secret" not in str(vm.state.refresh_status.params.get("reason"))
+        assert [row.connected for row in vm.state.rows] == [False]
+        assert vm.state.busy is False
+
+    @pytest.mark.asyncio
+    async def test_disconnect_failure_reports_error_and_keeps_rows(self) -> None:
+        """断开失败不得把行标成已断开，也不得伪造刷新错误。"""
+
+        fake = _FakeLifecycle([_config()])
+        fake.connected_keys.add(_identity().stable_key())
+        vm = _vm(fake)
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+        fake.fail_with = RuntimeError("in use")
+
+        await vm.disconnect()
+
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_error"
+        assert vm.state.status_level == STATUS_ERROR
+        assert vm.state.refresh_status is None
+        assert [row.connected for row in vm.state.rows] == [True]
+
+    @pytest.mark.asyncio
+    async def test_successful_load_clears_previous_refresh_failure(self) -> None:
+        fake = _FakeLifecycle([_config()])
+        fake.connected_keys.add(_identity().stable_key())
+        vm = _vm(fake)
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+        fake.list_fail_with = RuntimeError("db is down")
+
+        await vm.disconnect()
+        assert vm.state.refresh_status is not None
+
+        fake.list_fail_with = None
+        await vm.load()
+
+        assert vm.state.refresh_status is None
+        assert vm.state.rows[0].connected is False
+
+    @pytest.mark.asyncio
+    async def test_connect_receipt_survives_row_refresh_failure(self) -> None:
+        """启连回执同样不被刷新失败覆盖，行按已确认的启连结果投影。"""
+
+        fake = _FakeLifecycle([_config()])
+        vm = _vm(fake)
+        await vm.load()
+        vm.select_service(_identity().stable_key())
+        await vm.connection_test()
+        fake.list_fail_with = RuntimeError("db is down")
+
+        await vm.connect()
+
+        assert vm.state.status is not None
+        assert vm.state.status.key == "mcp_status_connected"
+        assert vm.state.status_level == STATUS_SUCCESS
+        assert vm.state.refresh_status is not None
+        assert vm.state.refresh_status.key == "mcp_status_list_refresh_failed"
+        assert vm.state.rows[0].connected is True
+
+    @pytest.mark.asyncio
     async def test_operation_cancelled_propagates(self) -> None:
         fake = _FakeLifecycle([_config()])
         vm = _vm(fake)
@@ -906,12 +990,14 @@ class TestGuardAndFailureBranches:
         vm = _vm(fake)
         await vm.load()
 
-        fake.fail_with = RuntimeError("list failed")
+        fake.list_fail_with = RuntimeError("list failed")
         await vm._refresh_rows()
-        status = vm.state.status
-        assert status is not None and (status.key, vm.state.status_level) == ("mcp_status_error", STATUS_ERROR)
+        refresh_status = vm.state.refresh_status
+        assert refresh_status is not None and refresh_status.key == "mcp_status_list_refresh_failed"
+        # 刷新失败不覆盖操作回执（N18）：status 保持原样，错误只进 refresh_status。
+        assert vm.state.status is None
 
-        fake.fail_with = asyncio.CancelledError()
+        fake.list_fail_with = asyncio.CancelledError()
         with pytest.raises(asyncio.CancelledError) as exc:
             await vm._refresh_rows()
         assert type(exc.value) is asyncio.CancelledError

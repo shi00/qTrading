@@ -597,6 +597,7 @@
     "agent_research_mcp_scope_hint": "仅勾选本次允许的 MCP 服务；不勾选表示本次不使用 MCP。",
     "agent_research_mcp_scope_empty": "暂无已配置的 MCP 服务。",
     "agent_research_mcp_scope_error": "MCP 服务目录读取失败，请稍后重试。",
+    "mcp_status_list_refresh_failed": "列表刷新失败：{reason}；上方操作结果仍然有效。",
     "settings_sec_api": "API 连接配置",
     "settings_ai_api_key_label": "AI 接口密钥 (API Key)",
     "settings_ai_base_url_label": "API 服务地址 (Base URL)",
