@@ -13,6 +13,7 @@ import asyncio
 import os
 import sys
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -30,10 +31,13 @@ from core.agent_types import (
 from data.persistence.daos.agent_dao import AgentDao
 from data.persistence.models import (
     AgentArtifact,
+    AgentAssetVersion,
     AgentExecution,
+    AgentMessage,
     AgentOperation,
     AgentRound,
     AgentSession,
+    AgentSourceLink,
 )
 from services.agent_service.delivery import WindowsManagedFileStore
 from services.agent_service.delivery_render import read_delivery_fields
@@ -129,6 +133,65 @@ async def _seed(dao: AgentDao, *, body_text: str, source_state: str = "available
                 io_state="open",
             )
         )
+        # N42：交付必须带出「获准公开的问题表示」；正文（私密原文）不得进入导出。
+        moment = datetime(2026, 11, 15, 8, 0, 0, tzinfo=UTC)
+        await conn.execute(
+            insert(AgentMessage).values(
+                user_scope=USER_SCOPE,
+                message_id="msg-q",
+                session_id="s1",
+                event_id="evt-msg-q",
+                session_seq=1,
+                event_kind="public_message_saved",
+                payload_kind="public_message",
+                subject_id="msg-q",
+                subject_revision=1,
+                role="user",
+                body_text="私密原问题正文",
+                model_text="私密原问题正文",
+                body_untrusted=False,
+                search_text="获准公开的问题",
+                payload={
+                    "schema_version": 1,
+                    "message_id": "msg-q",
+                    "role": "user",
+                    "source_id": "src-q",
+                    "source_version": "1",
+                },
+                occurred_at=moment,
+                committed_at=moment,
+            )
+        )
+        await conn.execute(
+            insert(AgentAssetVersion).values(
+                user_scope=USER_SCOPE,
+                asset_id="src-q",
+                asset_version="1",
+                asset_kind="source",
+                display_name="用户问题",
+                digest=sha256_hex("私密原问题正文".encode()),
+                metadata_payload={
+                    "schema_version": 1,
+                    "user_message_origin": {"session_id": "s1", "message_id": "msg-q", "message_version": "1"},
+                },
+                read_state="ready",
+                verification_state="program_verified",
+                available_at=moment,
+            )
+        )
+        await conn.execute(
+            insert(AgentSourceLink).values(
+                user_scope=USER_SCOPE,
+                link_id="link-msg-q",
+                source_id="src-q",
+                source_version="1",
+                consumer_kind="execution",
+                consumer_id="exec-1",
+                consumer_version="1",
+                execution_id="exec-1",
+                relation_kind="accepted_input",
+            )
+        )
 
 
 def _command(target: Path, *, format_name: str = "md", **overrides: object) -> ArtifactDeliveryCommand:
@@ -221,6 +284,8 @@ class TestDeliveryRoundTrip:
 
         index = {field.path: field for field in read_delivery_fields(target.read_bytes(), "md")}
         assert index["metadata:artifact_id"].value_text == "art-1"
+        assert index["metadata:question_public"].value_text == "获准公开的问题"
+        assert "私密原问题正文" not in target.read_text(encoding="utf-8")
         assert index["body:"].value_text == "成果正文"
         assert index["payload:/s"].value_text == "00123"
         assert index["payload:/n"].value_type == "null"

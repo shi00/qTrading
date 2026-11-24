@@ -38,8 +38,10 @@ from data.persistence.models import (
     AgentAssetVersion,
     AgentBodyPayload,
     AgentExecution,
+    AgentMessage,
     AgentRound,
     AgentSession,
+    AgentSourceLink,
 )
 from tests._helpers import create_test_engine, make_alembic_cfg
 
@@ -476,4 +478,149 @@ class TestReadArtifactSourceRefStates:
         with pytest.raises(AgentServiceError) as excinfo:
             await dao.read_artifact(_query(), user_scope=_USER)
         assert excinfo.value.code is AgentErrorCode.OPERATION_UNKNOWN
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+
+async def _seed_user_question(
+    dao: AgentDao,
+    *,
+    message_id: str = "msg-q",
+    session_seq: int = 1,
+    body_text: str = "私密原问题正文",
+    public_text: str | None = "获准公开的问题",
+    revision: str = "1",
+    asset_id: str = "src-q",
+) -> None:
+    """种子：用户问题消息 + 源资产（``user_message_origin``）+ 受理输入谱系边。"""
+
+    moment = datetime(2026, 6, 2, 8, 0, 0, tzinfo=UTC)
+    async with dao.engine.begin() as conn:  # type: ignore[union-attr]
+        await conn.execute(
+            sa.insert(AgentMessage).values(
+                user_scope=_USER,
+                message_id=message_id,
+                session_id="s1",
+                event_id=f"evt-{message_id}",
+                session_seq=session_seq,
+                event_kind="public_message_saved",
+                payload_kind="public_message",
+                subject_id=message_id,
+                subject_revision=1,
+                role="user",
+                body_text=body_text,
+                model_text=body_text,
+                body_untrusted=False,
+                search_text=public_text,
+                payload={
+                    "schema_version": 1,
+                    "message_id": message_id,
+                    "role": "user",
+                    "source_id": asset_id,
+                    "source_version": "1",
+                },
+                occurred_at=moment,
+                committed_at=moment,
+            )
+        )
+        await conn.execute(
+            sa.insert(AgentAssetVersion).values(
+                user_scope=_USER,
+                asset_id=asset_id,
+                asset_version="1",
+                asset_kind="source",
+                display_name="用户问题",
+                digest=sha256_hex(body_text.encode("utf-8")),
+                metadata_payload={
+                    "schema_version": 1,
+                    "user_message_origin": {"session_id": "s1", "message_id": message_id, "message_version": "1"},
+                },
+                read_state="ready",
+                verification_state="program_verified",
+                available_at=moment,
+            )
+        )
+        await conn.execute(
+            sa.insert(AgentSourceLink).values(
+                user_scope=_USER,
+                link_id=f"link-{message_id}",
+                source_id=asset_id,
+                source_version="1",
+                consumer_kind="execution",
+                consumer_id="exec-1",
+                consumer_version=revision,
+                execution_id="exec-1",
+                relation_kind="accepted_input",
+            )
+        )
+
+
+class TestReadArtifactQuestionPublic:
+    """N42：成果读取必须带出「获准公开的问题表示」，且绝不回退到私密原文。"""
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_returns_public_projection_not_raw_body(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+        await _seed_artifact(dao, artifact_kind="explanation")
+        await _seed_user_question(dao)
+
+        read = await dao.read_artifact(_query(), user_scope=_USER)
+
+        assert read.question_public_text == "获准公开的问题"
+        assert read.question_public_text != "私密原问题正文"
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_missing_question_link_is_none(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+        await _seed_artifact(dao, artifact_kind="explanation")
+
+        read = await dao.read_artifact(_query(), user_scope=_USER)
+
+        assert read.question_public_text is None
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_other_input_revision_is_not_used(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+        await _seed_artifact(dao, artifact_kind="explanation")
+        await _seed_user_question(dao, revision="2")
+
+        read = await dao.read_artifact(_query(), user_scope=_USER)
+
+        assert read.question_public_text is None
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_ambiguous_questions_are_none(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+        await _seed_artifact(dao, artifact_kind="explanation")
+        await _seed_user_question(dao)
+        await _seed_user_question(
+            dao,
+            message_id="msg-q2",
+            session_seq=2,
+            body_text="第二个原问题",
+            public_text="第二个公开问题",
+            asset_id="src-q2",
+        )
+
+        read = await dao.read_artifact(_query(), user_scope=_USER)
+
+        assert read.question_public_text is None
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_cleaned_public_projection_is_none(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+        await _seed_artifact(dao, artifact_kind="explanation")
+        await _seed_user_question(dao, public_text=None)
+
+        read = await dao.read_artifact(_query(), user_scope=_USER)
+
+        assert read.question_public_text is None
         await dao.engine.dispose()  # type: ignore[union-attr]
