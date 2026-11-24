@@ -132,6 +132,9 @@ class AttachmentExtractionResult:
     worker_pid: int
     worker_exited: bool
     elapsed_s: float
+    #: 原文预览的码点区间（半开、相对解码后文本、与 ``body_text`` 各段同序）。
+    #: 空元组表示该回执未携带（旧 worker 兼容）或该类型不提供原文预览。
+    preview_ranges: tuple[tuple[int, int], ...] = ()
 
 
 def detect_attachment_kind(file_name: str, data: bytes) -> AttachmentKind:
@@ -273,6 +276,36 @@ def _consume_future_result(future: asyncio.Future[Any]) -> None:
 
     if not future.cancelled():
         future.exception()
+
+
+def _decode_preview_ranges(raw: object, body_text: str | None) -> tuple[tuple[int, int], ...]:
+    """严格解码原文预览码点区间（半开、相对解码后文本）。
+
+    ``None``（旧回执未携带/该类型不提供）返回空元组；区间必须是非负整数、
+    ``start <= end``，且合计长度不超过 ``body_text``——偏移落在预览之外即协议失败，
+    不静默裁剪。
+    """
+
+    if raw is None:
+        return ()
+    if body_text is None:
+        raise ValueError("preview_ranges without body_text")
+    if not isinstance(raw, list):
+        raise ValueError("preview_ranges")
+    ranges: list[tuple[int, int]] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict) or set(item) != {"start", "end"}:
+            raise ValueError(f"preview_ranges[{index}]")
+        start = item["start"]
+        end = item["end"]
+        if isinstance(start, bool) or isinstance(end, bool) or not isinstance(start, int) or not isinstance(end, int):
+            raise ValueError(f"preview_ranges[{index}]")
+        if start < 0 or end < start:
+            raise ValueError(f"preview_ranges[{index}]")
+        ranges.append((start, end))
+    if sum(end - start for start, end in ranges) > len(body_text):
+        raise ValueError("preview_ranges")
+    return tuple(ranges)
 
 
 class SubprocessAttachmentWorker:
@@ -605,7 +638,9 @@ class SubprocessAttachmentWorker:
             "read_ranges",
             "unread_ranges",
         }
-        if set(result) - {"schema_version"} != expected:
+        # ``preview_ranges`` 为可选键：旧 worker 回执没有它，仍按原协议接受（向后兼容）。
+        provided = set(result) - {"schema_version", "preview_ranges"}
+        if provided != expected:
             raise AttachmentWorkerError("worker_protocol_invalid", "attachment worker result keys are invalid")
         try:
             read_state = ReadState(result["read_state"])
@@ -636,6 +671,7 @@ class SubprocessAttachmentWorker:
                 blocks_list.append(block)
             blocks = tuple(blocks_list)
             facts = tuple(decode_fact_value(fact, f"$.result.facts[{index}]") for index, fact in enumerate(facts_raw))
+            preview_ranges = _decode_preview_ranges(result.get("preview_ranges"), body_text)
             stats_raw = result["stats"]
             if not isinstance(stats_raw, dict):
                 raise ValueError("stats")
@@ -673,6 +709,7 @@ class SubprocessAttachmentWorker:
             worker_pid=pid,
             worker_exited=True,
             elapsed_s=elapsed_s,
+            preview_ranges=preview_ranges,
         )
 
     # ---- 子进程收尾 ----

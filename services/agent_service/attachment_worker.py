@@ -5,7 +5,8 @@
   也提供纯解析函数供单元测试直接调用；
 - 解析只读取显式选择范围；未选范围不解析、不计数；超限明确拒绝或按超时返回
   真实已读/未读（不截断冒完整）。CSV 按行增量解码、读满所需行即停；JSON 按
-  pointer 定向下钻、未选子树只做结构跳过不建对象（I70）；
+  pointer 定向下钻、未选子树只做结构跳过不建对象（I70）；JSON 除结构化值外
+  另回传选中子树的原文切片（保原空白/转义/指数写法）与码点偏移，供原选区预览核对；
 - 若定位所选范围在结构上必须读到选区外内容（CSV 前置行/区间空档、JSON
   pointer 前导扫描），须请求方显式给出 ``read_expansion_consent``，否则拒绝；
   已同意时把实际扩张量记入 limitation，不静默全量读取后仅裁输出；
@@ -107,6 +108,9 @@ class ParsedAttachment:
     stats: dict[str, int | None] = field(default_factory=dict)
     read_ranges: list[dict[str, Any]] = field(default_factory=list)
     unread_ranges: list[dict[str, Any]] = field(default_factory=list)
+    #: 原文预览的码点区间（半开区间，相对解码后文本；顺序与 ``body_text`` 各段一致）。
+    #: ``None`` 表示该类型不提供原文预览；空列表表示选了空范围。
+    preview_ranges: list[dict[str, int]] | None = None
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -120,6 +124,7 @@ class ParsedAttachment:
             "stats": self.stats,
             "read_ranges": self.read_ranges,
             "unread_ranges": self.unread_ranges,
+            "preview_ranges": self.preview_ranges,
         }
 
 
@@ -629,6 +634,8 @@ def _parse_json(
         except ValueError as exc:
             raise AttachmentParseError("invalid_structure", "JSON structure is invalid") from exc
         read_ranges: list[dict[str, Any]] = [to_wire_dict(AllAtom())]
+        preview_parts = [text]
+        preview_ranges: list[dict[str, int]] = [{"start": 0, "end": len(text)}]
     else:
         atoms = [atom for atom in selection.ranges if isinstance(atom, JsonPointerRange)]
         if _json_requires_expansion(selection) and not read_expansion_consent:
@@ -640,6 +647,8 @@ def _parse_json(
         values = []
         read_ranges = []
         spans: list[tuple[int, int]] = []
+        # 原文预览按准确定位区间切片：保留选中子树内的原空白/转义/指数写法，区外不混入。
+        preview_parts: list[str] = []
         for atom in atoms:
             try:
                 selected_value, start, end = _json_select_value(text, atom.pointer)
@@ -648,6 +657,8 @@ def _parse_json(
             values.append(selected_value)
             read_ranges.append(to_wire_dict(atom))
             spans.append((start, end))
+            preview_parts.append(text[start:end])
+        preview_ranges = [{"start": start, "end": end} for start, end in spans]
         value = values[0] if len(values) == 1 else values
         # I70：只把「为定位 pointer 而扫描到的区外字符」记为扩张量；其中未选子树不解析。
         scan_start = _json_skip_ws(text, 0)
@@ -662,16 +673,20 @@ def _parse_json(
                 )
             )
 
+    # 多段选择以单个换行分隔各段原文（与文本多段正文同源）；每段精确区间由 preview_ranges 给出。
+    body_text = "\n".join(preview_parts)
     block = json_doc({"kind": "json", "value": value})
-    budget.enforce_codepoints(len(block))
+    # 双表示各自受同一字符预算约束：原文预览超预算即拒绝，不以截断冒充完整预览（P03）。
+    budget.enforce_codepoints(max(len(block), len(body_text)))
     return ParsedAttachment(
         read_state=ReadState.READY,
         coverage="full",
-        body_text=None,
+        body_text=body_text,
         blocks=[block],
         limitations=limitations,
         stats=_stats(source_bytes=len(data), chars=len(block)),
         read_ranges=read_ranges,
+        preview_ranges=preview_ranges,
     )
 
 
