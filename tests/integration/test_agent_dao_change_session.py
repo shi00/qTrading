@@ -219,6 +219,39 @@ class TestMetadataActions:
         assert row.revision == 2
         assert row.updated_at > before.updated_at
 
+    async def test_rename_read_back_revision_and_reuse_for_next_action(self, real_embedded_pg: ConnectionInfo) -> None:
+        """N23：改名后只读查回与改名回执同版，且该版本可作为下一动作的 CAS 令牌。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        renamed = await dao.change_session(
+            _command(action=SessionAction.RENAME, expected=1, title="改名后", command_id="cmd-rename")
+        )
+        assert renamed.current_revision == 2
+
+        read = await dao.read_command(
+            CommandRef(
+                user_scope=_USER,
+                source_module="ui",
+                business_request_id="req-cmd-rename",
+                command_id="cmd-rename",
+                expected_revision=1,
+            ),
+            user_scope=_USER,
+            target_id="s1",
+        )
+        assert read.current_revision == renamed.current_revision == 2
+        # 只读查回不产生新命令（不执行第二次改名）。
+        assert len(await _command_rows(real_embedded_pg.url)) == 1
+
+        pinned = await dao.change_session(
+            _command(action=SessionAction.PIN, expected=read.current_revision, title=None, command_id="cmd-pin")
+        )
+        assert pinned.current_revision == 3
+        row = await _session_row(real_embedded_pg.url)
+        assert row.title == "改名后" and row.pinned is True and row.revision == 3
+        assert len(await _command_rows(real_embedded_pg.url)) == 2
+
     async def test_stale_rename_conflicts_with_zero_new_facts(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao)
