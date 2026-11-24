@@ -653,7 +653,9 @@ def plan_lane_queue(
     """按 D05 全局总位 + 同会话单总执行逐路排队（用户所选顺序，不并行抢跑）。
 
     只计算决定，不写事实、不派发；调用方按 ``dispatch`` 顺序启动且每次状态变化后
-    重算。等待/暂停中的路仍占位（不早释在途占用）。
+    重算。等待/暂停中的路仍占位（不早释在途占用）。``queued`` 的 ``reason`` 是该路
+    被哪个限额挡住：仅全局满为总位码、仅会话满为会话码、两者同时满则两码并列
+    （单报其一会让调用方误以为只放宽一种限额即可派发）。
     """
 
     if isinstance(active_total_executions, bool) or not isinstance(active_total_executions, int):
@@ -671,7 +673,12 @@ def plan_lane_queue(
     global_free = max(0, total_slots - active_total_executions)
     session_free = max(0, session_slots - active_session_executions)
     free = min(global_free, session_free)
-    reason = "d05_session_single_total_execution" if session_free <= global_free else "d05_total_execution_slots"
+    if global_free <= 0 and session_free <= 0:
+        reason = "d05_total_execution_slots+d05_session_single_total_execution"
+    elif session_free <= global_free:
+        reason = "d05_session_single_total_execution"
+    else:
+        reason = "d05_total_execution_slots"
     return tuple(
         LaneQueueDecision(
             lane_ref=lane.lane_ref,
@@ -1480,8 +1487,9 @@ class ComparisonSubmissionRequest:
 class ComparisonLaneReceipt:
     """单路受理结果（受理失败逐路如实分列，不伪造已受理）。
 
-    ``dispatch_submitted`` 只在真正尝试派发后有值：``False`` 表示本次零派发
-    （原因在 ``dispatch_reason``），``None`` 表示尚未尝试（只受理不派发）。
+    ``dispatch_submitted`` 只在真正尝试派发或确定因限额零派发后有值：``False``
+    表示本次零派发（原因在 ``dispatch_reason``，含派发器拒绝与排队限额），
+    ``None`` 表示未尝试且无已知限额原因（只受理不派发）。
     """
 
     lane_ref: str

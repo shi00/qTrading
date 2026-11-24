@@ -285,6 +285,18 @@ class TestRetryAndQueue:
         assert all(decision.reason == "d05_total_execution_slots" for decision in global_blocked)
         assert COMPARISON_SESSION_SLOTS == 1
 
+    def test_queue_reason_names_both_limits_when_both_full(self) -> None:
+        group = _group((_selection("conn-a"), _selection("conn-b")))
+        decisions = plan_lane_queue(
+            group,
+            active_total_executions=COMPARISON_TOTAL_SLOTS,
+            active_session_executions=COMPARISON_SESSION_SLOTS,
+        )
+        assert all(decision.decision == "queued" for decision in decisions)
+        assert all(
+            decision.reason == "d05_total_execution_slots+d05_session_single_total_execution" for decision in decisions
+        )
+
     @pytest.mark.asyncio
     async def test_drive_runs_next_lane_only_after_previous_completes(self) -> None:
         group = _group((_selection("conn-a"), _selection("conn-b"), _selection("conn-c")))
@@ -1373,6 +1385,88 @@ class TestProductionRunEntry:
         assert {lane.execution_id for lane in receipt.lanes} == {f"exec-{lane.lane_ref}" for lane in group.lanes}
         # 组本身没有执行身份：不能计为一次完整研究成功。
         assert not hasattr(receipt, "execution_id")
+
+    @pytest.mark.asyncio
+    async def test_global_slots_full_receipt_names_total_slots_and_zero_dispatch(self) -> None:
+        group = _group()
+        dao = _RunDao(group, [_row(group, lane.lane_ref, "queued", f"exec-{lane.lane_ref}") for lane in group.lanes])
+        dispatcher = _RunDispatcher()
+        service = _run_service(dao, dispatcher)
+
+        receipt = await service.run_comparison(_submission(group), active_total_executions=COMPARISON_TOTAL_SLOTS)
+
+        assert dispatcher.calls == []
+        assert receipt.view.ended is False
+        assert {lane.dispatch_reason for lane in receipt.lanes} == {"d05_total_execution_slots"}
+        assert all(lane.dispatch_submitted is False for lane in receipt.lanes)
+        # 幂等重放同一输入仍是零派发且原因不变（不伪造成已派发）。
+        replay = await service.run_comparison(_submission(group), active_total_executions=COMPARISON_TOTAL_SLOTS)
+        assert dispatcher.calls == []
+        assert {lane.dispatch_reason for lane in replay.lanes} == {"d05_total_execution_slots"}
+
+    @pytest.mark.asyncio
+    async def test_session_slots_full_receipt_names_session_limits_and_zero_dispatch(self) -> None:
+        group = _group()
+        dao = _RunDao(group, [_row(group, lane.lane_ref, "queued", f"exec-{lane.lane_ref}") for lane in group.lanes])
+        dispatcher = _RunDispatcher()
+        service = _run_service(dao, dispatcher)
+
+        receipt = await service.run_comparison(_submission(group), active_session_executions=COMPARISON_SESSION_SLOTS)
+
+        assert dispatcher.calls == []
+        assert receipt.view.ended is False
+        assert {lane.dispatch_reason for lane in receipt.lanes} == {"d05_session_single_total_execution"}
+        assert all(lane.dispatch_submitted is False for lane in receipt.lanes)
+
+    @pytest.mark.asyncio
+    async def test_both_slots_full_receipt_names_both_limits_and_zero_dispatch(self) -> None:
+        group = _group()
+        dao = _RunDao(group, [_row(group, lane.lane_ref, "queued", f"exec-{lane.lane_ref}") for lane in group.lanes])
+        dispatcher = _RunDispatcher()
+        service = _run_service(dao, dispatcher)
+
+        receipt = await service.run_comparison(
+            _submission(group),
+            active_total_executions=COMPARISON_TOTAL_SLOTS,
+            active_session_executions=COMPARISON_SESSION_SLOTS,
+        )
+
+        assert dispatcher.calls == []
+        assert {lane.dispatch_reason for lane in receipt.lanes} == {
+            "d05_total_execution_slots+d05_session_single_total_execution"
+        }
+        assert all(lane.dispatch_submitted is False for lane in receipt.lanes)
+
+    @pytest.mark.asyncio
+    async def test_skipped_lane_receipt_names_session_limit_while_first_lane_dispatched(self) -> None:
+        group = _group()
+        lane_a, lane_b = group.lanes
+        dao = _RunDao(group, [_row(group, lane.lane_ref, "queued", f"exec-{lane.lane_ref}") for lane in group.lanes])
+        dispatcher = _RunDispatcher()
+        service = _run_service(dao, dispatcher)
+
+        receipt = await service.run_comparison(_submission(group))
+        by_lane = {lane.lane_ref: lane for lane in receipt.lanes}
+
+        assert dispatcher.calls == [f"exec-{lane_a.lane_ref}"]
+        assert by_lane[lane_a.lane_ref].dispatch_submitted is True
+        assert (
+            by_lane[lane_b.lane_ref].dispatch_submitted,
+            by_lane[lane_b.lane_ref].dispatch_reason,
+        ) == (False, "d05_session_single_total_execution")
+
+    @pytest.mark.asyncio
+    async def test_invalid_capacity_input_is_rejected_before_any_dispatch(self) -> None:
+        group = _group()
+        dao = _RunDao(group, [_row(group, lane.lane_ref, "queued", f"exec-{lane.lane_ref}") for lane in group.lanes])
+        dispatcher = _RunDispatcher()
+        service = _run_service(dao, dispatcher)
+
+        with pytest.raises(AgentValidationError) as exc:
+            await service.run_comparison(_submission(group), active_total_executions=-1)
+
+        assert exc.value.code == "invalid_range"
+        assert dispatcher.calls == []
 
     @pytest.mark.asyncio
     async def test_run_drives_lanes_in_order_and_resumes_on_next_call(self) -> None:
