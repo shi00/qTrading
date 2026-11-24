@@ -204,6 +204,7 @@
     "screener_preset_overwrite_no_params": "（原方案未记录参数）",
     "screener_preset_delete_title": "删除方案",
     "screener_preset_delete_body": "将删除方案「{name}」，该操作无法撤销。当前参数草稿不受影响。",
+    "screener_preset_delete_failed": "方案「{name}」删除失败：设置未能写入，请重试",
     "screener_preset_missing": "方案不存在或已被删除",
     "screener_loading_data": "正在初始化/重载数据库...",
     "screener_data_loaded": "数据加载完成",
