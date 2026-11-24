@@ -555,7 +555,7 @@ async def run_leaf_agent(
             )
             return _failed(context, LEAF_TOOL_SETUP_FAILED)
     tools = tool_runtime.tools if tool_runtime is not None else ()
-    # 长上下文压缩（W-10）：预算取真实授权连接窗口并预留输出；摘要回合复用本叶
+    # 长上下文压缩：预算取真实授权连接窗口并预留输出；摘要回合复用本叶
     # 绑定模型（同一账本），摘要期限取本回合剩余冻结期限。
     compaction = build_leaf_compaction(
         binding,
