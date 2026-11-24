@@ -6276,9 +6276,13 @@ class AgentDao(BaseDao):
     ) -> DataConsentAuthority | None:
         """按 execution/round/node 定位权威资料许可决定（I43，只读）。
 
-        规则：同 execution+round+node 取最新 revision；多条同 revision 且载荷内容
-        不同 → ``OPERATION_UNKNOWN``（不猜，R21 fail-closed）；无决定行 → ``None``
-        （由调用方按「无许可即拒绝」处置）。载荷不可靠重读同样 fail-closed。
+        规则：每条决定只由自己的已提交 ``data_consent_save`` 权威命令绑定——同
+        execution+round+node 取「最近一次明确保存（批准）」的决定，**不跨决定比较
+        行内 revision**（新决定独立起版，revision 只在本决定内单调）；无已提交
+        save 命令的决定不参与选择（无权威绑定即不授权）。最近一次权威命令时刻相同
+        且载荷不同 → ``OPERATION_UNKNOWN``（不猜，R21 fail-closed）；无决定行 →
+        ``None``（由调用方按「无许可即拒绝」处置）。旧决定保持历史行不被改写，其
+        过期/撤销状态仍由消费侧核权拒绝。载荷不可靠重读同样 fail-closed。
         """
 
         self._check_engine()
@@ -6296,6 +6300,18 @@ class AgentDao(BaseDao):
                         AgentDecision.decision_id,
                         AgentDecision.revision,
                         AgentDecision.data_consent_payload,
+                        AgentCommand.created_at.label("authority_command_at"),
+                        AgentCommand.command_record_id.label("authority_command_id"),
+                    )
+                    .select_from(AgentDecision)
+                    .join(
+                        AgentCommand,
+                        sa.and_(
+                            AgentCommand.user_scope == AgentDecision.user_scope,
+                            AgentCommand.target_id == AgentDecision.decision_id,
+                            AgentCommand.command_kind == "data_consent_save",
+                            AgentCommand.commit_state == CommitState.COMMITTED.value,
+                        ),
                     )
                     .where(
                         AgentDecision.user_scope == facts.user_scope,
@@ -6304,22 +6320,31 @@ class AgentDao(BaseDao):
                         AgentDecision.node_id == node_id,
                         AgentDecision.decision_kind == "data_consent",
                     )
-                    .order_by(AgentDecision.revision.desc(), AgentDecision.updated_at.desc())
+                    .order_by(AgentCommand.created_at.desc(), AgentCommand.command_record_id.desc())
                 )
             ).all()
         if not rows:
             return None
-        top_revision = int(rows[0].revision)
-        top = [row for row in rows if int(row.revision) == top_revision]
+        # 每条决定只取自己最近的 save 命令（SQL 已按命令时刻降序，首次出现即最新）。
+        latest_by_decision: dict[str, Any] = {}
+        for row in rows:
+            latest_by_decision.setdefault(row.decision_id, row)
+        candidates = sorted(
+            latest_by_decision.values(),
+            key=lambda row: (row.authority_command_at, row.authority_command_id),
+            reverse=True,
+        )
+        top_at = candidates[0].authority_command_at
+        top = [row for row in candidates if row.authority_command_at == top_at]
         if len(top) > 1:
             payloads = {json_doc(row.data_consent_payload) for row in top if row.data_consent_payload is not None}
             if len(payloads) != 1 or any(row.data_consent_payload is None for row in top):
                 raise AgentServiceError(
                     AgentErrorCode.OPERATION_UNKNOWN,
-                    "data consent authority ambiguous at same revision",
+                    "data consent authority ambiguous at same authoritative command",
                     identity_str,
                 )
-        chosen = top[0]
+        chosen = min(top, key=lambda row: row.decision_id) if len(top) > 1 else top[0]
         if chosen.data_consent_payload is None:
             raise AgentServiceError(
                 AgentErrorCode.OPERATION_UNKNOWN,
