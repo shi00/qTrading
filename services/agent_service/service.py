@@ -87,8 +87,12 @@ from core.agent_types import (
     SaveAnswerRequest,
     SessionRead,
     SessionReadQuery,
+    RoleSkillAssignment,
+    RoleSkillAssignmentReceipt,
     SessionChangeCommand,
+    SkillUninstallReceipt,
     SkillVersionRef,
+    SkillVersionView,
     SourceKind,
     SourceRead,
     SourceReadQuery,
@@ -137,7 +141,12 @@ from services.agent_service.comparison import (
     verify_group_manifest_authority,
 )
 from services.agent_service.dispatch import DispatchOutcome, ResearchDispatcher, ResearchWorkflowResult
-from services.agent_service.skills import SkillAvailabilityReceipt, SkillCatalogService
+from services.agent_service.skills import (
+    SkillAvailabilityReceipt,
+    SkillCatalogService,
+    SkillImportReceipt,
+    SkillPackageImportRequest,
+)
 from services.agent_service.sources import BusinessSourceService
 from utils.error_classifier import classify_error
 from utils.loop_local import get_loop_local
@@ -1488,6 +1497,111 @@ class AgentService:
                 "agent_service",
             )
         return await skills.set_skill_enabled(ref, user_scope=user_scope, enabled=enabled)
+
+    async def preview_skill_package(self, request: SkillPackageImportRequest) -> SkillImportReceipt:
+        """导入预检（发布前预览清单/权限/文件摘要）；未接线时如实报未接线。"""
+
+        self._require_open("preview_skill_package")
+        skills = self._skills
+        if skills is None:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "skill catalog is not wired",
+                "agent_service",
+            )
+        return await skills.preview_package(request)
+
+    async def import_skill_package(self, request: SkillPackageImportRequest) -> SkillImportReceipt:
+        """导入/更新 Skill 包（发布 + 登记）；未接线时如实报未接线。"""
+
+        self._require_open("import_skill_package")
+        skills = self._skills
+        if skills is None:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "skill catalog is not wired",
+                "agent_service",
+            )
+        return await skills.import_package(request)
+
+    async def list_skills(self, *, user_scope: str) -> tuple[SkillVersionView, ...]:
+        """用户域已登记 Skill 版本只读列表（设置页 Skills 管理）。"""
+
+        self._require_open("list_skills")
+        skills = self._skills
+        if skills is None:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "skill catalog is not wired",
+                "agent_service",
+            )
+        return await skills.list_skills(user_scope=user_scope)
+
+    async def uninstall_skill(self, ref: SkillVersionRef, *, user_scope: str) -> SkillUninstallReceipt:
+        """卸载 Skill 版本（被角色/会话引用时阻删并指出引用方）。"""
+
+        self._require_open("uninstall_skill")
+        skills = self._skills
+        if skills is None:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "skill catalog is not wired",
+                "agent_service",
+            )
+        return await skills.uninstall_version(ref, user_scope=user_scope)
+
+    async def assign_role_skills(
+        self,
+        assignment: RoleSkillAssignment,
+        *,
+        user_scope: str,
+        display_name: str,
+    ) -> RoleSkillAssignmentReceipt:
+        """保存角色版本对 Skill 版本的启用/默认引用（默认⊆启用由合同校验）。"""
+
+        self._require_open("assign_role_skills")
+        skills = self._skills
+        if skills is None:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "skill catalog is not wired",
+                "agent_service",
+            )
+        return await skills.assign_role_skills(assignment, user_scope=user_scope, display_name=display_name)
+
+    async def read_role_skill_assignment(
+        self, *, user_scope: str, role_id: str, role_version: str
+    ) -> RoleSkillAssignment | None:
+        """读回角色版本的 Skill 启用/默认集合；未配置返回 ``None``。"""
+
+        self._require_open("read_role_skill_assignment")
+        skills = self._skills
+        if skills is None:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "skill catalog is not wired",
+                "agent_service",
+            )
+        return await skills.read_role_skill_assignment(
+            user_scope=user_scope,
+            role_id=role_id,
+            role_version=role_version,
+        )
+
+    async def validate_role_skill_assignment(
+        self, assignment: RoleSkillAssignment, *, user_scope: str
+    ) -> tuple[SkillVersionRef, ...]:
+        """保存前一致性校验：引用已安装/可用、默认⊆启用、无版本冲突。"""
+
+        self._require_open("validate_role_skill_assignment")
+        skills = self._skills
+        if skills is None:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "skill catalog is not wired",
+                "agent_service",
+            )
+        return await skills.validate_role_skill_assignment(assignment, user_scope=user_scope)
 
     async def resolve_role_skill_selection(
         self,

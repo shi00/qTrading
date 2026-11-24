@@ -7898,6 +7898,32 @@ class SkillAssetReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class SkillVersionView:
+    """已登记 Skill 版本的只读投影（设置页列表/角色校验用，不含脚本内容）。"""
+
+    skill_id: str
+    display_name: str
+    version: int
+    read_state: str
+    content_digest: str
+    file_count: int = 0
+    expanded_bytes: int = 0
+    license_id: str = ""
+    dependencies: tuple[str, ...] = ()
+    missing_dependencies: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SkillUninstallReceipt:
+    """Skill 版本卸载回执：``files_removed`` 表示受管目录是否确认清除（不伪报）。"""
+
+    user_scope: str
+    skill_id: str
+    version: int
+    files_removed: bool
+
+
+@dataclass(frozen=True, slots=True)
 class RoleSkillAssignment:
     """角色版本对 Skill 版本的引用（F13）。
 

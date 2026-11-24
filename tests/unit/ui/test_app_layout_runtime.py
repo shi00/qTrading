@@ -524,7 +524,9 @@ class TestBuildPagesStackE2E:
         view_mocks["BacktestView"].assert_called_once_with(active=False, prefill_request=None)
         view_mocks["DataExplorerView"].assert_called_once_with(active=False)
         view_mocks["TaskCenterView"].assert_called_once_with(active=False)
-        view_mocks["SettingsView"].assert_called_once_with(active=False, target_subtab=None, mcp_lifecycle=None)
+        view_mocks["SettingsView"].assert_called_once_with(
+            active=False, target_subtab=None, mcp_lifecycle=None, agent_service=None, user_scope="local-desktop"
+        )
         view_mocks["WatchlistView"].assert_called_once_with(active=False)
 
     def test_e2e_full_mount_alone_without_e2e_testing_constructs_all_views(
@@ -560,7 +562,9 @@ class TestBuildPagesStackE2E:
         view_mocks["BacktestView"].assert_called_once_with(active=False, prefill_request=None)
         view_mocks["DataExplorerView"].assert_called_once_with(active=False)
         view_mocks["TaskCenterView"].assert_called_once_with(active=False)
-        view_mocks["SettingsView"].assert_called_once_with(active=False, target_subtab=None, mcp_lifecycle=None)
+        view_mocks["SettingsView"].assert_called_once_with(
+            active=False, target_subtab=None, mcp_lifecycle=None, agent_service=None, user_scope="local-desktop"
+        )
         view_mocks["WatchlistView"].assert_called_once_with(active=False)
 
 

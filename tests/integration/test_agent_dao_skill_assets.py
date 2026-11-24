@@ -431,6 +431,49 @@ class TestSkillAvailabilityLifecycle:
         assert stored == assignment
 
 
+class TestSkillVersionRemoval:
+    """W-05：列表投影与卸载（角色引用阻删、无引用删行）。"""
+
+    @pytest.mark.asyncio
+    async def test_list_skill_version_views_returns_projection(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await dao.register_skill_asset(_registration("demo"))
+        views = await dao.list_skill_version_views(user_scope=USER_SCOPE)
+        assert [(view.skill_id, view.version, view.read_state) for view in views] == [("demo", 1, "ready")]
+        assert views[0].file_count == 2
+        assert views[0].expanded_bytes == 128
+        assert views[0].dependencies == ("base-skill",)
+
+    @pytest.mark.asyncio
+    async def test_remove_unreferenced_skill_version_deletes_row(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await dao.register_skill_asset(_registration("demo"))
+        await dao.remove_skill_version(user_scope=USER_SCOPE, skill_id="demo", version=1)
+        assert await dao.list_skill_version_views(user_scope=USER_SCOPE) == ()
+
+    @pytest.mark.asyncio
+    async def test_remove_role_referenced_skill_version_is_denied(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await dao.register_skill_asset(_registration("base-skill"))
+        await dao.save_role_skill_assignment(
+            _assignment((SkillVersionRef("base-skill", 1),), (SkillVersionRef("base-skill", 1),)),
+            user_scope=USER_SCOPE,
+            display_name="角色",
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.remove_skill_version(user_scope=USER_SCOPE, skill_id="base-skill", version=1)
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert "role-main@1" in str(exc.value)
+        assert len(await dao.list_skill_version_views(user_scope=USER_SCOPE)) == 1
+
+    @pytest.mark.asyncio
+    async def test_remove_missing_skill_version_is_input_invalid(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.remove_skill_version(user_scope=USER_SCOPE, skill_id="ghost", version=1)
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+
+
 async def _count(conn: AsyncConnection, model: type[object], asset_id: str | None) -> int:
     query = sa.select(sa.func.count()).select_from(model)
     if asset_id is not None and model is AgentAssetVersion:

@@ -56,7 +56,9 @@ from core.agent_types import (
     SkillAssetReceipt,
     SkillAssetRegistration,
     SkillBudget,
+    SkillUninstallReceipt,
     SkillVersionRef,
+    SkillVersionView,
     json_doc,
     require_identity,
     resolve_skill_selection,
@@ -1137,6 +1139,10 @@ class SkillCatalogPort(Protocol):
         self, *, user_scope: str, skill_id: str, version: int, enabled: bool
     ) -> tuple[str, bool]: ...
 
+    async def list_skill_version_views(self, *, user_scope: str) -> tuple[SkillVersionView, ...]: ...
+
+    async def remove_skill_version(self, *, user_scope: str, skill_id: str, version: int) -> None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class SkillPackageImportRequest:
@@ -1224,9 +1230,20 @@ class SkillCatalogService:
         identity = f"{request.user_scope}/skill/{request.directory_name}"
         ticket = self._operation_factory(f"{identity}#{uuid.uuid4().hex}")
         try:
-            return await self._import_guarded(request, identity, ticket)
+            return await self._import_guarded(request, identity, ticket, publish=True)
         except asyncio.CancelledError:
             # R2：取消必须上抛；上抛前置位合作取消并收尾（确认退出或标未知、撤销本次发布）。
+            await self._cancel_and_settle(ticket)
+            raise
+
+    async def preview_package(self, request: SkillPackageImportRequest) -> SkillImportReceipt:
+        """导入预检：与导入共用阈值/解析/同名判定，但不发布、不登记（管理页确认前预览）。"""
+
+        identity = f"{request.user_scope}/skill/{request.directory_name}"
+        ticket = self._operation_factory(f"{identity}#{uuid.uuid4().hex}")
+        try:
+            return await self._import_guarded(request, identity, ticket, publish=False)
+        except asyncio.CancelledError:
             await self._cancel_and_settle(ticket)
             raise
 
@@ -1235,6 +1252,8 @@ class SkillCatalogService:
         request: SkillPackageImportRequest,
         identity: str,
         ticket: SkillOperationTicket,
+        *,
+        publish: bool,
     ) -> SkillImportReceipt:
         started = self._clock()
         deadline = started + self._budget.max_preflight_seconds
@@ -1318,7 +1337,10 @@ class SkillCatalogService:
             requires_confirmation=decision.status is SkillImportStatus.UPDATE_REQUIRES_CONFIRMATION,
             source_kind=inspection.source_kind,
         )
-        if decision.status in {SkillImportStatus.UNCHANGED, SkillImportStatus.UPDATE_REQUIRES_CONFIRMATION}:
+        if not publish or decision.status in {
+            SkillImportStatus.UNCHANGED,
+            SkillImportStatus.UPDATE_REQUIRES_CONFIRMATION,
+        }:
             return receipt
         ref = SkillVersionRef(skill_id=skill_id, version=decision.next_version)
         ticket.claim(ref, user_scope=request.user_scope)
@@ -1492,6 +1514,108 @@ class SkillCatalogService:
                 defaults=assignment.defaults,
                 hand_picked=picked,
                 is_child=is_child,
+            )
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+
+    async def list_skills(self, *, user_scope: str) -> tuple[SkillVersionView, ...]:
+        """用户域已登记 Skill 版本（设置页列表；只读投影，不解包内容）。"""
+
+        try:
+            require_identity(user_scope, "$.skill.user_scope")
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", "skill_list"
+            ) from exc
+        return await self._dao.list_skill_version_views(user_scope=user_scope)
+
+    async def uninstall_version(self, ref: SkillVersionRef, *, user_scope: str) -> SkillUninstallReceipt:
+        """卸载一个 Skill 版本：先核角色/会话引用（阻删），再删登记与受管目录。
+
+        被引用时持久层报 ``POLICY_DENIED`` 并指出引用方；登记删除成功后删除目录，
+        目录是否确认清除由回执 ``files_removed`` 如实反映（不伪报）。
+        """
+
+        if not isinstance(ref, SkillVersionRef):
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "invalid_type: $.skill.ref", "skill_uninstall")
+        identity = f"{user_scope}/skill/{ref.skill_id}@{ref.version}"
+        try:
+            require_identity(user_scope, "$.skill.user_scope")
+            ref.stable_key()
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+        await self._dao.remove_skill_version(user_scope=user_scope, skill_id=ref.skill_id, version=ref.version)
+        await self._run(self._store.remove_version, ref)
+        return SkillUninstallReceipt(
+            user_scope=user_scope,
+            skill_id=ref.skill_id,
+            version=ref.version,
+            files_removed=not self._store.version_dir(ref).exists(),
+        )
+
+    async def read_role_skill_assignment(
+        self, *, user_scope: str, role_id: str, role_version: str
+    ) -> RoleSkillAssignment | None:
+        """读回角色版本的 Skill 启用/默认集合；未配置返回 ``None``（不猜默认）。"""
+
+        identity = f"{user_scope}/{role_id}@{role_version}"
+        try:
+            require_identity(user_scope, "$.role.user_scope")
+            require_identity(role_id, "$.role.role_id")
+            require_identity(role_version, "$.role.role_version")
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+        return await self._dao.read_role_skill_assignment(
+            user_scope=user_scope,
+            role_id=role_id,
+            role_version=role_version,
+        )
+
+    async def validate_role_skill_assignment(
+        self, assignment: RoleSkillAssignment, *, user_scope: str
+    ) -> tuple[SkillVersionRef, ...]:
+        """保存前一致性校验：默认⊆启用、引用版本已安装且可用、无版本冲突。
+
+        返回按现有合同解析出的实际能力集合（主角色 = 默认 ∪ 空手选）；任一项
+        不满足即如实报错，不静默替换版本或不存在的引用。
+        """
+
+        identity = f"{user_scope}/{assignment.role_id}@{assignment.role_version}"
+        try:
+            require_identity(user_scope, "$.role.user_scope")
+            validate_role_skill_assignment(assignment)
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+        views = {
+            (view.skill_id, view.version): view
+            for view in await self._dao.list_skill_version_views(user_scope=user_scope)
+        }
+        for ref in assignment.enabled:
+            view = views.get((ref.skill_id, ref.version))
+            if view is None:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    f"skill version not installed: {ref.skill_id}@{ref.version}",
+                    identity,
+                )
+            if view.read_state != "ready":
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    f"skill version not enabled: {ref.skill_id}@{ref.version}",
+                    identity,
+                )
+            if view.missing_dependencies:
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    f"skill dependency missing: {ref.skill_id}@{ref.version}",
+                    identity,
+                )
+        try:
+            return resolve_skill_selection(
+                enabled=assignment.enabled,
+                defaults=assignment.defaults,
+                hand_picked=(),
+                is_child=False,
             )
         except AgentValidationError as exc:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc

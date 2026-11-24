@@ -183,6 +183,8 @@ def _build_pages_stack(
     backtest_prefill_request: int | None = None,
     on_start_research: Any = None,
     mcp_lifecycle: Any = None,
+    agent_service: Any = None,
+    user_scope: str = "local-desktop",
 ) -> ft.Stack:
     """构造所有页面控件的 ``ft.Stack`` (``visible`` prop 控制显示/隐藏)。
 
@@ -295,6 +297,8 @@ def _build_pages_stack(
                     active=current_tab == NavTabs.SETTINGS,
                     target_subtab=settings_subtab_request,
                     mcp_lifecycle=mcp_lifecycle,
+                    agent_service=agent_service,
+                    user_scope=user_scope,
                 ),
                 current_tab == NavTabs.SETTINGS,
             ),
@@ -937,6 +941,8 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             backtest_prefill_request,
             _start_research,
             getattr(agent_wiring, "mcp_lifecycle", None),
+            getattr(agent_wiring, "service", None),
+            str(getattr(agent_wiring, "user_scope", LOCAL_DESKTOP_USER_SCOPE)),
         ),
         expand=True,
         padding=AppStyles.SPACING_XL,
