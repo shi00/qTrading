@@ -4933,9 +4933,10 @@ class CostProjection:
       此时 ``known_cny`` 可为 ``Decimal("0")``（已知零，与未知可区分）；
     - **已知金额**：``known_cny`` 为已计价 attempt 金额合计；无任何已计价 attempt
       时为 ``None``（未知，禁止填 0）；
-    - **预留中**：``reserved_cny`` 为活跃预留（reserved / dispatched /
-      held_unconfirmed）金额合计；账本无活跃预留为 ``Decimal("0")``（事实零），
-      无引用可投影时为 ``None``；
+    - **预留中**：``reserved_cny`` 为活跃预留金额合计——``reserved`` / ``dispatched``
+      仅计 owner 租约未过期者（过租即失权、预留不再可推进，按事实零释放），
+      ``held_unconfirmed``（结果未知）不随租约释放、明示保留计入；账本无活跃预留为
+      ``Decimal("0")``（事实零），无引用可投影时为 ``None``；
     - **未计价**：``unpriced_attempts``（cost 为 NULL，或引用存在但账本无行）与
       对应 ``unpriced_input_tokens`` / ``unpriced_output_tokens``（未知成本的用量规模）。
 

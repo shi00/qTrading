@@ -7366,7 +7366,8 @@ class AgentDao(BaseDao):
     # -- 快照可信度/费用投影 helper（§4.3 usage/observation，R21） --------------
 
     #: 活跃预留状态（与 AIUsageDao.read_active_reserved_cny 同口径：占用预算至
-    #: settled/released）。
+    #: settled/released）。``reserved`` / ``dispatched`` 另须 owner 租约未过期
+    #: （N25，与预算门一致）；``held_unconfirmed`` 为结果未知，不随租约释放。
     _SNAPSHOT_ACTIVE_RESERVATION_STATES: Final = ("reserved", "dispatched", "held_unconfirmed")
     #: attempt_refs 未冻结结构（ADR-0014）中可承载 attempt_id 的键；其余形状按不可读处理。
     _ATTEMPT_REF_KEYS: Final = ("attempt", "attempts", "attempt_ids", "attempt_refs")
@@ -7525,13 +7526,21 @@ class AgentDao(BaseDao):
         if reservation_refs:
             reservation_rows = (
                 await conn.execute(
-                    sa.select(AiInvocation.reservations).where(AiInvocation.invocation_id.in_(reservation_refs))
+                    sa.select(AiInvocation.reservations, AiInvocation.owner_lease_expires_at).where(
+                        AiInvocation.invocation_id.in_(reservation_refs)
+                    )
                 )
             ).all()
+            # 列 ``owner_lease_expires_at`` 为 naive UTC 墙钟（models.py），故 now 同形比较。
+            lease_now = datetime.now(UTC).replace(tzinfo=None)
             for reservation_row in reservation_rows:
                 entries = reservation_row.reservations
+                lease_alive = reservation_row.owner_lease_expires_at > lease_now
+                # N25：普通预留过租即失权不计活跃；held_unconfirmed（结果未知）明示保留。
                 if isinstance(entries, list) and any(
-                    isinstance(entry, dict) and entry.get("state") in self._SNAPSHOT_ACTIVE_RESERVATION_STATES
+                    isinstance(entry, dict)
+                    and entry.get("state") in self._SNAPSHOT_ACTIVE_RESERVATION_STATES
+                    and (entry.get("state") == "held_unconfirmed" or lease_alive)
                     for entry in entries
                 ):
                     has_active_reservation = True
