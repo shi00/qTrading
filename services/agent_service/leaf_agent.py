@@ -83,6 +83,7 @@ __all__ = [
     "LEAF_PREDECESSOR_ARTIFACT_UNAVAILABLE",
     "LEAF_RESULT_KIND",
     "LEAF_RESULT_SAVE_FAILED",
+    "LEAF_RESULT_SAVE_UNCONFIRMED",
     "LEAF_ROLE_PROMPT_KEY",
     "LEAF_ROLE_PROMPT_UNAVAILABLE",
     "LEAF_TIMEOUT_UNAVAILABLE",
@@ -121,6 +122,8 @@ LEAF_EMPTY_RESULT: Final[str] = "leaf_empty_result"
 LEAF_MODEL_FAILED: Final[str] = "leaf_model_failed"
 LEAF_POLICY_DENIED: Final[str] = "leaf_policy_denied"
 LEAF_RESULT_SAVE_FAILED: Final[str] = "leaf_result_save_failed"
+#: 保存确认丢失且按原成果身份无法证明已保存（未知，不固化失败，R21）。
+LEAF_RESULT_SAVE_UNCONFIRMED: Final[str] = "leaf_result_save_unconfirmed"
 LEAF_ROLE_PROMPT_UNAVAILABLE: Final[str] = "leaf_role_prompt_unavailable"
 LEAF_TOOL_SETUP_FAILED: Final[str] = "leaf_tool_setup_failed"
 LEAF_TOOL_BUDGET_EXCEEDED: Final[str] = "tool_budget_exceeded"
@@ -390,6 +393,60 @@ def _failed(context: LeafExecutionContext, code: str) -> NodeOutcome:
     """叶失败终态（不写成果、不伪造 complete）。"""
 
     return NodeOutcome(node_id=context.node.node_id, state="failed", error_code=code)
+
+
+def _is_confirmed_result(saved: object, draft: ResearchResultDraft) -> bool:
+    """保存确认：已保存成果须报告 ``final_output_saved`` 且身份与本叶草稿逐项一致。
+
+    身份核对按原成果稳定身份（同用户域/执行/轮/节点/输入版/输入指纹），避免把
+    他叶成果或旧输入版的成果当成本叶成果（R21）。
+    """
+
+    return (
+        isinstance(saved, ResearchResult)
+        and saved.final_output_saved is True
+        and saved.user_scope == draft.user_scope
+        and saved.execution_id == draft.execution_id
+        and saved.round_id == draft.round_id
+        and saved.node_id == draft.node_id
+        and saved.input_revision == draft.input_revision
+        and saved.actual_input_digest == draft.actual_input_digest
+    )
+
+
+async def _lookup_saved_result(store: LeafResultStore, draft: ResearchResultDraft) -> ResearchResult | None:
+    """提交确认丢失后按原成果身份查回（同身份同摘要幂等重放，零新版本）。
+
+    ``save_research_result`` 以 ``(user_scope, execution, round, node, result_kind)``
+    派生稳定成果身份并按 ``result_digest`` 幂等：原事务已提交时返回原成果版本
+    （不新增版本、不重复写事件）；原事务确未提交时补写本次成果（仍只有一行，
+    不产生重复成果）。以同一 draft 重放即「按原成果身份查回」，不重跑模型。
+    返回 ``None`` = 无法证明（重放再次异常或返回未确认/身份不符）。
+    """
+
+    try:
+        saved = await store.save_research_result(draft)
+    except asyncio.CancelledError:
+        raise
+    except AgentServiceError as e:
+        logger.warning(
+            "[LeafAgent] research result identity lookup rejected: %s (execution=%s node=%s)",
+            e.code.value,
+            draft.execution_id,
+            draft.node_id,
+        )
+        return None
+    except Exception as e:
+        logger.warning(
+            "[LeafAgent] research result identity lookup failed: %s (execution=%s node=%s)",
+            type(e).__name__,
+            draft.execution_id,
+            draft.node_id,
+        )
+        return None
+    if not _is_confirmed_result(saved, draft):
+        return None
+    return saved
 
 
 def _resolve_agent_dao(dao: Any | None) -> Any | None:
@@ -702,19 +759,44 @@ async def run_leaf_agent(
         parent_artifact_refs=parent_artifact_refs,
         source_refs=context.node.source_refs,
     )
+    store = DaoLeafResultStore(dao)
     try:
-        saved = await DaoLeafResultStore(dao).save_research_result(draft)
+        saved: object = await store.save_research_result(draft)
     except asyncio.CancelledError:
         raise
-    except Exception as e:
+    except AgentServiceError as e:
+        # 明确拒绝（执行/轮次/会话不符、清理 fence）：该事务提交前已回滚，成果
+        # 确证未保存，如实报失败；不查回、不补写（提交前确证回滚不在丢确认内）。
         logger.warning(
-            "[LeafAgent] research result save failed: %s (execution=%s node=%s)",
-            type(e).__name__,
+            "[LeafAgent] research result save rejected: %s (execution=%s node=%s)",
+            e.code.value,
             context.execution_id,
             context.node.node_id,
         )
         return _failed(context, LEAF_RESULT_SAVE_FAILED)
-    if not isinstance(saved, ResearchResult) or saved.final_output_saved is not True:
+    except Exception as e:
+        # 提交确认丢失（提交可能已生效）：按原成果身份查回，不把未知固化为失败。
+        logger.warning(
+            "[LeafAgent] research result save confirmation lost: %s (execution=%s node=%s)",
+            type(e).__name__,
+            context.execution_id,
+            context.node.node_id,
+        )
+        saved = await _lookup_saved_result(store, draft)
+        if saved is None:
+            logger.warning(
+                "[LeafAgent] research result save unconfirmed after identity lookup; leaf keeps unknown "
+                "(execution=%s node=%s)",
+                context.execution_id,
+                context.node.node_id,
+            )
+            return NodeOutcome(
+                node_id=context.node.node_id,
+                state="unknown",
+                error_code=LEAF_RESULT_SAVE_UNCONFIRMED,
+                input_digest=digest,
+            )
+    if not _is_confirmed_result(saved, draft):
         logger.warning(
             "[LeafAgent] research result save not confirmed (execution=%s node=%s)",
             context.execution_id,
