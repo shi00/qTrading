@@ -8372,13 +8372,20 @@ def _draft_fragment(value: object, path: str, *, require_source_module: bool = F
     return doc
 
 
-def _sorted_source_refs(refs: Iterable[SourceVersionRef]) -> tuple[SourceVersionRef, ...]:
+def _checked_source_refs(refs: Iterable[SourceVersionRef]) -> tuple[SourceVersionRef, ...]:
+    """草稿资料引用只做去重校验，**保持用户选序**（UX P03「顺序保持用户选择」）。
+
+    资料卡顺序是用户可见的选择事实，不是可规范化的集合：排序会把「重开草稿」
+    变成换序，并让仅换序的同命令键重放误判为原输入。去重键仍是源身份
+    （kind/id/version），同一引用重复出现即拒绝。
+    """
+
     items = tuple(refs)
     encoded = [encode_source_version_ref(ref) for ref in items]
     keys = [(item["source_kind"], item["source_id"], item["source_version"]) for item in encoded]
     if len(set(keys)) != len(keys):
         _fail("duplicate_source_ref", "$.payload.source_refs")
-    return tuple(sorted(items, key=lambda ref: (ref.source_kind.value, ref.source_id, ref.source_version)))
+    return items
 
 
 def _sorted_skill_refs(refs: Iterable[SkillVersionRef]) -> tuple[SkillVersionRef, ...]:
@@ -8455,6 +8462,10 @@ class DraftPayload:
     截止（带时区 ISO-8601 时点，与受理 ``decision_cutoff`` 同口径）。两者分列：
     17:00 截止不会被降级成日界，排队（19:00）也不改写它。``cutoff=None`` 表示
     精确截止未知（未选择或旧 v1 稿仅日界），排队前须澄清（:func:`draft_cutoff_requires_clarification`）。
+
+    ``source_refs`` 为**有序**资料选择：顺序即用户在资料卡上的选择顺序（UX P03），
+    编解码与命令摘要均按原序承载，不得排序。``skill_versions`` / ``mcp_selection``
+    / ``customized_fields`` 是集合语义（排序去重）。
     """
 
     schema_version: int
@@ -8485,7 +8496,11 @@ def draft_cutoff_requires_clarification(payload: DraftPayload) -> bool:
 
 
 def encode_draft_payload(payload: DraftPayload) -> dict[str, Any]:
-    """DraftPayload → 规范 wire 对象（v2 15 键全量，集合规范化排序去重）。"""
+    """DraftPayload → 规范 wire 对象（v2 15 键全量）。
+
+    ``source_refs`` 保持用户选序（UX P03）；``skill_versions`` / ``mcp_selection``
+    / ``customized_fields`` 为集合语义，规范化排序去重。
+    """
 
     _require_schema_version(payload.schema_version, DRAFT_PAYLOAD_SCHEMA_VERSION, "$.payload.schema_version")
     if not isinstance(payload.text, str):
@@ -8521,7 +8536,7 @@ def encode_draft_payload(payload: DraftPayload) -> dict[str, Any]:
         "text": payload.text,
         "mode": payload.mode.value,
         "model_selection": None if payload.model_selection is None else decode_json_doc(payload.model_selection),
-        "source_refs": [encode_source_version_ref(ref) for ref in _sorted_source_refs(payload.source_refs)],
+        "source_refs": [encode_source_version_ref(ref) for ref in _checked_source_refs(payload.source_refs)],
         "skill_versions": [encode_skill_version_ref(ref) for ref in _sorted_skill_refs(payload.skill_versions)],
         "mcp_selection": [encode_mcp_service_identity(ref) for ref in _sorted_mcp_selection(payload.mcp_selection)],
         "purpose": None if payload.purpose is None else payload.purpose.value,
@@ -8546,7 +8561,9 @@ def decode_draft_payload(value: object, path: str = "$.payload") -> DraftPayload
 
     v2 为当前写入形态（研究日期 + 精确截止分列）。v1 旧稿只读兼容：旧
     ``cutoff`` 为纯日期日界，提升为 ``research_date``；精确 ``cutoff`` 置
-    ``None``（未知），不补造时点，排队前须澄清（R21）。
+    ``None``（未知），不补造时点，排队前须澄清（R21）。``source_refs`` 按 wire
+    原序回读（不重排），保证草稿重开保持用户选择顺序（UX P03）；旧稿已落库的
+    顺序原样回读。
     """
 
     if not isinstance(value, dict):
@@ -8617,7 +8634,7 @@ def decode_draft_payload(value: object, path: str = "$.payload") -> DraftPayload
         text=text,
         mode=mode,
         model_selection=_opt_draft_fragment(value["model_selection"], f"{path}.model_selection"),
-        source_refs=_sorted_source_refs(
+        source_refs=_checked_source_refs(
             decode_source_version_ref(item, f"{path}.source_refs[{index}]")
             for index, item in enumerate(source_refs_raw)
         ),
