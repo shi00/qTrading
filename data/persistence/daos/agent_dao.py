@@ -4693,6 +4693,11 @@ class AgentDao(BaseDao):
         phase ``failed_confirmed`` / effect ``not_dispatched``（仅确定未发生时使用）；
         ``unknown`` → phase ``unknown`` / effect ``unknown``（后效未知，保留归属）。
         operation 不存在或归属不符即拒绝，不凭空建行。
+
+        结果事实与其 ``tool_result_saved`` 可靠事件（N39）在**同一事务**提交：
+        事件载荷指向 operation/结果引用，观察侧从原水位按 ``after_seq`` 即可增量
+        续读；``event_id`` 由 (operation, 结果态) 派生，同结果重放不写第二条，
+        写失败整体回滚（不出现「结果已存但没有事件」的半状态）。
         """
 
         self._check_engine("tool result")
@@ -4735,16 +4740,81 @@ class AgentDao(BaseDao):
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
         async with engine.begin() as conn:
-            result = await conn.execute(
-                sa.update(AgentOperation)
-                .where(
-                    AgentOperation.user_scope == request.user_scope,
-                    AgentOperation.operation_id == request.operation_id,
+            row = (
+                await conn.execute(
+                    sa.update(AgentOperation)
+                    .where(
+                        AgentOperation.user_scope == request.user_scope,
+                        AgentOperation.operation_id == request.operation_id,
+                    )
+                    .values(**values)
+                    .returning(
+                        AgentOperation.session_id,
+                        AgentOperation.execution_id,
+                        AgentOperation.round_id,
+                        AgentOperation.step_id,
+                        AgentOperation.tool_call_id,
+                        AgentOperation.parameter_digest,
+                        AgentOperation.revision,
+                    )
                 )
-                .values(**values)
-            )
-            if result.rowcount != 1:
+            ).first()
+            if row is None:
                 raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "tool operation does not exist", identity)
+            if row.session_id is None:
+                # 结果必须落在可观察会话上；无会话归属即无法发布可靠事件，
+                # 整体回滚（不把结果留在观察不到的状态，R21）。
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "tool operation has no session", identity)
+            watermarks = await self._lock_session_event_watermarks(
+                conn, user_scope=request.user_scope, session_ids=[row.session_id]
+            )
+            session_event_seq = watermarks.get(row.session_id)
+            if session_event_seq is None:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "tool operation session does not exist", identity)
+            # 同事务可靠事件（N39）：结果提交即发布 tool_result_saved，增量订阅可
+            # 按 after_seq 续读到；event_id 按 (operation, 结果态) 派生使同结果重放
+            # 不写第二条；水位由助手以 GREATEST 单调推进（R22）。
+            await self._append_session_event(
+                conn,
+                user_scope=request.user_scope,
+                session_id=row.session_id,
+                message_id=stable_id(
+                    "event_message",
+                    [
+                        request.user_scope,
+                        row.session_id,
+                        "tool_result_saved",
+                        request.operation_id,
+                        request.outcome_state,
+                    ],
+                ),
+                event_id=derive_event_identity(
+                    execution_id=None,
+                    round_id=None,
+                    node_id=None,
+                    native_event_id=f"tool_result_saved:{request.operation_id}:{request.outcome_state}",
+                ),
+                event_kind=EventKind.TOOL_RESULT_SAVED,
+                payload_kind="tool_result_saved",
+                subject_id=request.operation_id,
+                subject_revision=int(row.revision),
+                payload={
+                    "schema_version": 1,
+                    "operation_id": request.operation_id,
+                    "tool_call_id": row.tool_call_id,
+                    "execution_id": row.execution_id,
+                    "round_id": row.round_id,
+                    "node_id": row.step_id,
+                    "parameter_digest": row.parameter_digest,
+                    "outcome_state": request.outcome_state,
+                    "phase": phase,
+                    "io_state": io_state,
+                    "result_ref": request.result_ref,
+                    "error_code": request.error_code,
+                },
+                occurred_at=occurred,
+                session_event_seq=session_event_seq,
+            )
 
     async def _cas_grant_state(
         self,
