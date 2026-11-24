@@ -426,6 +426,41 @@ def config_snapshot_digest(config: MCPServerConfig) -> str:
 # ---------------------------------------------------------------------------
 
 
+class _SessionLiveness:
+    """会话「进程自行退出」的一次性信号：登记处理函数前触发也不丢，且只通知一次。"""
+
+    def __init__(self) -> None:
+        self.lost = False
+        self._handler: Callable[[], None] | None = None
+
+    def mark_lost(self) -> None:
+        """标记失联并通知已登记的处理函数；重复调用只通知一次。"""
+        if self.lost:
+            return
+        self.lost = True
+        handler = self._handler
+        if handler is not None:
+            handler()
+
+    def bind(self, handler: Callable[[], None]) -> None:
+        """绑定处理函数；若失联已发生则立即补发。"""
+        self._handler = handler
+        if self.lost:
+            handler()
+
+
+def _attach_lost_handler(session: MCPClientSessionPort, notify: Callable[[], None]) -> None:
+    """把会话的「进程自行退出」通知接到管理器。
+
+    端口以能力方式接入：真实适配实现 ``set_lost_handler``；不具备该能力的会话
+    （如无子进程的替身）视为不会自行退出，连接判据不受影响。
+    """
+
+    attach = getattr(session, "set_lost_handler", None)
+    if callable(attach):
+        attach(notify)
+
+
 class SharedMCPConnectionManager:
     """同一服务身份/配置版本共享一个连接；并发启连 single-flight，观察者退出不关持有者连接。"""
 
@@ -463,6 +498,8 @@ class SharedMCPConnectionManager:
         self._closing_owner: dict[str, MCPClientSessionPort] = {}
         #: 同一身份的关闭 single-flight：并发断开/重连不会对同一句柄重复关闭。
         self._closing_tasks: dict[str, asyncio.Task[None]] = {}
+        #: 进程自行退出后的收尾任务（保留引用避免被回收；失败句柄留在 ``_closing``）。
+        self._loss_cleanups: set[asyncio.Task[None]] = set()
         #: 连接 owner 在启连时冻结的发现目录与连接代次（单调递增，不复用）。
         self._catalogs: dict[str, tuple[MCPToolDescriptor, ...]] = {}
         self._generations: dict[str, int] = {}
@@ -705,9 +742,11 @@ class SharedMCPConnectionManager:
             )
         guard = MCPBudgetGuard(config.budget, identity=label)
         deadline = self._start_connect_deadline(config)
+        liveness = _SessionLiveness()
         # 每连接单一账本：入站限额（receive_bytes/structure_depth）与解析后各族
         # （目录/schema/解码/单条/留存）累计在同一 guard 上，由管理器注入会话。
         session = await self._factory.open(config, guard=guard)
+        _attach_lost_handler(session, liveness.mark_lost)
         try:
             tools = await self._discover(session, deadline, label)
         except BaseException:
@@ -721,7 +760,10 @@ class SharedMCPConnectionManager:
         self._guards[label] = guard
         self._catalogs[label] = tuple(tools)
         self._generation_seq += 1
-        self._generations[label] = self._generation_seq
+        generation = self._generation_seq
+        self._generations[label] = generation
+        # 发现期间就退出也不会被登记为已连接：信号在此补发，随即按原代次失效。
+        liveness.bind(lambda: self._on_session_lost(label, session, generation))
 
     async def disconnect(self, identity: MCPServiceIdentity) -> None:
         """显式断开：仍可能执行中的在途调用默认拒停；后效未知者保留到退出确认（I17/I53）。
@@ -809,6 +851,8 @@ class SharedMCPConnectionManager:
         return await self._store.delete(identity)
 
     def is_connected(self, identity: MCPServiceIdentity) -> bool:
+        """是否仍有登记的共享会话；进程自行退出后立即为 ``False``（不等句柄关闭）。"""
+
         return _identity_text(identity) in self._sessions
 
     def session(self, identity: MCPServiceIdentity) -> MCPClientSessionPort:
@@ -874,6 +918,45 @@ class SharedMCPConnectionManager:
             self._closing_owner[label] = session
             self._track_closing(label, session)
         await self._request_close(label)
+
+    def _on_session_lost(self, label: str, session: MCPClientSessionPort, generation: int) -> None:
+        """子进程自行退出：仅在同一代次仍登记时按原代次失效，不重连、不新建连接。
+
+        失效在**同步段**完成：``is_connected`` / 冻结目录 / 代次随即回到未登记态，
+        设置页刷新与工具调用都不会再把已退出的进程当作已连接；句柄收尾另行异步执行，
+        关闭未确认时保留在 ``_closing``，由下次启连前的关闭确认处理（I17）。
+        """
+
+        if self._sessions.get(label) is not session or self._generations.get(label) != generation:
+            # 已被显式断开、或已由更新的连接代次替换：旧代次退出不影响现状。
+            return
+        self._sessions.pop(label, None)
+        self._forget_connection_state(label)
+        self._closing_owner[label] = session
+        self._track_closing(label, session)
+        self._schedule_lost_cleanup(label)
+
+    def _schedule_lost_cleanup(self, label: str) -> None:
+        """异步收尾已退出进程的句柄（不自动重连）；任务持引用避免被提前回收。"""
+
+        try:
+            task = asyncio.get_running_loop().create_task(self._close_lost(label))
+        except RuntimeError:
+            # 无运行循环：句柄留在 ``_closing``，由下次启连前的关闭确认处理。
+            return
+        self._loss_cleanups.add(task)
+        task.add_done_callback(self._loss_cleanups.discard)
+
+    async def _close_lost(self, label: str) -> None:
+        """关闭已退出进程的句柄；失败保留句柄待下次启连前确认（不伪装已关闭）。"""
+
+        try:
+            await self._request_close(label)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # 句柄仍在 _closing：下一次 connect 前必须确认退出，否则显式拒绝（I17/R21）。
+            return
 
     # -- 在途归属 -----------------------------------------------------------
 
