@@ -120,9 +120,10 @@ class _FakeHandle:
 class _FakeRegistry:
     """应用登记面替身（AgentDao 最小恢复面 + 答复消费面）。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, recovery: tuple[Any, ...] = ()) -> None:
         self.finalized: list[str] = []
         self.consumed: list[ConsumeAnswerRequest] = []
+        self.recovery = recovery
 
     async def consume_answer(self, request: ConsumeAnswerRequest) -> ConsumptionFact:
         self.consumed.append(request)
@@ -135,7 +136,7 @@ class _FakeRegistry:
         )
 
     async def list_recovery_executions(self, user_scope: str) -> tuple[Any, ...]:
-        return ()
+        return self.recovery
 
     async def mark_dispatch_closed(self, request: Any) -> DispatchCloseFact:
         return DispatchCloseFact(user_scope=request.user_scope, closed_execution_ids=())
@@ -1089,10 +1090,14 @@ class _StatusClient:
             raise self._error
         if workflow_ids is not None:
             return [
-                SimpleNamespace(workflow_id=wid, status=self._by_id[wid]) for wid in workflow_ids if wid in self._by_id
+                SimpleNamespace(workflow_id=wid, status=self._by_id[wid], parent_workflow_id=None)
+                for wid in workflow_ids
+                if wid in self._by_id
             ]
         if status is not None:
-            return [SimpleNamespace(workflow_id=wid, status=state) for wid, state in self._active]
+            return [
+                SimpleNamespace(workflow_id=wid, status=state, parent_workflow_id=None) for wid, state in self._active
+            ]
         return []
 
     async def cancel_workflows_async(self, workflow_ids: list[str], *, cancel_children: bool = False) -> None:
@@ -1174,8 +1179,15 @@ async def test_launched_idle_host_can_close_after_native_verification() -> None:
 
 async def test_launched_host_with_active_workflow_still_blocks_close() -> None:
     """真实仍在途的 workflow（含叶）继续阻断关闭，给出精确原因与计数。"""
+    dao = _RecordingDao()
+    # 启动隔离按当前业务库登记归属解析取消集（N06）：在途行须先登记才算本库归属
+    dao.recovery = (
+        SimpleNamespace(workflow_id="wf-active"),
+        SimpleNamespace(workflow_id="leaf-active"),
+    )
     wiring, handle = await _wire_launched(
-        client=_StatusClient(active=[("wf-active", "PENDING"), ("leaf-active", "ENQUEUED")])
+        client=_StatusClient(active=[("wf-active", "PENDING"), ("leaf-active", "ENQUEUED")]),
+        dao=dao,
     )
 
     receipt = await wiring.prepare_close()
