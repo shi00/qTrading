@@ -378,30 +378,25 @@ def _find_research_raw_row(rows: list[dict], ts_code: str) -> Mapping[str, typin
     return None
 
 
-def _build_multi_research_controls(
+def _build_multi_research_open_button(
     *,
     on_open: typing.Callable[[ft.ControlEvent], None] | None,
-    panel: ft.Control | None,
-) -> list[ft.Control]:
-    """多选入口按钮 + 对照面板（未接线研究入口时不渲染按钮）。"""
+) -> ft.Control | None:
+    """多选研究入口按钮（未接线研究入口时返回 None，不渲染占位）。
 
-    controls: list[ft.Control] = []
-    if on_open is not None:
-        controls.append(
-            ft.Row(
-                [
-                    ft.OutlinedButton(
-                        content=ft.Text(I18n.get("agent_multi_subject_open"), size=AppStyles.FONT_SIZE_BODY_SM),
-                        icon=ft.Icons.CHECKLIST,
-                        on_click=safe_on_click(on_open),
-                    )
-                ],
-                alignment=ft.MainAxisAlignment.END,
-            )
-        )
-    if panel is not None:
-        controls.append(panel)
-    return controls
+    布局约束: 按钮**不占独立高度**——结果态直接并入既有工具栏 ``pagination_row``（该行已由
+    翻页按钮撑到固定高度）。新增独立横条会在 1024x640 视口压缩结果表体的弹性高度，
+    导致 ``PaginatedTable`` 表头(35px)+首行(32px) 无法落位而只渲染 0 行（E2E
+    ``test_r01_dialog_height`` 实证「共 1 条」但行文本永久缺失）。
+    """
+
+    if on_open is None:
+        return None
+    return ft.OutlinedButton(
+        content=ft.Text(I18n.get("agent_multi_subject_open"), size=AppStyles.FONT_SIZE_BODY_SM),
+        icon=ft.Icons.CHECKLIST,
+        on_click=safe_on_click(on_open),
+    )
 
 
 def _get_page() -> ft.Page | None:
@@ -2287,12 +2282,16 @@ def _build_screener_table_card(
 
     ADD-UI-002: ``interaction_disabled`` 为历史加载中 —— 表格仍展示上一次完整结果
     (身份不预提交), 但禁用行点击/分页/页大小交互, 防止把在途目标误当作已显示结果操作。
+
+    垂直预算 (1024x640): 卡内固定高度的横条越多, ``body_rows`` 的弹性高度越小;
+    ``PaginatedTable`` 需要 表头(35px)+首行(32px) 才能渲染出行, 否则只出表头/0 行。
+    故多选研究入口并入既有 ``pagination_row``, 结果态不新增任何固定横条。
     """
     row_click = None if interaction_disabled else on_row_click
     page_no = state.page_no
     total_pages = state.total_pages
 
-    multi_controls = _build_multi_research_controls(on_open=on_open_multi_research, panel=multi_research_panel)
+    multi_open_button = _build_multi_research_open_button(on_open=on_open_multi_research)
 
     pagination_row = ft.Row(
         safe_controls(
@@ -2326,6 +2325,8 @@ def _build_screener_table_card(
                     disabled=interaction_disabled,
                     on_select=safe_on_select(on_page_size_change),
                 ),
+                # 多选研究入口并入本工具栏（不新增独立横条），见 _build_multi_research_open_button。
+                *([ft.Container(width=12), multi_open_button] if multi_open_button is not None else []),
             ]
         ),
         alignment=ft.MainAxisAlignment.CENTER,
@@ -2345,7 +2346,13 @@ def _build_screener_table_card(
             [
                 # UX-09 / MAJOR-01: 选股结果区顶部固定风险提示（含空态）。
                 build_risk_disclaimer(compact=True),
-                *multi_controls,
+                # 空态无分页工具栏可并入，入口按钮保持独立横条（空态无表体可挤压）。
+                *([ft.Row([multi_open_button], alignment=ft.MainAxisAlignment.END)] if multi_open_button else []),
+                *(
+                    [ft.Container(content=multi_research_panel, expand=True)]
+                    if multi_research_panel is not None
+                    else []
+                ),
                 ft.Container(
                     content=EmptyState(
                         icon=ft.Icons.INBOX,
@@ -2415,8 +2422,14 @@ def _build_screener_table_card(
             # UX-09 / MAJOR-01: 选股结果区顶部固定风险提示。
             [
                 build_risk_disclaimer(compact=True),
-                *multi_controls,
                 *body_rows,
+                # 对照面板仅在用户显式打开时出现，且与表体**并列分享**弹性高度：
+                # 面板自带滚动（Column scroll=AUTO），不会被挤出卡片，表体也不归零。
+                *(
+                    [ft.Container(content=multi_research_panel, expand=True)]
+                    if multi_research_panel is not None
+                    else []
+                ),
                 ft.Divider(height=1, color=AppColors.DIVIDER),
                 pagination_row,
             ],
