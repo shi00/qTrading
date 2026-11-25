@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 from collections.abc import Iterator
 from decimal import Decimal
@@ -15,7 +16,9 @@ from services.agent_service.model import STREAM_SOURCE_SYNTHETIC, StreamedTextFr
 from ui.i18n import I18n
 from ui.viewmodels.research_observer_view_model import (
     CATCH_UP_INCOMPLETE,
+    MESSAGE_COPY_DONE_KEY,
     MESSAGE_COPY_EMPTY_KEY,
+    MESSAGE_COPY_FAILED_KEY,
     MESSAGE_TOOLS_UNAVAILABLE_KEY,
     PENDING_SCOPE_ALL,
     PROGRESS_DOING_RUNNING,
@@ -44,6 +47,7 @@ from ui.views.research_observer_composer import (
     build_plan_preview as _build_plan_preview,
     dispatch_reason_text,
 )
+from ui.views import research_observer_conversation as conversation_mod
 from ui.views.research_observer_conversation import (
     MessageActionHandlers,
     build_execution_section,
@@ -1088,3 +1092,325 @@ def test_message_branch_available_invokes_handler_with_message_id() -> None:
 
     assert calls == [("branch", "m-1")]
     assert branch.disabled is False
+
+
+def test_message_selection_forwards_text_and_normalizes_non_string_payload() -> None:
+    calls: list[Any] = []
+    rows = build_messages_section(_w15_state(), handlers=_message_handlers(calls))
+    area = next(item for item in _walk(rows) if isinstance(item, ft.SelectionArea))
+
+    _invoke(area.on_change, SimpleNamespace(data=" 选中片段 "))
+    _invoke(area.on_change, SimpleNamespace(data=None))
+
+    assert calls == [("select", "m-1", " 选中片段 "), ("select", "m-1", "")]
+
+
+def test_message_row_hides_edit_for_assistant_and_shows_branch_pending_ring() -> None:
+    state = _w15_state(
+        messages=(
+            SessionMessageView(
+                message_id="m-1",
+                role="assistant",
+                body_text="答复",
+                body_available=True,
+                execution_id=None,
+                occurred_at="2026-11-17T01:00:00.000000Z",
+            ),
+        ),
+        message_edit_available=True,
+        message_branch_available=True,
+        branch_pending_message_id="m-1",
+    )
+
+    rows = build_messages_section(state, handlers=_message_handlers())
+
+    edit_buttons = [item for item in _walk(rows) if isinstance(item, ft.IconButton) and item.icon == ft.Icons.EDIT]
+    assert edit_buttons == [], "助手消息不提供编辑入口"
+    assert [item for item in _walk(rows) if isinstance(item, ft.ProgressRing)], "分支在途应显示进度环"
+    assert _find_icon_button(rows, I18n.get("agent_research_message_branch")).disabled is False
+
+
+def test_message_edit_mode_without_errors_disables_actions_while_pending() -> None:
+    calls: list[Any] = []
+    state = _w15_state(
+        message_edit_available=True,
+        edit_message_id="m-1",
+        edit_text="待提交",
+        edit_pending=True,
+    )
+
+    rows = build_messages_section(state, handlers=_message_handlers(calls))
+    field = next(item for item in _walk(rows) if isinstance(item, ft.TextField))
+    submit = _find_text_button(rows, I18n.get("agent_research_message_edit_submit"))
+    cancel = _find_text_button(rows, I18n.get("agent_research_message_edit_cancel"))
+
+    assert field.disabled is True
+    assert submit.disabled is True
+    assert cancel.disabled is True
+    texts = _control_texts(rows)
+    assert I18n.get("agent_research_message_edit_body_unavailable") not in texts
+    assert I18n.get("agent_research_error_fmt").format(code="REVISION_CONFLICT") not in texts
+
+    _invoke(field.on_change, SimpleNamespace(control=SimpleNamespace(value="新正文")))
+    _invoke(field.on_change, SimpleNamespace(control=SimpleNamespace(value=None)))
+
+    assert calls == [("text", "新正文"), ("text", "")]
+
+
+def test_message_body_unloaded_and_stream_without_model_text_render_honest_hints() -> None:
+    state = _w15_state(
+        messages=(
+            SessionMessageView(
+                message_id="m-1",
+                role="user",
+                body_text="",
+                body_available=False,
+                execution_id=None,
+                occurred_at="2026-11-17T01:00:00.000000Z",
+            ),
+        ),
+        stream_fragments=(StreamedTextFragment(sequence=1, text="占位"),),
+        stream_text="",
+        stream_synthetic_visible=False,
+    )
+
+    texts = _control_texts(build_messages_section(state))
+
+    assert I18n.get("agent_research_message_body_unloaded") in texts
+    assert I18n.get("agent_research_stream_no_model_text") in texts
+    assert I18n.get("agent_research_stream_synthetic_badge") not in texts
+
+
+def test_messages_section_renders_branch_origin_and_error_codes() -> None:
+    state = _w15_state(
+        session_parent_id="s-parent",
+        session_branch_source_message_id="m-9",
+        branch_error_key="agent_research_message_branch_unavailable",
+        branch_error_code="BRANCH_UNSUPPORTED",
+    )
+
+    texts = _control_texts(build_messages_section(state, handlers=_message_handlers()))
+
+    assert I18n.get("agent_research_branch_origin_fmt").format(parent="s-parent", message="m-9") in texts
+    assert I18n.get("agent_research_message_branch_unavailable") in texts
+    assert I18n.get("agent_research_error_fmt").format(code="BRANCH_UNSUPPORTED") in texts
+
+
+def test_copy_toolbar_renders_notice_and_failure_code() -> None:
+    state = _w15_state(
+        copy_toolbar_message_id="m-1",
+        copy_selection_text="选中文本",
+        copy_notice_key=MESSAGE_COPY_DONE_KEY,
+        copy_error_key=MESSAGE_COPY_FAILED_KEY,
+        copy_error_code="clipboard_denied",
+    )
+
+    rows = build_messages_section(state, handlers=_message_handlers())
+    texts = _control_texts(rows)
+
+    assert I18n.get(MESSAGE_COPY_DONE_KEY) in texts
+    assert I18n.get(MESSAGE_COPY_FAILED_KEY) in texts
+    assert I18n.get("agent_research_error_fmt").format(code="clipboard_denied") in texts
+    assert I18n.get(MESSAGE_COPY_EMPTY_KEY) not in texts
+    assert _find_text_button(rows, I18n.get("agent_research_message_copy")).disabled is False
+
+
+def _copy_handlers(calls: list[Any], *, copy_text: str | None) -> MessageActionHandlers:
+    return MessageActionHandlers(
+        on_begin_edit=lambda mid: calls.append(("edit", mid)),
+        on_edit_text=lambda text: calls.append(("text", text)),
+        on_submit_edit=lambda: calls.append(("submit",)),
+        on_cancel_edit=lambda: calls.append(("cancel",)),
+        on_branch=lambda mid: calls.append(("branch", mid)),
+        on_selection=lambda mid, text: calls.append(("select", mid, text)),
+        on_copy=lambda: copy_text,
+        on_copy_summary=lambda: copy_text,
+        on_copy_done=lambda: calls.append(("copy_done",)),
+        on_copy_failed=lambda: calls.append(("copy_failed",)),
+    )
+
+
+async def _click_button(button: ft.TextButton) -> None:
+    handler = cast(Any, button.on_click)
+    assert handler is not None, "按钮应绑定点击回调"
+    await handler(SimpleNamespace(control=button))
+
+
+def test_copy_toolbar_buttons_write_clipboard_and_report_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[Any] = []
+    state = _w15_state(copy_toolbar_message_id="m-1", copy_selection_text="选中文本")
+    rows = build_messages_section(state, handlers=_copy_handlers(calls, copy_text="选中文本"))
+    copy_button = _find_text_button(rows, I18n.get("agent_research_message_copy"))
+    summary_button = _find_text_button(rows, I18n.get("agent_research_message_copy_summary"))
+
+    async def _ok(_text: str) -> bool:
+        return True
+
+    monkeypatch.setattr(conversation_mod, "_write_clipboard", _ok)
+    asyncio.run(_click_button(copy_button))
+    asyncio.run(_click_button(summary_button))
+
+    async def _failed(_text: str) -> bool:
+        return False
+
+    monkeypatch.setattr(conversation_mod, "_write_clipboard", _failed)
+    asyncio.run(_click_button(copy_button))
+    asyncio.run(_click_button(summary_button))
+
+    assert calls == [("copy_done",), ("copy_done",), ("copy_failed",), ("copy_failed",)]
+
+
+def test_copy_toolbar_does_not_touch_clipboard_without_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[Any] = []
+    writes: list[str] = []
+
+    async def _record(text: str) -> bool:
+        writes.append(text)
+        return True
+
+    monkeypatch.setattr(conversation_mod, "_write_clipboard", _record)
+    state = _w15_state(copy_toolbar_message_id="m-1", copy_selection_text="选中文本")
+    rows = build_messages_section(state, handlers=_copy_handlers(calls, copy_text=None))
+    copy_button = _find_text_button(rows, I18n.get("agent_research_message_copy"))
+    summary_button = _find_text_button(rows, I18n.get("agent_research_message_copy_summary"))
+
+    asyncio.run(_click_button(copy_button))
+    asyncio.run(_click_button(summary_button))
+
+    assert writes == []
+    assert calls == []
+
+
+def test_write_clipboard_returns_false_without_render_context() -> None:
+    assert asyncio.run(conversation_mod._write_clipboard("文本")) is False
+
+
+def test_write_clipboard_sets_and_removes_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    written: list[str] = []
+
+    class _Clipboard:
+        async def set(self, text: str) -> None:
+            written.append(text)
+
+    page = SimpleNamespace(services=[])
+    monkeypatch.setattr(conversation_mod, "_get_page", lambda: page)
+    monkeypatch.setattr(conversation_mod.ft, "Clipboard", _Clipboard)
+
+    assert asyncio.run(conversation_mod._write_clipboard("文本")) is True
+    assert written == ["文本"]
+    assert page.services == [], "写入完成后应移除临时剪贴板服务"
+
+
+def test_write_clipboard_reports_failure_when_set_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Clipboard:
+        async def set(self, _text: str) -> None:
+            raise RuntimeError("clipboard denied")
+
+    page = SimpleNamespace(services=[])
+    monkeypatch.setattr(conversation_mod, "_get_page", lambda: page)
+    monkeypatch.setattr(conversation_mod.ft, "Clipboard", _Clipboard)
+
+    assert asyncio.run(conversation_mod._write_clipboard("文本")) is False
+    assert page.services == []
+
+
+def test_write_clipboard_tolerates_missing_service_on_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Clipboard:
+        async def set(self, _text: str) -> None:
+            return None
+
+    class _Services:
+        def append(self, _item: Any) -> None:
+            return None
+
+        def remove(self, _item: Any) -> None:
+            raise ValueError("service not registered")
+
+    monkeypatch.setattr(conversation_mod, "_get_page", lambda: SimpleNamespace(services=_Services()))
+    monkeypatch.setattr(conversation_mod.ft, "Clipboard", _Clipboard)
+
+    assert asyncio.run(conversation_mod._write_clipboard("文本")) is True
+
+
+def test_write_clipboard_propagates_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Clipboard:
+        async def set(self, _text: str) -> None:
+            raise asyncio.CancelledError()
+
+    page = SimpleNamespace(services=[])
+    monkeypatch.setattr(conversation_mod, "_get_page", lambda: page)
+    monkeypatch.setattr(conversation_mod.ft, "Clipboard", _Clipboard)
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        asyncio.run(conversation_mod._write_clipboard("文本"))
+    assert str(exc_info.value) == ""
+    assert page.services == []
+
+
+def test_message_row_unknown_role_is_labelled_not_faked_as_user() -> None:
+    state = _w15_state(
+        messages=(
+            SessionMessageView(
+                message_id="m-1",
+                role=None,
+                body_text="",
+                body_available=True,
+                execution_id=None,
+                occurred_at="2026-11-17T01:00:00.000000Z",
+            ),
+        )
+    )
+
+    texts = _control_texts(build_messages_section(state, handlers=_message_handlers()))
+
+    assert I18n.get("agent_research_role_unknown") in texts
+    assert I18n.get("agent_research_role_user") not in texts
+
+
+def test_copy_toolbar_error_key_without_code_renders_single_error_row() -> None:
+    state = _w15_state(
+        copy_toolbar_message_id="m-1",
+        copy_selection_text="选中文本",
+        copy_error_key=MESSAGE_COPY_FAILED_KEY,
+    )
+
+    texts = _control_texts(build_messages_section(state, handlers=_message_handlers()))
+
+    assert I18n.get(MESSAGE_COPY_FAILED_KEY) in texts
+    assert not any(text.startswith(I18n.get("agent_research_error_fmt").format(code="")) for text in texts)
+
+
+def test_messages_section_marks_more_items_available() -> None:
+    state = _w15_state(messages_has_more=True)
+
+    texts = _control_texts(build_messages_section(state, handlers=_message_handlers()))
+
+    assert I18n.get("agent_research_more_items") in texts
+
+
+def test_execution_row_with_children_exposes_expand_toggle() -> None:
+    state = ResearchObserverState(
+        available=True,
+        execution_nodes=(
+            ExecutionNodeView(
+                execution_id="e-1",
+                parent_execution_id=None,
+                display_state="running",
+                goal_coverage="partial",
+                model_attempt_count=1,
+                tool_call_count=0,
+                active_ms=10,
+                depth=0,
+                has_children=True,
+            ),
+        ),
+    )
+
+    rows = build_execution_section(
+        state,
+        on_toggle_execution=lambda _execution_id: None,
+        on_select_execution=lambda _execution_id: None,
+    )
+
+    toggle = _find_icon_button(rows, I18n.get("agent_research_collapse"))
+    assert toggle.icon == ft.Icons.EXPAND_LESS
