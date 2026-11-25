@@ -7,7 +7,9 @@
 - ``save_startup_isolation``：同身份同快照幂等、异快照 INPUT_CONFLICT、
   ``finalize_startup_isolation`` 回填回执与缺失拒绝；
 - ``grant_recovery_epoch``：精确集合授予（A 不动 B）、用户终止/终态/无轮/代次
-  不前进明确进 ``blocked``、``dispatch_closed`` 重开与 ``run_epoch`` 落库。
+  不前进明确进 ``blocked``、``dispatch_closed`` 重开与 ``run_epoch`` 落库；
+  合法恢复承接原总占位（只占一张、新代可重放/可释放、旧代迟到释放不释新票），
+  承接不可核时保原票并拒绝继续（N33）。
 """
 
 # pyright: reportPrivateUsage=false
@@ -28,13 +30,23 @@ from core.agent_types import (
     AgentServiceError,
     DispatchCloseRequest,
     RecoveryGrantRequest,
+    ResourceClaimRequest,
+    ResourceReleaseRequest,
+    ResourceSlotKind,
     StartupIsolationRecord,
     assess_research_completion,
     json_doc,
     stable_id,
 )
 from data.persistence.daos.agent_dao import AgentDao
-from data.persistence.models import AgentCommand, AgentExecution, AgentOperation, AgentRound, AgentSession
+from data.persistence.models import (
+    AgentCommand,
+    AgentExecution,
+    AgentOperation,
+    AgentResourceSlot,
+    AgentRound,
+    AgentSession,
+)
 from services.agent_service.recovery import resume_selected_workflows
 from tests._helpers import create_test_engine, make_alembic_cfg
 
@@ -197,6 +209,76 @@ async def _fetch_round(dao: AgentDao, round_id: str) -> int:
         ).scalar_one()
 
 
+async def _claim_total(
+    dao: AgentDao,
+    *,
+    slot_id: str = "slot-total",
+    execution_id: str = "exec-a",
+    round_id: str = "round-a",
+    node_id: str = "root",
+    owner_epoch: int = 1,
+) -> Any:
+    return await dao.claim_resource(
+        ResourceClaimRequest(
+            user_scope=_USER,
+            slot_id=slot_id,
+            slot_kind=ResourceSlotKind.TOTAL,
+            execution_id=execution_id,
+            node_id=node_id,
+            round_id=round_id,
+            owner_epoch=owner_epoch,
+            operation_refs=None,
+        )
+    )
+
+
+async def _seed_open_total_slot(
+    dao: AgentDao,
+    *,
+    slot_id: str = "slot-total",
+    execution_id: str = "exec-a",
+    node_id: str = "root",
+    round_id: str = "round-a",
+    owner_epoch: int = 1,
+    run_epoch: int = 1,
+    released: bool = False,
+) -> None:
+    """直接构造已占用总票（含不可核形态：错节点/释放尾段未知）。"""
+
+    async with dao.engine.begin() as conn:  # type: ignore[union-attr]  # 测试内直接构造票据
+        await conn.execute(
+            insert(AgentResourceSlot).values(
+                user_scope=_USER,
+                slot_id=slot_id,
+                slot_kind=ResourceSlotKind.TOTAL.value,
+                execution_id=execution_id,
+                node_id=node_id,
+                round_id=round_id,
+                owner_epoch=owner_epoch,
+                run_epoch=run_epoch,
+                claimed_at=sa.func.now(),
+                released_at=sa.func.now() if released else None,
+                release_verified=False,
+            )
+        )
+
+
+async def _fetch_slot(dao: AgentDao, slot_id: str = "slot-total") -> Any:
+    async with dao.engine.connect() as conn:  # type: ignore[union-attr]  # 测试内直接查回
+        return (
+            await conn.execute(
+                sa.select(
+                    AgentResourceSlot.owner_epoch,
+                    AgentResourceSlot.run_epoch,
+                    AgentResourceSlot.round_id,
+                    AgentResourceSlot.node_id,
+                    AgentResourceSlot.released_at,
+                    AgentResourceSlot.release_verified,
+                ).where(AgentResourceSlot.user_scope == _USER, AgentResourceSlot.slot_id == slot_id)
+            )
+        ).one()
+
+
 async def _fetch_state(dao: AgentDao, execution_id: str) -> Any:
     """逐项查回执行权威事实（状态/代次/结束时刻/修订号）。"""
 
@@ -211,6 +293,32 @@ async def _fetch_state(dao: AgentDao, execution_id: str) -> Any:
                 ).where(AgentExecution.user_scope == _USER, AgentExecution.execution_id == execution_id)
             )
         ).one()
+
+
+async def _count_open_session_total(dao: AgentDao, session_id: str) -> int:
+    async with dao.engine.connect() as conn:  # type: ignore[union-attr]  # 测试内统计会话开放总票
+        return (
+            await conn.execute(
+                sa.select(sa.func.count())
+                .select_from(AgentResourceSlot)
+                .join(
+                    AgentExecution,
+                    sa.and_(
+                        AgentExecution.user_scope == AgentResourceSlot.user_scope,
+                        AgentExecution.execution_id == AgentResourceSlot.execution_id,
+                    ),
+                )
+                .where(
+                    AgentResourceSlot.user_scope == _USER,
+                    AgentResourceSlot.slot_kind == ResourceSlotKind.TOTAL.value,
+                    AgentExecution.session_id == session_id,
+                    sa.or_(
+                        AgentResourceSlot.released_at.is_(None),
+                        AgentResourceSlot.release_verified.is_(False),
+                    ),
+                )
+            )
+        ).scalar_one()
 
 
 class TestListRecoveryExecutions:
@@ -542,6 +650,204 @@ class TestRecoveryGrant:
             assert replay.granted_execution_ids == ("exec-a",)
             assert dict(replay.blocked)["exec-b"] == "user_termination"
             assert resumed == ["agent_research:a", "agent_research:a"]
+        finally:
+            await dao.engine.dispose()  # type: ignore[union-attr]
+
+
+async def _seed_recoverable_research(dao: AgentDao, *, execution_id: str = "exec-a", round_id: str = "round-a") -> Any:
+    """会话 + 可恢复执行/活动轮，并在隔离前认领一张总票（N33 前置现场）。"""
+
+    await _seed_session(dao, "s-1")
+    await _seed_execution(dao, execution_id=execution_id, session_id="s-1", owner_epoch=1)
+    await _seed_round(dao, round_id=round_id, execution_id=execution_id, workflow_id=f"agent_research:{execution_id}")
+    await _link_round(dao, execution_id=execution_id, round_id=round_id)
+    ticket = await _claim_total(dao, execution_id=execution_id, round_id=round_id)
+    await dao.mark_dispatch_closed(
+        DispatchCloseRequest(user_scope=_USER, workflow_ids=(f"agent_research:{execution_id}",))
+    )
+    return ticket
+
+
+class TestRecoverySlotTakeover:
+    """N33：合法恢复承接原总占位；旧代迟到释放不释新票；承接不可核保原票拒绝。"""
+
+    async def test_grant_adopts_open_total_ticket_and_keeps_single_placement(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        try:
+            ticket = await _seed_recoverable_research(dao)
+
+            fact = await dao.grant_recovery_epoch(
+                RecoveryGrantRequest(
+                    user_scope=_USER,
+                    execution_ids=("exec-a",),
+                    owner_epoch=2,
+                    run_epoch=2,
+                    application_version="0.11.7",
+                )
+            )
+            assert fact.granted_execution_ids == ("exec-a",)
+
+            slot = await _fetch_slot(dao)
+            assert slot.owner_epoch == 2
+            assert slot.run_epoch == 2
+            assert slot.round_id == "round-a"
+            assert slot.node_id == "root"
+            assert slot.released_at is None and slot.release_verified is False
+            # 始终只占一张：承接原票而非新增/释放重取，会话开放总票恒为 1。
+            assert await _count_open_session_total(dao, "s-1") == 1
+
+            # 新代按同一 slot_id 重放：原票据原样返回（零新事实，仍只占一张）。
+            replay = await _claim_total(dao, owner_epoch=2)
+            assert replay.slot_id == ticket.slot_id
+            assert replay.claimed_at == ticket.claimed_at
+            assert replay.owner_epoch == 2 and replay.run_epoch == 2
+            assert await _count_open_session_total(dao, "s-1") == 1
+        finally:
+            await dao.engine.dispose()  # type: ignore[union-attr]
+
+    async def test_old_generation_late_release_cannot_release_adopted_ticket(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        try:
+            await _seed_recoverable_research(dao)
+            await dao.grant_recovery_epoch(
+                RecoveryGrantRequest(
+                    user_scope=_USER,
+                    execution_ids=("exec-a",),
+                    owner_epoch=2,
+                    run_epoch=2,
+                    application_version="0.11.7",
+                )
+            )
+
+            with pytest.raises(AgentServiceError) as excinfo:
+                await dao.release_resource(
+                    ResourceReleaseRequest(
+                        user_scope=_USER,
+                        slot_id="slot-total",
+                        execution_id="exec-a",
+                        node_id="root",
+                        owner_epoch=1,
+                        exit_verified=True,
+                    )
+                )
+            assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
+            slot = await _fetch_slot(dao)
+            assert slot.owner_epoch == 2
+            assert slot.released_at is None and slot.release_verified is False
+            assert await _count_open_session_total(dao, "s-1") == 1
+
+            # 新代释放成功后才放空容量（真实退出确认）。
+            receipt = await dao.release_resource(
+                ResourceReleaseRequest(
+                    user_scope=_USER,
+                    slot_id="slot-total",
+                    execution_id="exec-a",
+                    node_id="root",
+                    owner_epoch=2,
+                    exit_verified=True,
+                )
+            )
+            assert receipt.released is True and receipt.release_verified is True
+            assert await _count_open_session_total(dao, "s-1") == 0
+        finally:
+            await dao.engine.dispose()  # type: ignore[union-attr]
+
+    async def test_unverifiable_takeover_keeps_original_ticket_and_blocks_grant(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        try:
+            await _seed_session(dao, "s-1")
+            await _seed_execution(dao, execution_id="exec-a", session_id="s-1", dispatch_closed=True, owner_epoch=1)
+            await _seed_round(dao, round_id="round-a", execution_id="exec-a", workflow_id="agent_research:a")
+            await _link_round(dao, execution_id="exec-a", round_id="round-a")
+            # 票据节点与执行当前节点不一致：承接无法核对归属。
+            await _seed_open_total_slot(dao, node_id="other-node")
+
+            fact = await dao.grant_recovery_epoch(
+                RecoveryGrantRequest(
+                    user_scope=_USER,
+                    execution_ids=("exec-a",),
+                    owner_epoch=2,
+                    run_epoch=2,
+                    application_version="0.11.7",
+                )
+            )
+            assert fact.granted_execution_ids == ()
+            assert dict(fact.blocked)["exec-a"] == "slot_takeover_unverified"
+            # 保原票：原代次/占用不动，执行不被授予（保原票并拒绝继续）。
+            slot = await _fetch_slot(dao)
+            assert slot.owner_epoch == 1 and slot.run_epoch == 1
+            assert slot.released_at is None and slot.release_verified is False
+            granted = await _fetch_execution(dao, "exec-a")
+            assert granted.owner_epoch == 1 and granted.dispatch_closed is True
+            assert await _count_open_session_total(dao, "s-1") == 1
+        finally:
+            await dao.engine.dispose()  # type: ignore[union-attr]
+
+    async def test_unknown_release_tail_blocks_takeover(self, real_embedded_pg) -> None:
+        """旧代释放尾段未知（released_at 有值但未核）不放空，也不得被承接。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        try:
+            await _seed_session(dao, "s-1")
+            await _seed_execution(dao, execution_id="exec-a", session_id="s-1", dispatch_closed=True, owner_epoch=1)
+            await _seed_round(dao, round_id="round-a", execution_id="exec-a", workflow_id="agent_research:a")
+            await _link_round(dao, execution_id="exec-a", round_id="round-a")
+            await _seed_open_total_slot(dao, released=True)
+
+            fact = await dao.grant_recovery_epoch(
+                RecoveryGrantRequest(
+                    user_scope=_USER,
+                    execution_ids=("exec-a",),
+                    owner_epoch=2,
+                    run_epoch=2,
+                    application_version="0.11.7",
+                )
+            )
+            assert fact.granted_execution_ids == ()
+            assert dict(fact.blocked)["exec-a"] == "slot_takeover_unverified"
+            slot = await _fetch_slot(dao)
+            assert slot.owner_epoch == 1 and slot.release_verified is False
+        finally:
+            await dao.engine.dispose()  # type: ignore[union-attr]
+
+    async def test_recovery_receipt_not_ready_when_takeover_unverifiable(self, real_embedded_pg) -> None:
+        """承接不可核即不授予 → 手动恢复回执不得报 ready（不把不可用当恢复成功）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        resumed: list[str] = []
+
+        class _Client:
+            async def list_workflows_async(self, **kwargs: Any) -> list[Any]:
+                return []
+
+            async def cancel_workflows_async(self, workflow_ids: list[str], **kwargs: Any) -> None:
+                raise AssertionError("cancel not expected")
+
+            async def resume_workflows_async(self, workflow_ids: list[str]) -> Any:
+                resumed.extend(workflow_ids)
+                return []
+
+        try:
+            await _seed_session(dao, "s-1")
+            await _seed_execution(dao, execution_id="exec-a", session_id="s-1", dispatch_closed=True, owner_epoch=1)
+            await _seed_round(dao, round_id="round-a", execution_id="exec-a", workflow_id="agent_research:a")
+            await _link_round(dao, execution_id="exec-a", round_id="round-a")
+            await _seed_open_total_slot(dao, node_id="other-node")
+
+            receipt = await resume_selected_workflows(
+                user_scope=_USER,
+                execution_ids=("exec-a",),
+                owner_epoch=2,
+                run_epoch=2,
+                application_version="0.11.7",
+                client=_Client(),
+                registry=dao,
+            )
+            assert receipt.ready is False
+            assert receipt.granted_execution_ids == ()
+            assert resumed == []
+            assert dict(receipt.blocked)["exec-a"] == "slot_takeover_unverified"
+            assert "no_granted_execution" in receipt.blocking_reasons
         finally:
             await dao.engine.dispose()  # type: ignore[union-attr]
 
