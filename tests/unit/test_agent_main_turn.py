@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from datetime import UTC, datetime
@@ -720,6 +721,7 @@ class _IntakeFacade:
         self.requests: list[Any] = []
         self.accepts: list[Any] = []
         self.consumed: list[tuple[str, str]] = []
+        self.restored: list[tuple[str, str, tuple[str, ...]]] = []
         self.clarification_requests: list[Any] = []
         self.clarification_facts: tuple[Any, ...] = ()
         self.saved_clarification_id = "decision-clarify-1"
@@ -740,6 +742,12 @@ class _IntakeFacade:
     async def consume_clarification(self, *, user_scope: str, session_id: str) -> tuple[Any, ...]:
         self.consumed.append((user_scope, session_id))
         return self.clarification_facts
+
+    async def restore_clarification_consumption(
+        self, *, user_scope: str, session_id: str, decision_ids: tuple[str, ...]
+    ) -> int:
+        self.restored.append((user_scope, session_id, decision_ids))
+        return len(decision_ids)
 
     async def save_clarification_decision(self, request: Any) -> Any:
         self.clarification_requests.append(request)
@@ -978,6 +986,95 @@ async def test_intake_injects_consumed_clarification_answers_into_main_turn() ->
     assert facade.consumed == [("u1", result.session_id)]
     assert runner.requests[0].clarification_answers == (fact,)
     assert result.clarification_decision_id is None
+
+
+def _consumed_answer_fact() -> ClarificationAnswerFact:
+    return ClarificationAnswerFact(
+        decision_id="decision-prev",
+        question_text="关注行业还是个股？",
+        answer_text="行业景气",
+        consumed_at="2026-01-01T00:00:00.000000Z",
+    )
+
+
+class _FailingRunner:
+    def __init__(self, exception: BaseException) -> None:
+        self._exception = exception
+
+    async def run(self, request: MainTurnRequest, *, turn: Any = None) -> Any:
+        raise self._exception
+
+
+@pytest.mark.asyncio
+async def test_intake_discuss_failure_restores_consumed_clarification_before_raising() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    fact = _consumed_answer_fact()
+    facade.clarification_facts = (fact,)
+    runner = _FailingRunner(RuntimeError("model unavailable"))
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await intake.start_question("继续分析", mode=Mode.DISCUSS)
+
+    assert str(excinfo.value) == "model unavailable"
+    assert len(facade.restored) == 1
+    user_scope, session_id, decision_ids = facade.restored[0]
+    assert user_scope == "u1"
+    assert session_id == facade.consumed[0][1]
+    assert decision_ids == (fact.decision_id,)
+
+
+@pytest.mark.asyncio
+async def test_intake_discuss_cancellation_propagates_without_restore() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    facade.clarification_facts = (_consumed_answer_fact(),)
+    runner = _FailingRunner(asyncio.CancelledError())
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+    )
+
+    with pytest.raises(asyncio.CancelledError) as excinfo:
+        await intake.start_question("继续分析", mode=Mode.DISCUSS)
+
+    assert isinstance(excinfo.value, asyncio.CancelledError)
+    assert facade.restored == []
+
+
+@pytest.mark.asyncio
+async def test_intake_execute_failure_restores_consumed_clarification() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    fact = _consumed_answer_fact()
+    facade.clarification_facts = (fact,)
+    runner = _FailingRunner(RuntimeError("planner unavailable"))
+    dispatcher, submitted = _recording_dispatcher(closed=False)
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+        dispatcher=dispatcher,
+    )
+
+    result = await intake.start_question(
+        "执行研究",
+        mode=Mode.EXECUTE,
+        role_prompt_refs=(("researcher", "v1"),),
+        skill_refs=(("skill-a", "2"),),
+    )
+
+    assert submitted == []
+    assert result.dispatch is not None
+    assert result.dispatch.reason_code == PLAN_UNAVAILABLE
+    assert len(facade.restored) == 1
+    assert facade.restored[0] == ("u1", result.session_id, (fact.decision_id,))
 
 
 @pytest.mark.asyncio

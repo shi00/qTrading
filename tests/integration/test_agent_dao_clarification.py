@@ -344,3 +344,69 @@ class TestPendingAndConsumeClarification:
 
         assert consumed == ()
         await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_restore_returns_answer_to_unconsumed_once_and_is_idempotent(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        receipt = await _seed_execution(dao, session_id="s1", business_request_id="req-1", workflow_id="wf-1")
+        fact = await dao.save_clarification_decision(_clarification_request(receipt))
+        answer = await dao.save_answer(
+            SaveAnswerRequest(
+                user_scope=_USER_SCOPE,
+                decision_id=fact.decision_id,
+                client_command_id="ans-restore",
+                expected_decision_revision=1,
+                expected_execution_id=receipt.execution_id,
+                expected_round_id=None,
+                answer_payload=json_doc({"text": "行业景气"}),
+            )
+        )
+        consumed = await dao.consume_clarification(user_scope=_USER_SCOPE, session_id=receipt.session_id)
+        assert [item.decision_id for item in consumed] == [fact.decision_id]
+
+        restored = await dao.restore_clarification_consumption(
+            user_scope=_USER_SCOPE,
+            session_id=receipt.session_id,
+            decision_ids=(fact.decision_id,),
+        )
+        assert restored == 1
+        async with dao.engine.connect() as conn:  # type: ignore[union-attr]
+            decision_row = (
+                await conn.execute(
+                    sa.select(AgentDecision.answer_consumed_at).where(AgentDecision.decision_id == fact.decision_id)
+                )
+            ).one()
+            command_row = (
+                await conn.execute(
+                    sa.select(AgentCommand.consumption_state, AgentCommand.consumed_at).where(
+                        AgentCommand.command_record_id == answer.command_record_id
+                    )
+                )
+            ).one()
+        assert decision_row.answer_consumed_at is None
+        assert command_row.consumption_state == "not_consumed"
+        assert command_row.consumed_at is None
+
+        assert (
+            await dao.restore_clarification_consumption(
+                user_scope=_USER_SCOPE,
+                session_id=receipt.session_id,
+                decision_ids=(fact.decision_id,),
+            )
+            == 0
+        )
+        assert (
+            await dao.restore_clarification_consumption(
+                user_scope=_USER_SCOPE,
+                session_id=receipt.session_id,
+                decision_ids=(fact.decision_id, "decision-unknown"),
+            )
+            == 0
+        )
+
+        reconsume = await dao.consume_clarification(user_scope=_USER_SCOPE, session_id=receipt.session_id)
+        assert [item.decision_id for item in reconsume] == [fact.decision_id]
+        assert reconsume[0].answer_text == "行业景气"
+        await dao.engine.dispose()  # type: ignore[union-attr]

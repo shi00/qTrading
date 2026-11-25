@@ -619,6 +619,10 @@ class AgentIntakeFacade(Protocol):
         self, *, user_scope: str, session_id: str
     ) -> tuple[ClarificationAnswerFact, ...]: ...
 
+    async def restore_clarification_consumption(
+        self, *, user_scope: str, session_id: str, decision_ids: tuple[str, ...]
+    ) -> int: ...
+
 
 @dataclass(frozen=True, slots=True)
 class MainTurnIntakeResult:
@@ -741,14 +745,22 @@ class MainTurnIntake:
             return result
         # 讨论/计划：受理后由生产主回合产出直答/可读计划；零研究动作由回合端口保证。
         identity = self._main_turn_identity(target_session, result.receipt, revision=revision, manifest=manifest)
-        turn_outcome = await self._main_turn.run(
-            MainTurnRequest(
-                identity=identity,
-                mode=mode,
-                prompt_text=question,
-                clarification_answers=await self._consume_clarification(target_session),
+        clarification_answers = await self._consume_clarification(target_session)
+        try:
+            turn_outcome = await self._main_turn.run(
+                MainTurnRequest(
+                    identity=identity,
+                    mode=mode,
+                    prompt_text=question,
+                    clarification_answers=clarification_answers,
+                )
             )
-        )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # 回合失败时答复未进入任何 prompt：补偿还原，避免静默丢失（原异常照抛）。
+            await self._restore_clarification(target_session, clarification_answers)
+            raise
         clarification_decision_id = await self._save_clarification(
             session_id=target_session,
             identity=identity,
@@ -792,6 +804,7 @@ class MainTurnIntake:
             # 未手选角色/Skills/MCP：无派发准入判据，先如实零派发（不耗模型、不猜授权）。
             return replace(result, dispatch=self._plan_unavailable(result, cause="role_policy_missing"))
         identity = self._main_turn_identity(session_id, result.receipt, revision=expected_revision, manifest=manifest)
+        clarification_answers: tuple[ClarificationAnswerFact, ...] = ()
         try:
             clarification_answers = await self._consume_clarification(session_id)
             turn_outcome = await runner.run(
@@ -805,6 +818,7 @@ class MainTurnIntake:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # 模型/计划端口失败：如实零派发，不伪造已启动
+            await self._restore_clarification(session_id, clarification_answers)
             logger.warning(
                 "[MainTurn] execute first-question plan generation failed, zero dispatch (execution=%s): %s",
                 result.receipt.execution_id,
@@ -860,6 +874,37 @@ class MainTurnIntake:
                 DataSanitizer.sanitize_error(exc),
             )
             return ()
+
+    async def _restore_clarification(self, session_id: str, facts: tuple[ClarificationAnswerFact, ...]) -> None:
+        """补偿还原本轮已消费的澄清答复（仅非空时；失败只记录脱敏原因）。
+
+        还原失败不掩盖原始异常（调用方仍按原异常/零派发处理），也不伪造
+        「已还原」；``CancelledError`` 依 R2 原样上抛。
+        """
+
+        if not facts:
+            return
+        restore = getattr(self._facade, "restore_clarification_consumption", None)
+        if not callable(restore):
+            logger.warning(
+                "[MainTurn] clarification restore port not wired; answers stay consumed (session=%s)", session_id
+            )
+            return
+        typed_restore = cast(Callable[..., Any], restore)
+        try:
+            await typed_restore(
+                user_scope=self._user_scope,
+                session_id=session_id,
+                decision_ids=tuple(fact.decision_id for fact in facts),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[MainTurn] clarification restore failed; answers stay consumed (session=%s): %s",
+                session_id,
+                DataSanitizer.sanitize_error(exc),
+            )
 
     async def _save_clarification(
         self, *, session_id: str, identity: LoopIdentity, outcome: MainTurnOutcome

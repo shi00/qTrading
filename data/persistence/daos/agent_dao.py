@@ -4287,6 +4287,88 @@ class AgentDao(BaseDao):
                 )
         return tuple(facts)
 
+    async def restore_clarification_consumption(
+        self, *, user_scope: str, session_id: str, decision_ids: tuple[str, ...]
+    ) -> int:
+        """撤销一次澄清答复消费（模型/计划端口失败时补偿，避免答复静默丢失）。
+
+        只对 ``session_id`` 内、``answer_command_id`` 非空且原答复命令仍存在的
+        ``user_choice`` 决定生效：``answer_consumed_at`` 置回 NULL，对应命令
+        ``consumed`` → ``not_consumed``、``consumed_at`` 置 NULL。命令只在
+        ``consumed_at`` 与决定原消费时点一致时还原，避免误回滚更早的消费。
+
+        单事务、幂等：重复调用或对非目标/未消费行不产生改动（返回 0）。
+        """
+
+        self._check_engine("clarification restore")
+        identity = f"{user_scope}/{session_id}"
+        _require_text_field(user_scope, "user_scope", identity)
+        _require_text_field(session_id, "session_id", identity)
+        if not isinstance(decision_ids, tuple) or any(not isinstance(item, str) or not item for item in decision_ids):
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "invalid clarification decision ids", identity)
+        if not decision_ids:
+            return 0
+        occurred = datetime.now(UTC)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        restored = 0
+        async with engine.begin() as conn:
+            rows = (
+                await conn.execute(
+                    sa.select(
+                        AgentDecision.decision_id,
+                        AgentDecision.answer_command_id,
+                        AgentDecision.answer_consumed_at,
+                    )
+                    .select_from(AgentDecision)
+                    .join(
+                        AgentCommand,
+                        sa.and_(
+                            AgentCommand.user_scope == AgentDecision.user_scope,
+                            AgentCommand.command_record_id == AgentDecision.answer_command_id,
+                        ),
+                    )
+                    .where(
+                        AgentDecision.user_scope == user_scope,
+                        AgentDecision.session_id == session_id,
+                        AgentDecision.decision_kind == USER_CHOICE_DECISION_KIND,
+                        AgentDecision.decision_id.in_(decision_ids),
+                        AgentDecision.answer_command_id.is_not(None),
+                        AgentDecision.answer_consumed_at.is_not(None),
+                    )
+                    .with_for_update()
+                )
+            ).all()
+            for row in rows:
+                cleared = await conn.execute(
+                    sa.update(AgentDecision)
+                    .where(
+                        AgentDecision.user_scope == user_scope,
+                        AgentDecision.decision_id == row.decision_id,
+                        AgentDecision.answer_consumed_at.is_not(None),
+                    )
+                    .values(answer_consumed_at=None, updated_at=occurred)
+                )
+                if cleared.rowcount != 1:
+                    continue
+                await conn.execute(
+                    sa.update(AgentCommand)
+                    .where(
+                        AgentCommand.user_scope == user_scope,
+                        AgentCommand.command_record_id == row.answer_command_id,
+                        AgentCommand.consumption_state == ConsumptionState.CONSUMED.value,
+                        AgentCommand.consumed_at == row.answer_consumed_at,
+                    )
+                    .values(
+                        consumption_state=ConsumptionState.NOT_CONSUMED.value,
+                        consumed_at=None,
+                        revision=AgentCommand.revision + 1,
+                        updated_at=occurred,
+                    )
+                )
+                restored += 1
+        return restored
+
     async def mark_answer_delivered(self, request: MarkAnswerDeliveredRequest) -> DeliveryFact:
         """投递核定（SQ-03「同 command_id 幂等原生 send」）：delivery_state
         not_delivered→delivered CAS。已 delivered → 返回原事实；delivery_unknown

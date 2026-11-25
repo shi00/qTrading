@@ -1752,6 +1752,18 @@ class AgentService:
         self._require_open("consume_clarification")
         return await self._dao.consume_clarification(user_scope=user_scope, session_id=session_id)
 
+    async def restore_clarification_consumption(
+        self, *, user_scope: str, session_id: str, decision_ids: tuple[str, ...]
+    ) -> int:
+        """撤销本轮澄清答复消费（模型/计划端口失败时补偿，避免答复静默丢失）。"""
+
+        self._require_open("restore_clarification_consumption")
+        return await self._dao.restore_clarification_consumption(
+            user_scope=user_scope,
+            session_id=session_id,
+            decision_ids=decision_ids,
+        )
+
     async def deliver_answer(self, request: AnswerDeliveryRequest) -> AnswerDeliveryOutcome:
         """答复交付（P1-05）：保存与投递分离，成功后才按原命令核定 delivered。
 
