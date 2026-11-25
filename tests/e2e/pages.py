@@ -1147,6 +1147,10 @@ class ResearchPanelPage:
         """断言面板标题可见（面板已展开）。"""
         await self.page.expect_text(I18n.get("agent_research_title"), timeout_ms=timeout_ms)
 
+    async def expect_closed(self, timeout_ms: int = TIMEOUTS.TITLE) -> None:
+        """断言面板标题已消失（面板已收起）。"""
+        await self.page.expect_text_gone(I18n.get("agent_research_title"), timeout_ms=timeout_ms)
+
     async def is_body_available(self) -> bool:
         """面板主体是否可用（首问区渲染 vs 仅渲染不可用原因）。"""
         return await self.page.has_text(I18n.get("agent_research_composer"))

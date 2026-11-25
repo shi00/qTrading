@@ -83,7 +83,7 @@ async def test_chinese_first_question_is_kept_without_auto_send(e2e_page):
 
 
 async def test_navigation_keeps_panel_and_business_controls_available(e2e_page):
-    """面板展开时跨页导航不报错，业务页关键控件与面板标题仍可见（非模态）。"""
+    """面板展开时跨页导航不报错；业务导航按设计收起观察层，之后仍可再次展开（非模态）。"""
     panel = ResearchPanelPage(e2e_page)
     home = HomePage(e2e_page)
     screener = ScreenerPage(e2e_page)
@@ -92,13 +92,13 @@ async def test_navigation_keeps_panel_and_business_controls_available(e2e_page):
     await screener.expect_run_button()
     await panel.open()
 
-    await screener.open()
-    await screener.expect_run_button()
-    await panel.expect_open()
-
     await panel.app.goto("nav_market")
     await home.expect_title(timeout_ms=TIMEOUTS.TITLE)
     await home.expect_kpi_sh(timeout_ms=TIMEOUTS.TITLE)
+
+    # 业务导航（含当前业务项）只收起观察层，不停止研究、不清草稿；收起后可再次展开。
+    await panel.expect_closed(timeout_ms=TIMEOUTS.TITLE)
+    await panel.open()
     await panel.expect_open()
 
 
