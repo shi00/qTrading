@@ -15,8 +15,11 @@
 """
 
 import asyncio
+import datetime
 import logging
+import math
 import typing
+from collections.abc import Mapping
 
 import flet as ft
 from flet.controls.material.refresh_indicator import RefreshIndicator
@@ -31,6 +34,7 @@ from ui.i18n import I18n, get_observable_state
 from ui.testing.anchor import anchored
 from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
+from ui.viewmodels.business_research_view_model import OBJECT_KIND_STOCK, BusinessResearchRequest
 from ui.viewmodels.sentiment_index_view_model import SentimentIndexViewModel
 from ui.viewmodels.watchlist_view_model import WatchlistMutationResult, WatchlistRow, WatchlistViewModel
 from utils.sanitizers import DataSanitizer
@@ -207,11 +211,13 @@ def _build_watchlist_row(
 @ft.component
 def WatchlistView(
     active: bool = True,
+    on_start_research: typing.Callable[[BusinessResearchRequest], None] | None = None,
 ) -> ft.Container:
     """关注列表视图 (声明式).
 
     Args:
         active: 是否为当前激活视图 (控制是否加载数据)
+        on_start_research: 个股详情 → 准备研究草稿（只准备不发送；未接线时不传）
     """
     state, vm = use_viewmodel(factory=lambda: WatchlistViewModel())
     # UIR-F10-003：本页情绪 VM（N5-3/FR-UX-007）。经 use_viewmodel 持有，命令与 state
@@ -508,6 +514,39 @@ def WatchlistView(
     # UX-09 MAJOR-04: 详情数据就绪时才渲染 StockDetailDialog。关闭时 VM 清空
     # detail_stock_data → 组件从控件树移除；再次打开为全新实例（open_ 初值正确），
     # 与 ScreenerView 的 `detail_dialog_data is None → 返回 None` 既有范式一致。
+    def _on_detail_research(stock_data: dict) -> None:
+        """关注个股 → 准备研究草稿（只准备不发送；无 ts_code 时不发起）。"""
+
+        if on_start_research is None:
+            return
+        raw = stock_data.get("_raw") if isinstance(stock_data, Mapping) else None
+        source = raw if isinstance(raw, Mapping) else stock_data
+        ts_code = source.get("ts_code")
+        if not isinstance(ts_code, str) or not ts_code:
+            return
+        name = source.get("name") or source.get("stock_name")
+        display = f"{name} ({ts_code})" if isinstance(name, str) and name else ts_code
+        summary: list[tuple[str, str]] = [("ts_code", ts_code)]
+        if isinstance(name, str) and name:
+            summary.append(("name", name))
+        for key in ("price", "pct_chg", "ai_score", "trade_date"):
+            value = source.get(key)
+            if value is None or str(value) == "" or (isinstance(value, float) and math.isnan(value)):
+                continue
+            summary.append((key, str(value)))
+        # 可得时点取用户看到该详情时的抓取时刻（保守：不声称更早可得，R24）。
+        captured_at = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        on_start_research(
+            BusinessResearchRequest(
+                source_module="watchlist",
+                object_kind=OBJECT_KIND_STOCK,
+                object_id=ts_code,
+                display_name=display,
+                summary=tuple(summary),
+                available_at=captured_at,
+            )
+        )
+
     detail_dialog: ft.Control | None = None
     if state.detail_stock_data is not None:
         detail_dialog = StockDetailDialog(
@@ -521,6 +560,7 @@ def WatchlistView(
             sentiment_state=sent_state,
             sentiment_on_select_day=sent_vm.select_day,
             sentiment_on_cancel=sent_vm.cancel,
+            on_start_research=_on_detail_research if on_start_research is not None else None,
         )
 
     return ft.Container(

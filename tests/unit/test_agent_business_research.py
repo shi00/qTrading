@@ -3,20 +3,44 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 
-from core.agent_types import AgentErrorCode, AgentServiceError, Purpose, ReadState, VerificationState
+from core.agent_types import (
+    DRAFT_PAYLOAD_SCHEMA_VERSION,
+    AgentErrorCode,
+    AgentServiceError,
+    AgentValidationError,
+    DraftPayload,
+    DraftRead,
+    DraftTransferCommand,
+    DraftTransferSourceKind,
+    Mode,
+    Purpose,
+    ReadState,
+    VerificationState,
+    draft_transfer_payload_digest,
+)
 from services.agent_service.business_research import (
+    MATERIAL_BYTES_EXCEEDED,
+    MATERIAL_COUNT_EXCEEDED,
     BusinessDraftAlreadyPrepared,
     BusinessDraftCommitUnknown,
+    BusinessDraftTargetUnavailable,
+    BusinessDraftTransferConflict,
     BusinessObjectSnapshot,
     BusinessResearchPreparer,
     BusinessSourceUnavailable,
+    MaterialLimitExceeded,
+    ResearchMaterial,
     backtest_preparation,
+    material_limit_violation,
+    material_read_counts,
     snapshot_preparation,
     snapshot_source,
 )
@@ -45,15 +69,22 @@ class _FakeFacade:
         existing_revision: int | None = None,
         save_error: Exception | None = None,
         create_error: Exception | None = None,
+        draft_read: object | None = None,
+        read_draft_error: Exception | None = None,
+        transfer_error: Exception | None = None,
     ) -> None:
         self.calls: list[str] = []
         self.saved_payload = None
         self.saved_commands: list = []
         self.session_commands: list = []
         self.registered_items: tuple = ()
+        self.transfer_commands: list = []
         self._existing_revision = existing_revision
         self._save_error = save_error
         self._create_error = create_error
+        self._draft_read = draft_read
+        self._read_draft_error = read_draft_error
+        self._transfer_error = transfer_error
 
     async def read_session(self, query, *, user_scope: str):
         self.calls.append("read_session")
@@ -82,6 +113,23 @@ class _FakeFacade:
         return SimpleNamespace(
             session_id=command.session_id,
             draft_revision=command.expected_draft_revision + 1,
+        )
+
+    async def read_draft(self, query, *, user_scope: str):
+        self.calls.append("read_draft")
+        if self._read_draft_error is not None:
+            raise self._read_draft_error
+        return self._draft_read
+
+    async def transfer_draft(self, command):
+        self.calls.append("transfer_draft")
+        self.transfer_commands.append(command)
+        if self._transfer_error is not None:
+            raise self._transfer_error
+        return SimpleNamespace(
+            target_session_id=command.target_session_id,
+            target_revision=command.expected_target_draft_revision + 1,
+            transfer_id=command.transfer_id,
         )
 
 
@@ -619,3 +667,374 @@ def test_resolve_business_research_service_reports_wiring_states():
     )
     # 就绪：返回 facade 本身且无原因 key
     assert resolve_business_research_service(SimpleNamespace(service=ready_service, ready=True)) == (ready_service, "")
+
+
+# --- 研究资料：限额 / 已读计数 / 并入既有草稿 / 草稿转移 ---
+
+_MATERIAL_CAPTURED = "2026-11-20T08:00:00.000000Z"
+_MATERIAL_CONTENT = "2026-11-18T00:00:00.000000Z"
+
+
+def _material(
+    index: int,
+    *,
+    read_state: ReadState = ReadState.READY,
+    byte_size: int | None = None,
+) -> ResearchMaterial:
+    return ResearchMaterial(
+        kind="file",
+        source_id=f"file:doc-{index}",
+        source_version=hashlib.sha256(f"doc-{index}".encode()).hexdigest(),
+        display_name=f"doc-{index}.md",
+        read_state=read_state,
+        missing_reason="material_extraction_not_wired" if read_state is ReadState.UNKNOWN else None,
+        captured_at=_MATERIAL_CAPTURED,
+        content_at=_MATERIAL_CONTENT,
+        byte_size=byte_size,
+    )
+
+
+def _draft_payload() -> DraftPayload:
+    return DraftPayload(
+        schema_version=DRAFT_PAYLOAD_SCHEMA_VERSION,
+        text="已有草稿",
+        mode=Mode.DISCUSS,
+        model_selection=None,
+        source_refs=(),
+        skill_versions=(),
+        mcp_selection=(),
+        purpose=Purpose.END_OF_DAY_RESEARCH,
+        research_date="2026-11-19",
+        cutoff=None,
+        send_target=None,
+        object_context=None,
+        role_prompt_selection=None,
+        customized_fields=(),
+        defaults_baseline_digest=None,
+    )
+
+
+def _draft_read(*, payload: DraftPayload | None = None, revision: int = 3, cleaned: bool = False) -> DraftRead:
+    return DraftRead(
+        session_id="session-target",
+        draft_revision=revision,
+        payload=payload,
+        is_empty=False,
+        cleaned=cleaned,
+        archived=False,
+        transferred=False,
+        read_at="2026-11-25T00:00:00.000000Z",
+    )
+
+
+def test_material_limit_violation_accepts_exact_limits_and_rejects_overflow():
+    exact = [_material(index) for index in range(5)]
+
+    assert material_limit_violation(exact) is None
+
+    overflow = [_material(index) for index in range(6)]
+    violation = material_limit_violation(overflow)
+    assert violation is not None
+    assert violation.code == MATERIAL_COUNT_EXCEEDED
+    assert violation.index == 5
+    assert violation.limit == 5
+    assert violation.actual == 6
+
+
+def test_material_limit_violation_checks_single_item_bytes():
+    materials = [_material(0), _material(1, byte_size=20_000_001), _material(2)]
+
+    violation = material_limit_violation(materials)
+
+    assert violation is not None
+    assert violation.code == MATERIAL_BYTES_EXCEEDED
+    assert violation.index == 1
+    assert violation.limit == 20_000_000
+    assert violation.actual == 20_000_001
+
+
+def test_material_read_counts_treat_partial_and_unknown_as_unread():
+    materials = [_material(0), _material(1, read_state=ReadState.PARTIAL), _material(2, read_state=ReadState.UNKNOWN)]
+
+    assert material_read_counts(materials) == (1, 2)
+
+
+@pytest.mark.asyncio
+async def test_add_materials_to_session_appends_refs_and_keeps_existing_payload_text():
+    payload = _draft_payload()
+    facade = _FakeFacade(draft_read=_draft_read(payload=payload))
+    preparer = BusinessResearchPreparer(facade)
+
+    receipt = await preparer.add_materials_to_session(
+        user_scope="local-desktop",
+        target_session_id="session-target",
+        materials=(_material(0), _material(1, read_state=ReadState.UNKNOWN)),
+        command_id="cmd-add-1",
+    )
+
+    assert receipt.target_session_id == "session-target"
+    assert receipt.draft_revision == 4
+    assert receipt.added == 2
+    assert receipt.read == 1
+    assert receipt.unread == 1
+    assert receipt.sent is False
+    sent_payload = facade.saved_commands[0].payload
+    assert sent_payload.text == "已有草稿"
+    assert [ref.source_id for ref in sent_payload.source_refs] == ["file:doc-0", "file:doc-1"]
+    assert [item.source.source_id for item in facade.registered_items] == ["file:doc-0", "file:doc-1"]
+    assert [item.source.read_state for item in facade.registered_items] == [ReadState.READY, ReadState.UNKNOWN]
+    assert facade.saved_commands[0].expected_draft_revision == 3
+
+
+@pytest.mark.asyncio
+async def test_add_materials_to_session_is_idempotent_when_all_refs_already_present():
+    existing = _material(0)
+    from core.agent_types import SourceKind, SourceVersionRef
+
+    payload = _draft_payload()
+    payload = DraftPayload(
+        schema_version=payload.schema_version,
+        text=payload.text,
+        mode=payload.mode,
+        model_selection=None,
+        source_refs=(
+            SourceVersionRef(
+                source_kind=SourceKind.ATTACHMENT,
+                source_id=existing.source_id,
+                source_version=existing.source_version,
+                source_digest=existing.source_version,
+            ),
+        ),
+        skill_versions=(),
+        mcp_selection=(),
+        purpose=payload.purpose,
+        research_date=payload.research_date,
+        cutoff=None,
+        send_target=None,
+        object_context=None,
+        role_prompt_selection=None,
+        customized_fields=(),
+        defaults_baseline_digest=None,
+    )
+    facade = _FakeFacade(draft_read=_draft_read(payload=payload))
+    preparer = BusinessResearchPreparer(facade)
+
+    receipt = await preparer.add_materials_to_session(
+        user_scope="local-desktop",
+        target_session_id="session-target",
+        materials=(existing,),
+        command_id="cmd-add-2",
+    )
+
+    assert receipt.added == 0
+    assert receipt.draft_revision == 3
+    assert "save_draft" not in facade.calls
+    assert facade.registered_items == ()
+
+
+@pytest.mark.asyncio
+async def test_add_materials_to_session_rejects_over_limit_before_touching_target():
+    facade = _FakeFacade(draft_read=_draft_read(payload=_draft_payload()))
+    preparer = BusinessResearchPreparer(facade)
+
+    with pytest.raises(MaterialLimitExceeded) as exc:
+        await preparer.add_materials_to_session(
+            user_scope="local-desktop",
+            target_session_id="session-target",
+            materials=tuple(_material(index) for index in range(6)),
+            command_id="cmd-add-3",
+        )
+
+    assert exc.value.code == MATERIAL_COUNT_EXCEEDED
+    assert facade.calls == []
+
+
+@pytest.mark.asyncio
+async def test_add_materials_to_session_reports_cleaned_target():
+    facade = _FakeFacade(draft_read=_draft_read(payload=None, cleaned=True))
+    preparer = BusinessResearchPreparer(facade)
+
+    with pytest.raises(BusinessDraftTargetUnavailable) as exc:
+        await preparer.add_materials_to_session(
+            user_scope="local-desktop",
+            target_session_id="session-target",
+            materials=(_material(0),),
+            command_id="cmd-add-4",
+        )
+
+    assert exc.value.code == "target_session_unavailable"
+    assert "save_draft" not in facade.calls
+
+
+@pytest.mark.asyncio
+async def test_add_materials_to_session_maps_revision_conflict():
+    conflict = AgentServiceError(AgentErrorCode.REVISION_CONFLICT, "stale", "session-target")
+    facade = _FakeFacade(draft_read=_draft_read(payload=_draft_payload()), save_error=conflict)
+    preparer = BusinessResearchPreparer(facade)
+
+    with pytest.raises(BusinessDraftTransferConflict) as exc:
+        await preparer.add_materials_to_session(
+            user_scope="local-desktop",
+            target_session_id="session-target",
+            materials=(_material(0),),
+            command_id="cmd-add-5",
+        )
+
+    assert exc.value.code == "target_draft_conflict"
+
+
+@pytest.mark.asyncio
+async def test_transfer_draft_sends_idempotent_command_without_sending_research():
+    facade = _FakeFacade(draft_read=_draft_read(payload=_draft_payload()))
+    preparer = BusinessResearchPreparer(facade)
+
+    receipt = await preparer.transfer_draft(
+        user_scope="local-desktop",
+        target_session_id="session-target",
+        materials=(_material(0), _material(1, read_state=ReadState.PARTIAL)),
+        command_id="cmd-transfer-1",
+        target_draft_revision=3,
+    )
+
+    assert receipt.sent is False
+    assert receipt.target_session_id == "session-target"
+    assert receipt.target_revision == 4
+    assert receipt.material_count == 2
+    command = facade.transfer_commands[0]
+    assert isinstance(command, DraftTransferCommand)
+    assert command.command.command_id == "cmd-transfer-1"
+    assert command.source_kind is DraftTransferSourceKind.BUSINESS_PREPARATION
+    assert command.source_session_id is None
+    assert command.expected_source_draft_revision == 1
+    assert command.expected_target_draft_revision == 3
+    assert command.confirmed is True
+    assert command.payload_digest == draft_transfer_payload_digest(command.payload)
+    assert command.payload.research_date is None
+    assert [ref.source_id for ref in command.payload.source_refs] == ["file:doc-0", "file:doc-1"]
+    assert "1 件资料未读或仅部分读取" in command.payload.text
+
+
+@pytest.mark.asyncio
+async def test_transfer_draft_rejects_invalid_revision_and_empty_materials():
+    preparer = BusinessResearchPreparer(_FakeFacade(draft_read=_draft_read()))
+
+    with pytest.raises(AgentValidationError) as exc:
+        await preparer.transfer_draft(
+            user_scope="local-desktop",
+            target_session_id="session-target",
+            materials=(_material(0),),
+            command_id="cmd-transfer-2",
+            target_draft_revision=0,
+        )
+
+    assert exc.value.code == "invalid_revision"
+    with pytest.raises(MaterialLimitExceeded) as exc2:
+        await preparer.transfer_draft(
+            user_scope="local-desktop",
+            target_session_id="session-target",
+            materials=(),
+            command_id="cmd-transfer-3",
+            target_draft_revision=3,
+        )
+    assert exc2.value.code == "material_empty"
+
+
+@pytest.mark.asyncio
+async def test_transfer_draft_maps_unknown_outcome_without_faking_success():
+    unknown = AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "timeout", "session-target")
+    facade = _FakeFacade(draft_read=_draft_read(), transfer_error=unknown)
+    preparer = BusinessResearchPreparer(facade)
+
+    with pytest.raises(BusinessDraftCommitUnknown) as exc:
+        await preparer.transfer_draft(
+            user_scope="local-desktop",
+            target_session_id="session-target",
+            materials=(_material(0),),
+            command_id="cmd-transfer-4",
+            target_draft_revision=3,
+        )
+
+    assert exc.value.session_id == "session-target"
+
+
+@pytest.mark.asyncio
+async def test_transfer_draft_maps_input_invalid_to_not_transferable():
+    invalid = AgentServiceError(AgentErrorCode.INPUT_INVALID, "target draft not empty", "session-target")
+    facade = _FakeFacade(draft_read=_draft_read(), transfer_error=invalid)
+    preparer = BusinessResearchPreparer(facade)
+
+    with pytest.raises(BusinessDraftTransferConflict) as exc:
+        await preparer.transfer_draft(
+            user_scope="local-desktop",
+            target_session_id="session-target",
+            materials=(_material(0),),
+            command_id="cmd-transfer-5",
+            target_draft_revision=3,
+        )
+
+    assert exc.value.code == "target_not_transferable"
+
+
+@pytest.mark.asyncio
+async def test_add_materials_to_session_rejects_blank_target_and_invalid_kind():
+    preparer = BusinessResearchPreparer(_FakeFacade(draft_read=_draft_read()))
+
+    with pytest.raises(AgentServiceError) as blank:
+        await preparer.add_materials_to_session(
+            user_scope="local-desktop",
+            target_session_id="   ",
+            materials=(_material(0),),
+            command_id="cmd-add-6",
+        )
+    assert blank.value.code is AgentErrorCode.INPUT_INVALID
+
+    with pytest.raises(MaterialLimitExceeded) as kind:
+        await preparer.add_materials_to_session(
+            user_scope="local-desktop",
+            target_session_id="session-target",
+            materials=(replace(_material(0), kind="video"),),
+            command_id="cmd-add-7",
+        )
+    assert kind.value.code == "material_kind_invalid"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (AgentServiceError(AgentErrorCode.INPUT_CONFLICT, "payload mismatch", "s"), "transfer_conflict"),
+        (AgentServiceError(AgentErrorCode.POLICY_DENIED, "cleaned", "s"), "target_session_unavailable"),
+    ],
+)
+async def test_transfer_draft_maps_each_conflict_code(error, expected):
+    facade = _FakeFacade(draft_read=_draft_read(), transfer_error=error)
+    preparer = BusinessResearchPreparer(facade)
+
+    with pytest.raises(BusinessDraftTransferConflict) as exc:
+        await preparer.transfer_draft(
+            user_scope="local-desktop",
+            target_session_id="session-target",
+            materials=(_material(0),),
+            command_id="cmd-transfer-6",
+            target_draft_revision=3,
+        )
+
+    assert exc.value.code == expected
+
+
+@pytest.mark.asyncio
+async def test_transfer_draft_preserves_unknown_facade_code():
+    unknown = AgentServiceError(AgentErrorCode.PERSISTENCE_UNAVAILABLE, "db down", "session-target")
+    facade = _FakeFacade(draft_read=_draft_read(), transfer_error=unknown)
+    preparer = BusinessResearchPreparer(facade)
+
+    with pytest.raises(BusinessDraftTransferConflict) as exc:
+        await preparer.transfer_draft(
+            user_scope="local-desktop",
+            target_session_id="session-target",
+            materials=(_material(0),),
+            command_id="cmd-transfer-7",
+            target_draft_revision=3,
+        )
+
+    assert exc.value.code == "PERSISTENCE_UNAVAILABLE"

@@ -53,6 +53,7 @@ from ui.viewmodels.decision_center_view_model import (
 from ui.viewmodels.nav_badge_view_model import NavBadgeViewModel
 from ui.viewmodels.research_observer_view_model import (
     LOCAL_DESKTOP_USER_SCOPE,
+    MaterialCandidate,
     resolve_agent_research_service,
     resolve_artifact_delivery,
     resolve_main_turn_intake,
@@ -322,7 +323,7 @@ def _build_pages_stack(
         ),
         ft.Container(
             content=_make_content(
-                lambda: WatchlistView(active=current_tab == NavTabs.WATCHLIST),
+                lambda: WatchlistView(active=current_tab == NavTabs.WATCHLIST, **research_props),
                 current_tab == NavTabs.WATCHLIST,
             ),
             expand=True,
@@ -788,6 +789,52 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         page = _get_page()
         if page is not None and research_vm.state.composer_available:
             page.run_task(research_vm.start_confirmed_plan)
+
+    # --- 研究资料（添加资料 / 并入既有研究 / 草稿转移） ---
+    def _pick_materials() -> None:
+        """打开文件选择并读入候选资料（异步调度；文件读取经 IO 池，R16）。"""
+
+        page = _get_page()
+        if page is None or not research_vm.state.available:
+            return
+        page.run_task(_pick_materials_async, page)
+
+    async def _pick_materials_async(page: ft.Page) -> None:
+        picker = ft.FilePicker()
+        page.services.append(picker)
+        try:
+            picked = await picker.pick_files(
+                dialog_title=I18n.get("agent_research_materials_add"),
+                allow_multiple=True,
+                with_data=True,
+            )
+        except Exception:
+            return
+        finally:
+            if picker in page.services:
+                page.services.remove(picker)
+        candidates: list[MaterialCandidate] = []
+        for picked_file in picked:
+            # 原生选择已在 with_data=True 下读入字节；缺失则如实留空 → VM 拒绝并给原因码。
+            candidates.append(MaterialCandidate(kind="file", display_name=picked_file.name, data=picked_file.bytes))
+        research_vm.attach_materials(candidates)
+
+    def _remove_material(key: str) -> None:
+        research_vm.remove_material(key)
+
+    def _add_materials_to_session() -> None:
+        """并入目标会话既有草稿（只保存、不发送；能力/目标缺失由 VM 如实报码）。"""
+
+        page = _get_page()
+        if page is not None and research_vm.state.materials_transfer_available:
+            page.run_task(research_vm.add_materials_to_existing_session)
+
+    def _transfer_draft() -> None:
+        """把资料包作为草稿转移到目标会话（不发送；失败如实报码）。"""
+
+        page = _get_page()
+        if page is not None and research_vm.state.materials_transfer_available:
+            page.run_task(research_vm.transfer_draft_to_target)
 
     def _submit_decision(decision_id: str, execution_id: str, round_id: str) -> None:
         """统一决定提交入口（旧 Dialog 打开/他人占用时拒绝，不排队、不伪造）。
@@ -1345,6 +1392,11 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             on_load_mcp_scope=_load_mcp_scope,
             on_select_model=_select_model,
             on_select_role=research_vm.select_role,
+            on_add_materials=_pick_materials,
+            on_remove_material=_remove_material,
+            on_select_material_target=research_vm.select_materials_target,
+            on_add_materials_to_session=_add_materials_to_session,
+            on_transfer_draft=_transfer_draft,
             on_load_model_selection=_load_model_selection,
             on_refresh_usage=_refresh_usage,
             on_refresh_budget=_refresh_budget,

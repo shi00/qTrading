@@ -20,13 +20,14 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from core.agent_types import (
+    DEFAULT_ATTACHMENT_BUDGET,
     DRAFT_PAYLOAD_SCHEMA_VERSION,
     AgentErrorCode,
     AgentServiceError,
@@ -35,8 +36,13 @@ from core.agent_types import (
     BusinessSourceRegistrationReceipt,
     CommandRef,
     DraftPayload,
+    DraftRead,
+    DraftReadQuery,
     DraftReceipt,
     DraftSaveCommand,
+    DraftTransferCommand,
+    DraftTransferReceipt,
+    DraftTransferSourceKind,
     Mode,
     Purpose,
     ReadState,
@@ -49,6 +55,8 @@ from core.agent_types import (
     SourceRef,
     SourceVersionRef,
     VerificationState,
+    derive_draft_transfer_id,
+    draft_transfer_payload_digest,
     encode_draft_payload,
     json_doc,
     sha256_hex,
@@ -104,6 +112,10 @@ class BusinessResearchFacade(Protocol):
 
     async def save_draft(self, command: DraftSaveCommand) -> DraftReceipt: ...
 
+    async def read_draft(self, query: DraftReadQuery, *, user_scope: str) -> DraftRead: ...
+
+    async def transfer_draft(self, command: DraftTransferCommand) -> DraftTransferReceipt: ...
+
 
 class BusinessSourceUnavailable(Exception):
     """来源不可用（不可用它冒充可用草稿；原因可审计）。"""
@@ -132,6 +144,126 @@ class BusinessDraftAlreadyPrepared(Exception):
         super().__init__(session_id)
         self.session_id = session_id
         self.draft_revision = draft_revision
+
+
+#: 研究资料类别（文件 / 片段 / 引用；与 SourceKind 不混用）。
+MATERIAL_KIND_FILE = "file"
+MATERIAL_KIND_FRAGMENT = "fragment"
+MATERIAL_KIND_REFERENCE = "reference"
+MATERIAL_KINDS: frozenset[str] = frozenset({MATERIAL_KIND_FILE, MATERIAL_KIND_FRAGMENT, MATERIAL_KIND_REFERENCE})
+
+#: 可解析的拒绝原因码（UI 由码映射 i18n key，不解析自由文本）。
+MATERIAL_EMPTY = "material_empty"
+MATERIAL_COUNT_EXCEEDED = "material_count_exceeded"
+MATERIAL_BYTES_EXCEEDED = "material_bytes_exceeded"
+MATERIAL_KIND_INVALID = "material_kind_invalid"
+#: 目标草稿冲突/失效（会话不存在、归档、已清理、已被推进）。
+TARGET_SESSION_UNAVAILABLE = "target_session_unavailable"
+TARGET_DRAFT_CONFLICT = "target_draft_conflict"
+TARGET_NOT_TRANSFERABLE = "target_not_transferable"
+TRANSFER_CONFLICT = "transfer_conflict"
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchMaterial:
+    """一件研究资料的只读事实（已读状态 + 三类时点，未知一律 ``None``）。"""
+
+    kind: str
+    source_id: str
+    source_version: str
+    display_name: str
+    read_state: ReadState
+    missing_reason: str | None
+    captured_at: str | None
+    content_at: str | None
+    byte_size: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialLimitViolation:
+    """D06 限额拒绝（``code`` 可解析；``index`` 为越限资料序号）。"""
+
+    code: str
+    index: int
+    limit: int
+    actual: int
+
+
+def material_limit_violation(
+    materials: Sequence[ResearchMaterial],
+    *,
+    budget: Any = DEFAULT_ATTACHMENT_BUDGET,
+) -> MaterialLimitViolation | None:
+    """按 D06 逐值核验件数与单件字节；未知字节不据此放开（不制造通过）。
+
+    恰等通过、超一即拒绝；返回第一个违规（件数优先），``None`` 表示全部在限内。
+    """
+
+    max_files = int(getattr(budget, "max_files", 5))
+    max_bytes = int(getattr(budget, "max_source_bytes", 20_000_000))
+    if len(materials) > max_files:
+        return MaterialLimitViolation(MATERIAL_COUNT_EXCEEDED, max_files, max_files, len(materials))
+    for index, material in enumerate(materials):
+        if material.byte_size is not None and material.byte_size > max_bytes:
+            return MaterialLimitViolation(MATERIAL_BYTES_EXCEEDED, index, max_bytes, material.byte_size)
+    return None
+
+
+def material_read_counts(materials: Sequence[ResearchMaterial]) -> tuple[int, int]:
+    """返回 ``(已读, 未读)``；``PARTIAL`` 计入未读（部分读取不得当作完整已读）。"""
+
+    read = sum(1 for material in materials if material.read_state is ReadState.READY)
+    return read, len(materials) - read
+
+
+class MaterialLimitExceeded(Exception):
+    """资料超限或非法（如实拒绝，不静默丢弃）。"""
+
+    def __init__(self, violation: MaterialLimitViolation) -> None:
+        super().__init__(violation.code)
+        self.code = violation.code
+        self.index = violation.index
+        self.limit = violation.limit
+        self.actual = violation.actual
+
+
+class BusinessDraftTargetUnavailable(Exception):
+    """目标会话/草稿不可用（不存在、归档、已清理或已转移）。"""
+
+    def __init__(self, code: str = TARGET_SESSION_UNAVAILABLE) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class BusinessDraftTransferConflict(Exception):
+    """草稿转移/并入冲突（错误码由 UI 映射 i18n；不伪装成功）。"""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+@dataclass(frozen=True, slots=True)
+class BusinessMaterialsReceipt:
+    """资料并入既有会话草稿的回执（只保存，不发送）。"""
+
+    target_session_id: str
+    draft_revision: int
+    added: int
+    read: int
+    unread: int
+    sent: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class BusinessDraftTransferReceipt:
+    """草稿转移回执（``sent`` 恒为 ``False``；转移不等于发送）。"""
+
+    target_session_id: str
+    target_revision: int
+    transfer_id: str
+    material_count: int
+    sent: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,6 +530,149 @@ class BusinessResearchPreparer:
         preparation = backtest_preparation(read, result_id=result_id)
         return await self.prepare(preparation, user_scope=user_scope, session_title=session_title)
 
+    async def add_materials_to_session(
+        self,
+        *,
+        user_scope: str,
+        target_session_id: str,
+        materials: Sequence[ResearchMaterial],
+        command_id: str,
+    ) -> BusinessMaterialsReceipt:
+        """把已选资料并入指定既有会话的草稿（只保存，不发送、不派发）。
+
+        目标会话不存在/归档/已清理 → :class:`BusinessDraftTargetUnavailable`；
+        草稿版被推进 → :class:`BusinessDraftTransferConflict`（不覆盖用户已编辑内容）；
+        超限/空清单 → :class:`MaterialLimitExceeded`（原因码可解析，R21）。
+        """
+
+        _require_non_empty(target_session_id, "target_session_id")
+        _require_non_empty(command_id, "command_id")
+        _raise_if_material_limit(materials)
+        read = await self._facade.read_draft(DraftReadQuery(session_id=target_session_id), user_scope=user_scope)
+        if read.cleaned or read.transferred or read.archived:
+            raise BusinessDraftTargetUnavailable(TARGET_SESSION_UNAVAILABLE)
+        base = read.payload
+        existing = list(base.source_refs) if base is not None else []
+        new_refs: list[SourceVersionRef] = []
+        new_items: list[BusinessSourceItem] = []
+        for material in materials:
+            ref = _material_version_ref(material)
+            if any(item.source_id == ref.source_id and item.source_version == ref.source_version for item in existing):
+                continue
+            existing.append(ref)
+            new_refs.append(ref)
+            new_items.append(_material_source_item(material, user_scope=user_scope))
+        if new_items:
+            await self._facade.register_draft_sources(
+                user_scope=user_scope,
+                session_id=target_session_id,
+                draft_revision=read.draft_revision,
+                items=tuple(new_items),
+            )
+        if base is None:
+            payload = _materials_payload(materials)
+        elif new_refs:
+            payload = replace(base, source_refs=tuple(existing))
+        else:
+            # 全部资料已在草稿引用中：不写新稿版（幂等并入），如实返回当前版本。
+            read_count, unread_count = material_read_counts(materials)
+            return BusinessMaterialsReceipt(
+                target_session_id=target_session_id,
+                draft_revision=read.draft_revision,
+                added=0,
+                read=read_count,
+                unread=unread_count,
+            )
+        command = DraftSaveCommand(
+            command=CommandRef(
+                user_scope=user_scope,
+                source_module="business_research",
+                business_request_id=command_id,
+                command_id=_write_command_id(
+                    "ui-materials",
+                    user_scope,
+                    target_session_id,
+                    str(read.draft_revision),
+                    sha256_hex(_canonical_json(encode_draft_payload(payload))),
+                ),
+                expected_revision=read.draft_revision,
+            ),
+            session_id=target_session_id,
+            expected_draft_revision=read.draft_revision,
+            payload=payload,
+        )
+        try:
+            receipt = await self._save_draft(command)
+        except BusinessDraftCommitUnknown:
+            raise
+        except AgentServiceError as exc:
+            raise _transfer_conflict(exc) from exc
+        read_count, unread_count = material_read_counts(materials)
+        return BusinessMaterialsReceipt(
+            target_session_id=target_session_id,
+            draft_revision=receipt.draft_revision,
+            added=len(new_refs),
+            read=read_count,
+            unread=unread_count,
+        )
+
+    async def transfer_draft(
+        self,
+        *,
+        user_scope: str,
+        target_session_id: str,
+        materials: Sequence[ResearchMaterial],
+        command_id: str,
+        target_draft_revision: int,
+    ) -> BusinessDraftTransferReceipt:
+        """把资料包作为草稿转移到目标（须为空稿）会话：幂等 ``command_id``，不发送。
+
+        以 ``business_preparation`` 为源类别（本库无源行，claim 由命令唯一仲裁）。
+        冲突/失效如实抛类型化异常，不静默降级为「已转移」。
+        """
+
+        _require_non_empty(target_session_id, "target_session_id")
+        _require_non_empty(command_id, "command_id")
+        if isinstance(target_draft_revision, bool) or not isinstance(target_draft_revision, int):
+            raise AgentValidationError("input_invalid", "target_draft_revision")
+        if target_draft_revision < 1:
+            raise AgentValidationError("invalid_revision", "target_draft_revision")
+        _raise_if_material_limit(materials)
+        payload = _materials_payload(materials)
+        source_id = stable_id("material_bundle", [user_scope, command_id])
+        provisional = DraftTransferCommand(
+            command=CommandRef(
+                user_scope=user_scope,
+                source_module="business_research",
+                business_request_id=command_id,
+                command_id=command_id,
+                expected_revision=target_draft_revision,
+            ),
+            transfer_id="pending",
+            source_kind=DraftTransferSourceKind.BUSINESS_PREPARATION,
+            source_id=source_id,
+            source_session_id=None,
+            expected_source_draft_revision=1,
+            target_session_id=target_session_id,
+            expected_target_draft_revision=target_draft_revision,
+            payload=payload,
+            payload_digest=draft_transfer_payload_digest(payload),
+            confirmed=True,
+        )
+        command = replace(provisional, transfer_id=derive_draft_transfer_id(provisional))
+        try:
+            receipt = await self._facade.transfer_draft(command)
+        except AgentServiceError as exc:
+            if exc.code is AgentErrorCode.OPERATION_UNKNOWN:
+                raise BusinessDraftCommitUnknown(target_session_id) from exc
+            raise _transfer_conflict(exc) from exc
+        return BusinessDraftTransferReceipt(
+            target_session_id=receipt.target_session_id,
+            target_revision=receipt.target_revision if receipt.target_revision is not None else target_draft_revision,
+            transfer_id=receipt.transfer_id,
+            material_count=len(materials),
+        )
+
     async def prepare(
         self,
         preparation: BusinessDraftPreparation,
@@ -557,6 +832,116 @@ class BusinessResearchPreparer:
                 return None
             raise
         return int(read.summary.draft_revision)
+
+
+def _require_non_empty(value: str, name: str) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{name} must be non-empty", "business_research")
+
+
+def _raise_if_material_limit(materials: Sequence[ResearchMaterial]) -> None:
+    """空清单与 D06 越限都如实拒绝（不返回空成功）。"""
+
+    if not materials:
+        raise MaterialLimitExceeded(MaterialLimitViolation(MATERIAL_EMPTY, 0, 1, 0))
+    for index, material in enumerate(materials):
+        if material.kind not in MATERIAL_KINDS:
+            raise MaterialLimitExceeded(MaterialLimitViolation(MATERIAL_KIND_INVALID, index, 0, 0))
+    violation = material_limit_violation(materials)
+    if violation is not None:
+        raise MaterialLimitExceeded(violation)
+
+
+def _transfer_conflict(exc: AgentServiceError) -> BusinessDraftTransferConflict:
+    """facade 类型化错误 → 可解析冲突码（未知码保留原名，不伪装成功）。"""
+
+    if exc.code is AgentErrorCode.REVISION_CONFLICT:
+        return BusinessDraftTransferConflict(TARGET_DRAFT_CONFLICT)
+    if exc.code is AgentErrorCode.INPUT_CONFLICT:
+        return BusinessDraftTransferConflict(TRANSFER_CONFLICT)
+    if exc.code is AgentErrorCode.POLICY_DENIED:
+        return BusinessDraftTransferConflict(TARGET_SESSION_UNAVAILABLE)
+    if exc.code is AgentErrorCode.INPUT_INVALID:
+        return BusinessDraftTransferConflict(TARGET_NOT_TRANSFERABLE)
+    return BusinessDraftTransferConflict(str(getattr(exc.code, "value", exc.code)))
+
+
+def _material_version_ref(material: ResearchMaterial) -> SourceVersionRef:
+    return SourceVersionRef(
+        source_kind=SourceKind.ATTACHMENT,
+        source_id=material.source_id,
+        source_version=material.source_version,
+        source_digest=material.source_version,
+    )
+
+
+def _material_source_item(material: ResearchMaterial, *, user_scope: str) -> BusinessSourceItem:
+    """资料 → 可登记来源（``available_at`` 用内容时点；未知保持 ``None``，不填当前时间）。"""
+
+    object_ref = f"attachment:{material.source_id}"
+    source = SourceRef(
+        user_scope=user_scope,
+        source_id=material.source_id,
+        version=material.source_version,
+        digest=material.source_version,
+        source_kind=SourceKind.ATTACHMENT,
+        display_name=material.display_name,
+        object_ref=object_ref,
+        locator=SourceLocator(
+            locator_kind="source_range",
+            origin_ref=SourceVersionRef(
+                source_kind=SourceKind.ATTACHMENT,
+                source_id=material.source_id,
+                source_version=material.source_version,
+                source_digest=material.source_version,
+            ),
+            selection=Selection(kind="all"),
+        ),
+        available_at=material.content_at,
+        period=None,
+        unit_note=None,
+        read_state=material.read_state,
+        missing_reason=material.missing_reason,
+        provenance_refs=(),
+    )
+    return BusinessSourceItem(source=source, verification=VerificationState.UNVERIFIED, body_text=None)
+
+
+def _materials_payload(materials: Sequence[ResearchMaterial]) -> DraftPayload:
+    """资料包草稿载荷：逐件列出名称与版本，并如实标注未读/部分读取数量。"""
+
+    lines = ["请研究以下资料并说明结论与依据："]
+    for material in materials:
+        lines.append(f"- {material.display_name}（{material.kind}，版本 {material.source_version[:12]}）")
+    read_count, unread_count = material_read_counts(materials)
+    if unread_count:
+        lines.append("")
+        lines.append(f"注意：{unread_count} 件资料未读或仅部分读取，未读内容不进入完整结论。")
+    return DraftPayload(
+        schema_version=DRAFT_PAYLOAD_SCHEMA_VERSION,
+        text="\n".join(lines),
+        mode=Mode.DISCUSS,
+        model_selection=None,
+        source_refs=tuple(_material_version_ref(material) for material in materials),
+        skill_versions=(),
+        mcp_selection=(),
+        purpose=_OBJECT_PURPOSE,
+        # 研究发起时间：资料包本身未提供发起时点，保持 None（不填当前时间，R21）。
+        research_date=None,
+        cutoff=None,
+        send_target=None,
+        object_context=json_doc(
+            {
+                "source_module": "business_research",
+                "material_count": len(materials),
+                "material_read": read_count,
+                "material_unread": unread_count,
+            }
+        ),
+        role_prompt_selection=None,
+        customized_fields=(),
+        defaults_baseline_digest=None,
+    )
 
 
 def _canonical_context(context: Mapping[str, Any]) -> dict[str, Any]:
