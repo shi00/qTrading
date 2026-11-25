@@ -63,9 +63,12 @@ from core.agent_types import (
     SessionChangeCommand,
     SessionRead,
     SessionReadQuery,
+    SourceStopCommand,
+    SourceStopReceipt,
     WITHDRAWABLE_DISPLAY_STATES,
     json_doc,
 )
+from services.agent_history import CleanupJobPreview, CleanupOutcome, HistoryCleanupGateway
 from ui.viewmodels.ai_brain_settings_view_model import ROLE_PROMPT_NAME_KEYS
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.config_handler import ConfigHandler
@@ -118,6 +121,15 @@ _REFRESH_TARGET_ATTEMPTS: Final[int] = 3
 _SESSION_SCAN_LIMIT: Final[int] = 50
 #: 会话列表展示上限（每个会话需一次轻量摘要读取，限制读取扇出）。
 SESSION_LIST_LIMIT: Final[int] = 10
+
+#: 历史目录分页大小（``HistoryQuery.limit`` 硬上界 50）。
+HISTORY_PAGE_LIMIT: Final[int] = 20
+#: 历史命中类型筛选（``all`` 不限；``main``/``child`` 为服务层 ``type_filter`` 值集）。
+HISTORY_SCOPE_FILTERS: Final[tuple[str, ...]] = ("all", "main", "child")
+#: 会话目录状态筛选（按摘要事实在客户端分列，不改写服务层 ``state_filter`` 语义）。
+SESSION_STATUS_FILTERS: Final[tuple[str, ...]] = ("all", "archived", "cleaned")
+#: 清理作业身份约定：本版不暴露清理准备，作业缺失即如实阻断（不构造空作业）。
+CLEANUP_JOB_ID_PREFIX: Final[str] = "ui-cleanup:"
 
 #: 会话状态文案 key（未知/已清理/已归档/正常分列；不把未知读成「正常」）。
 SESSION_STATUS_UNKNOWN = "agent_research_session_status_unknown"
@@ -255,6 +267,8 @@ class AgentResearchService(Protocol):
     async def control(self, request: ExecutionControlRequest) -> RevisionReceipt | ExecutionControlReceipt: ...
 
     async def retry_execution(self, request: RetryExecutionRequest) -> RetryExecutionReceipt: ...
+
+    async def stop_using(self, request: SourceStopCommand) -> SourceStopReceipt: ...
 
 
 class ArtifactDeliveryPort(Protocol):
@@ -714,6 +728,72 @@ class InMemoryObservationViewStateStore:
 
 
 @dataclass(frozen=True)
+class HistoryHitView:
+    """历史命中只读投影：摘要 + 准确地址（不含正文；正文经准确地址按需读取）。"""
+
+    hit_kind: str
+    session_id: str
+    created_at: str
+    summary_text: str | None
+    location: str
+    role: str | None = None
+    artifact_kind: str | None = None
+
+
+@dataclass(frozen=True)
+class HistoryUsageView:
+    """空间占用摘要（计数口径）：``exact_bytes=None`` 表示字节用量未知，不填 0（R21）。"""
+
+    session_id: str | None
+    sessions_listed: int
+    sessions_truncated: bool
+    executions: int
+    messages: int
+    messages_truncated: bool
+    artifacts: int
+    artifacts_truncated: bool
+    archived_sessions: int
+    cleaned_sessions: int
+    exact_bytes: int | None = None
+
+
+@dataclass(frozen=True)
+class CleanupPreviewView:
+    """清理作业预览投影：冻结集合计数 + 原版本（确认时复用，不另造集合）。"""
+
+    cleanup_job_id: str
+    phase: str
+    exact_count: int
+    session_count: int
+    asset_count: int
+    expected_revision: int
+    verified: bool
+
+
+@dataclass(frozen=True)
+class CleanupReceiptView:
+    """清理回执投影：``verified`` 才算清除；``retry_pending`` 如实保留为未完成。"""
+
+    cleanup_job_id: str
+    phase: str
+    replayed: bool
+    verified: bool
+    verified_counts: tuple[tuple[str, int], ...]
+    tombstoned: tuple[tuple[str, int], ...]
+
+
+@dataclass(frozen=True)
+class SourceStopReceiptView:
+    """停止使用来源回执：禁用的落定修订与是否重放（零复活）。"""
+
+    source_id: str
+    source_version: str
+    disabled_revision: int
+    already_disabled: bool
+    disabled_at: str
+
+
+@dataclass(frozen=True)
 class ResearchObserverState:
     """观察层不可变快照。
 
@@ -825,6 +905,32 @@ class ResearchObserverState:
     #: 未知回执的（成果, 格式, 目标）键：确认原交付前禁止再导出同一目标（§10.5）；
     #: 锁按会话 VM 存活期生效，跨重启由上层的覆盖确认（目标身份+摘要）兜底。
     artifact_export_blocked_keys: tuple[str, ...] = ()
+    #: 历史目录（W-04）：关键词/主次筛选/游标翻页；读取失败保留既有命中并报码（R21）。
+    history_query: str = ""
+    history_scope_filter: str = "all"
+    session_status_filter: str = "all"
+    history_hits: tuple[HistoryHitView, ...] = ()
+    history_cursor: str | None = None
+    history_has_more: bool = False
+    history_loading: bool = False
+    history_error_code: str | None = None
+    #: 空间占用摘要（计数口径；未刷新时为 None，不展示为 0）。
+    usage: HistoryUsageView | None = None
+    #: 清理确认：作业缺失/未接线如实阻断，不构造空作业、不强行删除。
+    cleanup_available: bool = False
+    cleanup_unavailable_reason: str | None = None
+    cleanup_preview: CleanupPreviewView | None = None
+    cleanup_receipt: CleanupReceiptView | None = None
+    cleanup_pending: bool = False
+    cleanup_error_key: str | None = None
+    cleanup_error_code: str | None = None
+    #: 停止使用来源：输入身份 + 在途/错误/回执（禁用先胜，结果如实呈现）。
+    stop_source_id: str = ""
+    stop_source_version: str = ""
+    stop_source_pending: bool = False
+    stop_source_error_key: str | None = None
+    stop_source_error_code: str | None = None
+    stop_source_receipt: SourceStopReceiptView | None = None
 
     # --- W-12 研究侧模型/角色选择、费用透明与耗时分段 ---
     model_selection_available: bool = False
@@ -883,6 +989,15 @@ class ResearchObserverState:
         """子任务节点是否处于收起态（展开态由共享 VM 持久化，切页不丢）。"""
 
         return execution_id in self.collapsed_execution_ids
+
+    def filtered_sessions(self) -> tuple[SessionListItemView, ...]:
+        """按状态筛选会话目录（``all`` 不过滤；未知状态不冒充正常/归档）。"""
+
+        if self.session_status_filter == "archived":
+            return tuple(item for item in self.sessions if item.archived)
+        if self.session_status_filter == "cleaned":
+            return tuple(item for item in self.sessions if item.cleaned)
+        return self.sessions
 
     def pending_for(self, stage: str) -> tuple[PendingAnswerView, ...]:
         """读取某阶段的跨会话待处理项（未知阶段返回空，不猜归属）。"""
@@ -1001,6 +1116,61 @@ def _unknown_session_item(session_id: str) -> SessionListItemView:
         archived=False,
         cleaned=False,
         status_unknown=True,
+    )
+
+
+def _history_hit_view(hit: Any) -> HistoryHitView:
+    """历史命中 → 只读投影（准确地址逐段拼装；缺字段不补造）。"""
+
+    parts: list[str] = []
+    if hit.execution_id:
+        parts.append(f"execution:{hit.execution_id}")
+    if hit.node_id:
+        parts.append(f"node:{hit.node_id}")
+    if hit.round_id:
+        parts.append(f"round:{hit.round_id}")
+    if hit.message_id:
+        parts.append(f"message:{hit.message_id}")
+    if hit.artifact_id:
+        version = f"@{hit.artifact_version}" if hit.artifact_version is not None else ""
+        parts.append(f"artifact:{hit.artifact_id}{version}")
+    return HistoryHitView(
+        hit_kind=hit.hit_kind,
+        session_id=hit.session_id,
+        created_at=hit.created_at,
+        summary_text=hit.summary_text,
+        location=" · ".join(parts) or hit.session_id,
+        role=hit.role,
+        artifact_kind=hit.artifact_kind,
+    )
+
+
+def _cleanup_job_id(session_id: str) -> str:
+    """会话对应的清理作业身份（准备由服务侧冻结；本版不构造空作业）。"""
+
+    return f"{CLEANUP_JOB_ID_PREFIX}{session_id}"
+
+
+def _cleanup_preview_view(preview: CleanupJobPreview) -> CleanupPreviewView:
+    return CleanupPreviewView(
+        cleanup_job_id=preview.cleanup_job_id,
+        phase=preview.phase.value,
+        exact_count=len(preview.exact_ids),
+        session_count=len(preview.session_ids),
+        asset_count=len(preview.asset_keys),
+        expected_revision=preview.expected_revision,
+        verified=preview.verified,
+    )
+
+
+def _cleanup_receipt_view(outcome: CleanupOutcome) -> CleanupReceiptView:
+    return CleanupReceiptView(
+        cleanup_job_id=outcome.cleanup_job_id,
+        phase=outcome.phase.value,
+        replayed=outcome.replayed,
+        verified=outcome.verified,
+        verified_counts=outcome.verified_counts,
+        tombstoned=outcome.tombstoned,
     )
 
 
@@ -1807,6 +1977,8 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         token_counter: Callable[[str, str | None], tuple[int, bool]] | None = None,
         view_store: ObservationViewStateStore | None = None,
         delivery: ArtifactDeliveryPort | None = None,
+        cleanup: HistoryCleanupGateway | None = None,
+        cleanup_unavailable_reason: str | None = None,
     ) -> None:
         self._service = service
         self._user_scope = user_scope
@@ -1823,6 +1995,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             view_store if view_store is not None else InMemoryObservationViewStateStore()
         )
         self._delivery = delivery
+        self._cleanup = cleanup
         #: 目录身份映射（identity_key → 服务身份）；范围选择提交时据此还原强类型身份。
         self._mcp_identities: dict[str, MCPServiceIdentity] = {}
         self._session_key: int | None = id(service) if service is not None else None
@@ -1844,6 +2017,8 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             mcp_scope_available=mcp_catalog is not None,
             model_selection_available=self._model_catalog is not None,
             artifact_delivery_available=delivery is not None,
+            cleanup_available=cleanup is not None,
+            cleanup_unavailable_reason=cleanup_unavailable_reason if cleanup is None else None,
         )
         self._init_mixin_fields()
 
@@ -1906,6 +2081,8 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         target = (session_id or "").strip()
         if not target:
             return
+        # 清理预览绑定原会话：切走后不得沿用旧会话的冻结集合。
+        self._set_state(cleanup_preview=None, cleanup_error_key=None, cleanup_error_code=None)
         await self.refresh(target)
 
     # ------------------------------------------------------------------
@@ -2419,6 +2596,283 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             await self.refresh()
         return receipt
 
+    # ------------------------------------------------------------------
+    # 历史目录（W-04）：全局关键词 + 主/次筛选 + 游标续翻（只读）
+    # ------------------------------------------------------------------
+
+    def set_history_query(self, text: str) -> None:
+        """记录历史搜索关键词（纯状态；空串表示无关键词过滤）。"""
+
+        self._set_state(history_query=text)
+
+    def set_history_scope_filter(self, scope: str) -> None:
+        """设置命中类型筛选（``all`` / ``main`` / ``child``）；未知值不改写。"""
+
+        if scope not in HISTORY_SCOPE_FILTERS:
+            return
+        self._set_state(history_scope_filter=scope)
+
+    def set_session_status_filter(self, status: str) -> None:
+        """设置会话目录状态筛选（``all`` / ``archived`` / ``cleaned``）。"""
+
+        if status not in SESSION_STATUS_FILTERS:
+            return
+        self._set_state(session_status_filter=status)
+
+    async def run_history_search(self) -> None:
+        """执行历史首读（不借当前表单重推范围；失败保留既有命中并报码）。"""
+
+        if self._service is None or not self._state.available:
+            return
+        if self._state.history_loading:
+            return
+        self._track_inflight_cancellable()
+        self._set_state(history_loading=True, history_error_code=None)
+        try:
+            page = await self._service.search(self._history_query(cursor=None), user_scope=self._user_scope)
+        except asyncio.CancelledError:
+            self._set_state(history_loading=False)
+            raise
+        except Exception as e:
+            # 首读失败：保留既有命中，不把读取失败读成「无命中」（R21）。
+            self._set_state(history_loading=False, history_error_code=self._error_code(e))
+            return
+        self._set_state(
+            history_loading=False,
+            history_hits=tuple(_history_hit_view(hit) for hit in page.hits),
+            history_cursor=page.next_cursor,
+            history_has_more=page.next_cursor is not None,
+            history_error_code=None,
+        )
+
+    async def load_more_history(self) -> None:
+        """游标续翻下一页；游标失效（REVISION_CONFLICT）保留既有命中并显式报码。"""
+
+        if self._service is None or not self._state.available:
+            return
+        cursor = self._state.history_cursor
+        if cursor is None or self._state.history_loading:
+            return
+        self._track_inflight_cancellable()
+        self._set_state(history_loading=True, history_error_code=None)
+        try:
+            page = await self._service.search(self._history_query(cursor=cursor), user_scope=self._user_scope)
+        except asyncio.CancelledError:
+            self._set_state(history_loading=False)
+            raise
+        except Exception as e:
+            self._set_state(history_loading=False, history_error_code=self._error_code(e))
+            return
+        seen = {(hit.hit_kind, hit.session_id, hit.location) for hit in self._state.history_hits}
+        appended = tuple(
+            view
+            for view in (_history_hit_view(hit) for hit in page.hits)
+            if (view.hit_kind, view.session_id, view.location) not in seen
+        )
+        self._set_state(
+            history_loading=False,
+            history_hits=(*self._state.history_hits, *appended),
+            history_cursor=page.next_cursor,
+            history_has_more=page.next_cursor is not None,
+            history_error_code=None,
+        )
+
+    def refresh_history_usage(self) -> None:
+        """刷新空间占用摘要（计数口径；字节用量未知保持 ``None``，不填 0）。"""
+
+        sessions = self._state.sessions
+        self._set_state(
+            usage=HistoryUsageView(
+                session_id=self._state.session_id,
+                sessions_listed=len(sessions),
+                sessions_truncated=len(sessions) >= SESSION_LIST_LIMIT,
+                executions=len(self._raw_executions),
+                messages=len(self._raw_messages),
+                messages_truncated=self._state.messages_has_more,
+                artifacts=len(self._raw_artifacts),
+                artifacts_truncated=self._state.artifacts_has_more,
+                archived_sessions=sum(1 for item in sessions if item.archived),
+                cleaned_sessions=sum(1 for item in sessions if item.cleaned),
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # 清理确认（W-04）：预览已准备作业 → 显式确认 → 回执；缺失即阻断
+    # ------------------------------------------------------------------
+
+    async def begin_cleanup(self) -> None:
+        """预览当前会话的清理作业（先刷新占用摘要；作业缺失不构造空集合）。"""
+
+        if not self._state.available:
+            self._set_state(cleanup_error_key=self._state.unavailable_reason_key, cleanup_error_code=None)
+            return
+        session_id = self._state.session_id
+        if session_id is None:
+            self._set_state(
+                cleanup_preview=None,
+                cleanup_receipt=None,
+                cleanup_error_key="agent_research_cleanup_no_session",
+                cleanup_error_code=None,
+            )
+            return
+        self.refresh_history_usage()
+        gateway = self._cleanup
+        if gateway is None:
+            self._set_state(
+                cleanup_preview=None,
+                cleanup_receipt=None,
+                cleanup_error_key="agent_research_cleanup_unavailable",
+                cleanup_error_code=self._state.cleanup_unavailable_reason,
+            )
+            return
+        if self._state.cleanup_pending:
+            return
+        self._set_state(
+            cleanup_pending=True,
+            cleanup_preview=None,
+            cleanup_receipt=None,
+            cleanup_error_key=None,
+            cleanup_error_code=None,
+        )
+        try:
+            preview = await gateway.preview(self._user_scope, _cleanup_job_id(session_id))
+        except asyncio.CancelledError:
+            self._set_state(cleanup_pending=False)
+            raise
+        except Exception as e:
+            code = self._error_code(e)
+            self._set_state(
+                cleanup_pending=False,
+                cleanup_error_key=("agent_research_cleanup_job_not_prepared" if code == "CONFIG_UNAVAILABLE" else None),
+                cleanup_error_code=code,
+            )
+            return
+        self._set_state(cleanup_pending=False, cleanup_preview=_cleanup_preview_view(preview))
+
+    def cancel_cleanup(self) -> None:
+        """取消清理预览（不产生任何删除副作用）。"""
+
+        self._set_state(cleanup_preview=None, cleanup_error_key=None, cleanup_error_code=None)
+
+    async def confirm_cleanup(self, confirmed: bool) -> None:
+        """显式确认后执行清理；未确认不发请求，回执 ``verified`` 才算完成。"""
+
+        preview = self._state.cleanup_preview
+        gateway = self._cleanup
+        if preview is None:
+            self._set_state(
+                cleanup_error_key="agent_research_cleanup_job_not_prepared",
+                cleanup_error_code=None,
+            )
+            return
+        if not confirmed:
+            self._set_state(cleanup_error_key="agent_research_cleanup_confirm_required", cleanup_error_code=None)
+            return
+        if gateway is None:
+            self._set_state(
+                cleanup_error_key="agent_research_cleanup_unavailable",
+                cleanup_error_code=self._state.cleanup_unavailable_reason,
+            )
+            return
+        if self._state.cleanup_pending:
+            return
+        self._set_state(cleanup_pending=True, cleanup_error_key=None, cleanup_error_code=None)
+        try:
+            outcome = await gateway.confirm(
+                self._user_scope,
+                preview.cleanup_job_id,
+                command_id=f"ui-cleanup-confirm:{preview.cleanup_job_id}:{preview.expected_revision}",
+                confirmed=True,
+            )
+        except asyncio.CancelledError:
+            self._set_state(cleanup_pending=False)
+            raise
+        except Exception as e:
+            # 准入未通过（未知交付/在途 writer 等）如实报码，预览保留供用户查看。
+            self._set_state(cleanup_pending=False, cleanup_error_code=self._error_code(e))
+            return
+        self._set_state(
+            cleanup_pending=False,
+            cleanup_preview=None,
+            cleanup_receipt=_cleanup_receipt_view(outcome),
+        )
+        await self.load_sessions()
+        if self._state.session_id == (preview.cleanup_job_id.removeprefix(CLEANUP_JOB_ID_PREFIX)):
+            await self.refresh()
+
+    # ------------------------------------------------------------------
+    # 停止使用来源（W-04）：入口 + 回执；禁用先胜、幂等重放
+    # ------------------------------------------------------------------
+
+    def set_stop_source_id(self, text: str) -> None:
+        self._set_state(stop_source_id=text)
+
+    def set_stop_source_version(self, text: str) -> None:
+        self._set_state(stop_source_version=text)
+
+    async def stop_source_use(self) -> None:
+        """停止使用来源（禁用的准确版本）；结果按回执呈现，失败不伪成功。"""
+
+        source_id = self._state.stop_source_id.strip()
+        source_version = self._state.stop_source_version.strip()
+        if not source_id or not source_version:
+            self._set_state(
+                stop_source_error_key="agent_research_stop_source_required",
+                stop_source_error_code=None,
+            )
+            return
+        service = self._service
+        stop = getattr(service, "stop_using", None) if service is not None else None
+        if not callable(stop):
+            self._set_state(
+                stop_source_error_key=UNAVAILABLE_NOT_WIRED,
+                stop_source_error_code=None,
+            )
+            return
+        if self._state.stop_source_pending:
+            return
+        self._set_state(stop_source_pending=True, stop_source_error_key=None, stop_source_error_code=None)
+        try:
+            receipt = await cast("Callable[..., Awaitable[SourceStopReceipt]]", stop)(
+                SourceStopCommand(
+                    user_scope=self._user_scope,
+                    source_id=source_id,
+                    source_version=source_version,
+                    command_id=f"ui-stop:{source_id}@{source_version}",
+                )
+            )
+        except asyncio.CancelledError:
+            self._set_state(stop_source_pending=False)
+            raise
+        except Exception as e:
+            self._set_state(stop_source_pending=False, stop_source_error_code=self._error_code(e))
+            return
+        self._set_state(
+            stop_source_pending=False,
+            stop_source_id="",
+            stop_source_version="",
+            stop_source_receipt=SourceStopReceiptView(
+                source_id=receipt.source_id,
+                source_version=receipt.source_version,
+                disabled_revision=receipt.disabled_revision,
+                already_disabled=receipt.already_disabled,
+                disabled_at=receipt.disabled_at,
+            ),
+        )
+
+    def _history_query(self, *, cursor: str | None) -> HistoryQuery:
+        scope_filter = self._state.history_scope_filter
+        return HistoryQuery(
+            scope="all_saved",
+            round_selection=HistoryRoundSelection(kind="all_rounds"),
+            query_text=self._state.history_query.strip(),
+            time_basis="updated",
+            sort="newest_first",
+            limit=HISTORY_PAGE_LIMIT,
+            type_filter=None if scope_filter == "all" else scope_filter,
+            cursor=cursor,
+        )
+
     async def _resolve_session(self, target: str | None) -> str | None:
         """解析要读取的会话：显式目标优先，其次当前会话，最后历史最新一条。
 
@@ -2517,6 +2971,10 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             artifact_export_notice_key=None,
             artifact_export_error_key=None,
             artifact_export_error_code=None,
+            cleanup_preview=None,
+            cleanup_receipt=None,
+            cleanup_error_key=None,
+            cleanup_error_code=None,
         )
 
     async def _read_pending_overview(self) -> tuple[PendingAnswerPage | None, str | None]:
@@ -4153,8 +4611,10 @@ def shared_research_observer(
     mcp_catalog: MCPScopeCatalogPort | None = None,
     model_catalog: ModelCatalogPort | None = None,
     delivery: ArtifactDeliveryPort | None = None,
+    cleanup: HistoryCleanupGateway | None = None,
+    cleanup_unavailable_reason: str | None = None,
 ) -> ResearchObserverViewModel:
-    """取本会话共享的观察层 VM（同一 facade/受理端口复用；变化或已销毁则重建）。"""
+    """取本会话共享的观察层 VM（同一 facade/受理/清理端口复用；变化或已销毁则重建）。"""
 
     global _shared_vm
     session_key = id(service) if service is not None else None
@@ -4167,6 +4627,7 @@ def shared_research_observer(
         # 未显式注入目录时由 VM 自建只读目录实例，重复调用不得因 None 反复重建。
         or (model_catalog is not None and _shared_vm._model_catalog is not model_catalog)
         or _shared_vm._delivery is not delivery
+        or _shared_vm._cleanup is not cleanup
     ):
         stale = _shared_vm
         _shared_vm = ResearchObserverViewModel(
@@ -4177,6 +4638,8 @@ def shared_research_observer(
             mcp_catalog=mcp_catalog,
             model_catalog=model_catalog,
             delivery=delivery,
+            cleanup=cleanup,
+            cleanup_unavailable_reason=cleanup_unavailable_reason,
         )
         if stale is not None and not stale.disposed:
             stale.dispose()
