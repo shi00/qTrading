@@ -131,12 +131,12 @@ class InstanceOwnershipLock:
         if connection is not None:
             try:
                 connection.sync_connection.invalidate()
-            except Exception:  # 释放兜底：不掩盖启动/关闭主流程异常（R2_ALLOWED）
+            except Exception:  # R2_ALLOWED: 释放兜底，仅捕获 Exception，CancelledError 不属其中
                 pass
         if engine is not None:
             try:
                 engine.sync_engine.dispose(close=True)
-            except Exception:  # 同上
+            except Exception:  # R2_ALLOWED: dispose 兜底，同上，不掩盖启动/关闭主流程异常
                 pass
 
 
@@ -145,7 +145,7 @@ async def _close_quietly(connection: Any) -> None:
 
     try:
         await connection.close()
-    except Exception:  # 释放兜底（R2_ALLOWED）
+    except Exception:  # R2_ALLOWED: 关闭兜底，仅捕获 Exception，CancelledError 不属其中
         pass
 
 
@@ -154,7 +154,7 @@ async def _dispose_quietly(engine: AsyncEngine) -> None:
 
     try:
         await engine.dispose()
-    except Exception:  # 释放兜底（R2_ALLOWED）
+    except Exception:  # R2_ALLOWED: 释放引擎兜底，仅捕获 Exception，CancelledError 不属其中
         pass
 
 
