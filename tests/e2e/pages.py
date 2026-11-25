@@ -1097,6 +1097,27 @@ class ResearchPanelPage:
         self.page = page
         self.app = App(page)
 
+    async def _click_toggle(self, name: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """精确点击导航栏入口。
+
+        入口按钮的可访问名来自 tooltip。共享 ``click_button`` 走 ``has_text``
+        子串匹配，业务页出现「发起研究」这类包含同名子串的按钮时会先命中它，
+        点击无效且不报错（表现为面板不展开）。此处优先精确 aria-label / 精确
+        按钮名，均不可见时才回退旧行为。
+        """
+        pw = self.page.page
+        for loc in (
+            pw.locator(f'[aria-label="{name}"]'),
+            pw.get_by_role("button", name=name, exact=True),
+        ):
+            try:
+                await loc.first.wait_for(state="attached", timeout=timeout_ms)
+            except PlaywrightTimeoutError:
+                continue
+            await loc.first.click(force=True, timeout=timeout_ms)
+            return
+        await self.page.click_button(name, timeout_ms=timeout_ms)
+
     async def open(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         """展开面板。
 
@@ -1105,7 +1126,7 @@ class ResearchPanelPage:
         """
         if await self.page.has_text(I18n.get("agent_research_title")):
             return
-        await self.page.click_button(I18n.get("agent_research_toggle"), timeout_ms=timeout_ms)
+        await self._click_toggle(I18n.get("agent_research_toggle"), timeout_ms=timeout_ms)
         await self.expect_open()
 
     async def close(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
@@ -1113,7 +1134,7 @@ class ResearchPanelPage:
         title = I18n.get("agent_research_title")
         if not await self.page.has_text(title):
             return
-        await self.page.click_button(I18n.get("agent_research_close"), timeout_ms=timeout_ms)
+        await self._click_toggle(I18n.get("agent_research_close"), timeout_ms=timeout_ms)
         await self.page.expect_text_gone(title, timeout_ms=TIMEOUTS.TITLE)
 
     async def is_runtime_unavailable(self) -> bool:
