@@ -241,10 +241,13 @@ def _comparison_button(env: dict) -> ft.IconButton:
 
 
 def _workbench_button(env: dict) -> ft.IconButton:
-    """W-18 研究工作台入口（位于对比入口之后，保持既有按钮索引不变）。"""
+    """W-18 研究工作台入口（位于决定中心入口之后，按 tooltip 语义定位）。"""
 
-    button = _brand_column(env).controls[5]
-    assert isinstance(button, ft.IconButton)
+    button = next(
+        control
+        for control in _brand_column(env).controls
+        if isinstance(control, ft.IconButton) and control.tooltip == "agent_workbench_toggle"
+    )
     return button
 
 

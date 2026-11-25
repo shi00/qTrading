@@ -142,10 +142,6 @@ def ResearchConfigCard(
                 ),
                 ft.Row(
                     [
-                        SectionHeader(
-                            I18n.get("research_config_summary_prompt_label"),
-                            title_key="research_config_summary_prompt_label",
-                        ),
                         ft.Text(
                             I18n.get(
                                 "research_config_prompt_source_default"
@@ -164,7 +160,9 @@ def ResearchConfigCard(
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     wrap=True,
                 ),
+                # F08: 持久 label 承载可访问名称（hint_text 不被读屏视为标签）
                 ft.TextField(
+                    label=I18n.get("research_config_summary_prompt_label"),
                     value=state.research_summary_prompt_value,
                     multiline=True,
                     min_lines=4,

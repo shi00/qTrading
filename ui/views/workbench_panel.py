@@ -180,14 +180,11 @@ def build_workbench_body(
     blocks: list[ft.Control] = [build_perspective_tabs(workbench_state.perspective, on_perspective=on_perspective)]
 
     if workbench_state.perspective == PERSPECTIVE_OVERVIEW:
-        title = ft.Text(
-            I18n.get("agent_workbench_query_label"),
-            size=AppStyles.FONT_SIZE_CAPTION,
-            color=AppColors.TEXT_SECONDARY,
-        )
         query_row = ft.Row(
             [
+                # F08: 持久 label 承载可访问名称（hint_text 不被读屏视为标签）
                 ft.TextField(
+                    label=I18n.get("agent_workbench_query_label"),
                     value=workbench_state.overview_query,
                     hint_text=I18n.get("agent_workbench_query_hint"),
                     expand=True,
@@ -204,7 +201,7 @@ def build_workbench_body(
             spacing=AppStyles.SPACING_XS,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
-        blocks.extend([title, query_row])
+        blocks.append(query_row)
 
     blocks.append(build_perspective_content(view, on_select_evidence=on_select_evidence))
     return ft.Column(blocks, spacing=AppStyles.SPACING_SM, scroll=ft.ScrollMode.AUTO, expand=True)

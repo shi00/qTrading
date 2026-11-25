@@ -86,8 +86,8 @@ def test_body_renders_query_field_and_command_menu() -> None:
     assert text_field.value == "息差"
     assert isinstance(field.controls[1], ft.PopupMenuButton)
 
-    labels = [item.value for item in control.controls if isinstance(item, ft.Text)]
-    assert I18n.get("agent_workbench_query_label") in labels
+    # F08: 可访问名称由 TextField 持久 label 承载（而非独立标题 Text）
+    assert text_field.label == I18n.get("agent_workbench_query_label")
 
 
 def test_unavailable_state_is_explicit() -> None:

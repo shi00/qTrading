@@ -1270,8 +1270,8 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
                 # P02: 公共区研究入口（不新增第八业务导航；展开非模态观察层）
                 research_toggle,
                 comparison_toggle,
-                workbench_toggle,
                 decision_toggle,
+                workbench_toggle,
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             spacing=5,
