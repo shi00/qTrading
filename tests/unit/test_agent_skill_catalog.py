@@ -864,6 +864,43 @@ class TestSkillLifecycleService:
         assert enabled.replayed is False
         assert len(dao.assets) == 2
 
+    async def test_enable_with_missing_content_is_input_invalid(self, tmp_path: Path) -> None:
+        service, dao, store = _service(tmp_path)
+        imported = await _import(service, _package())
+        ref = SkillVersionRef(imported.skill_id, 1)
+        (store.version_dir(ref) / "SKILL.md").unlink()
+
+        with pytest.raises(AgentServiceError) as exc:
+            await service.set_skill_enabled(ref, user_scope="scope", enabled=True)
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        assert "skill version content is missing" in exc.value.sanitized_message
+        assert dao.skill_states == {}
+
+    async def test_enable_with_unparseable_manifest_is_input_invalid(self, tmp_path: Path) -> None:
+        service, dao, store = _service(tmp_path)
+        imported = await _import(service, _package())
+        ref = SkillVersionRef(imported.skill_id, 1)
+        (store.version_dir(ref) / "SKILL.md").write_bytes(b"not a manifest\n")
+
+        with pytest.raises(AgentServiceError) as exc:
+            await service.set_skill_enabled(ref, user_scope="scope", enabled=True)
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        assert "invalid_skill_manifest" in exc.value.sanitized_message
+        assert dao.skill_states == {}
+
+    async def test_enable_with_all_dependencies_available_is_allowed(self, tmp_path: Path) -> None:
+        service, dao, _ = _service(tmp_path)
+        await _import(service, _package(name="base-skill"))
+        imported = await _import(service, _package(dependencies=("base-skill",)))
+        ref = SkillVersionRef(imported.skill_id, 1)
+        await service.set_skill_enabled(ref, user_scope="scope", enabled=False)
+
+        enabled = await service.set_skill_enabled(ref, user_scope="scope", enabled=True)
+
+        assert enabled.read_state == "ready"
+        assert enabled.replayed is False
+        assert dao.skill_states[("scope", imported.skill_id, 1)] == "ready"
+
     async def test_disable_version_bound_to_role_is_denied(self, tmp_path: Path) -> None:
         service, dao, _ = _service(tmp_path)
         imported = await _import(service, _package())
