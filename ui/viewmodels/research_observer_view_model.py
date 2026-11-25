@@ -259,6 +259,16 @@ _EVENT_CATCH_UP_PAGE: Final[int] = 50
 _EVENT_CATCH_UP_MAX_PAGES: Final[int] = 20
 CATCH_UP_INCOMPLETE = "catch_up_incomplete"
 
+#: 消息修订/前缀分支/局部复制（W-15）：能力缺失原因 key 与摘要截断上限。
+MESSAGE_TOOLS_UNAVAILABLE_KEY: Final[str] = "agent_research_message_tools_unavailable"
+MESSAGE_COPY_SUMMARY_LIMIT: Final[int] = 160
+MESSAGE_COPY_EMPTY_KEY: Final[str] = "agent_research_message_copy_selection_empty"
+MESSAGE_COPY_FAILED_KEY: Final[str] = "agent_research_message_copy_clipboard_failed"
+MESSAGE_COPY_DONE_KEY: Final[str] = "agent_research_message_copy_done"
+MESSAGE_EDIT_NOT_USER_KEY: Final[str] = "agent_research_message_edit_not_user"
+MESSAGE_EDIT_UNAVAILABLE_KEY: Final[str] = "agent_research_message_edit_unavailable"
+MESSAGE_BRANCH_UNAVAILABLE_KEY: Final[str] = "agent_research_message_branch_unavailable"
+
 
 class MainTurnIntakePort(Protocol):
     """首问/开始计划受理端口（组合根注入；UI 不 import app）。"""
@@ -274,6 +284,8 @@ class MainTurnIntakePort(Protocol):
         role_prompt_refs: Sequence[tuple[str, str]] = (),
         skill_refs: Sequence[tuple[str, str]] = (),
         mcp_selection: tuple[MCPServiceIdentity, ...] = (),
+        revise_source_message_id: str | None = None,
+        revise_causal_cutoff_message_id: str | None = None,
     ) -> MainTurnIntakeResult: ...
 
     async def start_plan(
@@ -423,7 +435,12 @@ class ArtifactDeliveryReceiptView:
 
 @dataclass(frozen=True)
 class SessionMessageView:
-    """主会话消息的只读投影（``body_ref`` 未载入正文时如实标记不可读）。"""
+    """主会话消息的只读投影（``body_ref`` 未载入正文时如实标记不可读）。
+
+    ``session_seq`` 用于确定消息前后顺序（修订取「源消息之前最近一条」为因果
+    截点）；``subject_revision`` 是消息事实版本（修订/分支命令的 CAS 预期版），
+    缺失（0）时对应动作禁用并给出原因。
+    """
 
     message_id: str
     role: str | None
@@ -431,6 +448,8 @@ class SessionMessageView:
     body_available: bool
     execution_id: str | None
     occurred_at: str
+    session_seq: int = 0
+    subject_revision: int = 0
 
 
 @dataclass(frozen=True)
@@ -990,6 +1009,31 @@ class ResearchObserverState:
     rename_text: str = ""
     #: 当前会话的元数据版（会话 CAS 动作的预期版；读取失败保持 0，动作被拒绝）。
     session_revision: int = 0
+    # --- W-15 消息修订 / 前缀分支 / 局部复制 ---
+    #: 能力可用性：修订需 ``change_session`` + 受理端口，分支只需 ``change_session``。
+    message_edit_available: bool = False
+    message_branch_available: bool = False
+    #: 能力缺失原因 key（仅当上述能力不可用时非空；不以「可用」伪装缺失）。
+    message_tools_unavailable_reason_key: str | None = None
+    #: 修订态：目标消息 + 编辑正文 + 在途/错误（错误码为服务端类型化码，原样展示）。
+    edit_message_id: str | None = None
+    edit_text: str = ""
+    edit_pending: bool = False
+    edit_error_key: str | None = None
+    edit_error_code: str | None = None
+    #: 前缀分支：在途源消息 + 错误（同一时刻只允许一个分支动作）。
+    branch_pending_message_id: str | None = None
+    branch_error_key: str | None = None
+    branch_error_code: str | None = None
+    #: 当前会话的派生关系（分支会话可追溯父会话与源消息；根会话为 None）。
+    session_parent_id: str | None = None
+    session_branch_source_message_id: str | None = None
+    #: 局部复制工具栏：显示在哪个消息下 + 当前选中文本（空串表示空选择）。
+    copy_toolbar_message_id: str | None = None
+    copy_selection_text: str = ""
+    copy_notice_key: str | None = None
+    copy_error_key: str | None = None
+    copy_error_code: str | None = None
     #: 增量流式（W-13）：受治理片段按序合并；``stream_text`` 只含真实模型片段，
     #: 合成/占位片段以 ``stream_synthetic_visible`` 单独标记（不与真实输出混淆）。
     stream_fragments: tuple[StreamedTextFragment, ...] = ()
@@ -1176,6 +1220,21 @@ class ResearchObserverState:
             if body.key == key:
                 return body
         return None
+
+    def message_by_id(self, message_id: str | None) -> SessionMessageView | None:
+        """按消息 id 取当前投影（不存在返回 ``None``，不猜近似消息）。"""
+
+        if message_id is None:
+            return None
+        for message in self.messages:
+            if message.message_id == message_id:
+                return message
+        return None
+
+    def copy_selection_available(self) -> bool:
+        """当前选中文本是否非空（空选择复制按钮禁用并给原因，R21）。"""
+
+        return bool(self.copy_selection_text.strip())
 
 
 def _extract_question_text(question_payload: str | None) -> str | None:
@@ -1477,6 +1536,22 @@ def _flatten_executions(
     return tuple(nodes)
 
 
+def _branch_source_message_id(summary: Any) -> str | None:
+    """会话分支元数据里的源消息 id（非分支会话/坏载荷返回 ``None``，不猜）。"""
+
+    raw = getattr(summary, "branch_metadata", None)
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    value = decoded.get("source_message_id")
+    return value if isinstance(value, str) and value else None
+
+
 def _project_messages(
     messages: tuple[Any, ...],
     *,
@@ -1497,6 +1572,8 @@ def _project_messages(
                 body_available=item.body_text is not None,
                 execution_id=item.execution_id,
                 occurred_at=item.occurred_at,
+                session_seq=int(getattr(item, "session_seq", 0) or 0),
+                subject_revision=int(getattr(item, "subject_revision", 0) or 0),
             )
         )
     return tuple(projected)
@@ -2383,6 +2460,9 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         self._session_cleaned = False
         #: 预算估算票据：文本变化期间的旧估算结果不得覆盖新估算。
         self._budget_ticket = 0
+        change_session = getattr(service, "change_session", None) if service is not None else None
+        branch_available = callable(change_session)
+        edit_available = branch_available and intake is not None
         self._state = ResearchObserverState(
             available=service is not None,
             unavailable_reason_key=unavailable_reason_key if service is None else "",
@@ -2393,6 +2473,11 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             cleanup_available=cleanup is not None,
             cleanup_unavailable_reason=cleanup_unavailable_reason if cleanup is None else None,
             materials_transfer_available=_materials_transfer_supported(service),
+            message_edit_available=edit_available,
+            message_branch_available=branch_available,
+            message_tools_unavailable_reason_key=None
+            if edit_available
+            else (MESSAGE_TOOLS_UNAVAILABLE_KEY if service is not None else unavailable_reason_key),
         )
         self._init_mixin_fields()
 
@@ -2971,6 +3056,337 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         return receipt
 
     # ------------------------------------------------------------------
+    # 消息修订 / 前缀分支 / 局部复制（W-15）
+    # ------------------------------------------------------------------
+
+    def begin_edit_message(self, message_id: str) -> None:
+        """进入用户消息编辑态；非用户消息/正文未载入/能力缺失显式拒绝并给原因。"""
+
+        if not self._state.message_edit_available:
+            self._set_state(
+                edit_message_id=None,
+                edit_text="",
+                edit_error_key=MESSAGE_EDIT_UNAVAILABLE_KEY,
+                edit_error_code=self._state.message_tools_unavailable_reason_key,
+            )
+            return
+        message = self._state.message_by_id(message_id)
+        if message is None:
+            self._set_state(
+                edit_message_id=None,
+                edit_text="",
+                edit_error_key="agent_research_decision_stale",
+                edit_error_code=None,
+            )
+            return
+        if message.role != "user":
+            self._set_state(
+                edit_message_id=None,
+                edit_text="",
+                edit_error_key=MESSAGE_EDIT_NOT_USER_KEY,
+                edit_error_code=None,
+            )
+            return
+        if not message.body_available or not (message.body_text or "").strip() or message.subject_revision < 1:
+            self._set_state(
+                edit_message_id=None,
+                edit_text="",
+                edit_error_key="agent_research_message_edit_body_unavailable",
+                edit_error_code=None,
+            )
+            return
+        self._set_state(
+            edit_message_id=message_id,
+            edit_text=message.body_text or "",
+            edit_error_key=None,
+            edit_error_code=None,
+        )
+
+    def set_edit_text(self, text: str) -> None:
+        """记录修订正文（纯状态；不发命令）。"""
+
+        self._set_state(edit_text=text)
+
+    def cancel_edit_message(self) -> None:
+        """退出编辑态（不改既有研究关联，R2-I25）。"""
+
+        self._set_state(
+            edit_message_id=None,
+            edit_text="",
+            edit_pending=False,
+            edit_error_key=None,
+            edit_error_code=None,
+        )
+
+    def _message_neighbors(self, message_id: str) -> tuple[Any | None, Any | None]:
+        """按 ``session_seq`` 顺序返回（源消息, 之前最近一条）；缺失返回 (None, None)。"""
+
+        ordered = sorted(self._raw_messages, key=lambda item: int(getattr(item, "session_seq", 0) or 0))
+        for index, item in enumerate(ordered):
+            if item.message_id == message_id:
+                previous = ordered[index - 1] if index > 0 else None
+                return item, previous
+        return None, None
+
+    def _submit_role_refs(self) -> tuple[tuple[str, str], ...] | None:
+        """修订重发沿用已冻结/当前角色选择；非法选择返回 ``None``（由调用方报原因）。"""
+
+        role_key = self._state.role_selection_frozen or self._state.role_selection
+        if role_key is None:
+            return ()
+        option = self._role_option(self._state.role_options, role_key)
+        if option is None or option.reject_key is not None or option.version is None:
+            return None
+        return ((role_key, option.version),)
+
+    async def submit_edit_message(self) -> None:
+        """以修订语义重发编辑后的用户消息（不覆盖原消息历史）。
+
+        先经 ``change_session(REVISE)`` 校验源消息版本与因果截点（只准备新稿，
+        不改因果头），再经受理端口以修订声明受理（因果头在该事务内原子切换）。
+        任一步失败保留编辑态并如实报服务端错误码；取消继续传播（R2）。
+        """
+
+        if not self._state.message_edit_available:
+            self._set_state(
+                edit_error_key=MESSAGE_EDIT_UNAVAILABLE_KEY,
+                edit_error_code=self._state.message_tools_unavailable_reason_key,
+            )
+            return
+        if self._state.edit_pending:
+            return
+        target_id = self._state.edit_message_id
+        if target_id is None:
+            return
+        text = self._state.edit_text.strip()
+        if not text:
+            self._set_state(edit_error_key="agent_research_empty_draft", edit_error_code=None)
+            return
+        service = self._service
+        intake = self._intake
+        session_id = self._state.session_id
+        if service is None or intake is None or session_id is None:
+            self._set_state(edit_error_key=MESSAGE_EDIT_UNAVAILABLE_KEY, edit_error_code=None)
+            return
+        change = getattr(service, "change_session", None)
+        if not callable(change):
+            self._set_state(edit_error_key=MESSAGE_EDIT_UNAVAILABLE_KEY, edit_error_code=None)
+            return
+        source, previous = self._message_neighbors(target_id)
+        if source is None or getattr(getattr(source, "role", None), "value", getattr(source, "role", None)) != "user":
+            self._set_state(
+                edit_error_key=MESSAGE_EDIT_NOT_USER_KEY,
+                edit_error_code=None,
+            )
+            return
+        source_revision = int(getattr(source, "subject_revision", 0) or 0)
+        if source_revision < 1:
+            self._set_state(
+                edit_error_key="agent_research_message_edit_body_unavailable",
+                edit_error_code=None,
+            )
+            return
+        cutoff = getattr(previous, "message_id", None) if previous is not None else None
+        role_refs = self._submit_role_refs()
+        if role_refs is None:
+            self._set_state(
+                edit_error_key="agent_research_role_selection_unknown",
+                edit_error_code=None,
+            )
+            return
+        try:
+            mode = Mode(self._state.composer_mode)
+        except ValueError:
+            self._set_state(edit_error_key="agent_research_message_mode_invalid", edit_error_code=None)
+            return
+        self._track_inflight_cancellable()
+        self._set_state(edit_pending=True, edit_error_key=None, edit_error_code=None)
+        command_id = f"ui-session-revise:{session_id}:{target_id}:{source_revision}"
+        try:
+            await cast("Callable[..., Awaitable[Any]]", change)(
+                SessionChangeCommand(
+                    command=CommandRef(
+                        user_scope=self._user_scope,
+                        source_module="ui",
+                        business_request_id=command_id,
+                        command_id=command_id,
+                        expected_revision=self._state.session_revision,
+                    ),
+                    action=SessionAction.REVISE,
+                    session_id=session_id,
+                    expected_session_revision=self._state.session_revision,
+                    source_message_id=target_id,
+                    source_message_revision=source_revision,
+                    causal_cutoff_message_id=cutoff,
+                )
+            )
+            await intake.start_question(
+                text,
+                mode=mode,
+                session_id=session_id,
+                expected_revision=self._state.session_draft_revision,
+                role_prompt_refs=role_refs,
+                revise_source_message_id=target_id,
+                revise_causal_cutoff_message_id=cutoff,
+            )
+        except asyncio.CancelledError:
+            self._set_state(edit_pending=False)
+            raise
+        except Exception as e:
+            self._set_state(edit_pending=False, edit_error_code=self._error_code(e))
+            return
+        self._set_state(
+            edit_pending=False,
+            edit_message_id=None,
+            edit_text="",
+            edit_error_key=None,
+            edit_error_code=None,
+        )
+        if self._state.available:
+            await self.refresh()
+        await self.refresh_budget_hint()
+
+    async def branch_from_message(self, message_id: str) -> None:
+        """从指定消息前缀新建研究分支并切换到该分支会话（父子关系由服务端记录）。
+
+        分支会话引用原因果前缀、不复制正文；成功后进入新分支会话（回到该分支
+        现场）。能力缺失/未接线时禁用并显示原因码，不伪造已建分支。
+        """
+
+        if not self._state.message_branch_available:
+            self._set_state(
+                branch_error_key=MESSAGE_BRANCH_UNAVAILABLE_KEY,
+                branch_error_code=self._state.message_tools_unavailable_reason_key,
+            )
+            return
+        if self._state.branch_pending_message_id is not None:
+            return
+        service = self._service
+        session_id = self._state.session_id
+        change = getattr(service, "change_session", None) if service is not None else None
+        if not callable(change) or session_id is None:
+            self._set_state(
+                branch_error_key=MESSAGE_BRANCH_UNAVAILABLE_KEY,
+                branch_error_code=self._state.message_tools_unavailable_reason_key,
+            )
+            return
+        source, previous = self._message_neighbors(message_id)
+        if source is None:
+            self._set_state(
+                branch_error_key="agent_research_decision_stale",
+                branch_error_code=None,
+            )
+            return
+        source_revision = int(getattr(source, "subject_revision", 0) or 0)
+        if source_revision < 1:
+            self._set_state(
+                branch_error_key=MESSAGE_BRANCH_UNAVAILABLE_KEY,
+                branch_error_code="source_revision_unavailable",
+            )
+            return
+        cutoff = getattr(previous, "message_id", None) if previous is not None else None
+        branch_id = f"session-branch-{uuid.uuid4().hex}"
+        base_title = self._state.session_title or session_id
+        title = f"{base_title} · {message_id[-8:]}"
+        self._track_inflight_cancellable()
+        self._set_state(
+            branch_pending_message_id=message_id,
+            branch_error_key=None,
+            branch_error_code=None,
+        )
+        try:
+            await cast("Callable[..., Awaitable[Any]]", change)(
+                SessionChangeCommand(
+                    command=CommandRef(
+                        user_scope=self._user_scope,
+                        source_module="ui",
+                        business_request_id=branch_id,
+                        command_id=f"ui-branch-{uuid.uuid4().hex}",
+                        expected_revision=0,
+                    ),
+                    action=SessionAction.BRANCH,
+                    session_id=branch_id,
+                    expected_session_revision=0,
+                    title=title,
+                    source_message_id=message_id,
+                    source_message_revision=source_revision,
+                    causal_cutoff_message_id=cutoff,
+                )
+            )
+        except asyncio.CancelledError:
+            self._set_state(branch_pending_message_id=None)
+            raise
+        except Exception as e:
+            self._set_state(
+                branch_pending_message_id=None,
+                branch_error_code=self._error_code(e),
+            )
+            return
+        self._set_state(branch_pending_message_id=None, branch_error_key=None, branch_error_code=None)
+        await self.open_session(branch_id)
+
+    def set_copy_toolbar(self, message_id: str, text: str) -> None:
+        """记录局部选择与工具栏位置（空选择保留工具栏但禁用复制并给原因）。"""
+
+        self._set_state(
+            copy_toolbar_message_id=message_id,
+            copy_selection_text=text,
+            copy_notice_key=None,
+            copy_error_key=None,
+            copy_error_code=None,
+        )
+
+    def dismiss_copy_toolbar(self) -> None:
+        """收起局部复制工具栏。"""
+
+        self._set_state(
+            copy_toolbar_message_id=None,
+            copy_selection_text="",
+            copy_notice_key=None,
+            copy_error_key=None,
+            copy_error_code=None,
+        )
+
+    def copy_toolbar_text(self) -> str | None:
+        """返回待复制的选中文本；空选择返回 ``None`` 并给出原因（不冒充已复制）。"""
+
+        text = self._state.copy_selection_text
+        if not text.strip():
+            self._set_state(copy_error_key=MESSAGE_COPY_EMPTY_KEY, copy_error_code="selection_empty")
+            return None
+        return text
+
+    def copy_toolbar_summary(self) -> str | None:
+        """返回选中文本的摘要（折叠空白后截断并显式省略号，不静默截断）。"""
+
+        text = self._state.copy_selection_text
+        compact = " ".join(text.split())
+        if not compact:
+            self._set_state(copy_error_key=MESSAGE_COPY_EMPTY_KEY, copy_error_code="selection_empty")
+            return None
+        if len(compact) > MESSAGE_COPY_SUMMARY_LIMIT:
+            return compact[:MESSAGE_COPY_SUMMARY_LIMIT] + "…"
+        return compact
+
+    def note_message_copy_done(self) -> None:
+        """剪贴板写入成功后标记（只有真实成功才显示已复制）。"""
+
+        self._set_state(
+            copy_notice_key=MESSAGE_COPY_DONE_KEY,
+            copy_error_key=None,
+            copy_error_code=None,
+        )
+
+    def note_message_copy_failed(self) -> None:
+        """剪贴板写入失败如实报错（不伪装成功）。"""
+
+        self._set_state(
+            copy_notice_key=None,
+            copy_error_key=MESSAGE_COPY_FAILED_KEY,
+            copy_error_code="clipboard_write_failed",
+        )
+
+    # ------------------------------------------------------------------
     # 历史目录（W-04）：全局关键词 + 主/次筛选 + 游标续翻（只读）
     # ------------------------------------------------------------------
 
@@ -3429,6 +3845,13 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         pending_keys = tuple(
             key for key in self._state.artifact_body_pending_keys if key in artifact_keys and key not in cleaned_keys
         )
+        # W-15：修订/复制工具栏只对仍存在的消息有效；消息消失或换会话即清空，
+        # 避免对已移除消息保留幽灵编辑态/工具栏。
+        message_ids = {item.message_id for item in read.messages.items}
+        edit_target = self._state.edit_message_id if self._state.edit_message_id in message_ids else None
+        copy_target = (
+            self._state.copy_toolbar_message_id if self._state.copy_toolbar_message_id in message_ids else None
+        )
         # R2-I23：已载入草稿只在新快照仍指向同一会话同一稿版时保留；稿版已推进、
         # 切了会话或会话已清理即丢弃，避免把旧稿正文冒充当前可继续编辑的内容。
         loaded_draft = self._state.session_draft
@@ -3472,13 +3895,31 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
                 "artifact_export_notice_key": None,
                 "artifact_export_error_key": None,
                 "artifact_export_error_code": None,
+                "edit_message_id": None,
+                "edit_text": "",
+                "edit_pending": False,
+                "edit_error_key": None,
+                "edit_error_code": None,
+                "branch_pending_message_id": None,
+                "branch_error_key": None,
+                "branch_error_code": None,
+                "copy_toolbar_message_id": None,
+                "copy_selection_text": "",
+                "copy_notice_key": None,
+                "copy_error_key": None,
+                "copy_error_code": None,
             }
             if session_changed
             else {
                 # 同会话刷新：选择只保留仍存在的成果版本，避免对已移除版本的幽灵操作。
                 "artifact_selected_keys": tuple(
                     key for key in self._state.artifact_selected_keys if key in artifact_keys
-                )
+                ),
+                # W-15：同一会话内消息仍在则保留编辑态/复制工具栏；消息消失即清空。
+                "edit_message_id": edit_target,
+                "edit_text": self._state.edit_text if edit_target is not None else "",
+                "copy_toolbar_message_id": copy_target,
+                "copy_selection_text": self._state.copy_selection_text if copy_target is not None else "",
             }
         )
         self._set_state(
@@ -3486,6 +3927,8 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             session_id=session_id,
             session_title=read.summary.title,
             session_revision=int(getattr(read.summary, "revision", 0) or 0),
+            session_parent_id=getattr(read.summary, "parent_session_id", None),
+            session_branch_source_message_id=_branch_source_message_id(read.summary),
             executions=tuple((execution.execution_id, execution.display_state) for execution in read.executions),
             decisions=pending,
             pending_count=pending_count,

@@ -33,6 +33,7 @@ from ui import agent_decision_arbiter
 from ui.viewmodels import research_observer_view_model as vm_mod
 from ui.viewmodels.business_research_view_model import BusinessResearchRequest
 from ui.viewmodels.research_observer_view_model import (
+    MESSAGE_COPY_DONE_KEY,
     ExecutionNodeView,
     LoadedArtifactBody,
     PendingDecision,
@@ -41,6 +42,7 @@ from ui.viewmodels.research_observer_view_model import (
     SessionDraftView,
     SessionMessageView,
 )
+from ui.views.research_observer_conversation import MessageActionHandlers
 
 pytestmark = pytest.mark.unit
 
@@ -538,6 +540,36 @@ class TestShellResearchEntry:
         panel.kwargs["on_retry_delivery"]("d-1")
         assert page.run_task.call_count == before + 1
         assert list(page.run_task.call_args.args) == [vm.retry_delivery, "d-1"]
+
+    def test_message_tool_callbacks_route_to_vm_commands(self, layout_env) -> None:
+        _open_panel(layout_env)
+        _drive_last_run_task(layout_env)
+        _rerender(layout_env)
+        panel = _observation_control(layout_env)
+        assert panel is not None
+        vm = _shared_vm()
+        page = layout_env["page"]
+        handlers = panel.kwargs["message_handlers"]
+        assert isinstance(handlers, MessageActionHandlers)
+
+        page.run_task.reset_mock()
+        handlers.on_submit_edit()
+        assert page.run_task.call_args.args[0] == vm.submit_edit_message, "修订重发须异步调度（R16）"
+
+        page.run_task.reset_mock()
+        handlers.on_branch("m-1")
+        assert list(page.run_task.call_args.args) == [vm.branch_from_message, "m-1"]
+
+        handlers.on_begin_edit("m-1")
+        assert vm.state.edit_error_key is not None, "缺失消息须如实拒绝而非进入编辑态"
+
+        handlers.on_edit_text("改后正文")
+        assert vm.state.edit_text == "改后正文"
+
+        handlers.on_copy_done()
+        assert vm.state.copy_notice_key == MESSAGE_COPY_DONE_KEY
+        handlers.on_copy_failed()
+        assert vm.state.copy_notice_key is None
 
 
 class TestCollapseKeepsDraftAndExecution:

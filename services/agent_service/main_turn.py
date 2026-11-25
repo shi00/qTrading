@@ -633,12 +633,16 @@ class MainTurnIntake:
         role_prompt_refs: Sequence[tuple[str, str]] = (),
         skill_refs: Sequence[tuple[str, str]] = (),
         mcp_selection: Sequence[MCPServiceIdentity] = (),
+        revise_source_message_id: str | None = None,
+        revise_causal_cutoff_message_id: str | None = None,
     ) -> MainTurnIntakeResult:
         """首问：必要时新建会话，冻结本次手选集合后受理。
 
         讨论/计划零研究派发；执行模式受理后先产出计划再派发。``role_prompt_refs``
         / ``skill_refs`` / ``mcp_selection`` 为本次显式手选集（未选择即空集，
-        能力来源据此 fail-closed；不由本入口补默认角色/能力）。
+        能力来源据此 fail-closed；不由本入口补默认角色/能力）。``revise_*`` 为
+        可选修订声明：仅编辑并重发旧问题时声明，随新意图在同一受理事务内原子
+        切换因果头（不覆盖原消息历史）；缺省表示普通新问题。
         """
 
         question = text.strip()
@@ -680,8 +684,16 @@ class MainTurnIntake:
                 expected_revision=revision,
                 manifest=manifest,
                 question=question,
+                revise_source_message_id=revise_source_message_id,
+                revise_causal_cutoff_message_id=revise_causal_cutoff_message_id,
             )
-        result = await self._submit(target_session, expected_revision=revision, manifest=manifest)
+        result = await self._submit(
+            target_session,
+            expected_revision=revision,
+            manifest=manifest,
+            revise_source_message_id=revise_source_message_id,
+            revise_causal_cutoff_message_id=revise_causal_cutoff_message_id,
+        )
         if self._main_turn is None:
             return result
         # 讨论/计划：受理后由生产主回合产出直答/可读计划；零研究动作由回合端口保证。
@@ -700,6 +712,8 @@ class MainTurnIntake:
         expected_revision: int,
         manifest: CanonicalJson,
         question: str,
+        revise_source_message_id: str | None = None,
+        revise_causal_cutoff_message_id: str | None = None,
     ) -> MainTurnIntakeResult:
         """执行模式首问：受理（不自动派发）→ 主回合产出计划 → 显式派发。
 
@@ -708,7 +722,13 @@ class MainTurnIntake:
         ``CancelledError`` 原样传播（R2）。
         """
 
-        result = await self._accept(session_id, expected_revision=expected_revision, manifest=manifest)
+        result = await self._accept(
+            session_id,
+            expected_revision=expected_revision,
+            manifest=manifest,
+            revise_source_message_id=revise_source_message_id,
+            revise_causal_cutoff_message_id=revise_causal_cutoff_message_id,
+        )
         runner = self._main_turn
         if runner is None:
             return replace(result, dispatch=self._plan_unavailable(result, cause="main_turn_not_wired"))
@@ -835,6 +855,8 @@ class MainTurnIntake:
         text: str | None = None,
         purpose: Purpose | None = None,
         plan_reference: PlanReference | None = None,
+        revise_source_message_id: str | None = None,
+        revise_causal_cutoff_message_id: str | None = None,
     ) -> MainTurnIntakeResult:
         request, command = self._build_request(
             session_id,
@@ -843,6 +865,8 @@ class MainTurnIntake:
             mode=mode,
             text=text,
             purpose=purpose,
+            revise_source_message_id=revise_source_message_id,
+            revise_causal_cutoff_message_id=revise_causal_cutoff_message_id,
         )
         outcome = await self._facade.submit_and_dispatch(request, command=command)
         receipt = getattr(outcome, "receipt", None)
@@ -866,6 +890,8 @@ class MainTurnIntake:
         *,
         expected_revision: int,
         manifest: CanonicalJson,
+        revise_source_message_id: str | None = None,
+        revise_causal_cutoff_message_id: str | None = None,
     ) -> MainTurnIntakeResult:
         """受理落定但不自动派发（执行模式首问先产出计划，再由本入口显式派发）。"""
 
@@ -873,6 +899,8 @@ class MainTurnIntake:
             session_id,
             expected_revision=expected_revision,
             manifest=manifest,
+            revise_source_message_id=revise_source_message_id,
+            revise_causal_cutoff_message_id=revise_causal_cutoff_message_id,
         )
         receipt = await self._facade.accept(request, command=command)
         if not isinstance(receipt, SubmissionReceipt):
@@ -892,8 +920,14 @@ class MainTurnIntake:
         mode: Mode | None = None,
         text: str | None = None,
         purpose: Purpose | None = None,
+        revise_source_message_id: str | None = None,
+        revise_causal_cutoff_message_id: str | None = None,
     ) -> tuple[AcceptRequest, CommandRef]:
-        """由冻结 manifest 构造受理请求与命令引用（幂等键逐请求唯一）。"""
+        """由冻结 manifest 构造受理请求与命令引用（幂等键逐请求唯一）。
+
+        ``revise_*`` 非空时以修订声明受理：因果头在同一受理事务内切到源消息
+        之前的前缀，原消息不被覆盖；缺省为普通新意图。
+        """
 
         decoded = self._manifest_object(manifest)
         frozen_mode = mode or self._mode_from(decoded)
@@ -916,6 +950,8 @@ class MainTurnIntake:
             text=body,
             manifest_payload=manifest,
             source_display_name=self._source_display_name,
+            revise_source_message_id=revise_source_message_id,
+            revise_causal_cutoff_message_id=revise_causal_cutoff_message_id,
         )
         command = CommandRef(
             user_scope=self._user_scope,

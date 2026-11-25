@@ -14,6 +14,9 @@ import pytest
 from services.agent_service.model import STREAM_SOURCE_SYNTHETIC, StreamedTextFragment
 from ui.i18n import I18n
 from ui.viewmodels.research_observer_view_model import (
+    CATCH_UP_INCOMPLETE,
+    MESSAGE_COPY_EMPTY_KEY,
+    MESSAGE_TOOLS_UNAVAILABLE_KEY,
     PENDING_SCOPE_ALL,
     PROGRESS_DOING_RUNNING,
     PROGRESS_NEXT_WAIT,
@@ -41,7 +44,11 @@ from ui.views.research_observer_composer import (
     build_plan_preview as _build_plan_preview,
     dispatch_reason_text,
 )
-from ui.views.research_observer_conversation import build_execution_section, build_messages_section
+from ui.views.research_observer_conversation import (
+    MessageActionHandlers,
+    build_execution_section,
+    build_messages_section,
+)
 from ui.views.research_observer_decisions import build_decisions_section, build_pending_overview
 from ui.views.research_observer_panel import _build_body
 from ui.views.research_observer_session_list import build_session_list
@@ -979,3 +986,104 @@ def test_messages_section_marks_restored_scroll_anchor_target() -> None:
 
     assert "agent_research_anchor_m-2" in keys
     assert "agent_research_anchor_m-1" not in keys
+
+
+def _message_handlers(calls: list[Any] | None = None) -> MessageActionHandlers:
+    """消息工具栏回调替身（记录调用；与组合根注入签名一致）。"""
+
+    log = calls if calls is not None else []
+
+    return MessageActionHandlers(
+        on_begin_edit=lambda mid: log.append(("edit", mid)),
+        on_edit_text=lambda text: log.append(("text", text)),
+        on_submit_edit=lambda: log.append(("submit",)),
+        on_cancel_edit=lambda: log.append(("cancel",)),
+        on_branch=lambda mid: log.append(("branch", mid)),
+        on_selection=lambda mid, text: log.append(("select", mid, text)),
+        on_copy=lambda: "选中文本",
+        on_copy_summary=lambda: "摘要",
+        on_copy_done=lambda: log.append(("copy_done",)),
+        on_copy_failed=lambda: log.append(("copy_failed",)),
+    )
+
+
+def _w15_state(**overrides: Any) -> ResearchObserverState:
+    messages = overrides.pop(
+        "messages",
+        (
+            SessionMessageView(
+                message_id="m-1",
+                role="user",
+                body_text="原提问",
+                body_available=True,
+                execution_id=None,
+                occurred_at="2026-11-17T01:00:00.000000Z",
+                session_seq=1,
+                subject_revision=2,
+            ),
+        ),
+    )
+    return ResearchObserverState(available=True, messages=messages, **overrides)
+
+
+def test_message_row_edit_mode_renders_field_submit_and_server_error_code() -> None:
+    state = _w15_state(
+        message_edit_available=True,
+        edit_message_id="m-1",
+        edit_text="修订中的提问",
+        edit_error_key="agent_research_message_edit_body_unavailable",
+        edit_error_code="REVISION_CONFLICT",
+    )
+
+    rows = build_messages_section(state, handlers=_message_handlers())
+    texts = _control_texts(rows)
+
+    field = next(item for item in _walk(rows) if isinstance(item, ft.TextField))
+    assert field.value == "修订中的提问"
+    assert I18n.get("agent_research_message_edit_body_unavailable") in texts
+    assert I18n.get("agent_research_error_fmt").format(code="REVISION_CONFLICT") in texts
+    submit = _find_text_button(rows, I18n.get("agent_research_message_edit_submit"))
+    assert submit.disabled is False
+
+
+def test_message_copy_toolbar_empty_selection_disables_and_reports_reason() -> None:
+    state = _w15_state(copy_toolbar_message_id="m-1", copy_selection_text="   ")
+
+    rows = build_messages_section(state, handlers=_message_handlers())
+    texts = _control_texts(rows)
+
+    copy = _find_text_button(rows, I18n.get("agent_research_message_copy"))
+    summary = _find_text_button(rows, I18n.get("agent_research_message_copy_summary"))
+    assert copy.disabled is True
+    assert summary.disabled is True
+    assert I18n.get(MESSAGE_COPY_EMPTY_KEY) in texts
+
+
+def test_message_branch_disabled_exposes_reason_key_in_tooltip() -> None:
+    state = _w15_state(
+        message_branch_available=False,
+        message_tools_unavailable_reason_key=MESSAGE_TOOLS_UNAVAILABLE_KEY,
+    )
+
+    rows = build_messages_section(state, handlers=_message_handlers())
+
+    icons = [
+        item
+        for item in _walk(rows)
+        if isinstance(item, ft.IconButton) and item.tooltip == I18n.get(MESSAGE_TOOLS_UNAVAILABLE_KEY)
+    ]
+    assert len(icons) == 2, "编辑与分支在能力缺失时都应显示原因码"
+    assert all(item.disabled for item in icons)
+    assert any(item.icon == ft.Icons.CALL_SPLIT for item in icons)
+
+
+def test_message_branch_available_invokes_handler_with_message_id() -> None:
+    calls: list[Any] = []
+    state = _w15_state(message_branch_available=True, message_edit_available=True)
+
+    rows = build_messages_section(state, handlers=_message_handlers(calls))
+    branch = _find_icon_button(rows, I18n.get("agent_research_message_branch"))
+    _invoke(branch.on_click, SimpleNamespace(control=branch))
+
+    assert calls == [("branch", "m-1")]
+    assert branch.disabled is False

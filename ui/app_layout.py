@@ -67,6 +67,7 @@ from ui.viewmodels.research_comparison_view_model import ComparisonServicePort, 
 from ui.viewmodels.research_workbench_view_model import ResearchWorkbenchViewModel
 from ui.views.research_comparison_panel import ResearchComparisonPanel
 from ui.views.research_history_panel import ResearchHistoryPanel
+from ui.views.research_observer_conversation import MessageActionHandlers
 from ui.views.research_observer_panel import ResearchObserverPanel
 from ui.views.workbench_panel import WorkbenchPanel
 from ui.views.screener_view import ScreenerView
@@ -836,6 +837,34 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         if page is not None and research_vm.state.materials_transfer_available:
             page.run_task(research_vm.transfer_draft_to_target)
 
+    # --- 消息修订 / 分支 / 局部复制 ---
+    def _submit_edited_message() -> None:
+        """修订重发（异步调度；先 REVISE 校验再以修订声明受理，R16/R2）。"""
+
+        page = _get_page()
+        if page is not None:
+            page.run_task(research_vm.submit_edit_message)
+
+    def _branch_from_message(message_id: str) -> None:
+        """从前缀新建研究分支并就位该分支（异步调度；能力缺失由 VM 报原因码）。"""
+
+        page = _get_page()
+        if page is not None:
+            page.run_task(research_vm.branch_from_message, message_id)
+
+    message_handlers = MessageActionHandlers(
+        on_begin_edit=research_vm.begin_edit_message,
+        on_edit_text=research_vm.set_edit_text,
+        on_submit_edit=_submit_edited_message,
+        on_cancel_edit=research_vm.cancel_edit_message,
+        on_branch=_branch_from_message,
+        on_selection=research_vm.set_copy_toolbar,
+        on_copy=research_vm.copy_toolbar_text,
+        on_copy_summary=research_vm.copy_toolbar_summary,
+        on_copy_done=research_vm.note_message_copy_done,
+        on_copy_failed=research_vm.note_message_copy_failed,
+    )
+
     def _submit_decision(decision_id: str, execution_id: str, round_id: str) -> None:
         """统一决定提交入口（旧 Dialog 打开/他人占用时拒绝，不排队、不伪造）。
 
@@ -1387,6 +1416,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             on_composer_mode=research_vm.set_composer_mode,
             on_send=_send_first_question,
             on_start_plan=_start_confirmed_plan,
+            message_handlers=message_handlers,
             on_retry_delivery=_retry_delivery,
             on_toggle_mcp_scope=research_vm.toggle_mcp_scope,
             on_load_mcp_scope=_load_mcp_scope,
