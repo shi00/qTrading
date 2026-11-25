@@ -1952,7 +1952,7 @@ class TestShellCallbackWiring:
         monkeypatch.setattr(mod, "shared_business_research", lambda *a, **kw: business_vm)
         captured: dict[str, Any] = {}
 
-        def _capture_pages(_tab, _settings, _screener, _backtest, start_research, *_rest):
+        def _capture_pages(_tab, _settings, _screener, _backtest, start_research, *_rest, **_kwargs):
             captured["start_research"] = start_research
             return ft.Row([])
 
@@ -1997,7 +1997,7 @@ class TestShellCallbackWiring:
         monkeypatch.setattr(mod, "shared_business_research", lambda *a, **kw: business_vm)
         captured: dict[str, Any] = {}
 
-        def _capture_pages(_tab, _settings, _screener, _backtest, start_research, *_rest):
+        def _capture_pages(_tab, _settings, _screener, _backtest, start_research, *_rest, **_kwargs):
             captured["start_research"] = start_research
             return ft.Row([])
 

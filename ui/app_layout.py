@@ -202,6 +202,7 @@ def _build_pages_stack(
     mcp_lifecycle: Any = None,
     agent_service: Any = None,
     user_scope: str = "local-desktop",
+    watchlist_stock_request: tuple[str, int] | None = None,
 ) -> ft.Stack:
     """构造所有页面控件的 ``ft.Stack`` (``visible`` prop 控制显示/隐藏)。
 
@@ -244,6 +245,8 @@ def _build_pages_stack(
         backtest_prefill_request: F13 选股→回测透传请求序号 (单调递增), 透传给
             BacktestView; 常驻回测页据此在「激活 + 新序号」时消费 pending prefill
             (不依赖重新 mount), None 表示尚无回测导航请求。
+        watchlist_stock_request: 成果卡「查看当前个股」深链请求
+            ``(code, seq)``, 透传给 WatchlistView (仅定位并展示当前资料)。
     """
     is_e2e = is_e2e_mode()
 
@@ -324,7 +327,11 @@ def _build_pages_stack(
         ),
         ft.Container(
             content=_make_content(
-                lambda: WatchlistView(active=current_tab == NavTabs.WATCHLIST, **research_props),
+                lambda: WatchlistView(
+                    active=current_tab == NavTabs.WATCHLIST,
+                    stock_detail_request=watchlist_stock_request,
+                    **research_props,
+                ),
                 current_tab == NavTabs.WATCHLIST,
             ),
             expand=True,
@@ -987,6 +994,9 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
     # UX-04 导航深链: screener 股票代码过滤请求 (code, seq), seq 递增使重复深链可重触发
     screener_stock_request: tuple[str, int] | None = None
     screener_stock_request, set_screener_stock_request = ft.use_state(screener_stock_request)
+    # 成果卡深链: 关注页「查看当前个股」请求 (code, seq), seq 递增使重复深链可重触发
+    watchlist_stock_request: tuple[str, int] | None = None
+    watchlist_stock_request, set_watchlist_stock_request = ft.use_state(watchlist_stock_request)
     # F13 常驻回测页透传: 回测导航请求序号 (单调递增), seq 变化使「已挂载/同 tab」的
     # 回测页仍触发现有 pending prefill 消费 (函数式更新防订阅时闭包 stale 快照)
     backtest_prefill_request: int | None = None
@@ -1102,8 +1112,8 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
 
         Args:
             target_tab: 目标 NavTabs 的 int 值。
-            subtab: 深链 subtab 段 (settings=子页 key / screener=股票代码),
-                无深链时为 None。
+            subtab: 深链 subtab 段 (settings=子页 key / screener=股票代码 /
+                watchlist=个股代码), 无深链时为 None。
 
         Note:
             本协程闭包捕获的是订阅时 (use_effect(dependencies=[]) 只执行一次)
@@ -1132,6 +1142,10 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             # UX-04: screener 段语义 = 股票代码 (任意非空字符串, 无白名单)
             set_screener_stock_request(lambda old: (subtab, (old[1] + 1) if old else 1))
             subtab_handled = True
+        elif subtab is not None and target_tab == int(NavTabs.WATCHLIST):
+            # 成果卡「查看当前个股」: 关注页按代码打开当前资料 (代码消费端 upper 归一)
+            set_watchlist_stock_request(lambda old: (subtab, (old[1] + 1) if old else 1))
+            subtab_handled = True
         if subtab is not None and not subtab_handled:
             logger.warning(
                 "[AppLayout] Unknown subtab %r for tab %s, fallback to main tab",
@@ -1150,7 +1164,8 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         """TOPIC_NAVIGATE 事件处理: 解析导航消息并调度切页 (UX-01 深链协议).
 
         消息格式: "<tab>" 或 "<tab>:<subtab>" (subtab 段语义由目标 tab 定义:
-        settings = 子页 key 白名单, screener = 股票代码任意非空段 UX-04)。
+        settings = 子页 key 白名单, screener = 股票代码任意非空段 UX-04,
+        watchlist = 个股代码任意非空段)。
         未知子页降级为切主 tab, 不吞导航; 格式非法整体忽略。
 
         Note:
@@ -1379,6 +1394,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             getattr(agent_wiring, "mcp_lifecycle", None),
             getattr(agent_wiring, "service", None),
             str(getattr(agent_wiring, "user_scope", LOCAL_DESKTOP_USER_SCOPE)),
+            watchlist_stock_request=watchlist_stock_request,
         ),
         expand=True,
         padding=AppStyles.SPACING_XL,

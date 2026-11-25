@@ -520,6 +520,27 @@ class SessionArtifactView:
 
 
 @dataclass(frozen=True)
+class SessionOriginView:
+    """会话研究的对象来源投影（只读；缺失项为 None，不填默认值冒充已知，R21）。
+
+    来源优先取草稿载荷里的 ``object_context``（canonical JSON），无该载荷时以
+    会话摘要的 ``origin_ref``（``"<kind>:<object_id>"``）兜底；两处都缺时整项为
+    None，由视图如实显示「未知」。
+    """
+
+    source_module: str | None
+    object_kind: str | None
+    object_id: str | None
+    object_version: str | None
+    display_name: str | None
+    available_at: str | None
+    period: str | None
+    availability_state: str | None
+    batch_ref: str | None
+    summary_items: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
 class LoadedArtifactBody:
     """按需读取的成果正文（``body_available=False`` 时保留服务端不可用原因）。"""
 
@@ -973,6 +994,9 @@ class ResearchObserverState:
     artifact_bodies: tuple[LoadedArtifactBody, ...] = ()
     artifact_body_pending_keys: tuple[str, ...] = ()
     session_draft: SessionDraftView | None = None
+    #: 会话级对象来源（成果卡「回原报告/查看当前个股/复制摘要」的事实来源）；
+    #: 会话无来源时为 None，不得残留上一会话（R21）。
+    session_origin: SessionOriginView | None = None
     draft_pending: bool = False
     draft_error_code: str | None = None
     #: 首问/计划（F01/F21）：输入正文、模式、提交中与错误 key 均为 UI 纯状态。
@@ -1405,6 +1429,79 @@ def _is_expired(expires_at: str | None) -> bool:
     except ValueError:
         return False
     return deadline <= datetime.now(UTC)
+
+
+def _origin_text(value: Any) -> str | None:
+    """来源字段 → 文本；非字符串/空串返回 None（类型不符即未知，不猜语义）。"""
+
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _origin_summary_items(value: Any) -> tuple[tuple[str, str], ...]:
+    """``object_context.summary`` → 稳定的 (键, 文本) 序列；缺失/非映射为空元组。
+
+    标量取 ``str()``；容器取 canonical JSON（``ensure_ascii=False`` + 键排序），
+    保证复制文本可复现（同一事实同一文本）。
+    """
+
+    if not isinstance(value, dict):
+        return ()
+    items: list[tuple[str, str]] = []
+    for key in sorted(value, key=str):
+        item = value[key]
+        if isinstance(item, (dict, list, tuple)):
+            items.append((str(key), json.dumps(item, ensure_ascii=False, sort_keys=True)))
+        else:
+            items.append((str(key), str(item)))
+    return tuple(items)
+
+
+def _session_origin_view(
+    object_context: str | None,
+    origin_ref: str | None = None,
+) -> SessionOriginView | None:
+    """会话来源投影：优先 canonical JSON ``object_context``，无载荷时 ``origin_ref`` 兜底。
+
+    JSON 非法或顶层不是对象 → None（不抛、不猜）；``origin_ref`` 仅在前者缺失
+    （None/空串）时使用，按第一个 ``:`` 拆成 ``kind`` / ``object_id``。
+    """
+
+    if object_context:
+        try:
+            payload = json.loads(object_context)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return SessionOriginView(
+            source_module=_origin_text(payload.get("source_module")),
+            object_kind=_origin_text(payload.get("object_kind")),
+            object_id=_origin_text(payload.get("object_id")),
+            object_version=_origin_text(payload.get("object_version")),
+            display_name=_origin_text(payload.get("display_name")),
+            available_at=_origin_text(payload.get("available_at")),
+            period=_origin_text(payload.get("period")),
+            availability_state=_origin_text(payload.get("availability_state")),
+            batch_ref=_origin_text(payload.get("batch_ref")),
+            summary_items=_origin_summary_items(payload.get("summary")),
+        )
+    if not origin_ref:
+        return None
+    kind, separator, object_id = origin_ref.partition(":")
+    return SessionOriginView(
+        source_module=None,
+        object_kind=kind or None,
+        object_id=(object_id or None) if separator else None,
+        object_version=None,
+        display_name=None,
+        available_at=None,
+        period=None,
+        availability_state=None,
+        batch_ref=None,
+        summary_items=(),
+    )
 
 
 def _session_draft_view(read: DraftRead) -> SessionDraftView:
@@ -3711,6 +3808,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             session_draft_revision=0,
             artifact_body_pending_keys=(),
             session_draft=None,
+            session_origin=None,
             draft_error_code=None,
             decisions=(),
             pending_count=0,
@@ -3946,6 +4044,10 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             # 换会话或读到清理状态时不复用正文缓存（同 id 跨会话/已清理也不冒充可读成果）
             artifact_bodies=artifact_bodies,
             session_draft=loaded_draft,
+            session_origin=_session_origin_view(
+                loaded_draft.object_context if loaded_draft is not None else None,
+                getattr(read.summary, "origin_ref", None),
+            ),
             draft_error_code=None,
             # 持久化首读为权威：内存增量片段被快照取代（返焦/重连不得只靠内存增量）。
             stream_fragments=(),
@@ -4699,7 +4801,15 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         if session_mismatch or revision_mismatch or self._session_cleaned:
             self._set_state(draft_pending=False)
             return
-        self._set_state(draft_pending=False, session_draft=_session_draft_view(read))
+        draft_view = _session_draft_view(read)
+        # 草稿载荷携带对象来源时以它为准（比首读 origin_ref 更完整）；草稿无来源时
+        # 保留首读的 origin_ref 兜底结果，不以「本次未提供」覆盖已知事实。
+        origin = (
+            _session_origin_view(draft_view.object_context)
+            if draft_view.object_context is not None
+            else self._state.session_origin
+        )
+        self._set_state(draft_pending=False, session_draft=draft_view, session_origin=origin)
 
     def _artifact_is_cleaned(self, key: str) -> bool:
         """当前首读投影中该成果版本是否已清理（清理只换 tombstone 文本）。"""

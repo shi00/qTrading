@@ -179,7 +179,9 @@ class TestAppLayoutContract:
         UX-01 后 SettingsView 为多行构造 (active + target_subtab 两个 prop),
         UX-04 后 ScreenerView 为多行构造 (active + stock_filter_request 两个 prop),
         F13 后 BacktestView 为多行构造 (active + prefill_request 两个 prop),
-        断言放宽为 ``SettingsView(`` / ``ScreenerView(`` / ``BacktestView(`` 函数调用存在性;
+        成果卡深链后 WatchlistView 为多行构造 (active + stock_detail_request 两个 prop),
+        断言放宽为 ``SettingsView(`` / ``ScreenerView(`` / ``BacktestView(`` /
+        ``WatchlistView(`` 函数调用存在性;
         active prop 的 kwargs 验证由 test_app_layout_runtime.py 的深链测试覆盖。
         """
         source = _code_source()
@@ -190,7 +192,7 @@ class TestAppLayoutContract:
             "DataExplorerView(active=",
             "TaskCenterView(active=",
             "SettingsView(",
-            "WatchlistView(active=",
+            "WatchlistView(",
         ]:
             assert view_name in source, f"必须函数调用消费 {view_name}"
 
@@ -269,8 +271,9 @@ class TestBuildPagesStack:
         UX-01 后 SettingsView 为多行构造 (active + target_subtab),
         UX-04 后 ScreenerView 为多行构造 (active + stock_filter_request),
         F13 后 BacktestView 为多行构造 (active + prefill_request),
-        断言为 ``SettingsView(`` / ``ScreenerView(`` / ``BacktestView(`` 构造存在性;
-        active prop 由 runtime 深链测试覆盖。
+        成果卡深链后 WatchlistView 为多行构造 (active + stock_detail_request),
+        断言为 ``SettingsView(`` / ``ScreenerView(`` / ``BacktestView(`` /
+        ``WatchlistView(`` 构造存在性; active prop 由 runtime 深链测试覆盖。
         """
         source = _code_source()
         for view_name in [
@@ -280,7 +283,7 @@ class TestBuildPagesStack:
             "DataExplorerView(active=",
             "TaskCenterView(active=",
             "SettingsView(",
-            "WatchlistView(active=",
+            "WatchlistView(",
         ]:
             assert view_name in source, f"_build_pages_stack 必须预创建 {view_name}"
 
