@@ -133,6 +133,8 @@ from services.agent_service.runtime import (
 from services.agent_service.service import (
     AgentService,
     ComparisonLaneRetryOutcome,
+    StockAnalysisPort,
+    StockAnalysisRequest,
     SubmissionOutcome,
     WaitResult,
 )
@@ -229,6 +231,8 @@ __all__ = [
     "SkillAvailabilityReceipt",
     "StartupIsolationReceipt",
     "StartupOutcome",
+    "StockAnalysisPort",
+    "StockAnalysisRequest",
     "SubmissionOutcome",
     "SubprocessAttachmentWorker",
     "SummaryLineage",
