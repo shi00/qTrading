@@ -169,6 +169,10 @@ class ScreenerPage:
         """导航到选股页。"""
         await self.app.goto("nav_screener")
 
+    async def expect_run_button(self, timeout_ms: int = TIMEOUTS.TITLE) -> None:
+        """断言选股页主执行按钮可见（选股页已渲染且未被其它层遮挡卸载）。"""
+        await self.ap.expect_visible(EIDS.SCREENER.RUN_BUTTON, timeout_ms=timeout_ms)
+
     async def select_strategy(self, strategy_key: str, timeout_ms: int = TIMEOUTS.TITLE) -> None:
         """选择指定策略（通过策略 key，内部解析为本地化显示名）。"""
         name = strategy_label(strategy_key)
@@ -1079,3 +1083,62 @@ class TaskCenterPage:
     async def expect_task_name(self, name: str, timeout_ms: int = TIMEOUTS.TITLE) -> None:
         """等待指定任务名出现（非 anchor 化，走文本断言）。"""
         await self.page.expect_text(name, timeout_ms=timeout_ms)
+
+
+class ResearchPanelPage:
+    """公共区研究观察层（右侧非模态面板）Page Object。
+
+    面板与品牌区入口均未锚点化，入口按钮的可访问名来自 tooltip，故以
+    ``click_button``（含 aria-label 回退）定位；面板主体以 i18n 文案断言。
+    收起只隐藏、不卸载业务页、不清草稿（见 research_observer_panel 模块说明）。
+    """
+
+    def __init__(self, page: FletPage):
+        self.page = page
+        self.app = App(page)
+
+    async def open(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """点击公共区研究入口并等待面板标题出现。"""
+        await self.page.click_button(I18n.get("agent_research_toggle"), timeout_ms=timeout_ms)
+        await self.expect_open()
+
+    async def close(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """点击面板「收起研究」并等待面板标题消失。"""
+        await self.page.click_button(I18n.get("agent_research_close"), timeout_ms=timeout_ms)
+        await self.page.expect_text_gone(I18n.get("agent_research_title"), timeout_ms=TIMEOUTS.TITLE)
+
+    async def expect_open(self, timeout_ms: int = TIMEOUTS.TITLE) -> None:
+        """断言面板标题可见（面板已展开）。"""
+        await self.page.expect_text(I18n.get("agent_research_title"), timeout_ms=timeout_ms)
+
+    async def is_body_available(self) -> bool:
+        """面板主体是否可用（首问区渲染 vs 仅渲染不可用原因）。"""
+        return await self.page.has_text(I18n.get("agent_research_composer"))
+
+    def _composer_field(self):
+        """首问输入框（multiline TextField 渲染为 textarea；兼容 input 语义节点）。"""
+        return self.page.page.locator('textarea[aria-label*="首问"], input[aria-label*="首问"]').first
+
+    async def fill_first_question(self, text: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """在首问输入区键入文本（沿用 fill_textbox 的 Control+A + 键盘输入路径）。"""
+        await self.page.fill_textbox(I18n.get("agent_research_composer_label"), text, timeout_ms=timeout_ms)
+
+    async def reveal_composer_value(self) -> str:
+        """聚焦首问输入框后读取其当前值（Flutter Web 仅在聚焦时同步 DOM value）。"""
+        field = self._composer_field()
+        await field.wait_for(state="attached", timeout=TIMEOUTS.INTERACTION)
+        await field.click(force=True)
+        await self.page.page.wait_for_timeout(200)
+        return await field.evaluate("e => e.value")
+
+    async def expect_composer_value(self, expected: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """轮询断言首问输入框的值精确等于 ``expected``（IME 组字不丢字的可见证据）。"""
+        scaled = self.page._tm(timeout_ms)  # noqa: SLF001  # 复用同一超时缩放口径
+        start = asyncio.get_running_loop().time()
+        actual = ""
+        while (asyncio.get_running_loop().time() - start) * 1000 < scaled:
+            actual = await self.reveal_composer_value()
+            if actual == expected:
+                return
+            await self.page.page.wait_for_timeout(200)
+        raise AssertionError(f"首问输入框值应为 {expected!r}，实际为 {actual!r}")
