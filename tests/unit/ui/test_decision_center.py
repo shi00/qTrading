@@ -29,6 +29,7 @@ from tests.unit.ui.component_renderer import (
     render_once,
     run_mount_effects,
     run_render_effects,
+    run_unmount_effects,
 )
 from ui import agent_decision_arbiter
 from ui.viewmodels import decision_center_view_model as vm_mod
@@ -1005,3 +1006,202 @@ def test_allow_double_click_only_schedules_once(
     scheduled = [call.args[0] for call in env["page"].run_task.call_args_list if call.args]
     runs = [item for item in scheduled if getattr(item, "__name__", "") == "_run_action"]
     assert len(runs) == 1, "仲裁单槽：双击只调度一次提交（至多一次）"
+
+
+def _open_center(env: dict[str, Any]) -> ft.Container:
+    """打开统一决定面板并重渲染（入口与观察层相互独立）。"""
+
+    _click(_leading_buttons(env)[5])
+    _render(env)
+    panel = _tail_control(env)
+    assert isinstance(panel, ft.Container) and panel.width == 340
+    return panel
+
+
+def test_center_shell_callbacks_cover_all_actions(
+    monkeypatch: Any, mock_i18n_state: Any, mock_app_colors_state: Any
+) -> None:
+    """壳层回调全覆盖：拒绝/答复/稍后/查看范围/撤销/重试投递都经统一入口。"""
+
+    facts = (
+        _fact("d-auth", decision_kind="tool_permission", question_payload=_auth_payload()),
+        _fact("d-text", question_payload='{"question":"选哪个？"}'),
+        _fact(
+            "d-del",
+            stage="delivery",
+            command_record_id="cmd-1",
+            delivery_state=SimpleNamespace(value="not_delivered"),
+        ),
+    )
+    env = _mount_layout(monkeypatch, _FakeService(facts=facts))
+    vm = vm_mod._shared_vm
+    assert isinstance(vm, DecisionCenterViewModel)
+    _run(vm.refresh())
+    vm.set_answer_draft("d-text", "选 A")
+
+    panel = _open_center(env)
+    buttons = _buttons(panel)
+    _click(buttons["agent_decision_deny"])
+    _click(buttons["agent_decision_submit_answer"])
+    _click(buttons["agent_decision_later"])
+    _click(buttons["agent_decision_load_scope"])
+    _click(buttons["agent_decision_retry_delivery"])
+
+    # 详情加载后撤销入口才出现（许可版本未知时仍可点击，但服务端拒绝）
+    _run(vm.load_authorization_detail("d-auth"))
+    _render(env)
+    _click(_buttons(_tail_control(env))["agent_decision_revoke"])
+
+    names = [getattr(call.args[0], "__name__", "") for call in env["page"].run_task.call_args_list if call.args]
+    assert "_run_action" in names, "写动作应经仲裁调度"
+    assert "load_authorization_detail" in names, "查看范围应只读调度"
+    assert vm.state.submitting_decision_id is None or vm.state.submitting_decision_id == "d-auth"
+
+
+def test_pending_reminder_locate_returns_to_source_session(
+    monkeypatch: Any, mock_i18n_state: Any, mock_app_colors_state: Any
+) -> None:
+    """提醒「定位」切回源会话（用户显式点击，不自动跳转）。"""
+
+    from ui.viewmodels import research_observer_view_model as research_mod
+
+    service = _FakeService(
+        facts=(
+            _fact(
+                "d-del",
+                stage="delivery",
+                command_record_id="cmd-1",
+                delivery_state=SimpleNamespace(value="not_delivered"),
+            ),
+        ),
+    )
+    env = _mount_layout(monkeypatch, service)
+    vm = vm_mod._shared_vm
+    assert isinstance(vm, DecisionCenterViewModel)
+    _run(vm.refresh())
+    assert vm.state.reminders, "交付异常应生成跨页提醒"
+
+    panel = _open_center(env)
+    env["page"].run_task.reset_mock()
+    _click(_buttons(panel)["agent_decision_locate"])
+
+    research_vm = research_mod._shared_vm
+    assert research_vm is not None
+    result = [
+        call.args
+        for call in env["page"].run_task.call_args_list
+        if call.args and call.args[0] == research_vm.open_session
+    ]
+    assert result and result[0][1] == "s-1", "定位应打开源会话 s-1"
+
+
+def test_empty_pending_hides_status_indicator_and_read_failure_is_quiet(
+    monkeypatch: Any, mock_i18n_state: Any, mock_app_colors_state: Any
+) -> None:
+    """无待处理不显示状态栏指示；读取失败不伪造 0 待办也不阻塞壳层。"""
+
+    env = _mount_layout(monkeypatch, _FakeService(facts=()))
+    pending_labels = [
+        control
+        for control in _iter_controls(env["result"])
+        if isinstance(control, ft.Text) and control.value == "agent_research_pending_fmt"
+    ]
+    assert pending_labels == [], "无待处理时不应出现待处理指示"
+
+    broken = _mount_layout(monkeypatch, _BrokenService())
+    vm = vm_mod._shared_vm
+    assert isinstance(vm, DecisionCenterViewModel)
+    _run(vm.refresh())
+    assert vm.state.error_code, "读取失败应给出错误码"
+    panel = _open_center(broken)
+    assert "agent_decision_error_fmt" in _texts(panel)
+
+
+def test_poll_tick_stops_on_cancellation_and_unmount_cancels_task(
+    monkeypatch: Any, mock_i18n_state: Any, mock_app_colors_state: Any
+) -> None:
+    """轮询协程取消必须传播（R2）；卸载时取消挂起的轮询任务。"""
+
+    env = _mount_layout(monkeypatch, _FakeService())
+    ticks = [
+        call.args[0]
+        for call in env["page"].run_task.call_args_list
+        if call.args and getattr(call.args[0], "__name__", "") == "_tick"
+    ]
+    assert ticks, "挂载后应调度低频轮询"
+
+    sleeps = {"count": 0}
+
+    async def _sleep_once_then_cancel(*_a: Any, **_kw: Any) -> None:
+        sleeps["count"] += 1
+        if sleeps["count"] > 1:
+            raise asyncio.CancelledError
+
+    original_sleep = asyncio.sleep
+    monkeypatch.setattr(asyncio, "sleep", _sleep_once_then_cancel)
+    try:
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            _run(ticks[0]())
+    finally:
+        monkeypatch.setattr(asyncio, "sleep", original_sleep)
+    assert isinstance(exc_info.value, asyncio.CancelledError), "取消必须原样传播（R2）"
+    assert sleeps["count"] >= 2, "首轮轮询应真正执行一次刷新后再进入下一轮"
+
+    mount_task = env["page"].run_task.return_value
+    run_unmount_effects(env["component"])
+    assert mount_task.cancel.call_count >= 1, "卸载应取消轮询任务（不泄漏后台任务）"
+
+
+def test_shell_sidebar_toggles_keep_panels_mutually_usable(
+    monkeypatch: Any, mock_i18n_state: Any, mock_app_colors_state: Any
+) -> None:
+    """公共区入口互不抢占：对比面板可开可关，决定中心入口仍在（跨页返回）。"""
+
+    env = _mount_layout(monkeypatch, _FakeService())
+    comparison_toggle = _leading_buttons(env)[4]
+    _click(comparison_toggle)
+    _render(env)
+    assert getattr(_tail_control(env), "width", None) != 340, "对比面板与决定面板互不串位"
+
+    _click(_leading_buttons(env)[4])
+    _render(env)
+    assert getattr(_tail_control(env), "width", None) != 340, "关闭对比后不得残留决定面板"
+    assert _leading_buttons(env)[5].tooltip == "agent_decision_center_open"
+
+
+def test_observer_panel_and_business_callbacks_schedule_async_commands(
+    monkeypatch: Any, mock_i18n_state: Any, mock_app_colors_state: Any
+) -> None:
+    """观察层与业务入口回调都只调度异步命令（事件处理器内不做同步 IO，R16）。"""
+
+    from ui import app_layout as layout_mod
+    from ui.viewmodels import research_observer_view_model as research_mod
+
+    panel_mock = MagicMock(return_value=MagicMock())
+    monkeypatch.setattr(layout_mod, "ResearchObserverPanel", panel_mock)
+    env = _mount_layout(monkeypatch, _FakeService())
+    _click(_leading_buttons(env)[3])
+    _render(env)
+    calls = panel_mock.call_args_list or panel_mock.mock_calls
+    assert calls, "展开观察层后应构建观察面板"
+    callbacks = calls[-1].kwargs
+
+    research_vm = research_mod._shared_vm
+    assert research_vm is not None
+    research_vm._set_state(session_id="s-1", session_draft_revision=2)
+    env["page"].run_task.reset_mock()
+    callbacks["on_load_mcp_scope"]()
+    callbacks["on_load_sessions"]()
+    callbacks["on_load_draft"]()
+    callbacks["on_send"]()
+    callbacks["on_start_plan"]()
+    callbacks["on_submit"]("d-1", "e-1", "r-1")
+
+    names = [getattr(call.args[0], "__name__", "") for call in env["page"].run_task.call_args_list if call.args]
+    assert "load_mcp_scope" in names
+    assert "load_sessions" in names
+    assert "load_draft" in names
+    assert "_run_action" in names, "观察层决定提交应经仲裁调度（至多一次）"
+
+    assert "send_first_question" not in names, "未接线 composer 时不得伪造发送"
+    assert "start_confirmed_plan" not in names, "未接线 composer 时不得伪造派发"
