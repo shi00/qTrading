@@ -16,6 +16,7 @@ from pathlib import PureWindowsPath
 import flet as ft
 
 from ui.i18n import I18n
+from ui.pubsub_topics import TOPIC_NAVIGATE
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.research_observer_view_model import (
     ARTIFACT_EXPORT_FORMATS,
@@ -25,6 +26,7 @@ from ui.viewmodels.research_observer_view_model import (
     LoadedArtifactBody,
     ResearchObserverState,
     SessionArtifactView,
+    SessionOriginView,
 )
 from ui.views.research_observer_widgets import hint_text, section_card, section_title
 
@@ -116,6 +118,199 @@ def artifact_preview_meta(preview: ArtifactPreviewView) -> str:
     )
 
 
+#: 对象类别 → 原业务页（只定位，不重跑筛选/回测、不预填参数）。
+_ORIGIN_REPORT_TAB_BY_KIND = {
+    "backtest_result": "backtest",
+    "screener_candidate": "screener",
+    "news_item": "market",
+}
+
+#: 可按 ts_code 打开当前个股详情的对象类别（个股 / 选股候选）。
+_STOCK_ORIGIN_KINDS = frozenset({"stock", "screener_candidate"})
+
+
+def origin_report_navigate(origin: SessionOriginView | None) -> str | None:
+    """研究对象的原业务页深链段；无来源/未知类别返回 None（不猜目标页）。"""
+
+    if origin is None or origin.object_kind is None:
+        return None
+    return _ORIGIN_REPORT_TAB_BY_KIND.get(origin.object_kind)
+
+
+def origin_stock_code(origin: SessionOriginView | None) -> str | None:
+    """研究对象对应的个股代码（``object_id`` 归一为大写）；类别不符/缺失返回 None。"""
+
+    if origin is None or origin.object_kind not in _STOCK_ORIGIN_KINDS:
+        return None
+    code = (origin.object_id or "").strip()
+    return code.upper() if code else None
+
+
+def artifact_brief_lines(origin: SessionOriginView | None, artifact: SessionArtifactView) -> list[str]:
+    """复制摘要/条件文本：准确对象 + 来源 + 版本 + 时点 + 缺口。
+
+    任何缺失事实都渲染为「未知」文案（R21：不留空、不以默认值冒充已知）；
+    不包含用户身份/路径等无关信息，也不承诺分享或写库。
+    """
+
+    unknown = I18n.get("agent_research_artifact_brief_unknown")
+    display_name = origin.display_name if origin is not None else None
+    kind = origin.object_kind if origin is not None else None
+    object_id = origin.object_id if origin is not None else None
+    if kind and object_id:
+        kind_text = f"{kind}:{object_id}"
+    else:
+        kind_text = kind or object_id or unknown
+    source = (origin.source_module if origin is not None else None) or unknown
+    version = origin.object_version[:12] if origin is not None and origin.object_version else unknown
+    available_at = (origin.available_at if origin is not None else None) or unknown
+    period = (origin.period if origin is not None else None) or unknown
+    published_at = artifact.published_at or unknown
+    gaps: list[str] = []
+    if not artifact.summary:
+        gaps.append(I18n.get("agent_research_artifact_brief_gap_missing_summary"))
+    if not artifact.body_available:
+        gaps.append(I18n.get("agent_research_artifact_brief_gap_body_unavailable"))
+    gap = " / ".join(gaps) if gaps else unknown
+    return [
+        I18n.get("agent_research_artifact_brief_object").format(object=display_name or unknown),
+        I18n.get("agent_research_artifact_brief_kind").format(kind=kind_text),
+        I18n.get("agent_research_artifact_brief_source").format(source=source),
+        I18n.get("agent_research_artifact_brief_version").format(version=version),
+        I18n.get("agent_research_artifact_brief_available_at").format(time=available_at),
+        I18n.get("agent_research_artifact_brief_period").format(period=period),
+        I18n.get("agent_research_artifact_brief_published_at").format(time=published_at),
+        I18n.get("agent_research_artifact_brief_gap").format(gap=gap),
+    ]
+
+
+async def _write_clipboard_text(text: str) -> bool | None:
+    """把文本写入系统剪贴板：无渲染上下文返回 None，成功 True，失败 False。
+
+    CancelledError 必须传播（R2）；剪贴板 service 无论成败都从页面移除。
+    """
+
+    page = _get_page()
+    if page is None:
+        return None
+    clipboard = ft.Clipboard()
+    page.services.append(clipboard)
+    try:
+        await clipboard.set(text)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return False
+    finally:
+        try:
+            page.services.remove(clipboard)
+        except ValueError:
+            pass
+    return True
+
+
+async def _copy_brief_and_toast(text: str) -> None:
+    """写入摘要文本并按结果给成功/失败 toast（不写库、不自动分享）。"""
+
+    result = await _write_clipboard_text(text)
+    if result is None:
+        return
+    page = _get_page()
+    if page is None:
+        return
+    if result:
+        page.toast.show(I18n.get("agent_research_artifact_brief_copied"), "success")  # type: ignore[attr-defined]  # [reason: page.toast 由 application.py 动态挂载, ft.Page 存根未声明]
+    else:
+        page.toast.show(I18n.get("agent_research_artifact_brief_copy_failed"), "error")  # type: ignore[attr-defined]  # [reason: page.toast 由 application.py 动态挂载, ft.Page 存根未声明]
+
+
+def _queue_brief_copy(text: str) -> None:
+    """事件处理器内只调度任务（R16：不在事件循环线程做同步阻塞操作）。"""
+
+    page = _get_page()
+    if page is not None:
+        page.run_task(_copy_brief_and_toast, text)
+
+
+def _publish_navigation(message: str) -> None:
+    """发送业务页定位消息（仅定位：不重跑、不预填、不自动保存）。"""
+
+    page = _get_page()
+    if page is not None:
+        page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, message)
+
+
+def _brief_action_button(
+    label_key: str, icon: str, tooltip_key: str, on_click: Callable[[ft.ControlEvent], None]
+) -> ft.TextButton:
+    """成果卡动作按钮（颜色/字号统一走 AppStyles/AppColors，R23）。"""
+
+    return ft.TextButton(
+        content=ft.Text(I18n.get(label_key), size=AppStyles.FONT_SIZE_BODY_SM),
+        icon=icon,
+        tooltip=I18n.get(tooltip_key),
+        style=ft.ButtonStyle(color=AppColors.PRIMARY),
+        on_click=on_click,
+    )
+
+
+def build_artifact_origin_actions(
+    origin: SessionOriginView | None,
+    artifact: SessionArtifactView,
+) -> ft.Row:
+    """成果卡动作行：复制摘要/条件 / 回原报告 / 查看当前个股 / 打开关注列表 / 打开选股方案。
+
+    全部为只读定位或复制：不重跑筛选/回测、不预填参数、不自动关注/保存方案，
+    也不显示未发生的成功提示。
+    """
+
+    buttons: list[ft.TextButton] = [
+        _brief_action_button(
+            "agent_research_artifact_brief_copy",
+            ft.Icons.CONTENT_COPY,
+            "agent_research_artifact_brief_copy_hint",
+            lambda _e: _queue_brief_copy("\n".join(artifact_brief_lines(origin, artifact))),
+        )
+    ]
+    report_tab = origin_report_navigate(origin)
+    if report_tab is not None:
+        buttons.append(
+            _brief_action_button(
+                "agent_research_artifact_open_report",
+                ft.Icons.OPEN_IN_NEW,
+                "agent_research_artifact_locate_only_hint",
+                lambda _e, tab=report_tab: _publish_navigation(tab),
+            )
+        )
+    stock_code = origin_stock_code(origin)
+    if stock_code is not None:
+        buttons.append(
+            _brief_action_button(
+                "agent_research_artifact_view_current_stock",
+                ft.Icons.SEARCH,
+                "agent_research_artifact_view_current_stock_note",
+                lambda _e, code=stock_code: _publish_navigation(f"watchlist:{code}"),
+            )
+        )
+    buttons.append(
+        _brief_action_button(
+            "agent_research_artifact_open_watchlist",
+            ft.Icons.STAR_OUTLINE,
+            "agent_research_artifact_locate_only_hint",
+            lambda _e: _publish_navigation("watchlist"),
+        )
+    )
+    buttons.append(
+        _brief_action_button(
+            "agent_research_artifact_open_plan",
+            ft.Icons.FILTER_ALT_OUTLINED,
+            "agent_research_artifact_locate_only_hint",
+            lambda _e: _publish_navigation("screener"),
+        )
+    )
+    return ft.Row(buttons, spacing=AppStyles.SPACING_XS, wrap=True)
+
+
 def build_artifact_card(
     artifact: SessionArtifactView,
     *,
@@ -124,8 +319,13 @@ def build_artifact_card(
     on_load_artifact: Callable[[str, int, str, str], None],
     selected: bool = False,
     on_toggle_selection: Callable[[str], None] | None = None,
+    origin: SessionOriginView | None = None,
 ) -> ft.Control:
-    """成果卡：摘要常驻；正文按需只读读取，未载入/不可用如实标注。"""
+    """成果卡：摘要常驻；正文按需只读读取，未载入/不可用如实标注。
+
+    ``origin`` 为会话级对象来源（同一会话所有成果共用）；为 None 时动作行只保留
+    「打开关注列表/打开选股方案」，复制文案只含成果自身字段（不编造对象）。
+    """
 
     selection_key = f"{artifact.artifact_id}:{artifact.artifact_version}"
     header_controls: list[ft.Control] = []
@@ -228,6 +428,7 @@ def build_artifact_card(
                     ),
                 )
             )
+    rows.append(build_artifact_origin_actions(origin, artifact))
     return ft.Container(
         content=ft.Column(rows, spacing=AppStyles.SPACING_XS),
         padding=AppStyles.SPACING_SM,
@@ -467,6 +668,7 @@ def build_artifacts_section(
                 on_load_artifact=on_load_artifact,
                 selected=key in state.artifact_selected_keys,
                 on_toggle_selection=on_toggle_artifact_selection,
+                origin=state.session_origin,
             )
         )
     if state.artifacts_has_more:

@@ -967,6 +967,7 @@ def StockDetailDialog(
     sentiment_state: SentimentIndexState | None = None,
     sentiment_on_select_day: Callable[[datetime.date], None] | None = None,
     sentiment_on_cancel: Callable[[], None] | None = None,
+    context_note: str | None = None,
 ) -> ft.Container:  # pragma: no cover  # UI 组件闭包（hooks/use_dialog/事件处理器）不可无头单测
     """股票详情弹窗（声明式 V1）。
 
@@ -995,6 +996,8 @@ def StockDetailDialog(
         sentiment_state: N5-3 新闻情绪指数不可变状态快照；为 None 时不渲染情绪条。
         sentiment_on_select_day: 点击情绪柱选中/收起某日 → 展开当日新闻明细命令。
         sentiment_on_cancel: 关闭弹窗时取消情绪指数在途任务（双任务槽，同 news_on_cancel）。
+        context_note: 标题下方提示条文案（如「当前资料」标注）；None 时不渲染
+            （既有调用点零变化）。
     """
     # --- i18n 订阅（locale 切换自动重渲染）---
     ft.use_state(get_observable_state)
@@ -1108,11 +1111,30 @@ def StockDetailDialog(
         )
     if on_add_to_watchlist is not None:
         actions.insert(0, ft.TextButton(I18n.get("watchlist_add"), on_click=_add_to_watchlist))
+    dialog_title: ft.Control = _build_title(data)
+    if context_note:
+        dialog_title = ft.Column(
+            [
+                dialog_title,
+                ft.Container(
+                    content=ft.Text(
+                        context_note,
+                        size=AppStyles.FONT_SIZE_CAPTION,
+                        color=AppColors.TEXT_SECONDARY,
+                    ),
+                    padding=AppStyles.SPACING_XS,
+                    bgcolor=AppColors.SURFACE_VARIANT,
+                    border_radius=4,
+                ),
+            ],
+            spacing=AppStyles.SPACING_XS,
+            tight=True,
+        )
     dialog = (
         ft.AlertDialog(
             modal=False,
             on_dismiss=_close,
-            title=_build_title(data),
+            title=dialog_title,
             content=_build_content(data, chart_content, width, height, column_label_fn, news_panel, sentiment_strip),
             actions=actions,
             actions_alignment=ft.MainAxisAlignment.END,

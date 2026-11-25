@@ -1,6 +1,7 @@
 """ResearchObserverViewModel 单测（检视 P02：共享研究观察层 + 统一决定）。"""
 
 import asyncio
+import json
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -40,6 +41,7 @@ from ui.viewmodels.research_observer_view_model import (
     ResearchObserverViewModel,
     reset_shared_research_observer,
     resolve_agent_research_service,
+    SessionOriginView,
     shared_research_observer,
 )
 
@@ -159,6 +161,7 @@ def _session_read(
     revision: int = 3,
     pinned: bool = False,
     archived: bool = False,
+    origin_ref: str | None = None,
 ) -> Any:
     return SimpleNamespace(
         summary=SimpleNamespace(
@@ -169,6 +172,7 @@ def _session_read(
             revision=revision,
             pinned=pinned,
             archived=archived,
+            origin_ref=origin_ref,
         ),
         executions=(_execution(),) if executions is None else executions,
         messages=SimpleNamespace(items=messages, has_more=messages_has_more, next_cursor=None),
@@ -189,6 +193,7 @@ def _draft_read(
     cleaned: bool = False,
     archived: bool = False,
     transferred: bool = False,
+    object_context: str | None = None,
 ) -> DraftRead:
     if payload is _UNSET:
         payload = DraftPayload(
@@ -203,7 +208,7 @@ def _draft_read(
             research_date="2026-11-13",
             cutoff=None,
             send_target=None,
-            object_context=None,
+            object_context=object_context,
             role_prompt_selection=None,
             customized_fields=("mode",),
             defaults_baseline_digest="b" * 64,
@@ -2539,3 +2544,198 @@ def _no_change_service(read: Any) -> Any:
             return super().__getattribute__(name)
 
     return _NoChange(hits=(_hit("s-1"),), session_reads={"s-1": read})
+
+
+class TestSessionOriginProjection:
+    """成果卡事实来源投影：canonical JSON 优先，origin_ref 兜底，缺失即 None（R21）。"""
+
+    @pytest.mark.asyncio
+    async def test_refresh_projects_origin_ref_fallback(self) -> None:
+        service = _FakeService(read=_session_read(origin_ref="screener_candidate:000001.SZ"))
+        vm = ResearchObserverViewModel(service)
+
+        await vm.refresh()
+
+        origin = vm.state.session_origin
+        assert origin is not None
+        assert origin.object_kind == "screener_candidate"
+        assert origin.object_id == "000001.SZ"
+        assert origin.source_module is None
+        assert origin.display_name is None, "origin_ref 不含展示名时必须留 None，不得编造"
+        assert origin.object_version is None
+        assert origin.summary_items == ()
+
+    @pytest.mark.asyncio
+    async def test_refresh_without_origin_leaves_origin_none(self) -> None:
+        service = _FakeService(read=_session_read())
+        vm = ResearchObserverViewModel(service)
+
+        await vm.refresh()
+
+        assert vm.state.session_origin is None
+
+    @pytest.mark.asyncio
+    async def test_load_draft_parses_canonical_object_context(self) -> None:
+        context = json.dumps(
+            {
+                "source_module": "screener",
+                "object_kind": "screener_candidate",
+                "object_id": "000001.SZ",
+                "object_version": "v" * 32,
+                "digest": "d" * 64,
+                "display_name": "平安银行",
+                "available_at": "2026-11-20",
+                "period": "20261120",
+                "availability_state": "available",
+                "summary": {"score": 88, "flags": ["a", "b"], "ratio": 0.5},
+                "batch_ref": "batch-1",
+            },
+            ensure_ascii=False,
+        )
+        service = _FakeService(
+            read=_session_read(draft_revision=2, origin_ref="news_item:news-1"),
+            draft_read=_draft_read(object_context=context),
+        )
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+
+        await vm.load_draft("s-1", 2)
+
+        origin = vm.state.session_origin
+        assert origin is not None
+        assert origin.source_module == "screener"
+        assert origin.object_kind == "screener_candidate"
+        assert origin.object_id == "000001.SZ"
+        assert origin.object_version == "v" * 32
+        assert origin.display_name == "平安银行"
+        assert origin.available_at == "2026-11-20"
+        assert origin.period == "20261120"
+        assert origin.availability_state == "available"
+        assert origin.batch_ref == "batch-1"
+        assert origin.summary_items == (
+            ("flags", '["a", "b"]'),
+            ("ratio", "0.5"),
+            ("score", "88"),
+        ), "标量取 str()，容器取 canonical JSON（键排序，中文不转义）"
+
+    @pytest.mark.asyncio
+    async def test_invalid_object_context_json_yields_none(self) -> None:
+        service = _FakeService(
+            read=_session_read(draft_revision=2, origin_ref="screener_candidate:000001.SZ"),
+            draft_read=_draft_read(object_context="{not json"),
+        )
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+
+        await vm.load_draft("s-1", 2)
+
+        assert vm.state.session_origin is None, "非法 JSON 不抛、不猜，且不得回落成半截来源"
+
+    @pytest.mark.asyncio
+    async def test_non_mapping_object_context_yields_none(self) -> None:
+        service = _FakeService(
+            read=_session_read(draft_revision=2),
+            draft_read=_draft_read(object_context="[1, 2]"),
+        )
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+
+        await vm.load_draft("s-1", 2)
+
+        assert vm.state.session_origin is None
+
+    @pytest.mark.asyncio
+    async def test_draft_without_object_context_keeps_origin_ref_fallback(self) -> None:
+        service = _FakeService(
+            read=_session_read(draft_revision=2, origin_ref="backtest_result:bt-1"),
+            draft_read=_draft_read(),
+        )
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+
+        await vm.load_draft("s-1", 2)
+
+        assert vm.state.session_origin == SessionOriginView(
+            source_module=None,
+            object_kind="backtest_result",
+            object_id="bt-1",
+            object_version=None,
+            display_name=None,
+            available_at=None,
+            period=None,
+            availability_state=None,
+            batch_ref=None,
+            summary_items=(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_session_switch_does_not_leak_previous_origin(self) -> None:
+        service = _FakeService(
+            hits=(_hit("s-1"),),
+            session_reads={
+                "s-1": _session_read(title="研究 A", origin_ref="screener_candidate:000001.SZ"),
+                "s-2": _session_read(title="研究 B"),
+            },
+        )
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+        assert (vm.state.session_origin.object_kind, vm.state.session_origin.object_id) == (
+            "screener_candidate",
+            "000001.SZ",
+        )
+
+        await vm.open_session("s-2")
+
+        assert vm.state.session_id == "s-2"
+        assert vm.state.session_origin is None, "新会话无来源时必须清空，不得残留上一会话"
+
+    @pytest.mark.asyncio
+    async def test_refresh_switching_session_replaces_origin(self) -> None:
+        service = _FakeService(read=_session_read(origin_ref="screener_candidate:000001.SZ"))
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+        assert vm.state.session_origin == SessionOriginView(
+            source_module=None,
+            object_kind="screener_candidate",
+            object_id="000001.SZ",
+            object_version=None,
+            display_name=None,
+            available_at=None,
+            period=None,
+            availability_state=None,
+            batch_ref=None,
+            summary_items=(),
+        )
+
+        service.read = _session_read(origin_ref="news_item:news-9")
+        await vm.refresh()
+
+        assert vm.state.session_origin == SessionOriginView(
+            source_module=None,
+            object_kind="news_item",
+            object_id="news-9",
+            object_version=None,
+            display_name=None,
+            available_at=None,
+            period=None,
+            availability_state=None,
+            batch_ref=None,
+            summary_items=(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_object_context_summary_non_mapping_yields_empty_items(self) -> None:
+        context = json.dumps({"object_kind": "stock", "object_id": "600519.SH", "summary": "not-a-map"})
+        service = _FakeService(
+            read=_session_read(draft_revision=2),
+            draft_read=_draft_read(object_context=context),
+        )
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+
+        await vm.load_draft("s-1", 2)
+
+        origin = vm.state.session_origin
+        assert origin is not None
+        assert origin.summary_items == ()
+        assert origin.display_name is None

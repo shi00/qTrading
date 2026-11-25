@@ -772,6 +772,79 @@ class TestWatchlistViewViewStock:
         # 对话框标题即该股名称（_build_title 为对话框标题唯一正本）
         title = _build_title(dict(stock_data))
         assert title.controls[0].value == "平安银行"
+        assert kwargs.get("context_note") is None, "普通打开不得标注「当前资料」"
+
+    def test_artifact_deep_link_opens_current_stock_with_note(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """成果卡深链 ``("000001.sz", 1)`` → 按大写代码取数 + 详情标注「当前资料」，且不写关注。"""
+        from tests.unit.ui.component_renderer import (
+            FakePage,
+            make_component,
+            render_once,
+            run_mount_effects,
+        )
+
+        rows = (_make_row(ts_code="000001.SZ", stock_name="平安银行"),)
+        mock_watchlist_vm._state = WatchlistState(watchlist_rows=rows, is_loading=False)
+        component = make_component(WatchlistView, active=True, stock_detail_request=("000001.sz", 1))
+        page = FakePage()
+        page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
+        run_mount_effects(component, page=page)
+        render_once(component)
+
+        assert ("open_stock_detail", {"ts_code": "000001.SZ"}) in mock_watchlist_vm.method_calls
+        assert [call for call in mock_watchlist_vm.method_calls if call[0] == "add_to_watchlist"] == [], (
+            "深链只展示当前资料，不得自动关注或写存储"
+        )
+        _rerender(component)
+        kwargs = mock_watchlist_vm.captured_detail_kwargs
+        assert kwargs.get("open_state") is True
+        assert kwargs.get("context_note") == "agent_research_artifact_view_current_stock_note"
+
+    def test_artifact_deep_link_same_seq_does_not_reopen(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """同一 request 序号在重渲染时不得重复打开详情（consumed seq 幂等）。"""
+        from tests.unit.ui.component_renderer import (
+            FakePage,
+            make_component,
+            render_once,
+            run_mount_effects,
+        )
+
+        rows = (_make_row(ts_code="000001.SZ", stock_name="平安银行"),)
+        mock_watchlist_vm._state = WatchlistState(watchlist_rows=rows, is_loading=False)
+        component = make_component(WatchlistView, active=True, stock_detail_request=("000001.SZ", 3))
+        page = FakePage()
+        page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
+        run_mount_effects(component, page=page)
+        _rerender(component)
+        _rerender(component)
+
+        opened = [call for call in mock_watchlist_vm.method_calls if call[0] == "open_stock_detail"]
+        assert opened == [("open_stock_detail", {"ts_code": "000001.SZ"})]
+
+    def test_artifact_deep_link_empty_code_does_not_open(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """空代码深链不得打开详情、不得写关注。"""
+        from tests.unit.ui.component_renderer import (
+            FakePage,
+            make_component,
+            render_once,
+            run_mount_effects,
+        )
+
+        mock_watchlist_vm._state = WatchlistState(watchlist_rows=(), is_loading=False)
+        component = make_component(WatchlistView, active=True, stock_detail_request=("", 1))
+        page = FakePage()
+        page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
+        run_mount_effects(component, page=page)
+        render_once(component)
+
+        assert [call for call in mock_watchlist_vm.method_calls if call[0] == "open_stock_detail"] == []
+        assert [call for call in mock_watchlist_vm.method_calls if call[0] == "add_to_watchlist"] == []
 
     def test_view_button_empty_code_shows_failure_toast(
         self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state

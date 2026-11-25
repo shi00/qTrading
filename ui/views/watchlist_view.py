@@ -212,12 +212,15 @@ def _build_watchlist_row(
 def WatchlistView(
     active: bool = True,
     on_start_research: typing.Callable[[BusinessResearchRequest], None] | None = None,
+    stock_detail_request: tuple[str, int] | None = None,
 ) -> ft.Container:
     """关注列表视图 (声明式).
 
     Args:
         active: 是否为当前激活视图 (控制是否加载数据)
         on_start_research: 个股详情 → 准备研究草稿（只准备不发送；未接线时不传）
+        stock_detail_request: 成果卡「查看当前个股」深链请求 ``(code, seq)``；
+            仅在序号变化时按代码打开当前资料（不自动加入关注、不写存储）。
     """
     state, vm = use_viewmodel(factory=lambda: WatchlistViewModel())
     # UIR-F10-003：本页情绪 VM（N5-3/FR-UX-007）。经 use_viewmodel 持有，命令与 state
@@ -240,6 +243,11 @@ def WatchlistView(
     # FUP-013: 当前渲染的 RefreshIndicator 引用（跨渲染持有，桌面端鼠标拖拽
     # 不触发下拉手势，工具栏按钮经 show() 复用同一刷新命令）。
     indicator_holder: typing.Any = ft.use_ref(None)
+
+    # 成果卡深链：详情来自「查看当前个股」时标注「当前资料」（与研究冻结依据不同）；
+    # consumed seq 防同一请求在重渲染/重挂载后重复打开。
+    detail_from_origin, set_detail_from_origin = ft.use_state(False)
+    consumed_detail_request_seq: typing.Any = ft.use_ref(0)
 
     # --- 加载关注列表 (active 时) ---
     async def _load_effect() -> None:
@@ -384,7 +392,35 @@ def WatchlistView(
         page = _get_page()
         if page is None:
             return
+        set_detail_from_origin(False)
         page.run_task(_do_open_detail, ts_code, stock_name)
+
+    def _on_close_detail() -> None:
+        """关闭详情：复位「来自成果定位」标注，再交由 VM 清空详情快照。"""
+        set_detail_from_origin(False)
+        vm.close_stock_detail()
+
+    def _apply_detail_request() -> None:
+        """消费成果卡深链请求：序号变化才按代码打开当前资料（不关注、不写存储）。
+
+        深链代码经 ``_parse_navigate_message`` 归一为小写，消费端 ``upper()`` 复原；
+        打开失败沿用既有失败 toast（不伪装打开成功）。
+        """
+        if stock_detail_request is None:
+            return
+        code, seq = stock_detail_request
+        if consumed_detail_request_seq.current == seq:
+            return
+        consumed_detail_request_seq.current = seq
+        if not code:
+            return
+        page = _get_page()
+        if page is None:
+            return
+        set_detail_from_origin(True)
+        page.run_task(_do_open_detail, code.upper(), "")
+
+    ft.use_effect(_apply_detail_request, dependencies=[stock_detail_request])
 
     def _do_confirm_remove() -> None:
         """ConfirmDialog on_confirm: 执行删除并关闭对话框。"""
@@ -554,7 +590,9 @@ def WatchlistView(
             data_processor=vm.detail_service,
             page=_get_page(),
             open_state=True,
-            on_close=vm.close_stock_detail,
+            on_close=_on_close_detail,
+            # 深链打开时标注「当前资料」（与研究冻结的历史依据不同）；普通打开不传。
+            context_note=(I18n.get("agent_research_artifact_view_current_stock_note") if detail_from_origin else None),
             # UIR-F10-003：FR-UX-007 情绪柱——与选股宿主同源接线（state + 选日 + 取消）。
             # 关闭时 StockDetailDialog._close 调 sentiment_on_cancel 取消在途任务。
             sentiment_state=sent_state,

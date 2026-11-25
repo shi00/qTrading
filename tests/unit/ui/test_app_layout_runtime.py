@@ -527,7 +527,7 @@ class TestBuildPagesStackE2E:
         view_mocks["SettingsView"].assert_called_once_with(
             active=False, target_subtab=None, mcp_lifecycle=None, agent_service=None, user_scope="local-desktop"
         )
-        view_mocks["WatchlistView"].assert_called_once_with(active=False)
+        view_mocks["WatchlistView"].assert_called_once_with(active=False, stock_detail_request=None)
 
     def test_e2e_full_mount_alone_without_e2e_testing_constructs_all_views(
         self, mock_i18n_state, mock_app_colors_state, monkeypatch
@@ -565,7 +565,7 @@ class TestBuildPagesStackE2E:
         view_mocks["SettingsView"].assert_called_once_with(
             active=False, target_subtab=None, mcp_lifecycle=None, agent_service=None, user_scope="local-desktop"
         )
-        view_mocks["WatchlistView"].assert_called_once_with(active=False)
+        view_mocks["WatchlistView"].assert_called_once_with(active=False, stock_detail_request=None)
 
 
 # ============================================================================
@@ -1230,6 +1230,45 @@ class TestOnNavigateDeepLink:
         assert settings_mock.call_args.kwargs.get("target_subtab") is None
         screener_mock = env["mod"].ScreenerView
         assert screener_mock.call_args.kwargs.get("stock_filter_request") is None
+        watchlist_mock = env["mod"].WatchlistView
+        assert watchlist_mock.call_args.kwargs.get("stock_detail_request") is None
+
+    def test_watchlist_deep_link_passes_stock_detail_request(self, app_layout_env) -> None:
+        """成果卡「查看当前个股」: "watchlist:000001.SZ" → WatchlistView 收到
+        stock_detail_request=("000001.sz", 1) (小写由消费端 upper 归一)。"""
+        env = app_layout_env
+        handler = _get_navigate_handler(env)
+        page = env["page"]
+        page.run_task.reset_mock()
+        env["mod"].WatchlistView.reset_mock()
+        env["mod"].SettingsView.reset_mock()
+        env["mod"].ScreenerView.reset_mock()
+
+        handler(env["mod"].TOPIC_NAVIGATE, "watchlist:000001.SZ")
+        handler_fn, args, _ = _await_run_task_handler(page)
+        assert args == (int(env["mod"].NavTabs.WATCHLIST), "000001.sz"), "深链应调度到 WATCHLIST 并携带个股代码段"
+        asyncio.run(handler_fn(*args))
+
+        self._render_pages_stack(env)
+        watchlist_mock = env["mod"].WatchlistView
+        assert watchlist_mock.call_args.kwargs.get("stock_detail_request") == ("000001.sz", 1)
+        assert env["mod"].SettingsView.call_args.kwargs.get("target_subtab") is None
+        assert env["mod"].ScreenerView.call_args.kwargs.get("stock_filter_request") is None
+
+    def test_watchlist_repeated_deep_link_increments_seq(self, app_layout_env) -> None:
+        """两次 "watchlist:000001" → seq 递增为 2 (函数式更新防 stale closure)。"""
+        env = app_layout_env
+        handler = _get_navigate_handler(env)
+        page = env["page"]
+        env["mod"].WatchlistView.reset_mock()
+
+        for _ in range(2):
+            page.run_task.reset_mock()
+            handler(env["mod"].TOPIC_NAVIGATE, "watchlist:000001")
+            handler_fn, args, _ = _await_run_task_handler(page)
+            asyncio.run(handler_fn(*args))
+        self._render_pages_stack(env)
+        assert env["mod"].WatchlistView.call_args.kwargs.get("stock_detail_request") == ("000001", 2)
 
 
 # ============================================================================
