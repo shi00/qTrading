@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import os
 
+from core.prompt_base import RESEARCH_SUMMARY_PROMPT_DEFAULT
 from utils import config_handler as cfg
 from utils.config import storage
 from utils.config_models import DEFAULT_AI_PROMPT, DEFAULT_NEWS_PROMPT, PresetDeleteOutcome
@@ -567,3 +568,121 @@ def get_strategy_min_turnover():
 
 def set_strategy_min_turnover(val):
     return cfg.ConfigHandler.set_typed("strategy_min_turnover", float(val))
+
+
+# ---------------------------------------------------------------------------
+# 研究配置统一入口（W-18）：角色 / 预算 / 摘要策略的单一配置来源
+#
+# 约定：
+# - 模型不在本域重复存储——研究模型与「模型连接 / 场景配置（agent_research）」同一来源；
+#   本域只表达研究侧默认角色与摘要策略。
+# - 预算不在本域重复存储——月度软预算由 ``usage_policy.monthly_cny_limit`` 单一来源承载。
+# - 摘要 Prompt 的默认资产来自 ``core.prompt_base.RESEARCH_SUMMARY_PROMPT_DEFAULT``
+#   （与 W-10 压缩模块对齐）；存储值为空即「未自定义」，读取时回落到默认资产。
+# - 缺失/非法值一律显式回落并在读取件上可区分（R21：不把未配置伪装成具体业务值）。
+# ---------------------------------------------------------------------------
+
+#: 研究角色白名单（与设置页/研究侧角色 Prompt 的 role_key 同集合）。
+RESEARCH_ROLE_KEYS: tuple[str, ...] = ("main", "sub")
+#: 研究默认角色（仅当配置缺失/非法时使用；属文档化默认，不是缺失值伪装）。
+DEFAULT_RESEARCH_ROLE = "main"
+#: 摘要策略默认：启用 + 保留尾部 6 条（与 W-10 ``CompactionConfig`` 默认对齐，
+#: 由测试守护两处不漂移）。
+DEFAULT_RESEARCH_SUMMARY_ENABLED = True
+DEFAULT_RESEARCH_SUMMARY_KEEP_MESSAGES = 6
+RESEARCH_SUMMARY_KEEP_MESSAGES_MIN = 1
+RESEARCH_SUMMARY_KEEP_MESSAGES_MAX = 50
+
+_RESEARCH_ROLE_KEY = "agent_research_role"
+_RESEARCH_SUMMARY_ENABLED_KEY = "agent_research_summary_enabled"
+_RESEARCH_SUMMARY_KEEP_MESSAGES_KEY = "agent_research_summary_keep_messages"
+_RESEARCH_SUMMARY_PROMPT_KEY = "agent_research_summary_prompt"
+
+
+def get_agent_research_role() -> str:
+    """研究默认角色；缺键/非法值回落文档化默认（并告警，不静默伪装）。"""
+    value = cfg.ConfigHandler.get_typed(_RESEARCH_ROLE_KEY, str, DEFAULT_RESEARCH_ROLE)
+    if value not in RESEARCH_ROLE_KEYS:
+        cfg.logger.warning("[ConfigHandler] Unknown research role %r, falling back to default", value)
+        return DEFAULT_RESEARCH_ROLE
+    return value
+
+
+def get_agent_research_summary_enabled() -> bool:
+    """摘要压缩是否启用（缺键按文档化默认 True）。"""
+    return cfg.ConfigHandler.get_typed(_RESEARCH_SUMMARY_ENABLED_KEY, bool, DEFAULT_RESEARCH_SUMMARY_ENABLED)
+
+
+def get_agent_research_summary_keep_messages() -> int:
+    """摘要后原样保留的尾部消息数；越界按合法区间收敛。"""
+    value = cfg.ConfigHandler.get_typed(
+        _RESEARCH_SUMMARY_KEEP_MESSAGES_KEY, int, DEFAULT_RESEARCH_SUMMARY_KEEP_MESSAGES
+    )
+    return max(RESEARCH_SUMMARY_KEEP_MESSAGES_MIN, min(value, RESEARCH_SUMMARY_KEEP_MESSAGES_MAX))
+
+
+def get_agent_research_summary_prompt() -> str:
+    """摘要 Prompt 生效值：未自定义（空/空白）时返回默认资产。"""
+    value = cfg.ConfigHandler.get_typed(_RESEARCH_SUMMARY_PROMPT_KEY, str, "")
+    return value if value.strip() else RESEARCH_SUMMARY_PROMPT_DEFAULT
+
+
+def is_agent_research_summary_prompt_default() -> bool:
+    """当前生效摘要 Prompt 是否仍为默认资产（空存储即默认）。"""
+    value = cfg.ConfigHandler.get_typed(_RESEARCH_SUMMARY_PROMPT_KEY, str, "")
+    return not value.strip()
+
+
+def save_agent_research_config(
+    role_key: str,
+    summary_enabled: bool,
+    summary_keep_messages: int,
+    summary_prompt: str,
+) -> bool:
+    """原子保存研究配置（角色 + 摘要策略），任一校验失败整体未提交。
+
+    - ``role_key`` 必须属于 :data:`RESEARCH_ROLE_KEYS`；
+    - ``summary_keep_messages`` 必须为 1..50 的整数（bool 拒绝）；
+    - ``summary_prompt`` 空串表示「恢复默认」；非空沿用 ``validate_prompt`` +
+      ``sanitize_prompt`` 语义，校验失败不写部分字段（R21 邻域）。
+
+    Returns:
+        True 全部落盘；False 未提交（校验失败 / 磁盘不可读 / 原子写失败）。
+    """
+    if role_key not in RESEARCH_ROLE_KEYS:
+        return False
+    if not isinstance(summary_enabled, bool):
+        return False
+    if (
+        isinstance(summary_keep_messages, bool)
+        or not isinstance(summary_keep_messages, int)
+        or not (RESEARCH_SUMMARY_KEEP_MESSAGES_MIN <= summary_keep_messages <= RESEARCH_SUMMARY_KEEP_MESSAGES_MAX)
+    ):
+        return False
+    if not isinstance(summary_prompt, str):
+        return False
+
+    prompt = summary_prompt
+    if prompt.strip():
+        from utils.prompt_guard import sanitize_prompt, validate_prompt
+
+        is_valid, _ = validate_prompt(prompt)
+        if not is_valid:
+            return False
+        prompt = sanitize_prompt(prompt)
+    else:
+        prompt = ""
+
+    return cfg.ConfigHandler.save_config(
+        {
+            _RESEARCH_ROLE_KEY: role_key,
+            _RESEARCH_SUMMARY_ENABLED_KEY: summary_enabled,
+            _RESEARCH_SUMMARY_KEEP_MESSAGES_KEY: summary_keep_messages,
+            _RESEARCH_SUMMARY_PROMPT_KEY: prompt,
+        }
+    )
+
+
+def reset_agent_research_summary_prompt() -> bool:
+    """恢复默认摘要 Prompt（清除自定义值，读取回落到默认资产）。"""
+    return cfg.ConfigHandler.save_config({_RESEARCH_SUMMARY_PROMPT_KEY: ""})

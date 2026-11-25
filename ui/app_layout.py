@@ -63,9 +63,11 @@ from ui.views.data_view import DataExplorerView
 from ui.views.decision_center_panel import build_decision_center_panel
 from ui.views.home_view import HomeView
 from ui.viewmodels.research_comparison_view_model import ComparisonServicePort, ResearchComparisonViewModel
+from ui.viewmodels.research_workbench_view_model import ResearchWorkbenchViewModel
 from ui.views.research_comparison_panel import ResearchComparisonPanel
 from ui.views.research_history_panel import ResearchHistoryPanel
 from ui.views.research_observer_panel import ResearchObserverPanel
+from ui.views.workbench_panel import WorkbenchPanel
 from ui.views.screener_view import ScreenerView
 from ui.views.settings_view import SETTINGS_SUBTAB_INDEX, SettingsView
 from ui.views.task_center_view import TaskCenterView
@@ -470,6 +472,9 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         )
     )
     comparison_open, set_comparison_open = ft.use_state(False)
+    # W-18: 研究工作台（非模态四视角；只读投影研究观察快照，不派发研究）
+    workbench_state, workbench_vm = use_viewmodel(factory=ResearchWorkbenchViewModel)
+    workbench_open, set_workbench_open = ft.use_state(False)
     # W-07: 应用级统一决定/授权界面（跨页可达；与观察层共用同一 facade）
     decision_state, decision_vm = use_viewmodel(
         factory=lambda: shared_decision_center(
@@ -672,10 +677,13 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
 
     def _schedule_comparison(command: Any, *args: Any) -> None:
         """异步命令统一经 page.run_task 调度（事件处理器内不做同步 IO，R16）。"""
-
         page = _get_page()
         if page is not None:
             page.run_task(command, *args)
+
+    def _toggle_workbench(_e: ft.ControlEvent | None = None) -> None:
+        """展开/收起研究工作台（纯视图层；不改研究观察层热点文件）。"""
+        set_workbench_open(not workbench_open)
 
     def _on_draft_change(decision_id: str, text: str) -> None:
         research_vm.set_answer_draft(decision_id, text)
@@ -1215,6 +1223,15 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         on_click=safe_on_click(_toggle_research),
     )
     research_toggle_holder.current = research_toggle
+    # W-18: 公共区研究工作台入口（四视角只读投影；不新增业务导航）
+    workbench_toggle = ft.IconButton(
+        icon=ft.Icons.DASHBOARD_OUTLINED,
+        selected=workbench_open,
+        selected_icon=ft.Icons.DASHBOARD,
+        icon_size=AppStyles.FONT_SIZE_HEADLINE,
+        tooltip=I18n.get("agent_workbench_toggle"),
+        on_click=safe_on_click(_toggle_workbench),
+    )
     # F37: 公共区多模型对比入口（独立面板；两路连接选择 + 只读组投影）
     comparison_toggle = ft.IconButton(
         icon=ft.Icons.COMPARE_ARROWS,
@@ -1254,6 +1271,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
                 research_toggle,
                 comparison_toggle,
                 decision_toggle,
+                workbench_toggle,
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             spacing=5,
@@ -1349,6 +1367,23 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             on_control_reason_cancel=research_vm.cancel_control_reason,
         )
         if research_open
+        else None
+    )
+    # W-18: 研究工作台面板（非模态；四视角共享同一研究观察快照，只读投影）
+    workbench_panel = (
+        WorkbenchPanel(
+            state=research_state,
+            workbench_state=workbench_state,
+            on_close=lambda: set_workbench_open(False),
+            on_perspective=workbench_vm.set_perspective,
+            on_overview_query=workbench_vm.set_overview_query,
+            on_select_evidence=lambda row_id: workbench_vm.select_evidence(row_id),
+            on_command=lambda: workbench_vm.insert_query_token("/"),
+            on_reference=lambda: workbench_vm.insert_query_token("@"),
+            on_skill=lambda: workbench_vm.insert_query_token("@skill"),
+            on_mcp=lambda: workbench_vm.insert_query_token("@mcp"),
+        )
+        if workbench_open
         else None
     )
     # F37: 对比面板（并列/表格；动作全部显式点击，异步命令经 run_task 调度）
@@ -1469,6 +1504,8 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
     body_controls: list[ft.Control] = [nav_rail, ft.VerticalDivider(width=1), body]
     if research_panel is not None:
         body_controls.append(research_panel)
+    if workbench_panel is not None:
+        body_controls.append(workbench_panel)
     if comparison_panel is not None:
         body_controls.append(comparison_panel)
     if decision_panel is not None:

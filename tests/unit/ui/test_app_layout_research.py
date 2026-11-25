@@ -240,6 +240,17 @@ def _comparison_button(env: dict) -> ft.IconButton:
     return button
 
 
+def _workbench_button(env: dict) -> ft.IconButton:
+    """W-18 研究工作台入口（位于决定中心入口之后，按 tooltip 语义定位）。"""
+
+    button = next(
+        control
+        for control in _brand_column(env).controls
+        if isinstance(control, ft.IconButton) and control.tooltip == "agent_workbench_toggle"
+    )
+    return button
+
+
 def _observation_control(env: dict) -> Any | None:
     """观察层在父 Row 中以子组件（Component）形式挂载；收起后不在 controls 内。"""
 
@@ -1570,6 +1581,43 @@ class TestComparisonPanelWiring:
         _invoke(_comparison_button(layout_env).on_click, MagicMock())
         scheduled = [getattr(call.args[0], "__name__", "") for call in page.run_task.call_args_list]
         assert scheduled == ["load_connections", "refresh"]
+
+
+class TestWorkbenchPanelWiring:
+    """W-18：四视角研究工作台在壳层的挂载（只读投影，不派发研究）。"""
+
+    def test_workbench_toggle_mounts_panel_and_keeps_drafts(self, layout_env) -> None:
+        from ui.viewmodels.research_workbench_view_model import ResearchWorkbenchViewModel
+
+        page = layout_env["page"]
+        page.run_task.reset_mock()
+
+        _invoke(_workbench_button(layout_env).on_click, MagicMock())
+        _rerender(layout_env)
+
+        tail = _body_row(layout_env).controls[-1]
+        assert type(tail).__name__ == "Component", "展开后应挂研究工作台"
+        assert isinstance(tail.kwargs["on_perspective"].__self__, ResearchWorkbenchViewModel)
+        assert tail.kwargs["workbench_state"].perspective == "overview"
+        assert page.run_task.call_args_list == [], "工作台展开不得调度异步命令"
+
+        # 视角切换只换渲染分支，草稿与选中由 VM 持有
+        tail.kwargs["on_perspective"]("evidence")
+        _rerender(layout_env)
+        tail = _body_row(layout_env).controls[-1]
+        assert tail.kwargs["workbench_state"].perspective == "evidence"
+
+        # 「＋指令与引用」菜单回调写入查询草稿
+        tail.kwargs["on_command"]()
+        tail.kwargs["on_skill"]()
+        _rerender(layout_env)
+        tail = _body_row(layout_env).controls[-1]
+        assert tail.kwargs["workbench_state"].overview_query == "/ @skill"
+
+        # 收起后不再挂载
+        tail.kwargs["on_close"]()
+        _rerender(layout_env)
+        assert type(_body_row(layout_env).controls[-1]).__name__ != "Component"
 
 
 class TestHandlersWithoutPage:

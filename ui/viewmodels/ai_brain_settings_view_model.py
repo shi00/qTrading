@@ -34,8 +34,24 @@ import hashlib
 import logging
 import re
 from dataclasses import dataclass, replace
+from typing import TypedDict
 
+from core.prompt_base import RESEARCH_SUMMARY_PROMPT_DEFAULT
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
+from utils.config.llm import (
+    DEFAULT_RESEARCH_ROLE,
+    DEFAULT_RESEARCH_SUMMARY_ENABLED,
+    DEFAULT_RESEARCH_SUMMARY_KEEP_MESSAGES,
+    RESEARCH_ROLE_KEYS,
+    RESEARCH_SUMMARY_KEEP_MESSAGES_MAX,
+    RESEARCH_SUMMARY_KEEP_MESSAGES_MIN,
+    get_agent_research_role,
+    get_agent_research_summary_enabled,
+    get_agent_research_summary_keep_messages,
+    get_agent_research_summary_prompt,
+    is_agent_research_summary_prompt_default,
+    save_agent_research_config,
+)
 from utils.config_handler import ConfigHandler
 from utils.config_models import ROLE_PROMPT_DEFAULTS
 from utils.sanitizers import DataSanitizer
@@ -190,6 +206,44 @@ def _build_role_prompt_state(role_key: str, append_value: str, saved_version: st
     )
 
 
+def _normalize_summary_prompt(value: str) -> str:
+    """摘要 Prompt 生效值：空白视为「默认资产」（与存储语义一致）。"""
+    return value if value.strip() else RESEARCH_SUMMARY_PROMPT_DEFAULT
+
+
+class _ResearchConfigFields(TypedDict):
+    """研究配置 state 字段集合（TypedDict 让 ``_set_state(**fields)`` 保持类型收敛）。"""
+
+    research_role: str
+    research_summary_enabled: bool
+    research_summary_keep_messages_value: str
+    research_summary_prompt_value: str
+    research_summary_prompt_is_default: bool
+    research_save_state: str
+    research_warning_key: str
+    research_model_label: str
+
+
+def _research_config_fields(*, save_state: str = SAVE_IDLE, warning_key: str = "") -> _ResearchConfigFields:
+    """从单一配置来源读取研究配置，构造 state 字段（禁止在本页另存第二份默认值）。"""
+    prompt = get_agent_research_summary_prompt()
+    provider = ConfigHandler.get_typed("llm_provider", str, "")
+    model = ConfigHandler.get_typed("llm_model", str, "")
+    model_label = (
+        f"{provider}/{model}" if isinstance(provider, str) and isinstance(model, str) and provider and model else ""
+    )
+    return {
+        "research_role": get_agent_research_role(),
+        "research_summary_enabled": get_agent_research_summary_enabled(),
+        "research_summary_keep_messages_value": str(get_agent_research_summary_keep_messages()),
+        "research_summary_prompt_value": prompt,
+        "research_summary_prompt_is_default": is_agent_research_summary_prompt_default(),
+        "research_save_state": save_state,
+        "research_warning_key": warning_key,
+        "research_model_label": model_label,
+    }
+
+
 @dataclass(frozen=True)
 class AIBrainSettingsState:
     """AIBrainSettingsViewModel 的不可变 state snapshot。"""
@@ -209,6 +263,16 @@ class AIBrainSettingsState:
     saved_revision: int = 0
     # F35 / J26: 主/子研究角色 Prompt（默认只读 + 追加 + 合成预览）。
     role_prompts: tuple[RolePromptState, ...] = ()
+    # --- W-18 研究配置统一入口：默认角色 + 摘要策略（单一来源 utils/config/llm.py） ---
+    research_role: str = DEFAULT_RESEARCH_ROLE
+    research_summary_enabled: bool = DEFAULT_RESEARCH_SUMMARY_ENABLED
+    research_summary_keep_messages_value: str = str(DEFAULT_RESEARCH_SUMMARY_KEEP_MESSAGES)
+    research_summary_prompt_value: str = RESEARCH_SUMMARY_PROMPT_DEFAULT
+    research_summary_prompt_is_default: bool = True
+    research_save_state: str = SAVE_IDLE
+    research_warning_key: str = ""
+    #: 研究所用模型（与 LLM 配置同一来源，只读展示；未配置时为空，不填占位模型名）。
+    research_model_label: str = ""
 
 
 class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
@@ -258,6 +322,7 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
             save_state=SAVE_IDLE,
             ai_local_only_mode=ConfigHandler.is_ai_local_only_mode(),
             role_prompts=role_prompts,
+            **_research_config_fields(),
         )
 
     # --- Update commands (View 通过 set_* 更新本地 state) ---
@@ -314,6 +379,96 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
             if role.role_key == role_key:
                 return role
         return None
+
+    # --- W-18 研究配置统一入口（角色 / 摘要策略；单一来源 utils/config/llm.py） ---
+
+    def _apply_research_edit(self, **changes: object) -> None:
+        """研究配置草稿编辑：复位本组保存反馈，不影响本页其它保存状态机。"""
+        self._set_state(**changes, research_save_state=SAVE_IDLE, research_warning_key="")
+
+    def set_research_role(self, role_key: str) -> None:
+        if role_key not in RESEARCH_ROLE_KEYS:
+            return
+        self._apply_research_edit(research_role=role_key)
+
+    def set_research_summary_enabled(self, value: bool) -> None:
+        self._apply_research_edit(research_summary_enabled=bool(value))
+
+    def set_research_summary_keep_messages(self, value: str) -> None:
+        self._apply_research_edit(research_summary_keep_messages_value=value)
+
+    def set_research_summary_prompt(self, value: str) -> None:
+        self._apply_research_edit(
+            research_summary_prompt_value=value,
+            research_summary_prompt_is_default=_normalize_summary_prompt(value) == RESEARCH_SUMMARY_PROMPT_DEFAULT,
+        )
+
+    def reset_research_summary_prompt(self) -> None:
+        """恢复默认摘要资产（内容等于默认资产时按「未自定义」持久化，跟随默认资产升级）。"""
+        self._apply_research_edit(
+            research_summary_prompt_value=RESEARCH_SUMMARY_PROMPT_DEFAULT,
+            research_summary_prompt_is_default=True,
+        )
+
+    async def save_research_config(self) -> bool:
+        """保存研究配置（角色 + 摘要策略），单次原子写，失败整体未提交。
+
+        - 保留条数须为 1..50 的整数（与 ``utils/config/llm.py`` 同界）；
+        - 摘要 Prompt 等于默认资产时以空串落盘（「未自定义」，未来默认资产升级自动生效）；
+        - 保存成功后按配置来源重载本组字段，确保「改一处两处生效」（设置页与配置读数一致）；
+        - R2: ``CancelledError`` 显式传播；阻塞写经 ``ThreadPoolManager`` IO 池（R16）。
+        """
+        if self._state.research_save_state == SAVE_SAVING:
+            return False
+
+        keep_raw = (self._state.research_summary_keep_messages_value or "").strip()
+        try:
+            keep = int(keep_raw)
+        except (TypeError, ValueError):
+            self._set_state(research_save_state=SAVE_ERROR, research_warning_key="research_config_keep_invalid")
+            return False
+        if not (RESEARCH_SUMMARY_KEEP_MESSAGES_MIN <= keep <= RESEARCH_SUMMARY_KEEP_MESSAGES_MAX):
+            self._set_state(research_save_state=SAVE_ERROR, research_warning_key="research_config_keep_invalid")
+            return False
+
+        prompt_value = self._state.research_summary_prompt_value
+        stored_prompt = (
+            "" if _normalize_summary_prompt(prompt_value) == RESEARCH_SUMMARY_PROMPT_DEFAULT else prompt_value
+        )
+
+        self._set_state(research_save_state=SAVE_SAVING, research_warning_key="")
+        try:
+            saved = await ThreadPoolManager().run_async(
+                TaskType.IO,
+                save_agent_research_config,
+                self._state.research_role,
+                self._state.research_summary_enabled,
+                keep,
+                stored_prompt,
+            )
+            if not saved:
+                self._set_state(research_save_state=SAVE_ERROR, research_warning_key="")
+                return False
+            self._set_state(**_research_config_fields(save_state=SAVE_SUCCESS))
+            return True
+        except asyncio.CancelledError:
+            self._set_state(research_save_state=SAVE_ERROR, research_warning_key="")
+            raise  # R2: 必须传播
+        except Exception as ex:
+            from utils.error_classifier import classify_error, classify_severity
+
+            error_info = classify_error(ex, context="general")
+            severity = classify_severity(ex, context="general")
+            sanitized = DataSanitizer.sanitize_error(ex)  # R9 异常消息脱敏
+            log = logger.critical if severity == "system" else logger.error
+            log(
+                "[AIBrainSettingsVM] Error saving research config (%s): %s",
+                error_info["code"],
+                sanitized,
+                exc_info=True,
+            )
+            self._set_state(research_save_state=SAVE_ERROR, research_warning_key="")
+            return False
 
     # --- 验证 (阶段 1) ---
 
