@@ -25,7 +25,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
 import logging
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -49,15 +51,27 @@ from core.agent_types import (
     SessionAction,
     SessionChangeCommand,
     SourceVersionRef,
+    MCPServiceIdentity,
     SubmissionReceipt,
     decode_json_doc,
+    decode_plan_proposal,
     decode_source_version_ref,
     derive_round_id,
+    encode_mcp_service_identity,
     is_digest,
     json_doc,
+    normalize_plan_proposal,
+    sha256_hex,
 )
 from services.agent_service.capabilities import PlanProposalStore
-from services.agent_service.dispatch import DispatchOutcome, PlanSpecProvider, RoleCapabilityProvider
+from services.agent_service.dispatch import (
+    PLAN_UNAVAILABLE,
+    DispatchOutcome,
+    PlanSpecProvider,
+    ResearchDispatcher,
+    RoleCapabilityProvider,
+    zero_dispatch,
+)
 from services.agent_service.loop import (
     DEFAULT_PLAN_TOOLS,
     AgentTurn,
@@ -96,6 +110,10 @@ MAIN_TURN_MODEL_REF: Final[str] = "agent_research:governed"
 PLAN_STEPS_KEY: Final[str] = "steps"
 #: 计划引用在冻结 manifest 中的顶层键（「开始这份计划」新意图据此定位已审版本）。
 PLAN_REFERENCE_KEY: Final[str] = "plan_ref"
+#: 计划来源在冻结 manifest 中的顶层键：``auto`` 表示执行模式首问由主回合自动规划。
+PLAN_SOURCE_KEY: Final[str] = "plan_source"
+#: 自动规划来源取值（仅执行模式首问冻结；其余入口仍只认显式 ``plan_ref``）。
+PLAN_SOURCE_AUTO: Final[str] = "auto"
 
 _PLAN_STEP_KEYS: Final[frozenset[str]] = frozenset({"id", "content", "depends_on"})
 _PLAN_REFERENCE_KEYS: Final[frozenset[str]] = frozenset({"execution_id", "plan_revision"})
@@ -324,10 +342,20 @@ class _PlanProposalReader(Protocol):
     ) -> PlanProposal | None: ...
 
 
-def build_plan_spec_provider(dao: _ManifestReader, proposals: _PlanProposalReader | None = None) -> PlanSpecProvider:
-    """生产计划来源：冻结 manifest 的计划引用 → 已确认计划版 → 可执行节点表。
+def _auto_plan_requested(manifest: Mapping[str, Any]) -> bool:
+    """冻结 manifest 是否声明「执行模式首问自动规划」（只认显式值，不猜）。"""
 
-    不可得一律返回 ``None``（派发侧据此 ``PLAN_UNAVAILABLE`` 零派发）。
+    return _frozen_section(manifest).get(PLAN_SOURCE_KEY) == PLAN_SOURCE_AUTO
+
+
+def build_plan_spec_provider(dao: _ManifestReader, proposals: _PlanProposalReader | None = None) -> PlanSpecProvider:
+    """生产计划来源：显式计划引用优先，其次执行模式首问的自动规划版本。
+
+    - 显式 ``plan_ref``（「开始这份计划」）→ 已确认计划版 → 可执行节点表；
+    - ``plan_source=auto``（执行模式首问）→ 本执行当前计划版（主回合已保存且经
+      ``decode_plan_proposal`` 严格校验）→ 可执行节点表；无保存版即不可得；
+    - 角色/能力仍只取冻结手选集（``derive_frozen_selection_policy``），未选择即
+      不可得；其余形状一律返回 ``None``（派发侧据此 ``PLAN_UNAVAILABLE`` 零派发）。
     """
 
     reader: _PlanProposalReader = proposals if proposals is not None else cast(_PlanProposalReader, dao)
@@ -336,14 +364,22 @@ def build_plan_spec_provider(dao: _ManifestReader, proposals: _PlanProposalReade
         manifest = await dao.read_authoritative_manifest(user_scope=user_scope, execution_id=execution_id)
         if manifest is None:
             return None
+        decoded = _manifest_object(manifest)
         reference = decode_plan_reference(manifest)
-        if reference is None:
+        if reference is not None:
+            proposal = await reader.read_plan_proposal(
+                user_scope=user_scope,
+                execution_id=reference.execution_id,
+                plan_revision=reference.plan_revision,
+            )
+        elif _auto_plan_requested(decoded):
+            current = getattr(dao, "read_current_plan_proposal", None)
+            if not callable(current):
+                return None
+            read_current = cast(Any, current)
+            proposal = await read_current(user_scope=user_scope, execution_id=execution_id)
+        else:
             return None
-        proposal = await reader.read_plan_proposal(
-            user_scope=user_scope,
-            execution_id=reference.execution_id,
-            plan_revision=reference.plan_revision,
-        )
         if proposal is None:
             return None
         policy = derive_frozen_selection_policy(manifest)
@@ -468,18 +504,46 @@ class MainTurnRunner:
         return MainTurnOutcome(outcome=outcome, plan_reference=await self._save_plan(request, outcome))
 
     async def _save_plan(self, request: MainTurnRequest, outcome: LoopRunOutcome) -> PlanReference | None:
-        """把计划回合的结构化步骤保存为可读计划版；未给出步骤即不保存。"""
+        """把计划回合的结构化步骤保存为可读计划版；未给出或非法步骤即不保存。
+
+        模型提案先按既有 ``decode_plan_proposal`` 严格校验（结构版本/键集/步骤
+        身份/重复 id），校验失败不写计划版——空计划与非法计划都不得冒充「已确认
+        计划」（R21）；执行模式首问因此得到 ``PLAN_UNAVAILABLE`` 而非伪派发。
+        """
 
         factory = self._plan_store_factory
         if factory is None:
             logger.info("[MainTurn] plan store not wired; readable plan saved without executable reference")
             return None
         steps = plan_steps_from_structured_fields(outcome.result.structured_fields)
-        if steps is None:
+        if not steps:
+            logger.info("[MainTurn] no plan steps produced; plan version not saved")
+            return None
+        if not _plan_steps_validated(steps, execution_id=request.identity.execution_id):
             return None
         store: PlanProposalStore = factory(request.identity)
         await store.set_items(_harness_plan_items(steps))
         return PlanReference(execution_id=request.identity.execution_id, plan_revision=store.revision)
+
+
+def _plan_failure_cause(exc: Exception) -> str:
+    """把计划生成失败转成稳定原因码（供 UI i18n；不拼接自由文本）。"""
+
+    if isinstance(exc, AgentServiceError):
+        return exc.code.value
+    return type(exc).__name__
+
+
+def _plan_steps_validated(steps: tuple[PlanItemSnapshot, ...], *, execution_id: str) -> bool:
+    """模型计划提案的严格 wire 往返校验（复用 ``decode_plan_proposal``，失败不落库）。"""
+
+    try:
+        wire = normalize_plan_proposal(PlanProposal(execution_id=execution_id, plan_revision=1, items=steps))
+        decode_plan_proposal(decode_json_doc(wire), execution_id=execution_id)
+    except AgentValidationError as exc:
+        logger.warning("[MainTurn] model plan proposal rejected by strict decode: %s", exc.code)
+        return False
+    return True
 
 
 def _harness_plan_items(steps: tuple[PlanItemSnapshot, ...]) -> list[Any]:
@@ -510,6 +574,8 @@ class AgentIntakeFacade(Protocol):
 
     async def change_session(self, command: SessionChangeCommand) -> CommandReceipt: ...
 
+    async def accept(self, request: AcceptRequest, *, command: CommandRef) -> SubmissionReceipt: ...
+
     async def submit_and_dispatch(self, request: AcceptRequest, *, command: CommandRef) -> Any: ...
 
 
@@ -531,6 +597,10 @@ class MainTurnIntake:
     讨论/计划请求同样经受理落库；真实派发仍由 ``ResearchDispatcher`` 按冻结模式
     判定（讨论/计划零派发）。「开始这份计划」把源计划执行冻结的输入完整带入新
     意图，只改 ``mode=execute`` 并追加计划引用，不扩大资料/权限/截止范围。
+
+    **执行模式首问**：受理后先由主回合产出计划（同一 ``decode_plan_proposal``
+    严格校验并保存计划版），再显式派发；模型不可用/提案非法/无角色策略时返回
+    ``PLAN_UNAVAILABLE`` 结构化原因，零派发且不伪造已启动（R21）。
     """
 
     def __init__(
@@ -542,6 +612,7 @@ class MainTurnIntake:
         source_module: str = "ui",
         source_display_name: str = "Agent",
         main_turn: MainTurnRunner | None = None,
+        dispatcher: ResearchDispatcher | None = None,
     ) -> None:
         self._facade = facade
         self._manifest_reader = manifest_reader
@@ -549,6 +620,7 @@ class MainTurnIntake:
         self._source_module = source_module
         self._source_display_name = source_display_name
         self._main_turn = main_turn
+        self._dispatcher = dispatcher
 
     async def start_question(
         self,
@@ -558,8 +630,16 @@ class MainTurnIntake:
         session_id: str | None = None,
         session_title: str | None = None,
         expected_revision: int | None = None,
+        role_prompt_refs: Sequence[tuple[str, str]] = (),
+        skill_refs: Sequence[tuple[str, str]] = (),
+        mcp_selection: Sequence[MCPServiceIdentity] = (),
     ) -> MainTurnIntakeResult:
-        """首问：必要时新建会话，冻结本次空手选集合后受理（讨论/计划零派发）。"""
+        """首问：必要时新建会话，冻结本次手选集合后受理。
+
+        讨论/计划零研究派发；执行模式受理后先产出计划再派发。``role_prompt_refs``
+        / ``skill_refs`` / ``mcp_selection`` 为本次显式手选集（未选择即空集，
+        能力来源据此 fail-closed；不由本入口补默认角色/能力）。
+        """
 
         question = text.strip()
         if not question:
@@ -586,9 +666,23 @@ class MainTurnIntake:
                     title=self._title(question, session_title),
                 )
             )
-        manifest = self._base_manifest(text=question, mode=mode, purpose=Purpose.CONCEPT)
+        manifest = self._base_manifest(
+            text=question,
+            mode=mode,
+            purpose=Purpose.CONCEPT,
+            role_prompt_refs=role_prompt_refs,
+            skill_refs=skill_refs,
+            mcp_selection=mcp_selection,
+        )
+        if mode is Mode.EXECUTE:
+            return await self._start_execute_question(
+                target_session,
+                expected_revision=revision,
+                manifest=manifest,
+                question=question,
+            )
         result = await self._submit(target_session, expected_revision=revision, manifest=manifest)
-        if mode is Mode.EXECUTE or self._main_turn is None:
+        if self._main_turn is None:
             return result
         # 讨论/计划：受理后由生产主回合产出直答/可读计划；零研究动作由回合端口保证。
         identity = self._main_turn_identity(target_session, result.receipt, revision=revision, manifest=manifest)
@@ -597,6 +691,59 @@ class MainTurnIntake:
             result,
             main_turn=turn_outcome,
             plan_reference=turn_outcome.plan_reference or result.plan_reference,
+        )
+
+    async def _start_execute_question(
+        self,
+        session_id: str,
+        *,
+        expected_revision: int,
+        manifest: CanonicalJson,
+        question: str,
+    ) -> MainTurnIntakeResult:
+        """执行模式首问：受理（不自动派发）→ 主回合产出计划 → 显式派发。
+
+        任何一步不可得都返回结构化 ``PLAN_UNAVAILABLE``（cause 参数），零派发：
+        未接主回合、模型失败、无步骤/非法步骤均不投递，不把空计划冒充已启动。
+        ``CancelledError`` 原样传播（R2）。
+        """
+
+        result = await self._accept(session_id, expected_revision=expected_revision, manifest=manifest)
+        runner = self._main_turn
+        if runner is None:
+            return replace(result, dispatch=self._plan_unavailable(result, cause="main_turn_not_wired"))
+        if derive_frozen_selection_policy(manifest) is None:
+            # 未手选角色/Skills/MCP：无派发准入判据，先如实零派发（不耗模型、不猜授权）。
+            return replace(result, dispatch=self._plan_unavailable(result, cause="role_policy_missing"))
+        identity = self._main_turn_identity(session_id, result.receipt, revision=expected_revision, manifest=manifest)
+        try:
+            turn_outcome = await runner.run(MainTurnRequest(identity=identity, mode=Mode.PLAN, prompt_text=question))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # 模型/计划端口失败：如实零派发，不伪造已启动
+            logger.warning(
+                "[MainTurn] execute first-question plan generation failed, zero dispatch (execution=%s): %s",
+                result.receipt.execution_id,
+                DataSanitizer.sanitize_error(exc),
+            )
+            return replace(result, dispatch=self._plan_unavailable(result, cause=_plan_failure_cause(exc)))
+        reference = turn_outcome.plan_reference
+        if reference is None:
+            return replace(result, dispatch=self._plan_unavailable(result, cause="plan_not_produced"))
+        dispatcher = self._dispatcher
+        if dispatcher is None:
+            return replace(result, plan_reference=reference)
+        outcome = await dispatcher.dispatch(result.receipt, user_scope=self._user_scope, mode=Mode.EXECUTE)
+        return replace(result, dispatch=outcome, plan_reference=reference)
+
+    def _plan_unavailable(self, result: MainTurnIntakeResult, *, cause: str) -> DispatchOutcome:
+        """执行模式首问的零派发事实（原因码 + cause 参数，供 UI 按码 i18n）。"""
+
+        return zero_dispatch(
+            result.receipt.execution_id,
+            result.receipt.workflow_id,
+            PLAN_UNAVAILABLE,
+            params=(("cause", cause),),
         )
 
     def _main_turn_identity(
@@ -689,6 +836,65 @@ class MainTurnIntake:
         purpose: Purpose | None = None,
         plan_reference: PlanReference | None = None,
     ) -> MainTurnIntakeResult:
+        request, command = self._build_request(
+            session_id,
+            expected_revision=expected_revision,
+            manifest=manifest,
+            mode=mode,
+            text=text,
+            purpose=purpose,
+        )
+        outcome = await self._facade.submit_and_dispatch(request, command=command)
+        receipt = getattr(outcome, "receipt", None)
+        if not isinstance(receipt, SubmissionReceipt):
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "submission receipt unavailable",
+                self._user_scope,
+            )
+        dispatch = getattr(outcome, "dispatch", None)
+        return MainTurnIntakeResult(
+            session_id=session_id,
+            receipt=receipt,
+            dispatch=dispatch if isinstance(dispatch, DispatchOutcome) else None,
+            plan_reference=plan_reference,
+        )
+
+    async def _accept(
+        self,
+        session_id: str,
+        *,
+        expected_revision: int,
+        manifest: CanonicalJson,
+    ) -> MainTurnIntakeResult:
+        """受理落定但不自动派发（执行模式首问先产出计划，再由本入口显式派发）。"""
+
+        request, command = self._build_request(
+            session_id,
+            expected_revision=expected_revision,
+            manifest=manifest,
+        )
+        receipt = await self._facade.accept(request, command=command)
+        if not isinstance(receipt, SubmissionReceipt):
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "submission receipt unavailable",
+                self._user_scope,
+            )
+        return MainTurnIntakeResult(session_id=session_id, receipt=receipt, dispatch=None)
+
+    def _build_request(
+        self,
+        session_id: str,
+        *,
+        expected_revision: int,
+        manifest: CanonicalJson,
+        mode: Mode | None = None,
+        text: str | None = None,
+        purpose: Purpose | None = None,
+    ) -> tuple[AcceptRequest, CommandRef]:
+        """由冻结 manifest 构造受理请求与命令引用（幂等键逐请求唯一）。"""
+
         decoded = self._manifest_object(manifest)
         frozen_mode = mode or self._mode_from(decoded)
         frozen_purpose = purpose or self._purpose_from(decoded)
@@ -718,45 +924,57 @@ class MainTurnIntake:
             command_id=request.client_command_id,
             expected_revision=request.expected_revision,
         )
-        outcome = await self._facade.submit_and_dispatch(request, command=command)
-        receipt = getattr(outcome, "receipt", None)
-        if not isinstance(receipt, SubmissionReceipt):
-            raise AgentServiceError(
-                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
-                "submission receipt unavailable",
-                self._user_scope,
-            )
-        dispatch = getattr(outcome, "dispatch", None)
-        return MainTurnIntakeResult(
-            session_id=session_id,
-            receipt=receipt,
-            dispatch=dispatch if isinstance(dispatch, DispatchOutcome) else None,
-            plan_reference=plan_reference,
-        )
+        return request, command
 
-    def _base_manifest(self, *, text: str, mode: Mode, purpose: Purpose) -> CanonicalJson:
-        """首问冻结 manifest（空手选集合；能力来源据此 fail-closed）。
+    def _base_manifest(
+        self,
+        *,
+        text: str,
+        mode: Mode,
+        purpose: Purpose,
+        role_prompt_refs: Sequence[tuple[str, str]] = (),
+        skill_refs: Sequence[tuple[str, str]] = (),
+        mcp_selection: Sequence[MCPServiceIdentity] = (),
+    ) -> CanonicalJson:
+        """首问冻结 manifest（仅写入调用方显式手选集合；能力来源据此 fail-closed）。
 
         首问用途固定为概念用途：研究用途/数据窗口在草稿/业务对象入口按 F20 冻结，
-        本入口不替用户决定研究截止日。执行据此零派发（无手选/无计划引用）。
+        本入口不替用户决定研究截止日。执行模式额外冻结 ``plan_source=auto``：首问
+        计划由主回合产出并经严格校验保存，派发侧只读取该已保存计划版。
+        ``mcp_selection`` 为空表示未选择（不解释为全部允许，§6 默认拒绝）；非空时
+        按服务身份排序冻结并写入规范摘要 ``mcp_scope_digest``，供能力策略派生
+        ``mcp_scope:<digest>``。
         """
 
-        return json_doc(
-            {
-                "schema_version": 1,
-                "text": text,
-                "mode": mode.value,
-                "purpose": purpose.value,
-                "cutoff": None,
-                "source_refs": [],
-                "visible_history_message_ids": [],
-                "visible_history_artifact_refs": [],
-                "role_prompt_refs": [],
-                "skill_refs": [],
-                "mcp_scope_digest": None,
-                "output_requirements": {},
-            }
-        )
+        selected = {identity.stable_key(): identity for identity in mcp_selection}
+        ordered = tuple(selected[key] for key in sorted(selected))
+        digest: str | None = None
+        if ordered:
+            canonical = json.dumps(
+                [encode_mcp_service_identity(identity) for identity in ordered],
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            digest = sha256_hex(canonical.encode("utf-8"))
+        manifest: dict[str, Any] = {
+            "schema_version": 1,
+            "text": text,
+            "mode": mode.value,
+            "purpose": purpose.value,
+            "cutoff": None,
+            "source_refs": [],
+            "visible_history_message_ids": [],
+            "visible_history_artifact_refs": [],
+            "role_prompt_refs": [[role_id, revision] for role_id, revision in role_prompt_refs],
+            "skill_refs": [[skill_id, revision] for skill_id, revision in skill_refs],
+            "mcp_selection": [encode_mcp_service_identity(identity) for identity in ordered],
+            "mcp_scope_digest": digest,
+            "output_requirements": {},
+        }
+        if mode is Mode.EXECUTE:
+            manifest[PLAN_SOURCE_KEY] = PLAN_SOURCE_AUTO
+        return json_doc(manifest)
 
     def _manifest_object(self, payload: str) -> dict[str, Any]:
         return _manifest_object(payload)

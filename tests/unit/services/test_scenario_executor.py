@@ -38,7 +38,7 @@ import dataclasses
 
 import pytest
 
-from core.errors import AIContentRefusedError
+from core.errors import AIContentRefusedError, AIProviderParamsRejectedError
 from core.i18n import Message
 from core.model_management_types import (
     AdapterResponse,
@@ -527,6 +527,50 @@ class TestHappyPath:
         adapter.invoke.assert_not_awaited()
         decisions = result.candidate_decisions
         assert any(d.decision == "rejected" for d in decisions)
+
+
+class TestN04CleanupStatusSingleColumn:
+    """N04：适配器收尾（注入 SDK client 关闭）失败只降级，成功结果与用量照常入账。
+
+    适配器已返回响应 + 报告用量后，关闭失败以 ``cleanup_status`` 单列进 attempt
+    元数据；attempt 终态仍为 succeeded，用量观察照常发生（不伪装成失败/未知）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_cleanup_failure_keeps_usage_and_succeeded_terminal(self):
+        usage = NormalizedLLMUsage(
+            input_total_tokens=10,
+            uncached_input_tokens=10,
+            cache_read_tokens=None,
+            cache_write_tokens=None,
+            output_tokens=5,
+        )
+        adapter = MagicMock()
+        adapter.invoke = AsyncMock(
+            return_value=AdapterResponse(
+                content="ok",
+                usage=usage,
+                actual_model="glm-4-air",
+                metadata={"cleanup_status": "close_failed"},
+            )
+        )
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder)
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+
+        assert result.status == "succeeded"
+        # 结果与报告用量不因收尾失败丢失
+        assert recorder.observe_usage.call_count == 1
+        obs_arg = recorder.observe_usage.call_args.args[0]
+        assert obs_arg.usage == usage
+        assert obs_arg.metadata["cleanup_status"] == "close_failed"
+        # 终态仍为 succeeded；收尾状态单列在元数据（不覆盖主状态）
+        terminal = recorder.submit_terminal.call_args.args[0]
+        assert terminal.status == "succeeded"
+        assert terminal.usage == usage
+        assert terminal.metadata["cleanup_status"] == "close_failed"
 
 
 class TestFailover:
@@ -2080,6 +2124,41 @@ class TestF27FailureClassification:
         )
         adapter.invoke.assert_awaited_once()
         assert result.candidate_decisions[0].reason == "CONTENT_REFUSED"
+
+    @pytest.mark.asyncio
+    async def test_params_rejected_stable_code_across_ledger_diagnosis_and_receipt(self):
+        """N20：严格出口 HTTP 422 参数被拒 → 账本终态 / 用户诊断 / 业务回执同源稳定码。
+
+        三处消费同一脱敏码 ``provider_params_rejected``（与适配器外发审计
+        error_category 一致），不以异常类名代替；不放宽重试（同连接单次出站）。
+        """
+        adapter = MagicMock()
+
+        async def _invoke(*args, **kwargs):
+            raise AIProviderParamsRejectedError(detail="Provider rejected request parameters with HTTP 422")
+
+        adapter.invoke = AsyncMock(side_effect=_invoke)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            _validator_ok,
+        )
+        # 不放宽重试：参数被拒不重试同一连接（单次出站）
+        adapter.invoke.assert_awaited_once()
+        assert result.status == "failed"
+        # 候选终态（模型管理明细 / 业务回执消费同一 reason）
+        decision = result.candidate_decisions[0]
+        assert decision.reason == "provider_params_rejected"
+        # 业务回执（新闻分类失败原因由候选终态 reason 拼装）同源稳定码
+        assert "; ".join(d.reason for d in result.candidate_decisions) == "provider_params_rejected"
+        # 账本终态错误码同源
+        terminal_call = recorder.submit_terminal.await_args
+        assert terminal_call.args[0].status == "failed"
+        assert terminal_call.args[0].error_code == "provider_params_rejected"
+        # R9：稳定码不含异常类名，也不含原始提供方正文
+        assert "AIProviderParamsRejectedError" not in decision.reason
 
     @pytest.mark.asyncio
     async def test_no_retry_switchable_moves_to_next_candidate(self):

@@ -21,7 +21,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 # 拒绝原因 i18n key（与 locales/*/strings.json 同名同义）
@@ -156,6 +158,44 @@ def has_open_modal_dialog(page: Any) -> bool:
     return _has_open_modal_dialog_control(page)
 
 
+def submit_arbitrated_action(
+    *,
+    page: Any,
+    owner: str,
+    decision_id: str,
+    execution_id: str,
+    round_id: str,
+    action: Callable[[], Awaitable[None]],
+) -> str | None:
+    """通用人工许可动作管线：同一唯一槽位仲裁 → 事件循环任务内执行一次。
+
+    供统一决定界面复用同一仲裁点（允许/拒绝/答复/撤销/重试投递都属人工许可
+    意向）。返回 ``None`` 表示已受理（完成后释放仲裁）；返回 i18n key 表示拒绝。
+    """
+
+    arbiter = get_decision_arbiter()
+    refusal = arbiter.begin_submit(
+        owner,
+        decision_id,
+        execution_id=execution_id,
+        round_id=round_id,
+        has_open_modal_dialog=has_open_modal_dialog(page),
+    )
+    if refusal is not None:
+        return refusal
+
+    async def _run_action() -> None:
+        try:
+            await action()
+        except asyncio.CancelledError:
+            raise  # R2: 取消必须传播；槽位由 finally 释放
+        finally:
+            arbiter.end_submit(owner)
+
+    page.run_task(_run_action)
+    return None
+
+
 def submit_decision(
     *,
     page: Any,
@@ -174,22 +214,11 @@ def submit_decision(
     本函数不接受键盘事件，也不解析 Enter：批准只能来自显式点击（IME 不穿透）。
     """
 
-    arbiter = get_decision_arbiter()
-    refusal = arbiter.begin_submit(
-        owner,
-        decision_id,
+    return submit_arbitrated_action(
+        page=page,
+        owner=owner,
+        decision_id=decision_id,
         execution_id=execution_id,
         round_id=round_id,
-        has_open_modal_dialog=has_open_modal_dialog(page),
+        action=lambda: vm.submit_answer(decision_id, execution_id=execution_id, round_id=round_id),
     )
-    if refusal is not None:
-        return refusal
-
-    async def _run_submit() -> None:
-        try:
-            await vm.submit_answer(decision_id, execution_id=execution_id, round_id=round_id)
-        finally:
-            arbiter.end_submit(owner)
-
-    page.run_task(_run_submit)
-    return None

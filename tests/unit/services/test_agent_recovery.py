@@ -103,6 +103,7 @@ class _FakeClient:
                 _Native(
                     workflow_id=item,
                     status=self._active[item].status,
+                    parent_workflow_id=self._active[item].parent_workflow_id,
                     application_version=self._active[item].application_version,
                     application_name=self._active[item].application_name,
                 )
@@ -123,7 +124,16 @@ class _FakeClient:
         if parent_filter is not None:
             allowed_parents = _allowed(parent_filter)
             items = [item for item in items if item.parent_workflow_id in allowed_parents]
-        return [_Native(workflow_id=item.workflow_id, status=item.status) for item in items[offset : offset + limit]]
+        return [
+            _Native(
+                workflow_id=item.workflow_id,
+                status=item.status,
+                parent_workflow_id=item.parent_workflow_id,
+                application_version=item.application_version,
+                application_name=item.application_name,
+            )
+            for item in items[offset : offset + limit]
+        ]
 
     async def cancel_workflows_async(self, workflow_ids: list[str], *, cancel_children: bool = False) -> None:
         if self.cancel_error is not None:
@@ -237,10 +247,20 @@ async def _isolate(client: _FakeClient, registry: _FakeRegistry, **overrides: An
 
 class TestStartupIsolation:
     async def test_reads_every_page_before_cancel_and_unions_registered(self) -> None:
-        active = [_Native(workflow_id=f"agent_leaf:wf-{index:03d}", status="PENDING") for index in range(150)]
+        active = [
+            _Native(
+                workflow_id=f"agent_leaf:wf-{index:03d}", status="PENDING", parent_workflow_id="agent_research:root-1"
+            )
+            for index in range(150)
+        ]
         active.append(_Native(workflow_id="agent_research:root-1", status="DELAYED"))
         client = _FakeClient(active)
-        registry = _FakeRegistry(registered=(_execution("exec-1", "agent_research:registered-1"),))
+        registry = _FakeRegistry(
+            registered=(
+                _execution("exec-1", "agent_research:registered-1"),
+                _execution("exec-2", "agent_research:root-1"),
+            )
+        )
 
         receipt = await _isolate(client, registry)
 
@@ -264,7 +284,10 @@ class TestStartupIsolation:
         # 先保存再取消、先关门闩
         assert registry.calls[:3] == ["list", "save", "fence"]
         assert registry.saved_records[0].snapshot
-        assert registry.fence_requests[0].workflow_ids == ("agent_research:registered-1",)
+        assert registry.fence_requests[0].workflow_ids == (
+            "agent_research:registered-1",
+            "agent_research:root-1",
+        )
 
     async def test_registered_terminal_native_state_is_read_back_not_absent(self) -> None:
         """R15：登记项原生已终态（被在途过滤）时按同版本谓词补读，如实区分终态与不可证明。"""
@@ -273,7 +296,7 @@ class TestStartupIsolation:
             [
                 _Native("agent_research:done-1", "SUCCESS"),
                 _Native("agent_research:stopped-1", "CANCELLED"),
-                _Native("agent_leaf:a", "PENDING"),
+                _Native("agent_leaf:a", "PENDING", parent_workflow_id="agent_research:done-1"),
             ]
         )
         registry = _FakeRegistry(
@@ -299,11 +322,11 @@ class TestStartupIsolation:
         assert receipt.ready is True
 
     async def test_registered_other_version_is_not_cancelled(self) -> None:
-        """①：版本谓词必须贯穿登记补读——别的制品版本的在途执行不得被误杀。"""
+        """①：版本谓词必须贯穿登记补读——别的制品版本的在途执行（含其直属叶）不得被误杀。"""
 
         client = _FakeClient(
             [
-                _Native("agent_leaf:mine", "PENDING"),
+                _Native("agent_leaf:mine", "PENDING", parent_workflow_id="agent_research:old"),
                 _Native("agent_research:old", "PENDING", application_version=_OTHER_VERSION),
             ]
         )
@@ -311,11 +334,45 @@ class TestStartupIsolation:
 
         receipt = await _isolate(client, registry)
 
-        assert client.cancelled == [("agent_leaf:mine",)]
-        assert receipt.cancelled_workflow_ids == ("agent_leaf:mine",)
-        assert receipt.unproven_version_workflow_ids == ("agent_research:old",)
+        assert client.cancelled == []
+        assert receipt.cancelled_workflow_ids == ()
+        assert receipt.unproven_version_workflow_ids == ("agent_leaf:mine", "agent_research:old")
         assert dict(receipt.original_states)["agent_research:old"] == VERSION_UNPROVEN
+        assert receipt.unproven_ownership_workflow_ids == ()
         assert receipt.ready is True
+
+    async def test_foreign_business_database_workflow_is_not_cancelled_and_blocks(self) -> None:
+        """N06：切库 N→N+1 时旧业务库原生在途执行未登记，必须零改写并阻塞 launch。"""
+
+        client = _FakeClient(
+            [
+                _Native("agent_research:foreign-root", "PENDING"),
+                _Native(
+                    "agent_leaf:foreign-leaf",
+                    "ENQUEUED",
+                    parent_workflow_id="agent_research:foreign-root",
+                ),
+                _Native("agent_research:mine", "PENDING"),
+                _Native("agent_leaf:mine-leaf", "DELAYED", parent_workflow_id="agent_research:mine"),
+            ]
+        )
+        registry = _FakeRegistry(registered=(_execution("exec-mine", "agent_research:mine"),))
+
+        receipt = await _isolate(client, registry)
+
+        # 只清理当前业务库已归属子树；旧库执行零改写
+        assert client.cancelled == [("agent_leaf:mine-leaf", "agent_research:mine")]
+        assert receipt.cancelled_workflow_ids == ("agent_leaf:mine-leaf", "agent_research:mine")
+        assert client._active["agent_research:foreign-root"].status == "PENDING"
+        assert client._active["agent_leaf:foreign-leaf"].status == "ENQUEUED"
+        # 归属不可证如实报告并阻塞（不得宣称 0 派发后 launch）
+        assert receipt.unproven_ownership_workflow_ids == (
+            "agent_leaf:foreign-leaf",
+            "agent_research:foreign-root",
+        )
+        assert receipt.blocking_reasons == ("ownership_unproven",)
+        assert receipt.ready is False
+        assert dict(receipt.original_states)["agent_research:foreign-root"] == "PENDING"
 
     async def test_user_terminated_registered_workflow_is_not_cancelled(self) -> None:
         """④：用户终止（CANCELLED）不得再进取消集（DBOS 会把非 SUCCESS/ERROR 改写状态）。"""
@@ -333,10 +390,16 @@ class TestStartupIsolation:
     async def test_missing_row_after_cancel_is_not_ready(self) -> None:
         """复查缺行不能证明原在途已退出：不得把缺行当成功。"""
 
-        client = _FakeClient([_Native("agent_leaf:a", "PENDING")])
+        client = _FakeClient(
+            [
+                _Native("agent_research:root-1", "SUCCESS"),
+                _Native("agent_leaf:a", "PENDING", parent_workflow_id="agent_research:root-1"),
+            ]
+        )
         client.vanishes_after_cancel = True
+        registry = _FakeRegistry(registered=(_execution("exec-root", "agent_research:root-1"),))
 
-        receipt = await _isolate(client, _FakeRegistry())
+        receipt = await _isolate(client, registry)
 
         assert receipt.ready is False
         assert receipt.unverified_workflow_ids == ("agent_leaf:a",)
@@ -404,16 +467,28 @@ class TestStartupIsolation:
         assert "finalize" in registry.calls
 
     async def test_cancel_failure_blocks(self) -> None:
-        client = _FakeClient([_Native("agent_leaf:a", "PENDING")])
+        client = _FakeClient(
+            [
+                _Native("agent_research:root-1", "SUCCESS"),
+                _Native("agent_leaf:a", "PENDING", parent_workflow_id="agent_research:root-1"),
+            ]
+        )
         client.cancel_error = RuntimeError("cancel unknown")
-        receipt = await _isolate(client, _FakeRegistry())
+        registry = _FakeRegistry(registered=(_execution("exec-root", "agent_research:root-1"),))
+        receipt = await _isolate(client, registry)
         assert receipt.ready is False
         assert "cancel_failed" in receipt.blocking_reasons
 
     async def test_cancel_unverified_blocks(self) -> None:
-        client = _FakeClient([_Native("agent_leaf:a", "PENDING")])
+        client = _FakeClient(
+            [
+                _Native("agent_research:root-1", "SUCCESS"),
+                _Native("agent_leaf:a", "PENDING", parent_workflow_id="agent_research:root-1"),
+            ]
+        )
         client.cancel_effect = False  # 取消未生效（模拟未知/失败静默）
-        receipt = await _isolate(client, _FakeRegistry())
+        registry = _FakeRegistry(registered=(_execution("exec-root", "agent_research:root-1"),))
+        receipt = await _isolate(client, registry)
         assert receipt.ready is False
         assert receipt.unverified_workflow_ids == ("agent_leaf:a",)
         assert "cancel_unverified" in receipt.blocking_reasons
@@ -428,10 +503,16 @@ class TestStartupIsolation:
     async def test_cancelled_error_propagates(self) -> None:
         """R2：取消不吞（不转成 ready=False）。"""
 
-        client = _FakeClient([_Native("agent_leaf:a", "PENDING")])
+        client = _FakeClient(
+            [
+                _Native("agent_research:root-1", "SUCCESS"),
+                _Native("agent_leaf:a", "PENDING", parent_workflow_id="agent_research:root-1"),
+            ]
+        )
         client.cancel_error = asyncio.CancelledError()
+        registry = _FakeRegistry(registered=(_execution("exec-root", "agent_research:root-1"),))
         with pytest.raises(asyncio.CancelledError) as exc_info:
-            await _isolate(client, _FakeRegistry())
+            await _isolate(client, registry)
         assert isinstance(exc_info.value, asyncio.CancelledError)
         assert client.cancelled == []
 
@@ -917,7 +998,12 @@ class TestStartupOrchestration:
         assert guard.released == 1
 
     async def test_cancellation_closes_assembled_handle(self) -> None:
-        client = _FakeClient([_Native("agent_leaf:a", "PENDING")])
+        client = _FakeClient(
+            [
+                _Native("agent_research:root-1", "SUCCESS"),
+                _Native("agent_leaf:a", "PENDING", parent_workflow_id="agent_research:root-1"),
+            ]
+        )
         client.cancel_error = asyncio.CancelledError()
         handle = _FakeHandle(client)
         guard = _FakeGuard()
@@ -926,6 +1012,7 @@ class TestStartupOrchestration:
             await self._start(
                 assemble_func=lambda _settings: handle,
                 launch_func=lambda _handle: None,
+                registry=_FakeRegistry(registered=(_execution("exec-root", "agent_research:root-1"),)),
                 instance_guard=guard,
             )
         assert isinstance(exc_info.value, asyncio.CancelledError)
@@ -1066,7 +1153,12 @@ class TestStartupOrchestration:
     async def test_cancellation_close_failure_keeps_guard(self) -> None:
         """取消且关闭失败：取消继续传播（R2），唯一执行锁保持持有。"""
 
-        client = _FakeClient([_Native("agent_leaf:a", "PENDING")])
+        client = _FakeClient(
+            [
+                _Native("agent_research:root-1", "SUCCESS"),
+                _Native("agent_leaf:a", "PENDING", parent_workflow_id="agent_research:root-1"),
+            ]
+        )
         client.cancel_error = asyncio.CancelledError()
         handle = _FlakyCloseHandle(client)
         guard = _FakeGuard()
@@ -1075,6 +1167,7 @@ class TestStartupOrchestration:
             await self._start(
                 assemble_func=lambda _settings: handle,
                 launch_func=lambda _handle: None,
+                registry=_FakeRegistry(registered=(_execution("exec-root", "agent_research:root-1"),)),
                 instance_guard=guard,
             )
         assert isinstance(exc_info.value, asyncio.CancelledError)

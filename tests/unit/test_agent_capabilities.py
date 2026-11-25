@@ -361,5 +361,105 @@ class TestResearchBoundaryCapability:
         assert "unestimable" in error.value.sanitized_message
 
 
+class TestBoundaryTokenCountingModel:
+    """N36：窗口门按冻结连接的实际模型 tokenizer 计数，不按叶模型桥别名。"""
+
+    @pytest.mark.asyncio
+    async def test_counts_with_frozen_model_not_bridge_alias(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from services.ai_service import token_budget
+
+        monkeypatch.setattr(token_budget, "_litellm_token_counter_error", False)
+        seen: list[str | None] = []
+
+        def _counter(text: object, model: str | None = None) -> int:
+            seen.append(model)
+            return 1
+
+        monkeypatch.setattr(token_budget, "_estimate_tokens", _counter)
+        boundary = ResearchBoundary(policy_provider=lambda ctx: _resolved(_policy(tokenizer_model="openai/gpt-4o")))
+
+        await boundary.before_model_request(cast(Any, None), _context(()))
+
+        assert seen
+        assert set(seen) == {"openai/gpt-4o"}
+        assert "qtrading:bound" not in seen
+
+    @pytest.mark.asyncio
+    async def test_same_window_different_frozen_models_use_own_tokenizer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from services.ai_service import token_budget
+
+        monkeypatch.setattr(token_budget, "_litellm_token_counter_error", False)
+
+        def _counter(text: object, model: str | None = None) -> int:
+            if not text:
+                return 0
+            return 100 if model == "openai/gpt-4o" else 200
+
+        monkeypatch.setattr(token_budget, "_estimate_tokens", _counter)
+        request_context = _context(())
+
+        def _boundary(model_ref: str) -> ResearchBoundary:
+            return ResearchBoundary(
+                policy_provider=lambda ctx: _resolved(
+                    _policy(
+                        context_window_tokens=300,
+                        estimated_input_tokens=None,
+                        output_reserve_tokens=0,
+                        tokenizer_model=model_ref,
+                    )
+                )
+            )
+
+        # 同一窗口：gpt-4o 计 2×100=200 放行；另一冻结模型计 2×200=400 阻断。
+        assert (
+            await _boundary("openai/gpt-4o").before_model_request(cast(Any, None), request_context) is request_context
+        )
+        with pytest.raises(AgentServiceError) as error:
+            await _boundary("deepseek/deepseek-chat").before_model_request(cast(Any, None), request_context)
+        assert error.value.code is AgentErrorCode.POLICY_DENIED
+        assert "measured_basis=verified" in error.value.sanitized_message
+
+    @pytest.mark.asyncio
+    async def test_unprovable_tokenizer_marked_as_estimate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from services.ai_service import token_budget
+
+        # tokenizer 不可用 → 回退启发式，计数不得伪装成已核。
+        monkeypatch.setattr(token_budget, "_litellm_token_counter_error", True)
+        boundary = ResearchBoundary(
+            policy_provider=lambda ctx: _resolved(
+                _policy(
+                    context_window_tokens=1,
+                    estimated_input_tokens=None,
+                    output_reserve_tokens=0,
+                    tokenizer_model="openai/gpt-4o",
+                )
+            )
+        )
+
+        with pytest.raises(AgentServiceError) as error:
+            await boundary.before_model_request(cast(Any, None), _context(()))
+        assert "measured_basis=estimated" in error.value.sanitized_message
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_marked_as_estimate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from services.ai_service import token_budget
+
+        monkeypatch.setattr(token_budget, "_litellm_token_counter_error", False)
+        boundary = ResearchBoundary(
+            policy_provider=lambda ctx: _resolved(
+                _policy(context_window_tokens=1, estimated_input_tokens=None, output_reserve_tokens=0)
+            )
+        )
+
+        with pytest.raises(AgentServiceError) as error:
+            await boundary.before_model_request(cast(Any, None), _context(()))
+        assert "measured_basis=estimated" in error.value.sanitized_message
+
+    def test_blank_tokenizer_model_rejected(self) -> None:
+        with pytest.raises(ValueError) as error:
+            _policy(tokenizer_model="")
+        assert "tokenizer_model" in str(error.value)
+
+
 async def _resolved(policy: ResearchBoundaryPolicy) -> ResearchBoundaryPolicy:
     return policy

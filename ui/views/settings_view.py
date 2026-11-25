@@ -32,6 +32,7 @@ from ui.views.settings_tabs.automation_tab import AutomationTab, NotificationsTa
 from ui.views.settings_tabs.data_source_tab import DataSourceTab
 from ui.views.settings_tabs.database_tab import DatabaseTab
 from ui.views.settings_tabs.mcp_services_tab import MCPServicesTab
+from ui.views.settings_tabs.skills_tab import SkillsTab
 from ui.views.settings_tabs.system_tab import SystemTab
 from utils.sanitizers import DataSanitizer
 
@@ -47,6 +48,7 @@ _TAB_CONFIG = [
     ("settings_tab_tasks", ft.Icons.SCHEDULE),
     ("settings_tab_notify", ft.Icons.NOTIFICATIONS),
     ("settings_tab_system", ft.Icons.TUNE),
+    ("settings_tab_skills", ft.Icons.EXTENSION),
 ]
 
 # UX-01 导航深链协议: 子页 key → 索引 (从 _TAB_CONFIG 派生, 单一事实源, 不手工维护顺序)
@@ -72,6 +74,8 @@ def _build_tabs(
     current_tab: int = 0,
     visited_tabs: set[int] | None = None,
     mcp_lifecycle: Any | None = None,
+    agent_service: Any | None = None,
+    user_scope: str = "local-desktop",
 ) -> list[ft.Control]:
     """构造已访问 Tab (``visible`` prop 控制显隐), 未访问 Tab 为空 Container。
 
@@ -99,6 +103,7 @@ def _build_tabs(
         lambda: AutomationTab(show_snack),
         lambda: NotificationsTab(show_snack),
         lambda: SystemTab(show_snack),
+        lambda: SkillsTab(agent_service, user_scope),
     ]
     return [
         ft.Container(
@@ -153,6 +158,8 @@ def SettingsView(
     active: bool = True,
     target_subtab: tuple[str, int] | None = None,
     mcp_lifecycle: Any | None = None,
+    agent_service: Any | None = None,
+    user_scope: str = "local-desktop",
 ) -> ft.Container:
     """Settings view — declarative shell container.
 
@@ -215,6 +222,8 @@ def SettingsView(
         current_tab=current_tab,
         visited_tabs=visited_tabs,
         mcp_lifecycle=mcp_lifecycle,
+        agent_service=agent_service,
+        user_scope=user_scope,
     )
     assert len(_TAB_CONFIG) == len(tabs), f"_TAB_CONFIG ({len(_TAB_CONFIG)}) and tabs ({len(tabs)}) length mismatch!"
 

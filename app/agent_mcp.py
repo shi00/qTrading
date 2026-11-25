@@ -16,13 +16,14 @@ from __future__ import annotations
 from functools import partial
 from typing import Any
 
-from data.persistence.app_state_service import get_app_state, list_app_state, set_app_state
+from data.persistence.app_state_service import delete_app_state, get_app_state, list_app_state, set_app_state
 from services.agent_service.mcp import SharedMCPConnectionManager
 from services.agent_service.mcp_config_store import AppStateMCPConfigStore
 from services.agent_service.mcp_fastmcp import FastMCPClientFactory
 from services.agent_service.mcp_grant import AppStateMCPGrantStore
 from services.agent_service.mcp_lifecycle import MCPServiceLifecycle
 from services.agent_service.mcp_probe import StdioImplementationProbe
+from services.agent_service.mcp_role import AppStateMCPRoleAssignmentStore
 from services.agent_service.mcp_usage import DaoMCPDispatchGate, DaoMCPFrozenUsage
 
 __all__ = ["build_mcp_lifecycle"]
@@ -35,10 +36,18 @@ def build_mcp_lifecycle(*, engine: Any, dao: Any) -> MCPServiceLifecycle:
         read=partial(get_app_state, engine),
         write=partial(set_app_state, engine, strict=True),
         scan=partial(list_app_state, engine),
+        delete=partial(delete_app_state, engine),
     )
     grants = AppStateMCPGrantStore(
         read=partial(get_app_state, engine),
         write=partial(set_app_state, engine, strict=True),
+        delete=partial(delete_app_state, engine),
+    )
+    roles = AppStateMCPRoleAssignmentStore(
+        read=partial(get_app_state, engine),
+        write=partial(set_app_state, engine, strict=True),
+        scan=partial(list_app_state, engine),
+        delete=partial(delete_app_state, engine),
     )
     manager = SharedMCPConnectionManager(
         store=configs,
@@ -47,4 +56,4 @@ def build_mcp_lifecycle(*, engine: Any, dao: Any) -> MCPServiceLifecycle:
         usage=DaoMCPFrozenUsage(dao),
         dispatch_gate=DaoMCPDispatchGate(dao),
     )
-    return MCPServiceLifecycle(manager=manager, configs=configs, grants=grants)
+    return MCPServiceLifecycle(manager=manager, configs=configs, grants=grants, roles=roles)

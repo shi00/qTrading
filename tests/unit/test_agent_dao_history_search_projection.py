@@ -9,6 +9,8 @@
 - 未公开（``published_at IS NULL``）/已清理成果在关键词搜索中显式排除；
 - 缺投影明确失败：公开消息已有正文而 ``search_text IS NULL`` → OPERATION_UNKNOWN，
   不返回「看起来准确」的空页/残缺页；
+- 符号写法等价（N26）：查询按原写法与写入侧公开投影（``<``/``>`` → ``‹``/``›``）
+  各生成一个模式，两种写法命中同一公开消息，且不新增检索列（私有原文不入索引）；
 - 既有 scope/type/role/state/date/游标 keyset 过滤不被关键词分支覆盖。
 
 真实 PG 上的命中语义见 ``tests/integration/test_agent_dao_search_history.py``；
@@ -229,13 +231,47 @@ class TestArtifactPublicBodySearch:
         assert sql.count(escaped) == 6
 
     def test_body_predicate_is_correlated_exists(self) -> None:
-        pattern = AgentDao._history_like_pattern("尾词")
+        patterns = AgentDao._history_like_patterns("尾词")
         compiled = _literal_sql(
-            select(AgentArtifact.artifact_id).where(AgentDao._history_artifact_body_predicate(pattern))
+            select(AgentArtifact.artifact_id).where(AgentDao._history_artifact_body_predicate(patterns))
         )
         assert "EXISTS" in compiled
         assert compiled.count("agent_artifact.body_ref") >= 1
         assert "agent_body_payload.body_ref" in compiled
+
+
+class TestSymbolProjectionSearchEquivalence:
+    """N26：普通比较短语两种符号写法定位同一公开消息，私有原文仍不进索引。"""
+
+    def test_patterns_pair_raw_with_public_projection(self) -> None:
+        # 写入侧公开投影把尖括号中和为 ‹/›，查询侧原写法须同时携带投影模式
+        assert AgentDao._history_like_patterns("PE < 20") == ("%PE < 20%", "%PE ‹ 20%")
+        # 已是投影写法时不重复生成模式
+        assert AgentDao._history_like_patterns("PE ‹ 20") == ("%PE ‹ 20%",)
+        # 不含尖括号的普通短语仍是单一模式（不改变既有转义计数）
+        assert AgentDao._history_like_patterns("回撤") == ("%回撤%",)
+
+    def test_angle_bracket_per_char_projection(self) -> None:
+        assert AgentDao._history_like_patterns("PE <= 20") == ("%PE <= 20%", "%PE ‹= 20%")
+        assert AgentDao._history_like_patterns("PE >= 20") == ("%PE >= 20%", "%PE ›= 20%")
+
+    @pytest.mark.asyncio
+    async def test_both_spellings_hit_public_projection(self) -> None:
+        raw_sql = await _union_sql(query_text="PE < 20")
+        projected_sql = await _union_sql(query_text="PE ‹ 20")
+        # 两种写法都带上公开投影模式：存储为中和符号的公开消息对两者同样可见
+        for sql in (raw_sql, projected_sql):
+            assert "agent_message.search_text ILIKE '%PE ‹ 20%'" in sql
+            assert "agent_artifact.summary ILIKE '%PE ‹ 20%'" in sql
+        # 原写法额外保留字面量模式（标题等未投影列仍可命中）
+        assert "agent_message.search_text ILIKE '%PE < 20%'" in raw_sql
+        assert "agent_message.search_text ILIKE '%PE < 20%'" not in projected_sql
+
+    @pytest.mark.asyncio
+    async def test_private_raw_body_still_not_indexed(self) -> None:
+        sql = await _union_sql(query_text="PE < 20")
+        # 消息原始正文不参与检索：只搜公开投影 search_text（缺投影另有显式失败判据）
+        assert "agent_message.body_text ILIKE" not in sql
 
 
 class TestMissingProjectionFailsExplicitly:
@@ -279,6 +315,8 @@ class TestMissingProjectionFailsExplicitly:
                     type_filter="main",
                     message_role_filter="user",
                     state_filter="running",
+                    # 消息发生口径（N21：created 口径按会话创建日，不再落在行 created_at）
+                    time_basis="message",
                     date_from="2026-06-01",
                     date_to="2026-06-30",
                 ),
@@ -292,8 +330,8 @@ class TestMissingProjectionFailsExplicitly:
         assert "agent_execution.execution_kind IN ('root')" in preflight
         assert "agent_message.role = 'user'" in preflight
         assert "agent_execution.display_state = 'running'" in preflight
-        assert "agent_message.created_at >= '2026-06-01" in preflight
-        assert "agent_message.created_at < '2026-07-01" in preflight
+        assert "agent_message.occurred_at >= '2026-06-01" in preflight
+        assert "agent_message.occurred_at < '2026-07-01" in preflight
 
 
 class TestExistingFiltersNotBypassed:
@@ -308,6 +346,8 @@ class TestExistingFiltersNotBypassed:
             type_filter="child",
             message_role_filter="user",
             state_filter="running",
+            # 消息发生口径（N21：created 口径按会话创建日，不再落在行 created_at）
+            time_basis="message",
             date_from="2026-06-01",
             date_to="2026-06-30",
             session_row=True,
@@ -315,7 +355,7 @@ class TestExistingFiltersNotBypassed:
         assert sql.count("agent_execution.execution_kind IN ('leaf', 'comparison_lane')") == 2
         assert "agent_message.role = 'user'" in sql
         assert sql.count("agent_execution.display_state = 'running'") == 2
-        assert sql.count("agent_message.created_at >= '2026-06-01") == 1
+        assert sql.count("agent_message.occurred_at >= '2026-06-01") == 1
         assert sql.count("agent_artifact.created_at < '2026-07-01") == 1
 
     @pytest.mark.asyncio

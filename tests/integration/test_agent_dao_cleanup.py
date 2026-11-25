@@ -1759,3 +1759,295 @@ async def test_admission_derives_closure_and_preview_from_storage(real_embedded_
     assert ok is not None and ok.closure_known is True and ok.preview_valid is True
     assert missing is not None and missing.preview_valid is False
     assert unsettled is not None and unsettled.closure_known is False
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_three_representations_cleared_per_domain_and_outside_untouched(real_embedded_pg) -> None:
+    """第四类验收证据：清理跨 ``body_text``/``model_text``/``search_text`` 三表示逐域清空。
+
+    断言：
+
+    - 集合内每条消息的三表示与结构化 ``payload`` 逐列清空，资产正文清空并换固定
+      tombstone（``display_name``/``digest``），不因 NOT NULL 保旧正文；
+    - 同一用户域集合外会话/资产、以及**其他用户域**记录逐列零变更（不误删、不改写
+      他人数据）；
+    - 残留计数清理前非 0、清理后为 0（P1-11 完成前证据，R21 不把残留报成已清除）。
+
+    真实 PG 不可用时由 ``real_embedded_pg`` 夹具按 ``embedded_real`` 口径跳过
+    （sidecar 二进制缺失）；连接建立后的鉴权/配置/协议失败不降级为 skip
+    （判据见 ``tests/integration/_real_pg_gate.py``）。
+    """
+
+    url = real_embedded_pg.url
+    await _reset_and_migrate_app_schema(url)
+
+    suffix = uuid.uuid4().hex[:8]
+    other_scope = f"{_USER_SCOPE}-other"
+    session_in, session_out, session_other = f"s-in-{suffix}", f"s-out-{suffix}", f"s-other-{suffix}"
+    message_in_one, message_in_two = f"m-in-1-{suffix}", f"m-in-2-{suffix}"
+    message_out, message_other = f"m-out-{suffix}", f"m-other-{suffix}"
+    asset_in, asset_out, asset_other = f"asset-in-{suffix}", f"asset-out-{suffix}", f"asset-other-{suffix}"
+    body_in, model_in, search_in = "正文原值-内部", "模型可见-内部", "公开索引-内部"
+    body_out, model_out, search_out = "正文原值-外部", "模型可见-外部", "公开索引-外部"
+    body_other, model_other, search_other = "正文原值-他人", "模型可见-他人", "公开索引-他人"
+    asset_body_out, asset_body_other = "资产正文-外部", "资产正文-他人"
+    now = datetime.now(UTC)
+
+    def _message(
+        user_scope: str,
+        message_id: str,
+        session_id: str,
+        seq: int,
+        *,
+        body: str,
+        model: str,
+        search: str,
+        payload: str,
+    ) -> dict[str, object]:
+        return {
+            "user_scope": user_scope,
+            "message_id": message_id,
+            "session_id": session_id,
+            "execution_id": None,
+            "round_id": None,
+            "event_id": f"evt-{message_id}",
+            "session_seq": seq,
+            "execution_seq": None,
+            "event_kind": "public_message_saved",
+            "payload_kind": "public_message",
+            "subject_id": message_id,
+            "subject_revision": 1,
+            "role": "user",
+            "body_text": body,
+            "model_text": model,
+            "search_text": search,
+            "body_untrusted": False,
+            "payload": {"text": payload},
+            "occurred_at": now,
+            "committed_at": now,
+        }
+
+    def _asset(
+        user_scope: str,
+        asset_id: str,
+        *,
+        display_name: str,
+        digest: str,
+        body_text: str,
+    ) -> dict[str, object]:
+        return {
+            "user_scope": user_scope,
+            "asset_id": asset_id,
+            "asset_version": "1",
+            "asset_kind": "summary",
+            "display_name": display_name,
+            "digest": digest,
+            "body_text": body_text,
+            "read_state": "ready",
+            "verification_state": "program_verified",
+        }
+
+    app_engine = create_test_engine(url)
+    try:
+        dao = AgentDao(app_engine)
+        async with app_engine.begin() as conn:
+            await conn.execute(
+                sa.insert(AgentSession),
+                [
+                    {"user_scope": _USER_SCOPE, "session_id": session_in, "title": "集合内会话标题"},
+                    {"user_scope": _USER_SCOPE, "session_id": session_out, "title": "外部会话标题"},
+                    {"user_scope": other_scope, "session_id": session_other, "title": "他人会话标题"},
+                ],
+            )
+            await conn.execute(
+                sa.insert(AgentMessage),
+                [
+                    _message(
+                        _USER_SCOPE,
+                        message_in_one,
+                        session_in,
+                        1,
+                        body=body_in,
+                        model=model_in,
+                        search=search_in,
+                        payload="载荷-内部-1",
+                    ),
+                    _message(
+                        _USER_SCOPE,
+                        message_in_two,
+                        session_in,
+                        2,
+                        body=f"{body_in}-2",
+                        model=f"{model_in}-2",
+                        search=f"{search_in}-2",
+                        payload="载荷-内部-2",
+                    ),
+                    _message(
+                        _USER_SCOPE,
+                        message_out,
+                        session_out,
+                        1,
+                        body=body_out,
+                        model=model_out,
+                        search=search_out,
+                        payload="载荷-外部",
+                    ),
+                    _message(
+                        other_scope,
+                        message_other,
+                        session_other,
+                        1,
+                        body=body_other,
+                        model=model_other,
+                        search=search_other,
+                        payload="载荷-他人",
+                    ),
+                ],
+            )
+            await conn.execute(
+                sa.insert(AgentAssetVersion),
+                [
+                    _asset(
+                        _USER_SCOPE, asset_in, display_name="资产名-内部", digest="9" * 64, body_text="资产正文-内部"
+                    ),
+                    _asset(
+                        _USER_SCOPE, asset_out, display_name="资产名-外部", digest="8" * 64, body_text=asset_body_out
+                    ),
+                    _asset(
+                        other_scope,
+                        asset_other,
+                        display_name="资产名-他人",
+                        digest="7" * 64,
+                        body_text=asset_body_other,
+                    ),
+                ],
+            )
+
+        residual_before = await dao.count_cleanup_residual_text(
+            _USER_SCOPE, session_ids=[session_in], asset_keys=[(asset_in, "1")]
+        )
+        touched = await dao.tombstone_cleanup_text(_USER_SCOPE, session_ids=[session_in], asset_keys=[(asset_in, "1")])
+        residual_after = await dao.count_cleanup_residual_text(
+            _USER_SCOPE, session_ids=[session_in], asset_keys=[(asset_in, "1")]
+        )
+
+        async with app_engine.connect() as conn:
+            in_rows = (
+                await conn.execute(
+                    sa.select(
+                        AgentMessage.message_id,
+                        AgentMessage.body_text,
+                        AgentMessage.model_text,
+                        AgentMessage.search_text,
+                        AgentMessage.payload,
+                    )
+                    .where(AgentMessage.message_id.in_([message_in_one, message_in_two]))
+                    .order_by(AgentMessage.message_id)
+                )
+            ).all()
+            out_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentMessage.body_text,
+                        AgentMessage.model_text,
+                        AgentMessage.search_text,
+                        AgentMessage.payload,
+                    ).where(AgentMessage.message_id == message_out)
+                )
+            ).one()
+            other_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentMessage.body_text,
+                        AgentMessage.model_text,
+                        AgentMessage.search_text,
+                    ).where(AgentMessage.message_id == message_other)
+                )
+            ).one()
+            asset_in_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentAssetVersion.display_name,
+                        AgentAssetVersion.digest,
+                        AgentAssetVersion.body_text,
+                    ).where(AgentAssetVersion.user_scope == _USER_SCOPE, AgentAssetVersion.asset_id == asset_in)
+                )
+            ).one()
+            asset_out_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentAssetVersion.display_name,
+                        AgentAssetVersion.digest,
+                        AgentAssetVersion.body_text,
+                    ).where(AgentAssetVersion.user_scope == _USER_SCOPE, AgentAssetVersion.asset_id == asset_out)
+                )
+            ).one()
+            asset_other_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentAssetVersion.display_name,
+                        AgentAssetVersion.digest,
+                        AgentAssetVersion.body_text,
+                    ).where(AgentAssetVersion.user_scope == other_scope, AgentAssetVersion.asset_id == asset_other)
+                )
+            ).one()
+            out_title = (
+                await conn.execute(
+                    sa.select(AgentSession.title).where(
+                        AgentSession.user_scope == _USER_SCOPE, AgentSession.session_id == session_out
+                    )
+                )
+            ).scalar_one()
+            other_title = (
+                await conn.execute(
+                    sa.select(AgentSession.title).where(
+                        AgentSession.user_scope == other_scope, AgentSession.session_id == session_other
+                    )
+                )
+            ).scalar_one()
+    finally:
+        await app_engine.dispose()
+
+    # 三表示逐域清空：两条集合内消息逐列断言（不按行数聚合）。
+    assert residual_before > 0
+    assert residual_after == 0
+    assert [row.message_id for row in in_rows] == sorted([message_in_one, message_in_two])
+    for row in in_rows:
+        assert row.body_text is None
+        assert row.model_text is None
+        assert row.search_text is None
+        assert row.payload is None
+    assert touched["agent_session"] == 1
+    assert touched["agent_message"] == 2
+    assert touched["agent_asset_version"] == 1
+    assert touched["agent_artifact"] == 0
+    assert touched["agent_round"] == 0
+    assert touched["agent_body_payload"] == 0
+
+    # 资产 NOT NULL 文本换固定 tombstone、正文清空（不保旧正文摘要）。
+    assert asset_in_row.display_name == CLEANUP_TOMBSTONE
+    assert asset_in_row.digest == CLEANUP_TOMBSTONE_DIGEST
+    assert asset_in_row.body_text is None
+
+    # 集合外（同用户域）零变更：不误删、不改写。
+    assert (out_row.body_text, out_row.model_text, out_row.search_text) == (body_out, model_out, search_out)
+    assert out_row.payload == {"text": "载荷-外部"}
+    assert (asset_out_row.display_name, asset_out_row.digest, asset_out_row.body_text) == (
+        "资产名-外部",
+        "8" * 64,
+        asset_body_out,
+    )
+    assert out_title == "外部会话标题"
+
+    # 其他用户域零变更：不改写他人数据。
+    assert (other_row.body_text, other_row.model_text, other_row.search_text) == (
+        body_other,
+        model_other,
+        search_other,
+    )
+    assert (asset_other_row.display_name, asset_other_row.digest, asset_other_row.body_text) == (
+        "资产名-他人",
+        "7" * 64,
+        asset_body_other,
+    )
+    assert other_title == "他人会话标题"

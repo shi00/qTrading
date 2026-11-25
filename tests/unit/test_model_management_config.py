@@ -26,6 +26,7 @@ from utils.config_models import (
     MODEL_MANAGEMENT_SCHEMA_VERSION,
     AppConfig,
     ModelManagementConfig,
+    PresetDeleteOutcome,
     SecurityStateCorruptionError,
     validate_security_subdomain_integrity,
 )
@@ -911,7 +912,7 @@ class TestCrossProcessStrategyPresets:
         }
 
     def test_stale_cache_does_not_resurrect_entry_deleted_by_other_process(self, isolated_config):
-        """A 的旧快照仍含 old，B 已删除 old → A 删除返回 False、新增不复活 old。"""
+        """A 的旧快照仍含 old，B 已删除 old → A 删除返回 NOT_FOUND、新增不复活 old。"""
         _write_raw_config(
             isolated_config,
             {"strategy_presets_oversold": {"old": {"pe": 1}, "keep": {"pe": 2}}},
@@ -920,14 +921,14 @@ class TestCrossProcessStrategyPresets:
 
         worker = (
             "from utils.config_handler import ConfigHandler\n"
-            "print('DELETED=' + str(ConfigHandler.delete_strategy_preset('oversold', 'old')))\n"
+            "print('DELETED=' + str(ConfigHandler.delete_strategy_preset('oversold', 'old').value))\n"
         )
         proc = _run_worker(isolated_config, worker)
         assert proc.returncode == 0, proc.stderr
-        assert "DELETED=True" in proc.stdout
+        assert "DELETED=deleted" in proc.stdout
 
-        # 存在性在锁内基于磁盘判定：旧缓存命中也必须返回 False
-        assert cfg_mod.ConfigHandler.delete_strategy_preset("oversold", "old") is False
+        # 存在性在锁内基于磁盘判定：旧缓存命中也必须返回 NOT_FOUND
+        assert cfg_mod.ConfigHandler.delete_strategy_preset("oversold", "old") is PresetDeleteOutcome.NOT_FOUND
         assert cfg_mod.ConfigHandler.save_strategy_preset("oversold", "A", {"pe": 3}) is True
         raw = _read_raw_config(isolated_config)
         assert raw["strategy_presets_oversold"] == {"keep": {"pe": 2}, "A": {"pe": 3}}

@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from enum import StrEnum
 from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -597,6 +598,21 @@ class ModelManagementSaveResult:
     current_revision: int | None = None
     committed_revision: int | None = None
     last_config_commit: dict[str, Any] | None = None
+
+
+class PresetDeleteOutcome(StrEnum):
+    """策略参数预设删除结果（替代裸 bool，避免写失败被报成目标缺失，N14）。
+
+    - ``DELETED``: 磁盘上预设存在且已成功落盘删除。
+    - ``NOT_FOUND``: 锁内基于磁盘判定目标预设不存在（他进程已删除 / 从未存在）——
+      这不是错误，不需要用户重试。
+    - ``WRITE_FAILED``: 目标存在但存储未能提交（读盘失败 / 锁超时 / 校验失败 /
+      原子写失败等），磁盘与缓存均保持已提交值，可提示用户重试。
+    """
+
+    DELETED = "deleted"
+    NOT_FOUND = "not_found"
+    WRITE_FAILED = "write_failed"
 
 
 class AppConfig(BaseModel):

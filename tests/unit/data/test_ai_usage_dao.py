@@ -1919,6 +1919,19 @@ class TestReadActiveReservedCny:
         assert set(params["states"]) == {"reserved", "dispatched", "held_unconfirmed"}
 
     @pytest.mark.asyncio
+    async def test_lease_expiry_gates_ordinary_reservation_only(self):
+        """N25：普通预留须租约未过期；held_unconfirmed 不受租约影响仍计入。"""
+        conn = _CaptureConn(results=[[("inv-1", Decimal("0.5"))]])
+        dao = _dao(conn)
+        await dao.read_active_reserved_cny(invocation_ids=["inv-1"])
+
+        sql = conn.calls[0][0]
+        # 与预算门 `_read_active_reservations_sum` 同一租约判据（严格大于，恰好到期视为过期）
+        assert "i.owner_lease_expires_at > (now() AT TIME ZONE 'UTC')" in sql
+        # 失权后「结果未知」的 held_unconfirmed 明示保留，不被租约分支释放
+        assert "elem->>'state' = 'held_unconfirmed'" in sql
+
+    @pytest.mark.asyncio
     async def test_non_negative_guard_applied_before_sum(self):
         """存量垃圾金额在 SQL 内先过滤再 SUM（非负小数正则 + 上限），不 crash 不抵消。"""
         conn = _CaptureConn(results=[[("inv-1", Decimal("0"))]])

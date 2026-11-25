@@ -19,11 +19,11 @@
 import asyncio
 import logging
 from enum import IntEnum
-from typing import Any
+from typing import Any, cast
 
 import flet as ft
 
-from ui.agent_decision_arbiter import submit_decision
+from ui.agent_decision_arbiter import submit_arbitrated_action, submit_decision
 from ui.components.flet_type_helpers import (
     get_control_attr,
     safe_controls,
@@ -44,16 +44,25 @@ from ui.viewmodels.business_research_view_model import (
     resolve_business_research_service,
     shared_business_research,
 )
+from ui.viewmodels.decision_center_view_model import (
+    DecisionCenterService,
+    resolve_tool_grant_revoker,
+    shared_decision_center,
+)
 from ui.viewmodels.nav_badge_view_model import NavBadgeViewModel
 from ui.viewmodels.research_observer_view_model import (
     LOCAL_DESKTOP_USER_SCOPE,
     resolve_agent_research_service,
+    resolve_artifact_delivery,
     resolve_main_turn_intake,
     shared_research_observer,
 )
 from ui.views.backtest_view import BacktestView
 from ui.views.data_view import DataExplorerView
+from ui.views.decision_center_panel import build_decision_center_panel
 from ui.views.home_view import HomeView
+from ui.viewmodels.research_comparison_view_model import ComparisonServicePort, ResearchComparisonViewModel
+from ui.views.research_comparison_panel import ResearchComparisonPanel
 from ui.views.research_observer_panel import ResearchObserverPanel
 from ui.views.screener_view import ScreenerView
 from ui.views.settings_view import SETTINGS_SUBTAB_INDEX, SettingsView
@@ -66,6 +75,8 @@ logger = logging.getLogger(__name__)
 
 # Tab 切换防抖 (ms) — 快速连续点击导航时, 最后一次点击生效
 DEBOUNCE_MS = 50
+# 应用级待处理提醒轮询间隔（只读聚合查询，不触碰执行；跨页提醒的兜底刷新）
+DECISION_CENTER_POLL_SECONDS = 30.0
 
 
 class NavTabs(IntEnum):
@@ -183,6 +194,8 @@ def _build_pages_stack(
     backtest_prefill_request: int | None = None,
     on_start_research: Any = None,
     mcp_lifecycle: Any = None,
+    agent_service: Any = None,
+    user_scope: str = "local-desktop",
 ) -> ft.Stack:
     """构造所有页面控件的 ``ft.Stack`` (``visible`` prop 控制显示/隐藏)。
 
@@ -295,6 +308,8 @@ def _build_pages_stack(
                     active=current_tab == NavTabs.SETTINGS,
                     target_subtab=settings_subtab_request,
                     mcp_lifecycle=mcp_lifecycle,
+                    agent_service=agent_service,
+                    user_scope=user_scope,
                 ),
                 current_tab == NavTabs.SETTINGS,
             ),
@@ -419,7 +434,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
     egress_status_state, _ = ft.use_state(get_egress_status_state)
 
     # --- Phase 6.1 FR-UX-006: nav_tasks 运行中任务数角标 (TaskManager.subscribe 驱动) ---
-    nav_badge_state, _ = use_viewmodel(factory=NavBadgeViewModel)
+    nav_badge_state, nav_badge_vm = use_viewmodel(factory=NavBadgeViewModel)
 
     # --- P02: 壳层公共研究观察层（跨页共享 VM；观察不控制执行） ---
     research_service, research_unavailable_key = resolve_agent_research_service(agent_wiring)
@@ -430,9 +445,33 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             user_scope=str(getattr(agent_wiring, "user_scope", LOCAL_DESKTOP_USER_SCOPE)),
             unavailable_reason_key=research_unavailable_key,
             intake=main_turn_intake,
+            mcp_catalog=getattr(agent_wiring, "mcp_lifecycle", None),
+            delivery=resolve_artifact_delivery(agent_wiring),
         )
     )
     research_open, set_research_open = ft.use_state(False)
+    # F37: 多模型对比接线（独立面板；不改动研究观察层热点文件）
+    comparison_state, comparison_vm = use_viewmodel(
+        factory=lambda: ResearchComparisonViewModel(
+            cast(ComparisonServicePort | None, research_service),
+            user_scope=str(getattr(agent_wiring, "user_scope", LOCAL_DESKTOP_USER_SCOPE)),
+            unavailable_reason_key=research_unavailable_key,
+        )
+    )
+    comparison_open, set_comparison_open = ft.use_state(False)
+    # W-07: 应用级统一决定/授权界面（跨页可达；与观察层共用同一 facade）
+    decision_state, decision_vm = use_viewmodel(
+        factory=lambda: shared_decision_center(
+            cast(DecisionCenterService | None, research_service),
+            user_scope=str(getattr(agent_wiring, "user_scope", LOCAL_DESKTOP_USER_SCOPE)),
+            unavailable_reason_key=research_unavailable_key,
+            revoker=resolve_tool_grant_revoker(agent_wiring),
+        )
+    )
+    decision_open, set_decision_open = ft.use_state(False)
+    # 事件/效果闭包读取最新可见性（避免 stale 快照）
+    decision_open_ref: Any = ft.use_ref(None)
+    decision_open_ref.current = decision_open
     decision_notice: str | None = None
     decision_notice, set_decision_notice = ft.use_state(lambda: decision_notice)
     # R2-I06: 业务对象 → 研究草稿准备（只准备不发送；与观察层共用同一 facade）
@@ -451,6 +490,16 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
     # 观察入口按钮引用（每渲染刷新）：显式关闭观察层后把焦点还给入口，避免焦点
     # 随观察层卸载丢失（返焦）。
     research_toggle_holder: Any = ft.use_ref(None)
+    # N08: 导航意图序号 —— 业务导航 / 快捷键切页 / 深链导航同步递增；建稿回执
+    # 迟到时据此核对用户是否已离开发起页，不据过期操作重开观察层。
+    nav_intent_seq_ref: Any = ft.use_ref(None)
+    if nav_intent_seq_ref.current is None:
+        nav_intent_seq_ref.current = 0
+
+    def _note_nav_intent() -> None:
+        """登记一次导航意图（同步递增，供迟到回执判定用户是否已离开）。"""
+
+        nav_intent_seq_ref.current = int(nav_intent_seq_ref.current or 0) + 1
 
     def _collapse_research() -> None:
         """只收起观察层：不清空草稿、不停止/取消研究（观察不控制执行）。
@@ -487,6 +536,93 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         if page is not None and research_vm.state.available:
             page.run_task(research_vm.refresh)
 
+    def _load_mcp_scope() -> None:
+        """观察层挂载时读取 MCP 服务目录（只读；不连接任何服务）。"""
+        page = _get_page()
+        if page is not None:
+            page.run_task(research_vm.load_mcp_scope)
+
+    def _load_model_selection() -> None:
+        """观察层挂载时读取研究场景模型候选与角色选项（只读；不改任何配置）。"""
+        page = _get_page()
+        if page is not None:
+            page.run_task(research_vm.load_model_selection)
+
+    def _select_model(connection_id: str) -> None:
+        """选择研究模型连接（异步校验命令；非法选择由 VM 显式拒绝）。"""
+        page = _get_page()
+        if page is not None and connection_id:
+            page.run_task(research_vm.select_model_connection, connection_id)
+
+    def _refresh_usage() -> None:
+        """刷新本轮/累计费用与五段耗时（只读投影）。"""
+        page = _get_page()
+        if page is not None:
+            page.run_task(research_vm.refresh_usage)
+
+    def _refresh_budget() -> None:
+        """重算发送前预算提示（token 计数在 VM 内经 CPU 池执行）。"""
+        page = _get_page()
+        if page is not None:
+            page.run_task(research_vm.refresh_budget_hint)
+
+    def _load_sessions() -> None:
+        """观察层挂载时读取会话列表（只读；不创建、不切换会话）。"""
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.load_sessions)
+
+    def _open_session(session_id: str) -> None:
+        """切换到列表中的精确会话（只读导航；不派发研究）。"""
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.open_session, session_id)
+
+    def _create_session() -> None:
+        """新建空会话（标题来自列表输入框；不派发研究）。"""
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.create_session)
+
+    def _commit_rename() -> None:
+        """提交会话改名（CAS 动作；异步调度，事件处理器内不做同步 IO）。"""
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.commit_rename)
+
+    def _pin_session(session_id: str) -> None:
+        """置顶会话（只改元数据；不改变研究执行）。"""
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.pin_session, session_id)
+
+    def _archive_session(session_id: str) -> None:
+        """归档会话（只改元数据；不终止执行）。"""
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.archive_session, session_id)
+
+    def _toggle_comparison(_e: ft.ControlEvent | None = None) -> None:
+        """展开/收起对比面板；展开时只读加载连接目录并同步当前会话。"""
+
+        opening = not comparison_open
+        set_comparison_open(opening)
+        if not opening:
+            return
+        comparison_vm.set_session(research_state.session_id)
+        page = _get_page()
+        if page is not None and comparison_state.available:
+            page.run_task(comparison_vm.load_connections)
+            if comparison_state.group_ref:
+                page.run_task(comparison_vm.refresh)
+
+    def _schedule_comparison(command: Any, *args: Any) -> None:
+        """异步命令统一经 page.run_task 调度（事件处理器内不做同步 IO，R16）。"""
+
+        page = _get_page()
+        if page is not None:
+            page.run_task(command, *args)
+
     def _on_draft_change(decision_id: str, text: str) -> None:
         research_vm.set_answer_draft(decision_id, text)
 
@@ -494,21 +630,41 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         """业务入口发起准备（异步调度；事件处理器内不做同步 IO，R16）。"""
         page = _get_page()
         if page is not None:
-            page.run_task(_prepare_research, request, reader)
+            # N08: 冻结发起时的页面与导航意图序号，回执到达时核对是否已离开。
+            page.run_task(
+                _prepare_research,
+                request,
+                reader,
+                current_tab_ref.current,
+                nav_intent_seq_ref.current or 0,
+            )
 
-    async def _prepare_research(request: BusinessResearchRequest, reader: Any | None) -> None:
-        """只准备草稿（不发送、不派发）；成功/失败都只改提示，不导航、不重跑业务。"""
+    async def _prepare_research(
+        request: BusinessResearchRequest,
+        reader: Any | None,
+        origin_tab: int | None,
+        nav_seq: int,
+    ) -> None:
+        """只准备草稿（不发送、不派发）；成功/失败都只改提示，不导航、不重跑业务。
+
+        N08: 回执可能晚于用户导航到达——仅当用户仍停留在发起页且期间无新导航
+        意图时才展开观察层；已离开则只留提示，不重开、不改当前页。
+        """
         await business_vm.prepare(request, backtest_reader=reader)
         notice_key = business_vm.state.notice_key
         if notice_key is None:
             return
         set_decision_notice(I18n.get(notice_key))
         prepared_session_id = business_vm.state.last_session_id
-        if prepared_session_id is not None and notice_key in (NOTICE_DRAFT_PREPARED, NOTICE_DRAFT_EXISTS):
-            # 草稿已可见：展开观察层并导航到回执给出的精确会话（不以历史首条代替）
-            set_research_open(True)
-            research_open_ref.current = True
-            await research_vm.open_session(prepared_session_id)
+        if prepared_session_id is None or notice_key not in (NOTICE_DRAFT_PREPARED, NOTICE_DRAFT_EXISTS):
+            return
+        if (nav_intent_seq_ref.current or 0) != nav_seq or current_tab_ref.current != origin_tab:
+            # N08: 用户已离开发起页（或有新的导航意图）：不重开观察层、不代用户导航。
+            return
+        # 草稿已可见：展开观察层并导航到回执给出的精确会话（不以历史首条代替）
+        set_research_open(True)
+        research_open_ref.current = True
+        await research_vm.open_session(prepared_session_id)
 
     def _toggle_execution(execution_id: str) -> None:
         """只改子任务树展开态（共享 VM 持久化，切页不丢；不控制执行）。"""
@@ -517,6 +673,33 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
     def _select_execution(execution_id: str | None) -> None:
         """只改观察位置（整会话 / 某执行子树）；不派发、不取消研究。"""
         research_vm.select_execution(execution_id)
+
+    def _control_execution(kind: str, execution_id: str) -> None:
+        """提交显式控制命令（暂停/继续/撤回；异步调度，事件处理器不阻塞，R16）。"""
+        page = _get_page()
+        if page is None or not research_vm.state.available:
+            return
+        if kind == "pause":
+            page.run_task(research_vm.pause_execution, execution_id)
+        elif kind == "resume":
+            page.run_task(research_vm.resume_execution, execution_id)
+        elif kind == "withdraw_queued":
+            page.run_task(research_vm.withdraw_execution, execution_id)
+
+    def _retry_execution(execution_id: str, target_node_id: str) -> None:
+        """提交单任务重试（服务按持久计划重算精确范围；不在 UI 内计算）。"""
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.retry_execution, execution_id, target_node_id)
+
+    def _prompt_control_reason(execution_id: str, kind: str) -> None:
+        """进入终止/未知结案的原因输入态（纯展示，不发命令）。"""
+        research_vm.prompt_control_reason(execution_id, kind)
+
+    def _control_reason_submit() -> None:
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.submit_control_reason)
 
     def _load_artifact(artifact_id: str, artifact_version: int, execution_id: str, round_id: str) -> None:
         """按需只读读取成果正文（异步调度，事件处理器内不做同步 IO）。"""
@@ -570,6 +753,82 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         if page is not None and research_vm.state.available:
             page.run_task(research_vm.retry_delivery, decision_id)
 
+    # --- W-07: 统一决定界面命令（全部经仲裁层；不排队、不抢焦点） ---
+    def _refresh_decisions() -> None:
+        """只读刷新跨会话待处理（不触碰执行状态）。"""
+
+        page = _get_page()
+        if page is not None and decision_vm.state.available:
+            page.run_task(decision_vm.refresh)
+
+    def _toggle_decision_center(_e: ft.ControlEvent | None = None) -> None:
+        """打开/关闭统一决定面板（用户显式点击；新事项不自动弹出）。"""
+
+        opening = not bool(decision_open_ref.current)
+        decision_open_ref.current = opening
+        set_decision_open(opening)
+        if opening:
+            _refresh_decisions()
+
+    def _submit_center_action(decision_id: str, action: Any) -> None:
+        """统一决定界面的写入动作：单槽仲裁 → 事件循环任务内执行一次。"""
+
+        page = _get_page()
+        if page is None:
+            return
+        item = decision_vm.state.item_by_id(decision_id)
+        if item is None:
+            page.run_task(action)
+            return
+        refusal = submit_arbitrated_action(
+            page=page,
+            owner="decision_center",
+            decision_id=decision_id,
+            execution_id=item.execution_id,
+            round_id=item.round_id,
+            action=action,
+        )
+        if refusal is not None:
+            decision_vm.report_refusal(refusal)
+
+    def _allow_decision(decision_id: str) -> None:
+        _submit_center_action(decision_id, lambda: decision_vm.allow(decision_id))
+
+    def _deny_decision(decision_id: str) -> None:
+        _submit_center_action(decision_id, lambda: decision_vm.deny(decision_id))
+
+    def _answer_decision(decision_id: str) -> None:
+        _submit_center_action(decision_id, lambda: decision_vm.submit_answer(decision_id))
+
+    def _defer_decision(decision_id: str) -> None:
+        """「稍后」只降噪，不写服务、不移出待处理（期限不变）。"""
+
+        decision_vm.defer(decision_id)
+
+    def _retry_center_delivery(decision_id: str) -> None:
+        _submit_center_action(decision_id, lambda: decision_vm.retry_delivery(decision_id))
+
+    def _load_authorization_scope(decision_id: str) -> None:
+        """按需只读加载授权范围（许可状态/版本；不触碰执行）。"""
+
+        page = _get_page()
+        if page is not None:
+            page.run_task(decision_vm.load_authorization_detail, decision_id)
+
+    def _revoke_authorization(decision_id: str) -> None:
+        _submit_center_action(decision_id, lambda: decision_vm.revoke(decision_id))
+
+    def _locate_source_session(session_id: str) -> None:
+        """提醒定位：切到源会话（用户显式点击；不自动跳转、不抢焦点）。"""
+
+        if not session_id:
+            return
+        decision_open_ref.current = False
+        set_decision_open(False)
+        set_research_open(True)
+        research_open_ref.current = True
+        _open_session(session_id)
+
     # --- Pure UI state ---
 
     current_tab, set_current_tab = ft.use_state(NavTabs.MARKET)
@@ -613,6 +872,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
 
     def _on_nav_change(e: ft.ControlEvent) -> None:
         # P02: 业务导航（含当前业务项）只收起观察层，不清稿、不控制执行
+        _note_nav_intent()
         _collapse_research()
         selected = get_control_attr(e.control, ft.NavigationRail, "selected_index")
         if selected == int(current_tab):
@@ -640,6 +900,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             return
         if action.startswith(SHORTCUT_TAB_PREFIX):
             # P02: Ctrl+1—7（含当前业务项）只收起观察层，不清稿、不控制执行
+            _note_nav_intent()
             _collapse_research()
             target = int(action[len(SHORTCUT_TAB_PREFIX) :])
             page.run_task(_do_tab_switch, target)
@@ -713,6 +974,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             值 (APP-F1); state 写入保持函数式更新。
         """
         # 业务导航（含深链）一律先收起观察层：不清稿、不停止/取消研究
+        _note_nav_intent()
         _collapse_research()
         # F13: 每次 backtest 导航递增透传请求序号 (函数式更新, 防闭包 stale 快照)。
         # 置于 same-tab 早返回之前 —— 即使回测页已挂载或当前 tab 相同, 新序号仍触发
@@ -822,6 +1084,62 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
 
     ft.use_effect(_setup_egress_listener, dependencies=[], cleanup=_cleanup_egress_listener)
 
+    # --- W-07: 统一决定界面的跨页提醒（只读轮询 + 非抢焦点读屏公告） ---
+    decision_poll_holder: Any = ft.use_ref(None)
+    decision_announce_service: Any = ft.use_ref(None)
+
+    def _setup_decision_poll() -> None:
+        """挂载即只读刷新；运行期低频轮询让其他页也能收到新待处理（不抢焦点）。"""
+
+        _refresh_decisions()
+        if not decision_vm.state.available:
+            return
+        page = _get_page()
+        if page is None:
+            return
+
+        async def _tick() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(DECISION_CENTER_POLL_SECONDS)
+                    await decision_vm.refresh()
+            except asyncio.CancelledError:
+                raise  # R2: 取消必须传播
+
+        decision_poll_holder.current = page.run_task(_tick)
+
+    def _cleanup_decision_poll() -> None:
+        task = decision_poll_holder.current
+        decision_poll_holder.current = None
+        cancel = getattr(task, "cancel", None)
+        if callable(cancel):
+            cancel()
+
+    def _sync_decision_badge() -> None:
+        """待处理决定数同步到导航角标（与业务任务运行数分列，不混淆）。"""
+
+        nav_badge_vm.set_pending_decisions(decision_vm.state.pending_count)
+
+    def _announce_decision_change() -> None:
+        """新增/解除阻塞时经平台语义服务礼仪式播报（不抢焦点、不弹窗）。"""
+
+        announcement = decision_vm.state.announcement
+        if announcement is None:
+            return
+        page = _get_page()
+        if page is None:
+            return
+        service = decision_announce_service.current
+        if service is None:
+            service = ft.SemanticsService()
+            decision_announce_service.current = service
+        text = I18n.get(announcement.key).format(**dict(announcement.params))
+        page.run_task(service.announce_message, text)
+
+    ft.use_effect(_setup_decision_poll, dependencies=[decision_state.available], cleanup=_cleanup_decision_poll)
+    ft.use_effect(_sync_decision_badge, dependencies=[decision_state.pending_count])
+    ft.use_effect(_announce_decision_change, dependencies=[decision_state.announcement_seq])
+
     # --- 渲染 ---
     collapse_btn = ft.IconButton(
         icon=ft.Icons.MENU_OPEN,
@@ -843,6 +1161,23 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         on_click=safe_on_click(_toggle_research),
     )
     research_toggle_holder.current = research_toggle
+    # F37: 公共区多模型对比入口（独立面板；两路连接选择 + 只读组投影）
+    comparison_toggle = ft.IconButton(
+        icon=ft.Icons.COMPARE_ARROWS,
+        selected=comparison_open,
+        icon_size=AppStyles.FONT_SIZE_HEADLINE,
+        tooltip=I18n.get("agent_comparison_toggle"),
+        on_click=safe_on_click(_toggle_comparison),
+    )
+    # W-07: 任意页可达的统一决定/授权入口（非第八业务导航；角标=待处理决定数）
+    decision_toggle = ft.IconButton(
+        icon=ft.Icons.PENDING_ACTIONS,
+        selected=decision_open,
+        icon_size=AppStyles.FONT_SIZE_HEADLINE,
+        tooltip=I18n.get("agent_decision_center_open"),
+        badge=ft.Badge(label=str(nav_badge_state.pending_decisions)) if nav_badge_state.pending_decisions > 0 else None,
+        on_click=safe_on_click(_toggle_decision_center),
+    )
     brand_text = ft.Text(
         I18n.get("app_brand"),
         size=AppStyles.FONT_SIZE_LG,
@@ -863,6 +1198,8 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
                 brand_text,
                 # P02: 公共区研究入口（不新增第八业务导航；展开非模态观察层）
                 research_toggle,
+                comparison_toggle,
+                decision_toggle,
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             spacing=5,
@@ -892,6 +1229,8 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             backtest_prefill_request,
             _start_research,
             getattr(agent_wiring, "mcp_lifecycle", None),
+            getattr(agent_wiring, "service", None),
+            str(getattr(agent_wiring, "user_scope", LOCAL_DESKTOP_USER_SCOPE)),
         ),
         expand=True,
         padding=AppStyles.SPACING_XL,
@@ -913,13 +1252,87 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             on_select_execution=_select_execution,
             on_load_artifact=_load_artifact,
             on_load_draft=_load_draft,
+            on_toggle_artifact_selection=research_vm.toggle_artifact_selection,
+            on_select_all_artifacts=research_vm.select_all_artifacts,
+            on_clear_artifact_selection=research_vm.clear_artifact_selection,
+            on_artifact_format_change=research_vm.set_artifact_export_format,
+            on_artifact_target_path_change=research_vm.set_artifact_export_target_path,
+            on_preview_artifact=research_vm.preview_selected_artifact,
+            on_copy_artifacts=research_vm.copy_selected_artifacts,
+            on_artifact_copy_done=research_vm.confirm_artifact_copy,
+            on_artifact_copy_failed=research_vm.note_artifact_copy_failed,
+            on_request_export=research_vm.request_selected_export,
+            on_confirm_export=research_vm.confirm_selected_export,
+            on_cancel_export=research_vm.cancel_selected_export,
             on_composer_text=research_vm.set_composer_text,
             on_composer_mode=research_vm.set_composer_mode,
             on_send=_send_first_question,
             on_start_plan=_start_confirmed_plan,
             on_retry_delivery=_retry_delivery,
+            on_toggle_mcp_scope=research_vm.toggle_mcp_scope,
+            on_load_mcp_scope=_load_mcp_scope,
+            on_select_model=_select_model,
+            on_select_role=research_vm.select_role,
+            on_load_model_selection=_load_model_selection,
+            on_refresh_usage=_refresh_usage,
+            on_refresh_budget=_refresh_budget,
+            on_load_sessions=_load_sessions,
+            on_open_session=_open_session,
+            on_new_session_title=research_vm.set_new_session_title,
+            on_create_session=_create_session,
+            on_begin_rename=research_vm.begin_rename,
+            on_rename_text=research_vm.set_rename_text,
+            on_commit_rename=_commit_rename,
+            on_cancel_rename=research_vm.cancel_rename,
+            on_pin_session=_pin_session,
+            on_archive_session=_archive_session,
+            control_actions=research_vm.control_actions,
+            on_control_execution=_control_execution,
+            on_retry_execution=_retry_execution,
+            on_prompt_control_reason=_prompt_control_reason,
+            on_control_reason_change=research_vm.update_control_reason,
+            on_control_reason_submit=_control_reason_submit,
+            on_control_reason_cancel=research_vm.cancel_control_reason,
         )
         if research_open
+        else None
+    )
+    # F37: 对比面板（并列/表格；动作全部显式点击，异步命令经 run_task 调度）
+    comparison_panel = (
+        ResearchComparisonPanel(
+            state=comparison_state,
+            on_close=lambda: _toggle_comparison(None),
+            on_lane=comparison_vm.set_lane,
+            on_text=comparison_vm.set_text,
+            on_mode=comparison_vm.set_mode,
+            on_view_mode=comparison_vm.set_view_mode,
+            on_submit=lambda: _schedule_comparison(comparison_vm.submit),
+            on_refresh=lambda: _schedule_comparison(comparison_vm.refresh),
+            on_retry_lane=lambda lane_ref: _schedule_comparison(comparison_vm.retry_lane, lane_ref),
+            on_stop=lambda: _schedule_comparison(comparison_vm.stop_group),
+            on_mcp_disconnect=comparison_vm.report_shared_mcp_disconnect,
+        )
+        if comparison_open
+        else None
+    )
+    # W-07: 统一决定/授权面板（非模态；源会话/影响范围/三动作/授权范围与撤销）
+    decision_panel = (
+        build_decision_center_panel(
+            decision_state,
+            on_close=lambda: _toggle_decision_center(None),
+            on_refresh=_refresh_decisions,
+            on_allow=_allow_decision,
+            on_deny=_deny_decision,
+            on_defer=_defer_decision,
+            on_submit_answer=_answer_decision,
+            on_draft_change=decision_vm.set_answer_draft,
+            on_retry_delivery=_retry_center_delivery,
+            on_load_detail=_load_authorization_scope,
+            on_revoke=_revoke_authorization,
+            on_locate=_locate_source_session,
+            on_dismiss_reminder=decision_vm.dismiss_reminder,
+        )
+        if decision_open
         else None
     )
 
@@ -937,8 +1350,9 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             color=AppColors.TEXT_HINT,
         ),
     ]
-    if research_state.pending_count > 0:
-        # P02/F31: 持续待处理指示（非抢焦点；显式点击打开观察层）
+    # W-07/F31: 持续待处理指示（任意页可见；非抢焦点，显式点击打开统一决定界面）
+    pending_badge_count = research_state.pending_count
+    if pending_badge_count > 0:
         status_bar_items.append(ft.Container(expand=True))
         status_bar_items.append(
             ft.TextButton(
@@ -950,15 +1364,15 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
                             color=AppColors.ERROR,
                         ),
                         ft.Text(
-                            I18n.get("agent_research_pending_fmt").format(count=research_state.pending_count),
+                            I18n.get("agent_research_pending_fmt").format(count=pending_badge_count),
                             size=AppStyles.FONT_SIZE_CAPTION,
                             color=AppColors.ERROR,
                         ),
                     ],
                     spacing=AppStyles.SPACING_XS,
                 ),
-                tooltip=I18n.get("agent_research_toggle"),
-                on_click=safe_on_click(_toggle_research),
+                tooltip=I18n.get("agent_decision_center_open"),
+                on_click=safe_on_click(_toggle_decision_center),
             )
         )
     status_bar_egress = ft.Container(
@@ -971,6 +1385,10 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
     body_controls: list[ft.Control] = [nav_rail, ft.VerticalDivider(width=1), body]
     if research_panel is not None:
         body_controls.append(research_panel)
+    if comparison_panel is not None:
+        body_controls.append(comparison_panel)
+    if decision_panel is not None:
+        body_controls.append(decision_panel)
     body_region = ft.Container(
         content=ft.Row(safe_controls(body_controls), expand=True),
         expand=True,

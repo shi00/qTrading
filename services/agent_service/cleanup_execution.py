@@ -8,7 +8,9 @@
 
 尝试阶段在副作用前落库（M14）：删除完成到 ``tombstone/verified`` 之间取消、
 硬崩或服务异常时，下一次重试据此识别「已尝试删除」并沿原 job 收尾，不把
-已删净的主键域误判为首次缺失。
+已删净的主键域误判为首次缺失。重试中的临时预检异常不得把「已删除」证据
+覆盖成普通预检失败（N43）：删除尝试之后发生的预检失败落专门类别，恢复后
+仍沿原集合与 fence 收尾。
 
 不做：递归扩集合、绕过 fence 删除、把「查不到」当「已清除」、把缺失计数当 0。
 """
@@ -22,6 +24,7 @@ from typing import Final, Protocol
 from core.agent_types import (
     AgentErrorCode,
     AgentServiceError,
+    CleanupJobRecord,
     CleanupPhase,
     CleanupState,
 )
@@ -37,6 +40,12 @@ from services.agent_service.cleanup_native import NativeCleanupResult, NativePre
 _DELETE_STARTED_STAGE: Final = "cleanup_native_delete_started"
 _TOMBSTONE_PENDING_STAGE: Final = "cleanup_native_deleted_tombstone_pending"
 
+#: 预检失败类别（N43）：尚无删除尝试时是普通失败，缺失仍按首次缺失拒绝；
+#: 删除尝试已发生时另记一个仍承载「已删除」事实的类别，避免暂时读取异常
+#: 把已删进度覆盖掉、令恢复后的重试被误判为首次缺失。
+_PREFLIGHT_FAILED_CATEGORY: Final = "cleanup_preflight_failed"
+_PREFLIGHT_FAILED_AFTER_DELETE_CATEGORY: Final = "cleanup_preflight_failed_after_delete"
+
 _RETRY_AFTER_DELETION_CATEGORIES: frozenset[str] = frozenset(
     {
         "cleanup_execution_failed",
@@ -44,6 +53,7 @@ _RETRY_AFTER_DELETION_CATEGORIES: frozenset[str] = frozenset(
         "cleanup_residual_content",
         _DELETE_STARTED_STAGE,
         _TOMBSTONE_PENDING_STAGE,
+        _PREFLIGHT_FAILED_AFTER_DELETE_CATEGORY,
     }
 )
 # 上次失败/中断发生在删除尝试之后 → §10.7 允许重试时原生行已缺失。
@@ -138,22 +148,23 @@ class CleanupExecutionService:
             if preflight.missing_ids:
                 # §10.7：只有「已有可靠 prepared 且 fence 持续」的**重试**允许原生行已缺失。
                 # 判据是上次失败/中断发生在删除尝试之后（cleanup_execution_failed /
-                # rows_remaining / 已落库的删除尝试阶段）；预检阶段缺失
-                # （native_target_missing）与首次确认一律拒绝，不以「查不到」冒充「已清理」。
-                retry_after_prepared = (
-                    record.fence_committed
-                    and bool(record.exact_ids)
-                    and record.prior_error_category in _RETRY_AFTER_DELETION_CATEGORIES
-                )
-                if not retry_after_prepared:
+                # rows_remaining / 已落库的删除尝试阶段 / 删除尝试后的预检失败）；预检阶段
+                # 缺失（native_target_missing）与首次确认一律拒绝，不以「查不到」冒充「已清理」。
+                if not self._deletion_attempted(record):
                     await self._mark_retry(record.user_scope, record.cleanup_job_id, "native_target_missing")
                     raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "native cleanup target not found", label)
         except AgentServiceError:
             raise
         except Exception as exc:
-            # 预检阶段尚未尝试删除：任何失败（含拒绝写入自身失败）都记
-            # cleanup_preflight_failed，绝不并入 cleanup_execution_failed。
-            await self._mark_retry(record.user_scope, record.cleanup_job_id, "cleanup_preflight_failed", exc)
+            # 本次预检未删除任何行：从未删除的失败记 cleanup_preflight_failed，缺失仍按
+            # 首次缺失拒绝；若上次失败已在删除尝试之后（N43），改记专用类别以保留
+            # 「已删除」事实，暂时读取异常不得让恢复后的重试停成首次缺失。
+            category = (
+                _PREFLIGHT_FAILED_AFTER_DELETE_CATEGORY
+                if self._deletion_attempted(record)
+                else _PREFLIGHT_FAILED_CATEGORY
+            )
+            await self._mark_retry(record.user_scope, record.cleanup_job_id, category, exc)
             raise
 
         # 副作用前先落「删除尝试已开始」阶段（M14）：两主键域（公开系统 + Datasource）
@@ -241,6 +252,16 @@ class CleanupExecutionService:
             confirmation.replayed,
             deletion.verified_counts,
             tombstoned,
+        )
+
+    @staticmethod
+    def _deletion_attempted(record: CleanupJobRecord) -> bool:
+        """上次失败/中断是否发生在删除尝试之后（§10.7 重试豁免的唯一判据来源）。"""
+
+        return (
+            record.fence_committed
+            and bool(record.exact_ids)
+            and record.prior_error_category in _RETRY_AFTER_DELETION_CATEGORIES
         )
 
     async def _mark_retry(

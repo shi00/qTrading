@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -223,6 +224,45 @@ class TestReadOperationFacts:
         second = await dao.read_operation(_query(limit=1, body_cursor=first.next_cursor), user_scope=_USER)
         assert second.result_text == body[2000:]
         assert second.next_cursor is None
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_not_dispatched_operation_reports_determinate_state(self, real_embedded_pg: ConnectionInfo) -> None:
+        """未开始派发是确定态：报 ``not_dispatched``，与「已派发未终结」区分，不报错。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+        await _seed_operation(dao, phase="prepared", effect_state="not_dispatched", io_state="not_started")
+
+        read = await dao.read_operation(_query(), user_scope=_USER)
+
+        assert read.phase == "prepared"
+        assert read.effect_state is EffectState.NOT_DISPATCHED
+        assert read.result_available is False
+        assert read.unavailable_reason == "not_dispatched"
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_finite_decimal_payload_reads_back_with_number_semantics(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        """N38：合规工具返回的小数落库后，原 operation ID 读回数字语义与结果状态。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+        await _seed_operation(dao, result_payload={"ratio": 0.5, "nested": {"score": 1.25}, "rows": [1, 2]})
+
+        read = await dao.read_operation(_query(), user_scope=_USER)
+
+        assert read.phase == "result_saved"
+        assert read.effect_state is EffectState.CONFIRMED
+        assert read.result_available is True
+        assert read.unavailable_reason is None
+        assert read.result_text is not None
+        assert '"ratio":0.5' in read.result_text
+        assert '"score":1.25' in read.result_text
+        assert json.loads(read.result_text) == {"ratio": 0.5, "nested": {"score": 1.25}, "rows": [1, 2]}
+        assert read.result_payload == read.result_text
         await dao.engine.dispose()  # type: ignore[union-attr]
 
     @pytest.mark.asyncio(loop_scope="session")

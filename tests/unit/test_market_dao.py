@@ -4,6 +4,7 @@
 # 测试行为由测试用例本身验证。
 
 import datetime
+import hashlib
 import json
 from contextlib import asynccontextmanager
 
@@ -165,6 +166,42 @@ class TestMarketDaoSaveMarketNews:
         )
         params = dao._write_db.call_args[0][1]
         assert params[-4] is None
+
+
+class TestMarketDaoGetMarketNewsId:
+    """N07: 落库后按 (content_hash, publish_time) 反查准确 market_news.id。"""
+
+    @pytest.mark.asyncio
+    async def test_returns_id_by_identity(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        captured: dict = {}
+
+        async def fake_read(sql, params, **kwargs):
+            captured["sql"] = sql
+            captured["params"] = params
+            return pd.DataFrame([{"id": 42}])
+
+        dao._read_db = fake_read
+        publish_time = datetime.datetime(2024, 6, 15, 2, 0)
+        result = await dao.get_market_news_id("Test news", publish_time)
+        assert result == 42
+        # R4: 参数化占位符，值与宽度对齐
+        assert "content_hash = $1" in captured["sql"]
+        assert "publish_time = $2" in captured["sql"]
+        assert captured["params"] == (hashlib.sha256(b"Test news").hexdigest(), publish_time)
+
+    @pytest.mark.asyncio
+    async def test_no_row_returns_none(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        assert await dao.get_market_news_id("c", datetime.datetime(2024, 6, 15)) is None
+
+    @pytest.mark.asyncio
+    async def test_missing_publish_time_skips_query(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame([{"id": 1}]))
+        assert await dao.get_market_news_id("c", None) is None
+        dao._read_db.assert_not_awaited()
 
 
 class TestMarketDaoGetMarketNews:

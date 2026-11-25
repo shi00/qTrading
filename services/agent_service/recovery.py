@@ -19,6 +19,14 @@
 行，已终态（含用户终止、恢复耗尽）零改写；复查只认显式终态，**缺行不等于已
 退出**（``unverified_workflow_ids`` 如实阻塞）。
 
+**业务库归属贯穿隔离集**：登记面是**当前业务库**（``AgentDao``）的投影，而运行库
+在同实例内固定复用，原生在途行可能残留别的业务库（切库前的 N）执行。取消集只收
+「登记归属可证」的原生行——直接登记项，或已登记 root 的直属/传递子项；登记父项
+须在原生列举中证明同应用同版本才可作归属依据，否则其子项随父按
+``version-unproven`` 处理、不取消。无主（未登记且父级归属不可证）的在途行一律
+零改写并 ``ready=False``（``ownership_unproven``），避免切库后误清理/误恢复旧业务库
+执行；手动恢复同样以登记 root + 其直属叶为归属判据。
+
 明确不做：
 
 - 不 ``launch``（启动编排在隔离 ``ready=True`` 后另行调用）；
@@ -30,7 +38,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Final, Protocol
 
@@ -106,8 +114,10 @@ class StartupIsolationReceipt:
     全部原生 workflow 已不在途。``blocking_reasons`` 为阻塞码（稳定 wire 值），
     ``unverified_workflow_ids`` 为复查仍未见终态的原生 ID。
     ``cancelled_workflow_ids`` 为真正进入取消集的精确集合（只含在途行）；
-    ``unproven_version_workflow_ids`` 为登记但无法证明同应用同版本、未进入取消
-    集的项（快照原状态标 ``version-unproven``）。
+    ``unproven_version_workflow_ids`` 为登记但无法证明同应用同版本（或其子项）而
+    未进入取消集的项（登记项快照原状态标 ``version-unproven``）；
+    ``unproven_ownership_workflow_ids`` 为原生在途但无法证明属于当前业务库（未
+    登记且父级归属不可证）的项：零改写并阻塞 launch。
     """
 
     command_id: str
@@ -120,6 +130,7 @@ class StartupIsolationReceipt:
     unverified_workflow_ids: tuple[str, ...]
     cancelled_workflow_ids: tuple[str, ...] = ()
     unproven_version_workflow_ids: tuple[str, ...] = ()
+    unproven_ownership_workflow_ids: tuple[str, ...] = ()
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -133,6 +144,7 @@ class StartupIsolationReceipt:
             "unverified_workflow_ids": list(self.unverified_workflow_ids),
             "cancelled_workflow_ids": list(self.cancelled_workflow_ids),
             "unproven_version_workflow_ids": list(self.unproven_version_workflow_ids),
+            "unproven_ownership_workflow_ids": list(self.unproven_ownership_workflow_ids),
         }
 
 
@@ -204,17 +216,19 @@ async def run_startup_isolation(
     """执行启动隔离（HANDOFF §8.4 第 2-3 条），返回不可变回执。
 
     顺序固定：读登记集合 → 原生分页快照（读满才停）→ 按登记 ID 带同一版本谓词
-    补读被过滤项（无法证明版本者不取消、如实标记）→ 固定并保存隔离命令与原状态
-    → 关闭应用派发门闩 → 精确取消（仅限在途行）→ 复查显式终态。任一步普通异常即
-    ``ready=False`` 并停止后续步骤（不取消、不 launch）；``CancelledError`` 继续
-    传播（R2）。
+    补读被过滤项（无法证明版本者不取消、如实标记）→ 按**当前业务库登记归属**解析
+    取消集（未登记且父级不可证的原生在途行零改写并阻塞）→ 固定并保存隔离命令与
+    原状态 → 关闭应用派发门闩 → 精确取消（仅限已归属在途行）→ 复查显式终态。任一
+    步普通异常即 ``ready=False`` 并停止后续步骤（不取消、不 launch）；
+    ``CancelledError`` 继续传播（R2）。
 
     Args:
         user_scope: 用户域（与 DAO 同域校验）。
         isolation_id: 本次启动隔离命令的稳定 ID（客户端命令键）。
         target_id: 命令目标身份（应用实例，如运行库名 + 启动批次）。
         client: 原生控制面（禁监听/禁无限重试的 ``DBOSClient``）。
-        registry: 应用登记面（``AgentDao``）。
+        registry: 应用登记面（``AgentDao``，必须是**当前业务库**的投影；其登记项
+            是归属判据的唯一来源，运行库原生行可能残留旧业务库执行）。
         application_name: 运行库应用稳定名（HANDOFF §8.3 固定签名）。
         app_version: 真实工作流代码版本（隔离只处理同版本在途集合）。
         workflow_names: 应用自有 workflow 名（默认 D-02 发布名）。
@@ -242,7 +256,7 @@ async def run_startup_isolation(
     registered_ids = tuple(sorted({item.workflow_id for item in registered if item.workflow_id is not None}))
 
     try:
-        native_states = await _snapshot_native_workflows(
+        active_states = await _snapshot_native_workflows(
             client,
             application_name=application_name,
             app_version=app_version,
@@ -250,6 +264,7 @@ async def run_startup_isolation(
         )
     except Exception as exc:  # 分页失败：集合不完整（§8.4 第 3 条）
         return _blocked_receipt(command_id, user_scope, "native_listing_failed", exc)
+    native_states = dict(active_states)
 
     # 在途列举按名/版本/在途状态过滤，登记项若已处于终态不会被列入。补读必须带
     # **同一版本谓词**：只有能证明「同应用、同版本」的登记项才有资格进入取消集；
@@ -271,11 +286,23 @@ async def run_startup_isolation(
         unproven_registered = tuple(sorted(set(filtered_registered) - set(scoped_states)))
         native_states = {**scoped_states, **native_states}
 
+    # 归属判据：登记面是当前业务库投影，运行库原生行可能来自切库前的旧业务库。
+    # 只有「直接登记」或「已登记且版本可证的 root 的子项」进入取消集；无主在途行
+    # 零改写并阻塞 launch（N06：切库后不得清理/恢复旧业务库执行）。
+    owned_ids, version_unproven_ids, unproven_ownership = _resolve_ownership(
+        active_states=active_states,
+        proven_states=native_states,
+        registered_ids=registered_ids,
+        unproven_version_ids=unproven_registered,
+    )
+
     snapshot_ids = tuple(sorted(set(native_states) | set(registered_ids)))
     original_states = tuple(
         (
             workflow_id,
-            VERSION_UNPROVEN if workflow_id in unproven_registered else native_states[workflow_id],
+            VERSION_UNPROVEN
+            if workflow_id in version_unproven_ids and workflow_id in registered_ids
+            else native_states[workflow_id].status,
         )
         for workflow_id in snapshot_ids
     )
@@ -314,13 +341,18 @@ async def run_startup_isolation(
             registered_ids=registered_ids,
             snapshot_ids=snapshot_ids,
             original_states=original_states,
-            unproven_registered=unproven_registered,
+            unproven_version_ids=tuple(sorted(version_unproven_ids)),
         )
 
     # 取消只发在途行：DBOS 的 cancel 会把非 SUCCESS/ERROR 行（含恢复耗尽终态）
-    # 统一改写成 CANCELLED，故已终态/用户终止项绝不能进入取消集。
+    # 统一改写成 CANCELLED，故已终态/用户终止项绝不能进入取消集；归属不可证或
+    # 版本不可证的原生行也不进入（零改写，交回执如实报告）。
     cancel_ids = tuple(
-        sorted(workflow_id for workflow_id, state in native_states.items() if state in STARTUP_ACTIVE_STATUSES)
+        sorted(
+            workflow_id
+            for workflow_id, state in active_states.items()
+            if workflow_id in owned_ids and state.status in STARTUP_ACTIVE_STATUSES
+        )
     )
     if cancel_ids:
         try:
@@ -336,7 +368,7 @@ async def run_startup_isolation(
                 snapshot_ids=snapshot_ids,
                 original_states=original_states,
                 cancelled_ids=cancel_ids,
-                unproven_registered=unproven_registered,
+                unproven_version_ids=tuple(sorted(version_unproven_ids)),
             )
 
     try:
@@ -352,24 +384,33 @@ async def run_startup_isolation(
             snapshot_ids=snapshot_ids,
             original_states=original_states,
             cancelled_ids=cancel_ids,
-            unproven_registered=unproven_registered,
+            unproven_version_ids=tuple(sorted(version_unproven_ids)),
         )
 
     # 只认显式终态：缺行可能来自清理删除/读取缺口，不能当作「原在途已退出」。
     unverified_ids = tuple(
-        workflow_id for workflow_id in cancel_ids if verified_states.get(workflow_id) not in TERMINAL_WORKFLOW_STATUSES
+        workflow_id
+        for workflow_id in cancel_ids
+        if _native_status(verified_states.get(workflow_id)) not in TERMINAL_WORKFLOW_STATUSES
     )
+    blocking_reasons: list[str] = []
+    if unverified_ids:
+        blocking_reasons.append("cancel_unverified")
+    if unproven_ownership:
+        # 无主在途行仍可能被 launch 的恢复管线接管：缺归属证据不得宣称 0 派发
+        blocking_reasons.append("ownership_unproven")
     receipt = StartupIsolationReceipt(
         command_id=command_id,
         user_scope=user_scope,
-        ready=not unverified_ids,
+        ready=not blocking_reasons,
         registered_workflow_ids=registered_ids,
         isolated_workflow_ids=snapshot_ids,
         original_states=original_states,
-        blocking_reasons=() if not unverified_ids else ("cancel_unverified",),
+        blocking_reasons=tuple(blocking_reasons),
         unverified_workflow_ids=unverified_ids,
         cancelled_workflow_ids=cancel_ids,
-        unproven_version_workflow_ids=unproven_registered,
+        unproven_version_workflow_ids=tuple(sorted(version_unproven_ids)),
+        unproven_ownership_workflow_ids=tuple(sorted(unproven_ownership)),
     )
     return await _finalize_receipt(registry, receipt)
 
@@ -931,16 +972,72 @@ async def start_agent_runtime(
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _NativeWorkflowState:
+    """原生行快照：状态 + 父 workflow 身份（归属解析用；空表示 root/未记录）。"""
+
+    status: str
+    parent_workflow_id: str | None = None
+
+
+def _native_status(state: _NativeWorkflowState | None) -> str | None:
+    """取原生状态；缺行返回 ``None``（不伪终态）。"""
+
+    return None if state is None else state.status
+
+
+def _resolve_ownership(
+    *,
+    active_states: Mapping[str, _NativeWorkflowState],
+    proven_states: Mapping[str, _NativeWorkflowState],
+    registered_ids: Sequence[str],
+    unproven_version_ids: Sequence[str],
+) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    """按业务库登记归属解析原生在途集合（N06）。
+
+    登记面来自当前业务库（``AgentDao``），原生运行库在同实例内固定复用，故原生
+    在途行可能属于切库前的另一个业务库。归属判据（与手动恢复一致）：
+
+    - 直接登记项——只有同时在 ``proven_states``（原生列举报回、已证同应用同版本）
+      才可作归属依据，避免把别的制品版本登记项当父级；
+    - 已归属 root 的直属/传递子项（``parent_workflow_id`` 链）；
+    - 版本不可证登记项的子项随父按版本不可证处理。
+
+    返回 ``(可清理集合, 版本不可证集合, 归属不可证集合)``：后两类均零改写；归属
+    不可证项阻塞 launch，避免旧业务库执行被误清理或经 launch 恢复管线误恢复。
+    """
+
+    registered = set(registered_ids)
+    proven = set(proven_states)
+    version_unproven = set(unproven_version_ids)
+    owned = registered & proven
+    changed = True
+    while changed:
+        changed = False
+        for workflow_id, state in active_states.items():
+            if workflow_id in owned or workflow_id in version_unproven:
+                continue
+            parent_id = state.parent_workflow_id
+            if parent_id in owned:
+                owned.add(workflow_id)
+                changed = True
+            elif parent_id in version_unproven:
+                version_unproven.add(workflow_id)
+                changed = True
+    unproven = frozenset(set(active_states) - owned - version_unproven)
+    return frozenset(owned & set(active_states)), frozenset(version_unproven), unproven
+
+
 async def _snapshot_native_workflows(
     client: WorkflowControlClient,
     *,
     application_name: str,
     app_version: str,
     workflow_names: Sequence[str],
-) -> dict[str, str]:
-    """读满全部分页后返回 ``{workflow_id: 原生状态}``（固定集合后才取消）。"""
+) -> dict[str, _NativeWorkflowState]:
+    """读满全部分页后返回 ``{workflow_id: 原生状态/父身份}``（固定集合后才取消）。"""
 
-    states: dict[str, str] = {}
+    states: dict[str, _NativeWorkflowState] = {}
     offset = 0
     while True:
         page = await client.list_workflows_async(
@@ -954,7 +1051,7 @@ async def _snapshot_native_workflows(
             load_output=False,
         )
         for item in page:
-            states[item.workflow_id] = str(item.status)
+            states[item.workflow_id] = _NativeWorkflowState(str(item.status), item.parent_workflow_id)
         if len(page) < ISOLATION_PAGE_SIZE:
             return states
         offset += len(page)
@@ -967,14 +1064,14 @@ async def _list_states_by_id(
     application_name: str | None = None,
     app_version: str | None = None,
     workflow_names: Sequence[str] | None = None,
-) -> dict[str, str]:
-    """按精确 ID 查回原生状态（分批；无行即不在结果中，不伪终态）。
+) -> dict[str, _NativeWorkflowState]:
+    """按精确 ID 查回原生状态/父身份（分批；无行即不在结果中，不伪终态）。
 
     给 ``application_name`` / ``app_version`` / ``workflow_names`` 时带同一版本谓词
     （登记项补读必须与原生列举同谓词）；不给时按纯身份读（取消后复查用）。
     """
 
-    states: dict[str, str] = {}
+    states: dict[str, _NativeWorkflowState] = {}
     for start in range(0, len(workflow_ids), ISOLATION_PAGE_SIZE):
         chunk = list(workflow_ids[start : start + ISOLATION_PAGE_SIZE])
         page = await client.list_workflows_async(
@@ -987,7 +1084,7 @@ async def _list_states_by_id(
             load_output=False,
         )
         for item in page:
-            states[item.workflow_id] = str(item.status)
+            states[item.workflow_id] = _NativeWorkflowState(str(item.status), item.parent_workflow_id)
     return states
 
 
@@ -999,7 +1096,9 @@ async def _list_necessary_leaf_ids(
     必要叶 = 该 root 直属（``parent_workflow_id``）、名为叶 workflow、且处于
     ``RECOVERY_RESUMABLE_LEAF_STATUSES``（中断未结案）的子执行。成功叶零重做，
     已定失败叶（``ERROR``/恢复耗尽）保留其失败成果，均不纳入。只列举给定
-    root 的直属子代，未选研究不被扩入。分页读满后返回 ``root → 稳定排序叶集合``
+    root 的直属子代，未选研究不被扩入。归属判据与启动隔离一致：root 取自当前
+    业务库登记面，叶只认这些已归属 root 的直属子项，不按全局原生名扩大集合。
+    分页读满后返回 ``root → 稳定排序叶集合``
     （保留父叶从属关系，供授权后按已授予 root 精确过滤）；列举异常冒泡给调用
     方（无法证明全集时不得部分恢复，``CancelledError`` 继续传播）。
     """
@@ -1038,7 +1137,7 @@ def _receipt(
     blocking_reasons: tuple[str, ...],
     unverified_ids: tuple[str, ...] = (),
     cancelled_ids: tuple[str, ...] = (),
-    unproven_registered: tuple[str, ...] = (),
+    unproven_version_ids: tuple[str, ...] = (),
 ) -> StartupIsolationReceipt:
     return StartupIsolationReceipt(
         command_id=command_id,
@@ -1050,7 +1149,7 @@ def _receipt(
         blocking_reasons=blocking_reasons,
         unverified_workflow_ids=unverified_ids,
         cancelled_workflow_ids=cancelled_ids,
-        unproven_version_workflow_ids=unproven_registered,
+        unproven_version_workflow_ids=unproven_version_ids,
     )
 
 
@@ -1085,7 +1184,7 @@ async def _finalize_blocked(
     snapshot_ids: tuple[str, ...],
     original_states: tuple[tuple[str, str], ...],
     cancelled_ids: tuple[str, ...] = (),
-    unproven_registered: tuple[str, ...] = (),
+    unproven_version_ids: tuple[str, ...] = (),
 ) -> StartupIsolationReceipt:
     """取消/复查阶段失败：回填阻塞回执并保持 ``ready=False``。"""
 
@@ -1098,7 +1197,7 @@ async def _finalize_blocked(
         original_states=original_states,
         blocking_reasons=(reason,) if exc is None else (reason, f"{reason}:{type(exc).__name__}"),
         cancelled_ids=cancelled_ids,
-        unproven_registered=unproven_registered,
+        unproven_version_ids=unproven_version_ids,
     )
     return await _finalize_receipt(registry, receipt)
 

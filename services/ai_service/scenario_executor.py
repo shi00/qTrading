@@ -105,7 +105,7 @@ from core.agent_types import (
     SourceKind,
     validate_data_attempt_authorization,
 )
-from core.errors import AIContentRefusedError
+from core.errors import AIContentRefusedError, AppError
 from core.model_management_types import (
     AdapterResponse,
     AttemptContext,
@@ -1650,7 +1650,7 @@ class ScenarioExecutor:
                             halt_candidates=True,
                             attempt_id=attempt_id,
                         )
-                    last_reason = f"adapter error: {type(e).__name__}"
+                    last_reason = _adapter_failure_reason(e)
                     # F18：失败尝试即时收敛（结算该次预留 + 记失败事实，R21 不静默），
                     # 再退避重试——迟到响应在适配器层被丢弃，无第二次观察通道，费用
                     # 未知以 None 承载（R21 禁止填 0 伪装）。
@@ -1693,6 +1693,12 @@ class ScenarioExecutor:
                     "actual_model": response.actual_model,
                     **_encoder_usage_metadata(pricing, identity, connection.model, response),
                 }
+                # N04：适配器收尾（如注入 SDK client 关闭）失败不改写结果/用量，但
+                # 收尾状态单列进 attempt 元数据（R21：已知降级信号不在持久化边界丢失，
+                # 也不覆盖 succeeded 主状态）。
+                response_metadata = getattr(response, "metadata", None)
+                if isinstance(response_metadata, Mapping) and "cleanup_status" in response_metadata:
+                    attempt_metadata["cleanup_status"] = response_metadata["cleanup_status"]
                 scope = _AttemptScope(identity, attempt_id, reservation_id, attempt_metadata, ledger)
                 self._recorder.observe_usage(_observation_from(identity, attempt_id, response, attempt_metadata))
 
@@ -1728,7 +1734,7 @@ class ScenarioExecutor:
             # attempt_id=None，结算事实无账目投影）。
             return _CandidateOutcome(status="failed", reason=last_reason, outputs=(), usages=())
         except Exception as e:
-            last_reason = f"adapter error: {type(e).__name__}"
+            last_reason = _adapter_failure_reason(e)
             # M08：来源 attempt = 触发该异常的真实尝试（非「当前」遍历状态）。
             return _CandidateOutcome(
                 status="failed", reason=last_reason, outputs=(), usages=(), attempt_id=last_attempt_id
@@ -2153,6 +2159,21 @@ def _chat_capability_check(
         return None
 
     return _check
+
+
+def _adapter_failure_reason(error: Exception) -> str:
+    """适配器失败收敛原因码（N20：账本 / 用户诊断 / 业务回执同源）。
+
+    ``AppError`` 已携带**脱敏稳定策略码**（如 ``provider_params_rejected``，
+    与外发审计 ``error_category`` 同一来源，R9 不含凭据与提供方正文），直接
+    取用，避免三处消费端分别看到「异常类名」与「稳定码」两种表述；其余异常
+    保守保留异常类型名（未核验格式不臆造分类码，R21），行为与既有逐字一致。
+    """
+    if isinstance(error, AppError):
+        code = classify_error(error, context="llm").get("code")
+        if isinstance(code, str) and code:
+            return code
+    return f"adapter error: {type(error).__name__}"
 
 
 # F27 适配器异常分类（终止判定先于重试判定的判据正本；映射表式，不散落 if-else）

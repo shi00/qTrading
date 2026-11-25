@@ -53,7 +53,7 @@ from core.agent_types import (
     json_doc,
     sha256_hex,
 )
-from data.persistence.daos.agent_dao import AgentDao
+from data.persistence.daos.agent_dao import AgentDao, DataConsentAuthority
 from data.persistence.models import (
     AgentCommand,
     AgentDecision,
@@ -1059,3 +1059,174 @@ class TestAcceptIntentConcurrency:
                 )
             ).scalar_one()
         assert count == 1
+
+
+class TestReadAuthoritativeDataConsent:
+    """N35：同轮重新批准后的权威选权（真实 PG 查询/排序）。
+
+    每个决定独立起版，跨决定不得按行内 revision 选权；权威由各决定自己最近一次
+    已提交 ``data_consent_save`` 命令绑定，旧决定保持历史行。
+    """
+
+    @staticmethod
+    def _binding_for(
+        consent_id: str,
+        *,
+        execution_id: str,
+        round_id: str,
+        state: str = "approved",
+        consent_revision: int = 1,
+        expires_at: str | None = "2099-01-01T00:00:00.000000Z",
+    ) -> DataConsentBinding:
+        return replace(
+            _binding(
+                state=state,
+                consent_revision=consent_revision,
+                execution_id=execution_id,
+                round_id=round_id,
+                expires_at=expires_at,
+            ),
+            consent_id=consent_id,
+        )
+
+    async def _save(
+        self,
+        dao: AgentDao,
+        *,
+        consent_id: str,
+        binding: DataConsentBinding,
+        session_id: str,
+        execution_id: str,
+        round_id: str,
+        expected_revision: int,
+        client_command_id: str,
+    ) -> DataConsentBinding:
+        return await dao.save_data_consent_decision(
+            replace(
+                _save_command(
+                    binding,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    round_id=round_id,
+                    expected_revision=expected_revision,
+                    client_command_id=client_command_id,
+                ),
+                consent_id=consent_id,
+            )
+        )
+
+    async def test_new_approval_binds_despite_old_higher_revision(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        session_id, execution_id, round_id = await _seed_research_chain(dao)
+        scope: dict[str, Any] = {"execution_id": execution_id, "round_id": round_id}
+        # 旧决定：批准后撤销 → 行内 revision=2（高于新决定的 1）。
+        await self._save(
+            dao,
+            consent_id="dec-old",
+            binding=self._binding_for("dec-old", **scope),
+            session_id=session_id,
+            expected_revision=0,
+            client_command_id="cmd-old-save",
+            **scope,
+        )
+        await dao.revoke_data_consent_decision(
+            replace(_revoke_command(1, client_command_id="cmd-old-revoke"), consent_id="dec-old")
+        )
+        # 同轮同节点的新批准：独立起版 revision=1，save 命令更晚。
+        await self._save(
+            dao,
+            consent_id="dec-new",
+            binding=self._binding_for("dec-new", **scope),
+            session_id=session_id,
+            expected_revision=0,
+            client_command_id="cmd-new-save",
+            **scope,
+        )
+
+        authority = await dao.read_authoritative_data_consent(
+            execution_id=execution_id, round_id=round_id, node_id="root"
+        )
+
+        assert authority is not None
+        assert authority.consent_id == "dec-new"
+        assert authority.revision == 1
+        assert authority.binding.consent_id == "dec-new"
+        assert authority.binding.state is DataConsentState.APPROVED
+        # 旧件保持历史（行未被改写，仍为撤销态 revision=2）。
+        old = await dao.read_data_consent_decision(USER_SCOPE, "dec-old")
+        assert old is not None
+        assert old.state is DataConsentState.REVOKED
+        assert old.consent_revision == 2
+
+    async def test_same_revision_pending_old_does_not_shadow_new_approval(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        session_id, execution_id, round_id = await _seed_research_chain(dao)
+        scope: dict[str, Any] = {"execution_id": execution_id, "round_id": round_id}
+        # 旧决定等待中过期（revision 1），新批准同为 revision 1 → 不再判未知。
+        await self._save(
+            dao,
+            consent_id="dec-pending-old",
+            binding=self._binding_for(
+                "dec-pending-old",
+                state="pending",
+                expires_at="2026-01-01T00:00:00.000000Z",
+                **scope,
+            ),
+            session_id=session_id,
+            expected_revision=0,
+            client_command_id="cmd-pending-save",
+            **scope,
+        )
+        expected = self._binding_for("dec-approved", **scope)
+        await self._save(
+            dao,
+            consent_id="dec-approved",
+            binding=expected,
+            session_id=session_id,
+            expected_revision=0,
+            client_command_id="cmd-approved-save",
+            **scope,
+        )
+
+        authority = await dao.read_authoritative_data_consent(
+            execution_id=execution_id, round_id=round_id, node_id="root"
+        )
+
+        assert authority == DataConsentAuthority(consent_id="dec-approved", revision=1, binding=expected)
+
+    async def test_decision_without_committed_save_command_is_not_authority(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        session_id, execution_id, round_id = await _seed_research_chain(dao)
+        scope: dict[str, Any] = {"execution_id": execution_id, "round_id": round_id}
+        expected = self._binding_for("dec-approved", **scope)
+        await self._save(
+            dao,
+            consent_id="dec-approved",
+            binding=expected,
+            session_id=session_id,
+            expected_revision=0,
+            client_command_id="cmd-approved-save",
+            **scope,
+        )
+        # 无权威 save 命令的决定行（批次更靠后也不得参与选权）。
+        orphan = self._binding_for("dec-orphan", **scope)
+        async with dao.engine.begin() as conn:
+            await conn.execute(
+                insert(AgentDecision).values(
+                    user_scope=USER_SCOPE,
+                    decision_id="dec-orphan",
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    round_id=round_id,
+                    node_id="root",
+                    decision_kind="data_consent",
+                    presentation_batch_seq=999,
+                    data_consent_payload=encode_data_consent_binding(orphan),
+                )
+            )
+
+        authority = await dao.read_authoritative_data_consent(
+            execution_id=execution_id, round_id=round_id, node_id="root"
+        )
+
+        assert authority == DataConsentAuthority(consent_id="dec-approved", revision=1, binding=expected)

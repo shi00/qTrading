@@ -5,7 +5,8 @@
   也提供纯解析函数供单元测试直接调用；
 - 解析只读取显式选择范围；未选范围不解析、不计数；超限明确拒绝或按超时返回
   真实已读/未读（不截断冒完整）。CSV 按行增量解码、读满所需行即停；JSON 按
-  pointer 定向下钻、未选子树只做结构跳过不建对象（I70）；
+  pointer 定向下钻、未选子树只做结构跳过不建对象（I70）；JSON 除结构化值外
+  另回传选中子树的原文切片（保原空白/转义/指数写法）与码点偏移，供原选区预览核对；
 - 若定位所选范围在结构上必须读到选区外内容（CSV 前置行/区间空档、JSON
   pointer 前导扫描），须请求方显式给出 ``read_expansion_consent``，否则拒绝；
   已同意时把实际扩张量记入 limitation，不静默全量读取后仅裁输出；
@@ -107,6 +108,9 @@ class ParsedAttachment:
     stats: dict[str, int | None] = field(default_factory=dict)
     read_ranges: list[dict[str, Any]] = field(default_factory=list)
     unread_ranges: list[dict[str, Any]] = field(default_factory=list)
+    #: 原文预览的码点区间（半开区间，相对解码后文本；顺序与 ``body_text`` 各段一致）。
+    #: ``None`` 表示该类型不提供原文预览；空列表表示选了空范围。
+    preview_ranges: list[dict[str, int]] | None = None
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -120,6 +124,7 @@ class ParsedAttachment:
             "stats": self.stats,
             "read_ranges": self.read_ranges,
             "unread_ranges": self.unread_ranges,
+            "preview_ranges": self.preview_ranges,
         }
 
 
@@ -629,6 +634,8 @@ def _parse_json(
         except ValueError as exc:
             raise AttachmentParseError("invalid_structure", "JSON structure is invalid") from exc
         read_ranges: list[dict[str, Any]] = [to_wire_dict(AllAtom())]
+        preview_parts = [text]
+        preview_ranges: list[dict[str, int]] = [{"start": 0, "end": len(text)}]
     else:
         atoms = [atom for atom in selection.ranges if isinstance(atom, JsonPointerRange)]
         if _json_requires_expansion(selection) and not read_expansion_consent:
@@ -640,6 +647,8 @@ def _parse_json(
         values = []
         read_ranges = []
         spans: list[tuple[int, int]] = []
+        # 原文预览按准确定位区间切片：保留选中子树内的原空白/转义/指数写法，区外不混入。
+        preview_parts: list[str] = []
         for atom in atoms:
             try:
                 selected_value, start, end = _json_select_value(text, atom.pointer)
@@ -648,6 +657,8 @@ def _parse_json(
             values.append(selected_value)
             read_ranges.append(to_wire_dict(atom))
             spans.append((start, end))
+            preview_parts.append(text[start:end])
+        preview_ranges = [{"start": start, "end": end} for start, end in spans]
         value = values[0] if len(values) == 1 else values
         # I70：只把「为定位 pointer 而扫描到的区外字符」记为扩张量；其中未选子树不解析。
         scan_start = _json_skip_ws(text, 0)
@@ -662,16 +673,20 @@ def _parse_json(
                 )
             )
 
+    # 多段选择以单个换行分隔各段原文（与文本多段正文同源）；每段精确区间由 preview_ranges 给出。
+    body_text = "\n".join(preview_parts)
     block = json_doc({"kind": "json", "value": value})
-    budget.enforce_codepoints(len(block))
+    # 双表示各自受同一字符预算约束：原文预览超预算即拒绝，不以截断冒充完整预览（P03）。
+    budget.enforce_codepoints(max(len(block), len(body_text)))
     return ParsedAttachment(
         read_state=ReadState.READY,
         coverage="full",
-        body_text=None,
+        body_text=body_text,
         blocks=[block],
         limitations=limitations,
         stats=_stats(source_bytes=len(data), chars=len(block)),
         read_ranges=read_ranges,
+        preview_ranges=preview_ranges,
     )
 
 
@@ -686,6 +701,7 @@ MAX_PROBED_CELLS: Final = 200_000
 #: 实际行范围核定的行元素扫描上限（Excel 单表最大行数为 1,048,576）。
 MAX_PROBED_ROWS: Final = 1_048_576
 #: 单表上报的隐藏行/隐藏列区间样本上限（超出以计数与截断标记如实上报，I72）。
+#: 隐藏行样本按所选行取证，区外隐藏行不占用该上限（N41）。
 MAX_REPORTED_HIDDEN_ROWS: Final = 256
 MAX_REPORTED_HIDDEN_COLUMNS: Final = 64
 #: XLSX 容器前置预算（I08）：在 openpyxl 分配前按中央目录声明值拒绝解压炸弹。
@@ -942,7 +958,8 @@ class XlsxCacheProbe:
         self._cache: dict[tuple[str, str], dict[str, Any] | None] = {}
         self._row_extents: dict[str, int | None] = {}
         #: 每表隐藏行列取证结果；None 表示结构超界/不可读（未知，不等于可见）。
-        self._hidden: dict[str, dict[str, Any] | None] = {}
+        #: 键为 (工作表, 所选行区间)：隐藏行样本按选区取证，避免区外样本占满（N41）。
+        self._hidden: dict[tuple[str, tuple[int, int] | None], dict[str, Any] | None] = {}
         self._probed_cells = 0
         self.date_epoch = metadata.date_epoch
 
@@ -997,7 +1014,7 @@ class XlsxCacheProbe:
         for cell in pending:
             self._cache[(sheet, cell)] = found.get(cell)
 
-    def row_extent(self, sheet: str) -> int | None:
+    def row_extent(self, sheet: str, target_rows: tuple[int, int] | None = None) -> int | None:
         """返回工作表实际存在的最大物理行号；结构不可读/超界返回 None（未知）。
 
         以 worksheet XML 的 ``<row>`` 元素为准，不信任 ``<dimension>`` 声明：
@@ -1007,14 +1024,16 @@ class XlsxCacheProbe:
 
         同一遍扫描顺带取证隐藏行（``<row hidden>``）与隐藏列（``<col hidden>``）：
         只读视图不暴露这两类属性，不在此处取证就等于把「源文件里不可见」伪装成
-        「可见」（I72）。
+        「可见」（I72）。``target_rows`` 给定时隐藏行样本只收集选区内行：区外隐藏行
+        再多也不能占满上报样本而让选区内隐藏行漏报（N41）。
         """
 
-        if sheet in self._row_extents:
+        hidden_key = (sheet, target_rows)
+        if sheet in self._row_extents and hidden_key in self._hidden:
             return self._row_extents[sheet]
         path = self._sheet_paths.get(sheet)
         extent: int | None = None
-        self._hidden[sheet] = None
+        self._hidden[hidden_key] = None
         if path is not None:
             try:
                 info = self._zip.getinfo(path)
@@ -1029,6 +1048,7 @@ class XlsxCacheProbe:
                     current = 0
                     scanned = 0
                     hidden_rows: list[int] = []
+                    hidden_rows_in_target = 0
                     hidden_columns: list[tuple[int, int]] = []
                     for _event, element in ElementTree.iterparse(handle, events=("end",)):
                         if element.tag == f"{_NS_MAIN}col":
@@ -1045,30 +1065,33 @@ class XlsxCacheProbe:
                         current = int(ref) if ref and ref.isdigit() else current + 1
                         best = max(best, current)
                         scanned += 1
-                        if _xlsx_hidden_flag(element.get("hidden")) and len(hidden_rows) <= MAX_REPORTED_HIDDEN_ROWS:
-                            hidden_rows.append(current)
+                        if _xlsx_hidden_flag(element.get("hidden")):
+                            if target_rows is None or target_rows[0] <= current <= target_rows[1]:
+                                hidden_rows_in_target += 1
+                                if len(hidden_rows) < MAX_REPORTED_HIDDEN_ROWS:
+                                    hidden_rows.append(current)
                         element.clear()
                         if scanned > MAX_PROBED_ROWS:
                             raise KeyError(path)
                     extent = best
                     merged_columns = _xlsx_merge_column_spans(hidden_columns)
-                    self._hidden[sheet] = {
-                        "rows": tuple(hidden_rows[:MAX_REPORTED_HIDDEN_ROWS]),
-                        "rows_truncated": len(hidden_rows) > MAX_REPORTED_HIDDEN_ROWS,
+                    self._hidden[hidden_key] = {
+                        "rows": tuple(hidden_rows),
+                        "rows_truncated": hidden_rows_in_target > MAX_REPORTED_HIDDEN_ROWS,
                         "columns": tuple(merged_columns[:MAX_REPORTED_HIDDEN_COLUMNS]),
                         "columns_truncated": len(merged_columns) > MAX_REPORTED_HIDDEN_COLUMNS,
                     }
             except (KeyError, zipfile.BadZipFile, ElementTree.ParseError, OSError):
                 # 结构不可核：行范围与隐藏属性都按未知上报，不冒充「可见/已读」。
                 extent = None
-                self._hidden[sheet] = None
+                self._hidden[hidden_key] = None
         self._row_extents[sheet] = extent
         return extent
 
-    def hidden_attributes(self, sheet: str) -> dict[str, Any] | None:
-        """返回 ``row_extent`` 同遍取证到的隐藏行列；未知返回 None。"""
+    def hidden_attributes(self, sheet: str, target_rows: tuple[int, int] | None = None) -> dict[str, Any] | None:
+        """返回 ``row_extent`` 同遍取证到的隐藏行列（按 ``target_rows`` 取证）；未知返回 None。"""
 
-        return self._hidden.get(sheet)
+        return self._hidden.get((sheet, target_rows))
 
     def _scan_sheet(self, path: str, targets: set[str]) -> dict[str, dict[str, Any]]:
         found: dict[str, dict[str, Any]] = {}
@@ -1406,8 +1429,8 @@ def _parse_xlsx(
                 if target_spans is None
                 else (min(span[0] for span in target_spans), max(span[1] for span in target_spans))
             )
-            extent = probe.row_extent(sheet_name)
-            visibility = probe.hidden_attributes(sheet_name)
+            extent = probe.row_extent(sheet_name, target_rows)
+            visibility = probe.hidden_attributes(sheet_name, target_rows)
             limitations.extend(_xlsx_hidden_limitations(metadata.hidden_sheets, sheet_name, visibility, target_rows))
             formula_sheet = formulas[sheet_name]
             cached_sheet = cached[sheet_name]
@@ -1758,7 +1781,8 @@ def _xlsx_hidden_limitations(
     """把隐藏表/隐藏行/隐藏列取证结果转成选择结果里的限制记录（I72）。
 
     ``visibility is None``（结构超界/不可读）按「无法核定」上报，不能静默当作
-    全部可见；隐藏行按所选行范围过滤，隐藏列对行轴选择意味着整表可见列都隐藏。
+    全部可见；隐藏行样本已按所选行范围取证（N41），此处再按范围过滤作防御，
+    隐藏列对行轴选择意味着整表可见列都隐藏。
     """
 
     items: list[dict[str, str]] = []
@@ -1777,7 +1801,7 @@ def _xlsx_hidden_limitations(
     if hidden_rows:
         message = f"所选范围包含隐藏行：{_xlsx_format_row_ranges(hidden_rows)}"
         if visibility["rows_truncated"]:
-            message += f"（本表隐藏行超过 {MAX_REPORTED_HIDDEN_ROWS} 个，仅列前 {MAX_REPORTED_HIDDEN_ROWS} 个）"
+            message += f"（所选范围隐藏行超过 {MAX_REPORTED_HIDDEN_ROWS} 个，仅列前 {MAX_REPORTED_HIDDEN_ROWS} 个）"
         items.append(_limitation("xlsx_hidden_rows", message))
     if visibility["columns"]:
         message = f"所选范围包含隐藏列：{_xlsx_format_column_ranges(visibility['columns'])}"

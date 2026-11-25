@@ -1671,6 +1671,73 @@ class TestReviseQueued:
         await engine.dispose()
 
 
+class TestAcceptIdempotentAcrossEntries:
+    """双入口同身份幂等受理（QAC09/NFR-R03）。
+
+    同一 intent（user_scope+source_module+business_request_id）与同一冻结输入从
+    UI/API 两个入口提交：并发冷启动只落一份事实；后续重传只查回原回执。断言以
+    事实行数与事件水位为准，避免「看起来幂等」的弱断言。
+    """
+
+    async def _snapshot(self, engine, business_request_id: str) -> tuple[int, int, int, int, int]:
+        async with engine.connect() as conn:
+            event_seq = (
+                await conn.execute(
+                    sa.select(AgentSession.event_seq).where(
+                        AgentSession.user_scope == "u1", AgentSession.session_id == "s1"
+                    )
+                )
+            ).scalar_one()
+        return (
+            await _count_for(engine, AgentExecution, AgentExecution.business_request_id == business_request_id),
+            await _count(engine, "agent_command"),
+            await _count(engine, "agent_message"),
+            await _count(engine, "agent_asset_version"),
+            int(event_seq),
+        )
+
+    async def test_cold_concurrent_entries_share_single_effect(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        engine = create_test_engine(real_embedded_pg.url)
+        try:
+            results = await asyncio.gather(
+                dao.accept_request(_request(client_command_id="entry-ui")),
+                dao.accept_request(_request(client_command_id="entry-api")),
+                return_exceptions=True,
+            )
+            receipts = [result for result in results if isinstance(result, SubmissionReceipt)]
+            assert len(receipts) == 2, f"both entries must observe the accepted fact, got {results}"
+            # 同一 execution / 同一回执：第二个入口是重放而非第二次计费。
+            assert receipts[0] == receipts[1]
+            assert await self._snapshot(engine, "req-1") == (1, 1, 1, 1, 1)
+        finally:
+            await engine.dispose()
+            await dao.engine.dispose()  # type: ignore[union-attr]  # 释放测试引擎
+
+    async def test_repeated_dual_entry_replays_add_no_event(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        engine = create_test_engine(real_embedded_pg.url)
+        try:
+            first = await dao.accept_request(_request(client_command_id="entry-ui"))
+            before = await self._snapshot(engine, "req-1")
+            assert before == (1, 1, 1, 1, 1)
+
+            for _ in range(20):
+                pair = await asyncio.gather(
+                    dao.accept_request(_request(client_command_id="entry-ui")),
+                    dao.accept_request(_request(client_command_id="entry-api")),
+                    return_exceptions=True,
+                )
+                assert all(isinstance(item, SubmissionReceipt) for item in pair), pair
+                assert all(item == first for item in pair)
+                assert await self._snapshot(engine, "req-1") == before
+        finally:
+            await engine.dispose()
+            await dao.engine.dispose()  # type: ignore[union-attr]  # 释放测试引擎
+
+
 async def _scalar(engine, query) -> object:
     async with engine.connect() as conn:
         return (await conn.execute(query)).scalar_one()

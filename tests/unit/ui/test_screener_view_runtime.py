@@ -50,6 +50,7 @@ from ui.viewmodels.screener_view_model import (
     StreamCard,
 )
 from ui.viewmodels.strategy_meta_mixin import StrategyMetaMixin
+from utils.config_models import PresetDeleteOutcome
 
 pytestmark = pytest.mark.unit
 
@@ -493,13 +494,13 @@ class _FakeScreenerViewModel:
         self._preset_store(strategy_key)[name] = dict(params)
         return True
 
-    async def delete_preset(self, name: str, strategy_key: str) -> bool:
+    async def delete_preset(self, name: str, strategy_key: str) -> PresetDeleteOutcome:
         self.method_calls.append(f"delete_preset:{strategy_key}:{name}")
         store = self._preset_store(strategy_key)
         if name not in store:
-            return False
+            return PresetDeleteOutcome.NOT_FOUND
         del store[name]
-        return True
+        return PresetDeleteOutcome.DELETED
 
     def get_column_alias(self, table_name: str | None, col: str) -> str:
         """Mock vm.get_column_alias (Task 5.1: 从 View 迁入 VM)."""
@@ -2219,6 +2220,27 @@ class TestOnRowClickAndDetailClose:
 
         # on_close 回调被清除 (StockDetailDialog 不再渲染)
         assert env["captured_callbacks"]["on_close"] is None
+
+    def test_detail_reopens_after_research_close(self, screener_view_env) -> None:
+        """N15: 详情收起后仍可从结果行重开详情（不残留旧实例/旧回调）。"""
+        env = screener_view_env
+
+        on_row_click = env["captured_callbacks"]["on_row_click"]
+        _invoke(on_row_click, {"ts_code": "000001.SZ"})
+        _rerender(env)
+        first_on_close = env["captured_callbacks"]["on_close"]
+        assert callable(first_on_close)
+
+        # 从详情发起研究后由详情自身收起 → 消费方 on_close 清空数据
+        _invoke(first_on_close)
+        _rerender(env)
+
+        # 其他入口（结果行点击）重开 → 构造新的详情实例
+        _invoke(on_row_click, {"ts_code": "000002.SZ"})
+        _rerender(env)
+        second_on_close = env["captured_callbacks"]["on_close"]
+        assert callable(second_on_close)
+        assert second_on_close is not first_on_close
 
 
 # ============================================================================
@@ -4784,6 +4806,39 @@ class TestStrategyPresetEntry:
         ]
         assert deleted_calls, "删除成功提示须经 i18n 渲染"
         assert deleted_calls[-1].kwargs.get("name") == "保守型"
+
+    def test_delete_write_failure_shows_error_not_missing(self, screener_view_with_params_env) -> None:
+        """存储写入失败 → 提示删除失败（不得误报方案不存在），方案保留可重试."""
+        env = screener_view_with_params_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+        fake_vm._preset_store("value")["保守型"] = {"num_param": 15}
+        fake_vm._set_state(preset_names=("保守型",))
+        _rerender(env)
+        self._select(env, "保守型")
+
+        _invoke(self._button(env, "screener_preset_delete").on_click, _make_event())
+        _rerender(env)
+        dialog = self._find_dialog(env, "screener_preset_delete_title")
+        assert dialog is not None
+
+        page.toast.show.reset_mock()
+        fake_vm.method_calls.clear()
+        with patch.object(fake_vm, "delete_preset", AsyncMock(return_value=PresetDeleteOutcome.WRITE_FAILED)):
+            _invoke(dialog.kwargs["on_confirm"])
+            self._run_last_task(env)
+
+        # 写失败不改盘面语义：方案仍在、无需刷新、不提示「不存在」
+        assert "保守型" in fake_vm._preset_store("value")
+        assert "refresh_presets:value" not in fake_vm.method_calls
+        page.toast.show.assert_called_once_with(
+            "i18n[screener_preset_delete_failed]", "error", action_text=None, on_action=None
+        )
+        failed_calls = [
+            c for c in env["mock_i18n"].get.call_args_list if c.args and c.args[0] == "screener_preset_delete_failed"
+        ]
+        assert failed_calls, "删除失败提示须经 i18n 渲染"
+        assert failed_calls[-1].kwargs.get("name") == "保守型"
 
     def test_delete_cancel_keeps_preset(self, screener_view_with_params_env) -> None:
         """取消删除 → 方案保留，不调度删除任务."""
