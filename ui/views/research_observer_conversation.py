@@ -132,6 +132,7 @@ def build_message_row(
                 [
                     ft.TextField(
                         value=state.edit_text,
+                        tooltip=I18n.get("agent_research_message_edit"),
                         multiline=True,
                         min_lines=2,
                         max_lines=6,

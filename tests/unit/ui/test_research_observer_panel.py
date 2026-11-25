@@ -1040,6 +1040,7 @@ def test_message_row_edit_mode_renders_field_submit_and_server_error_code() -> N
 
     field = next(item for item in _walk(rows) if isinstance(item, ft.TextField))
     assert field.value == "修订中的提问"
+    assert field.tooltip == I18n.get("agent_research_message_edit")
     assert I18n.get("agent_research_message_edit_body_unavailable") in texts
     assert I18n.get("agent_research_error_fmt").format(code="REVISION_CONFLICT") in texts
     submit = _find_text_button(rows, I18n.get("agent_research_message_edit_submit"))
