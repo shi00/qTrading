@@ -20,15 +20,20 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from core.agent_types import RoleSkillAssignment, SkillVersionRef, SkillVersionView
-from services.agent_service.service import AgentService
-from services.agent_service.skills import SkillImportReceipt, SkillPackageImportRequest
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.error_classifier import classify_error, classify_severity
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
+
+if TYPE_CHECKING:
+    # N01：Agent 栈仅在类型检查时导入；运行时按需局部导入，
+    # 依赖缺失时主壳与设置页壳仍可导入。
+    from services.agent_service.service import AgentService
+    from services.agent_service.skills import SkillImportReceipt, SkillPackageImportRequest
 
 logger = logging.getLogger(__name__)
 
@@ -455,6 +460,8 @@ class SkillsSettingsViewModel(ObservableViewModelMixin[SkillsSettingsState]):
 
     async def _build_request(self, *, confirm_update: bool) -> SkillPackageImportRequest | None:
         """由输入框构造导入请求；ZIP 读取在受管线程执行（R16）。"""
+
+        from services.agent_service.skills import SkillPackageImportRequest
 
         raw = self._state.import_path.strip()
         if not raw:

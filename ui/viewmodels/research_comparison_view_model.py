@@ -25,29 +25,23 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from decimal import Decimal
-from typing import Any, Final, Protocol, cast
+from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 from core.agent_types import AgentValidationError, Mode, Purpose, SessionReadQuery, stable_id
 from core.model_management_types import ModelManagementSnapshot, normalize_egress_target
-from services.agent_service.comparison import (
-    COMPARISON_COST_FAILED,
-    COMPARISON_COST_KNOWN,
-    COMPARISON_COST_PARTIAL,
-    COMPARISON_COST_RESERVED,
-    COMPARISON_COST_UNKNOWN,
-    STOP_REASON_USER_ENDED_GROUP,
-    ComparisonGroupView,
-    ComparisonLaneObservation,
-    ComparisonLaneSelection,
-    ComparisonReadQuery,
-    ComparisonSharedInput,
-    ComparisonSubmissionRequest,
-    FrozenComparisonGroup,
-    freeze_comparison_group,
-    plan_group_stop,
-)
 from services.model_configuration_service import ModelConfigurationService
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
+
+if TYPE_CHECKING:
+    # N01：Agent 栈（含 pydantic_ai）仅在类型检查时导入；运行时按需局部导入，
+    # 依赖缺失时主壳与对比页壳仍可导入。
+    from services.agent_service.comparison import (
+        ComparisonGroupView,
+        ComparisonLaneSelection,
+        ComparisonReadQuery,
+        ComparisonSubmissionRequest,
+        FrozenComparisonGroup,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -129,14 +123,33 @@ _LANE_GAP_KEYS: Final[Mapping[str, str]] = {
     "no_result": "agent_comparison_gap_no_result",
 }
 
-_COST_STATE_KEYS: Final[Mapping[str, str]] = {
-    COMPARISON_COST_KNOWN: "agent_comparison_cost_state_known",
-    COMPARISON_COST_PARTIAL: "agent_comparison_cost_state_partial",
-    COMPARISON_COST_RESERVED: "agent_comparison_cost_state_reserved",
-    COMPARISON_COST_UNKNOWN: "agent_comparison_cost_state_unknown",
-    COMPARISON_COST_FAILED: "agent_comparison_cost_state_failed",
-    "unread": "agent_comparison_cost_state_unread",
-}
+_COST_STATE_KEYS: dict[str, str] = {}
+
+
+def _cost_state_keys() -> Mapping[str, str]:
+    """费用状态 → i18n key（N01：comparison 常量惰性导入，Agent 依赖缺失时本模块仍可导入）。"""
+
+    if not _COST_STATE_KEYS:
+        from services.agent_service.comparison import (
+            COMPARISON_COST_FAILED,
+            COMPARISON_COST_KNOWN,
+            COMPARISON_COST_PARTIAL,
+            COMPARISON_COST_RESERVED,
+            COMPARISON_COST_UNKNOWN,
+        )
+
+        _COST_STATE_KEYS.update(
+            {
+                COMPARISON_COST_KNOWN: "agent_comparison_cost_state_known",
+                COMPARISON_COST_PARTIAL: "agent_comparison_cost_state_partial",
+                COMPARISON_COST_RESERVED: "agent_comparison_cost_state_reserved",
+                COMPARISON_COST_UNKNOWN: "agent_comparison_cost_state_unknown",
+                COMPARISON_COST_FAILED: "agent_comparison_cost_state_failed",
+                "unread": "agent_comparison_cost_state_unread",
+            }
+        )
+    return _COST_STATE_KEYS
+
 
 _MCP_IMPACT_KEYS: Final[Mapping[str, str]] = {
     "withdraw": "agent_comparison_impact_withdraw",
@@ -323,11 +336,13 @@ def _state_key(state: str | None) -> str:
 
 
 def _cost_key(cost_state: str) -> str:
-    return _COST_STATE_KEYS.get(cost_state, "agent_comparison_cost_state_unknown")
+    return _cost_state_keys().get(cost_state, "agent_comparison_cost_state_unknown")
 
 
 def _lane_row(lane: Any, *, active_ms: int | None, impact: str | None) -> ComparisonLaneRow:
     """``ComparisonLaneView`` → 展示行（费用未知保持 ``None``，R21）。"""
+
+    from services.agent_service.comparison import COMPARISON_COST_UNKNOWN
 
     cost = lane.cost
     if cost is None:
@@ -548,6 +563,12 @@ class ResearchComparisonViewModel(ObservableViewModelMixin[ResearchComparisonSta
             return
         self._track_inflight_cancellable()
         self._set_state(submitting=True, selection_error_key=None, message_key=None, error_key=None, error_code=None)
+        from services.agent_service.comparison import (
+            ComparisonSharedInput,
+            ComparisonSubmissionRequest,
+            freeze_comparison_group,
+        )
+
         group: FrozenComparisonGroup | None = None
         try:
             expected_revision = await self._session_revision(session_id)
@@ -651,6 +672,8 @@ class ResearchComparisonViewModel(ObservableViewModelMixin[ResearchComparisonSta
             return
         self._track_inflight_cancellable()
         self._set_state(stopping=True, message_key=None, error_key=None, error_code=None)
+        from services.agent_service.comparison import STOP_REASON_USER_ENDED_GROUP
+
         try:
             outcome = await service.stop_comparison_group(
                 self._query(),
@@ -703,6 +726,8 @@ class ResearchComparisonViewModel(ObservableViewModelMixin[ResearchComparisonSta
         )
 
     def _query(self) -> ComparisonReadQuery:
+        from services.agent_service.comparison import ComparisonReadQuery
+
         return ComparisonReadQuery(
             user_scope=self._user_scope,
             session_id=cast(str, self._state.session_id),
@@ -715,6 +740,8 @@ class ResearchComparisonViewModel(ObservableViewModelMixin[ResearchComparisonSta
         if not state.lane_a or not state.lane_b or state.lane_a == state.lane_b:
             self._set_state(selection_error_key="agent_comparison_need_two_lanes")
             return None
+        from services.agent_service.comparison import ComparisonLaneSelection
+
         by_id = {option.connection_id: option for option in state.connections}
         selections: list[ComparisonLaneSelection] = []
         for connection_id in (state.lane_a, state.lane_b):
@@ -795,6 +822,8 @@ class ResearchComparisonViewModel(ObservableViewModelMixin[ResearchComparisonSta
 
         if self._group is None:
             return None
+        from services.agent_service.comparison import ComparisonLaneObservation, plan_group_stop
+
         observations = tuple(
             ComparisonLaneObservation(
                 lane_ref=row.lane_ref,
