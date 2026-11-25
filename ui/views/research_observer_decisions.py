@@ -38,12 +38,15 @@ def build_decision_card(
 ) -> ft.Control:
     """单个必要决定的阅读卡（授权类只读，不给提交入口）。"""
 
+    is_clarification = decision.decision_kind == "user_choice"
+    title_key = "agent_research_clarification_title" if is_clarification else "agent_research_decision_fmt"
+    if is_clarification:
+        title = I18n.get(title_key)
+    else:
+        title = I18n.get(title_key).format(kind=decision.decision_kind, revision=decision.revision)
     rows: list[ft.Control] = [
         ft.Text(
-            I18n.get("agent_research_decision_fmt").format(
-                kind=decision.decision_kind,
-                revision=decision.revision,
-            ),
+            title,
             size=AppStyles.FONT_SIZE_BODY_SM,
             weight=ft.FontWeight.BOLD,
             color=AppColors.TEXT_PRIMARY,
@@ -57,6 +60,23 @@ def build_decision_card(
                 color=AppColors.TEXT_PRIMARY,
             )
         )
+    if is_clarification:
+        for option in decision.options:
+            rows.append(
+                ft.Text(
+                    I18n.get("agent_research_clarification_option_fmt").format(option=option),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.TEXT_PRIMARY,
+                )
+            )
+        if decision.impact is not None:
+            rows.append(
+                ft.Text(
+                    I18n.get("agent_research_clarification_impact").format(impact=decision.impact),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.TEXT_HINT,
+                )
+            )
     if decision.expires_at is not None:
         rows.append(
             ft.Text(
