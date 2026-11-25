@@ -64,6 +64,8 @@ def _build_body(
     on_start_plan: Callable[[], None],
     on_retry_delivery: Callable[[str], None] = _ignore_decision,
     on_toggle_mcp_scope: Callable[[str], None] = _ignore_text,
+    on_select_model: Callable[[str], None] = _ignore_text,
+    on_select_role: Callable[[str], None] = _ignore_text,
     on_open_session: Callable[[str], None] = _ignore_text,
     on_new_session_title: Callable[[str], None] = _ignore_text,
     on_create_session: Callable[[], None] = _ignore_click,
@@ -101,6 +103,8 @@ def _build_body(
             on_composer_mode=on_composer_mode,
             on_send=on_send,
             on_toggle_mcp_scope=on_toggle_mcp_scope,
+            on_select_model=on_select_model,
+            on_select_role=on_select_role,
         ),
     ]
     preview = build_plan_preview(state, on_start_plan=on_start_plan)
@@ -180,6 +184,11 @@ def ResearchObserverPanel(
     on_retry_delivery: Callable[[str], None] = _ignore_decision,
     on_toggle_mcp_scope: Callable[[str], None] = _ignore_text,
     on_load_mcp_scope: Callable[[], None] = _ignore_click,
+    on_select_model: Callable[[str], None] = _ignore_text,
+    on_select_role: Callable[[str], None] = _ignore_text,
+    on_load_model_selection: Callable[[], None] = _ignore_click,
+    on_refresh_usage: Callable[[], None] = _ignore_click,
+    on_refresh_budget: Callable[[], None] = _ignore_click,
     on_load_sessions: Callable[[], None] = _ignore_click,
     on_open_session: Callable[[str], None] = _ignore_text,
     on_new_session_title: Callable[[str], None] = _ignore_text,
@@ -195,6 +204,17 @@ def ResearchObserverPanel(
 
     ft.use_effect(lambda: on_load_mcp_scope(), dependencies=[])
     ft.use_effect(lambda: on_load_sessions(), dependencies=[])
+    # W-12: 模型/角色目录只读加载；会话或选中执行变化时刷新费用与耗时；正文或
+    # 模型选择变化时重算发送前预算（全部经 VM 异步命令，事件处理器内不阻塞）。
+    ft.use_effect(lambda: on_load_model_selection(), dependencies=[])
+    ft.use_effect(
+        lambda: on_refresh_usage(),
+        dependencies=[state.session_id, state.selected_execution_id],
+    )
+    ft.use_effect(
+        lambda: on_refresh_budget(),
+        dependencies=[state.composer_text, state.model_selection],
+    )
 
     title_rows: list[ft.Control] = [
         ft.Text(
@@ -257,6 +277,8 @@ def ResearchObserverPanel(
             on_start_plan=on_start_plan,
             on_retry_delivery=on_retry_delivery,
             on_toggle_mcp_scope=on_toggle_mcp_scope,
+            on_select_model=on_select_model,
+            on_select_role=on_select_role,
             on_open_session=on_open_session,
             on_new_session_title=on_new_session_title,
             on_create_session=on_create_session,

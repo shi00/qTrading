@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 from collections.abc import Iterator
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -13,12 +14,17 @@ import pytest
 from ui.i18n import I18n
 from ui.viewmodels.research_observer_view_model import (
     PENDING_SCOPE_ALL,
+    BudgetEstimate,
     DispatchReasonView,
+    ModelConnectionOption,
     PendingAnswerView,
     PendingDecision,
     PlanStepView,
     ResearchObserverState,
+    RoleOption,
     SessionListItemView,
+    build_duration_segments,
+    cost_state_view,
 )
 from ui.views.research_observer_artifacts import build_comparison_entry
 from ui.views.research_observer_composer import (
@@ -681,3 +687,92 @@ def test_pending_overview_empty_scope_only() -> None:
     assert I18n.get("agent_research_pending_session_only") in texts
     assert I18n.get("agent_research_pending_fmt").format(count=0) in texts
     assert not any(isinstance(item, ft.TextButton) for item in _walk(control))
+
+
+def _w12_state() -> ResearchObserverState:
+    return ResearchObserverState(
+        available=True,
+        composer_available=True,
+        model_selection_available=True,
+        model_options=(
+            ModelConnectionOption("conn-a", "连接 A", "gpt-4o", 128000, 1, True, None),
+            ModelConnectionOption(
+                "conn-off", "连接 B", "gpt-4.1", None, 2, False, "agent_research_model_selection_disabled"
+            ),
+        ),
+        model_selection="conn-a",
+        role_options=(RoleOption("main", "agent_research_role_label", "v1", None),),
+        role_selection="main",
+        model_selection_frozen="conn-a",
+        budget=BudgetEstimate(
+            state="estimated",
+            state_key="agent_research_budget_estimated",
+            amount_cny=Decimal("0.08"),
+            unit_key="agent_research_budget_unit_per_request",
+            basis_key="agent_research_budget_basis",
+            input_tokens=4,
+            output_reserve_tokens=4000,
+            tokens_verified=True,
+        ),
+        usage_round=cost_state_view("known", known_cny=Decimal("0.5")),
+        usage_cumulative=cost_state_view("unknown"),
+        durations=build_duration_segments(active_ms=1500),
+    )
+
+
+def test_composer_renders_model_role_budget_and_usage_sections() -> None:
+    state = _w12_state()
+
+    control = _build_composer(
+        state,
+        on_composer_text=_noop_text,
+        on_composer_mode=_noop_mode,
+        on_send=_noop,
+        on_select_model=_noop_text,
+        on_select_role=_noop_text,
+    )
+
+    dropdown_keys = {item.key for item in _walk(control) if isinstance(item, ft.Dropdown)}
+    assert dropdown_keys == {"agent_research_model_select", "agent_research_role_select"}
+    texts = [item.value for item in _walk(control) if isinstance(item, ft.Text)]
+    joined = "\n".join(texts)
+    assert "¥0.08" in joined
+    assert I18n.get("agent_research_model_frozen_fmt").format(model="连接 A") in texts
+    assert I18n.get("agent_research_duration_queue") in joined
+    assert I18n.get("agent_research_duration_unknown") in joined
+    assert I18n.get("agent_research_duration_source_work") in joined
+    assert I18n.get("agent_research_duration_source_model_wait") in joined
+    assert I18n.get("agent_research_cost_state_unknown") in joined
+
+
+def test_composer_budget_unknown_never_renders_zero() -> None:
+    state = ResearchObserverState(
+        available=True,
+        composer_available=True,
+        model_selection_available=True,
+        budget=BudgetEstimate(
+            state="unknown",
+            state_key="agent_research_budget_unknown_no_model",
+            amount_cny=None,
+            unit_key="agent_research_budget_unit_per_request",
+            basis_key=None,
+            input_tokens=None,
+            output_reserve_tokens=None,
+            tokens_verified=False,
+        ),
+        usage_round=cost_state_view("reserved"),
+        durations=build_duration_segments(active_ms=None),
+    )
+
+    control = _build_composer(
+        state,
+        on_composer_text=_noop_text,
+        on_composer_mode=_noop_mode,
+        on_send=_noop,
+    )
+
+    texts = [item.value for item in _walk(control) if isinstance(item, ft.Text)]
+    assert I18n.get("agent_research_budget_unknown_no_model") in texts
+    assert I18n.get("agent_research_cost_state_reserved") in "\n".join(texts)
+    assert not any("¥" in text for text in texts), "未知/预留费用不得渲染成金额"
+    assert not any(I18n.get("agent_research_duration_value_fmt").format(ms=0) in text for text in texts)

@@ -25,6 +25,7 @@ from tests.unit.ui.component_renderer import (
     make_component,
     render_once,
     run_mount_effects,
+    run_unmount_effects,
 )
 from core.agent_types import stable_id
 from services.agent_service.business_research import snapshot_source
@@ -139,10 +140,14 @@ class _FakeDecisionVm:
 
 @pytest.fixture(autouse=True)
 def _reset_research_shared() -> Iterator[None]:
+    from ui.viewmodels.business_research_view_model import reset_shared_business_research
+
     vm_mod.reset_shared_research_observer()
+    reset_shared_business_research()
     agent_decision_arbiter.get_decision_arbiter().reset()
     yield
     vm_mod.reset_shared_research_observer()
+    reset_shared_business_research()
     agent_decision_arbiter.get_decision_arbiter().reset()
 
 
@@ -215,12 +220,22 @@ def _nav_rail(env: dict) -> ft.NavigationRail:
     return rail
 
 
-def _research_button(env: dict) -> ft.IconButton:
+def _brand_column(env: dict) -> ft.Column:
     leading = _nav_rail(env).leading
     assert isinstance(leading, ft.Container)
     column = leading.content
     assert isinstance(column, ft.Column)
-    button = column.controls[3]
+    return column
+
+
+def _research_button(env: dict) -> ft.IconButton:
+    button = _brand_column(env).controls[3]
+    assert isinstance(button, ft.IconButton)
+    return button
+
+
+def _comparison_button(env: dict) -> ft.IconButton:
+    button = _brand_column(env).controls[4]
     assert isinstance(button, ft.IconButton)
     return button
 
@@ -1427,3 +1442,238 @@ def test_shortcut_key_normalization_tolerates_blank_and_variants() -> None:
     assert _normalize_shortcut_key("   ") == "", "空白按键标签应归一化为空（不匹配任何快捷键）"
     assert _normalize_shortcut_key("Numpad3") == "3"
     assert _normalize_shortcut_key("KeyA") == "A"
+
+
+class TestW12ToolbarRouting:
+    """W-12：模型/角色、费用与耗时工具栏在壳层的调度接线（只读命令）。"""
+
+    def test_toolbar_callbacks_schedule_vm_commands(self, layout_env) -> None:
+        _open_panel(layout_env)
+        _drive_last_run_task(layout_env)
+        _rerender(layout_env)
+        panel = _observation_control(layout_env)
+        assert panel is not None
+        vm = _shared_vm()
+        page = layout_env["page"]
+
+        for name, command in (
+            ("on_load_mcp_scope", vm.load_mcp_scope),
+            ("on_load_model_selection", vm.load_model_selection),
+            ("on_refresh_usage", vm.refresh_usage),
+            ("on_refresh_budget", vm.refresh_budget_hint),
+        ):
+            page.run_task.reset_mock()
+            panel.kwargs[name]()
+            assert page.run_task.call_args.args[0] == command
+
+        page.run_task.reset_mock()
+        panel.kwargs["on_select_model"]("conn-a")
+        assert list(page.run_task.call_args.args) == [vm.select_model_connection, "conn-a"]
+
+        page.run_task.reset_mock()
+        panel.kwargs["on_select_model"]("")
+        assert page.run_task.call_args_list == [], "空连接不得调度选择命令"
+
+        # 角色目录尚未加载：未知角色如实拒绝，不静默换成默认角色
+        panel.kwargs["on_select_role"]("main")
+        assert vm.state.role_selection_error_key == "agent_research_role_selection_unknown"
+
+
+class TestDraftComposerAndDecisionHandlers:
+    """壳层草稿/首问/计划/决定入口：异步调度到 VM，不在事件处理器内同步 IO。"""
+
+    def test_draft_and_composer_handlers_use_current_session(self, layout_env) -> None:
+        _open_panel(layout_env)
+        _drive_last_run_task(layout_env)
+        _rerender(layout_env)
+        panel = _observation_control(layout_env)
+        assert panel is not None
+        vm = _shared_vm()
+        page = layout_env["page"]
+        assert vm.state.session_id == "s-1", "刷新后应已选中会话"
+        vm._set_state(composer_available=True)
+
+        page.run_task.reset_mock()
+        panel.kwargs["on_load_draft"]()
+        assert list(page.run_task.call_args.args) == [vm.load_draft, "s-1", None]
+
+        page.run_task.reset_mock()
+        panel.kwargs["on_send"]()
+        assert page.run_task.call_args.args[0] == vm.send_first_question
+
+        page.run_task.reset_mock()
+        panel.kwargs["on_start_plan"]()
+        assert page.run_task.call_args.args[0] == vm.start_confirmed_plan
+
+    def test_decision_submit_routes_through_arbiter(self, layout_env) -> None:
+        _open_panel(layout_env)
+        _drive_last_run_task(layout_env)
+        _rerender(layout_env)
+        panel = _observation_control(layout_env)
+        assert panel is not None
+        vm = _shared_vm()
+        page = layout_env["page"]
+
+        vm.set_answer_draft("d-1", "选择第一家")
+        page.run_task.reset_mock()
+        panel.kwargs["on_submit"]("d-1", "e-1", "r-1")
+        assert page.run_task.call_count == 1, "提交必须经仲裁层调度，不就地执行"
+        asyncio.run(page.run_task.call_args.args[0]())
+        assert [request.decision_id for request in layout_env["service"].answer_calls] == ["d-1"]
+
+
+class TestComparisonPanelWiring:
+    """F37：对比面板在壳层的挂载与异步命令调度（独立面板，不影响观察层）。"""
+
+    def test_comparison_toggle_mounts_panel_and_schedules_loads(self, layout_env) -> None:
+        page = layout_env["page"]
+        page.run_task.reset_mock()
+        _invoke(_comparison_button(layout_env).on_click, MagicMock())
+        _rerender(layout_env)
+
+        tail = _body_row(layout_env).controls[-1]
+        assert type(tail).__name__ == "Component", "展开后应挂对比面板"
+        comparison_vm = tail.kwargs["on_lane"].__self__
+        assert [call.args[0] for call in page.run_task.call_args_list] == [comparison_vm.load_connections]
+
+        page.run_task.reset_mock()
+        tail.kwargs["on_refresh"]()
+        assert page.run_task.call_args.args[0] == comparison_vm.refresh
+
+        # 收起后不再挂载
+        _invoke(_comparison_button(layout_env).on_click, MagicMock())
+        _rerender(layout_env)
+        assert type(_body_row(layout_env).controls[-1]).__name__ != "Component"
+
+        # 已有组身份时，重新展开同时刷新组投影
+        comparison_vm._set_state(group_ref="g-1")
+        _rerender(layout_env)
+        page.run_task.reset_mock()
+        _invoke(_comparison_button(layout_env).on_click, MagicMock())
+        scheduled = [getattr(call.args[0], "__name__", "") for call in page.run_task.call_args_list]
+        assert scheduled == ["load_connections", "refresh"]
+
+
+class TestHandlersWithoutPage:
+    """无渲染上下文（page 不可得）时所有入口安全空转，不派发、不抛错。"""
+
+    def test_handlers_are_noops_without_page(self, monkeypatch, layout_env) -> None:
+        from ui import app_layout as mod
+
+        _open_panel(layout_env)
+        panel = _observation_control(layout_env)
+        assert panel is not None
+        assert panel.kwargs["state"].available is True, "已接线时观察层应可用"
+        page = layout_env["page"]
+        page.run_task.reset_mock()
+        monkeypatch.setattr(mod, "_get_page", lambda: None)
+
+        panel.kwargs["on_close"]()
+        for name, args in (
+            ("on_load_mcp_scope", ()),
+            ("on_load_model_selection", ()),
+            ("on_refresh_usage", ()),
+            ("on_refresh_budget", ()),
+            ("on_select_model", ("conn-a",)),
+            ("on_load_sessions", ()),
+            ("on_open_session", ("s-1",)),
+            ("on_create_session", ()),
+            ("on_commit_rename", ()),
+            ("on_pin_session", ("s-1",)),
+            ("on_archive_session", ("s-1",)),
+            ("on_load_artifact", ("a-1", 1, "e-1", "r-1")),
+            ("on_load_draft", ()),
+            ("on_send", ()),
+            ("on_start_plan", ()),
+            ("on_submit", ("d-1", "e-1", "r-1")),
+            ("on_retry_delivery", ("d-1",)),
+        ):
+            panel.kwargs[name](*args)
+        _invoke(page.on_keyboard_event, SimpleNamespace(ctrl=True, alt=False, meta=False, shift=False, key="3"))
+        assert page.run_task.call_args_list == []
+
+
+class TestPrepareResearchEarlyReturns:
+    """建稿回执的早退分支：无提示 / 非建稿成功提示都不重开、不导航。"""
+
+    def _business_vm(self) -> Any:
+        from ui.viewmodels import business_research_view_model as business_mod
+
+        vm = business_mod._shared_vm
+        assert vm is not None
+        return vm
+
+    def test_missing_notice_does_not_open_panel(self, monkeypatch, layout_env) -> None:
+        vm = self._business_vm()
+
+        async def _silent_prepare(*_args: Any, **_kwargs: Any) -> None:
+            return
+
+        monkeypatch.setattr(vm, "prepare", _silent_prepare)
+        _start_research_handler(layout_env)(_business_request())
+        scheduled, args = _capture_prepare(layout_env)
+        layout_env["page"].run_task.reset_mock()
+
+        asyncio.run(scheduled(*args))
+        _rerender(layout_env)
+
+        assert _observation_control(layout_env) is None
+        assert layout_env["page"].run_task.call_args_list == []
+
+    def test_non_prepared_notice_does_not_open_panel(self, monkeypatch, layout_env) -> None:
+        vm = self._business_vm()
+
+        async def _source_unavailable(*_args: Any, **_kwargs: Any) -> None:
+            vm._set_state(notice_key="agent_research_source_unavailable", last_session_id="s-9")
+
+        monkeypatch.setattr(vm, "prepare", _source_unavailable)
+        _start_research_handler(layout_env)(_business_request())
+        scheduled, args = _capture_prepare(layout_env)
+        layout_env["page"].run_task.reset_mock()
+
+        asyncio.run(scheduled(*args))
+        _rerender(layout_env)
+
+        assert _observation_control(layout_env) is None, "非建稿成功提示不得重开观察层"
+        assert _shared_vm().state.session_id is None, "不得导航到非建稿回执的会话"
+        assert layout_env["page"].run_task.call_args_list == []
+
+
+class TestShellLifecycleSafety:
+    """快捷键聚焦与卸载清理：清理幂等，卸载后残留订阅回调安全忽略。"""
+
+    def test_focus_shortcut_and_cleanup_are_idempotent(self, layout_env) -> None:
+        from ui.pubsub_topics import TOPIC_NAVIGATE
+
+        page = layout_env["page"]
+        page.run_task.reset_mock()
+        _invoke(page.on_keyboard_event, SimpleNamespace(ctrl=True, alt=False, meta=False, shift=False, key="f"))
+        assert page.run_task.call_count == 1, "Ctrl+F 应把焦点还给导航栏切换按钮"
+
+        run_unmount_effects(layout_env["component"])
+
+        handler = page.pubsub.subscribe_topic.call_args.args[1]
+        handler(TOPIC_NAVIGATE, "market")  # 订阅句柄已清空：安全忽略迟到消息
+
+    def test_mount_without_page_cleans_up_without_side_effects(
+        self, mock_i18n_state, mock_app_colors_state, monkeypatch
+    ) -> None:
+        from ui import app_layout as mod
+
+        monkeypatch.setattr(mod, "_get_page", lambda: None)
+        egress_audit = MagicMock()
+        egress_audit.return_value.add_listener.return_value = None
+        monkeypatch.setattr("utils.egress_audit.EgressAudit", egress_audit)
+        env = _mount(
+            None,
+            service=None,
+            mock_i18n_state=mock_i18n_state,
+            mock_app_colors_state=mock_app_colors_state,
+            monkeypatch=monkeypatch,
+        )
+
+        _invoke(_research_button(env).on_click, MagicMock())  # 无 page：只切可见性，不调度刷新
+        _rerender(env)
+        assert env["page"].run_task.call_args_list == []
+
+        run_unmount_effects(env["component"])  # 清理阶段无 page / 无退订句柄：安全空转
