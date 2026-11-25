@@ -25,7 +25,8 @@ import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Final, Protocol, cast
+from typing import TYPE_CHECKING, Any, Final, Protocol, cast
+
 from core.agent_types import (
     AnswerDeliveryOutcome,
     AnswerDeliveryRequest,
@@ -48,8 +49,12 @@ from core.agent_types import (
     SessionReadQuery,
     json_doc,
 )
-from services.agent_service.main_turn import MainTurnIntakeResult, PlanReference
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
+
+if TYPE_CHECKING:
+    # N01：``services.agent_service`` 包初始化会拉入 Agent 专用依赖（DBOS / pydantic_ai）。
+    # 该导入只用于类型标注；运行时仅在已接线（intake 存在）路径内惰性导入。
+    from services.agent_service.main_turn import MainTurnIntakeResult, PlanReference
 
 #: 桌面单用户域（与 app.agent_wiring 的默认 user_scope 保持一致；UI 层不 import app）。
 LOCAL_DESKTOP_USER_SCOPE = "local-desktop"
@@ -1582,6 +1587,8 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         self._track_inflight_cancellable()
         self._set_state(composer_pending=True, composer_error_key=None, last_dispatch_reason=None)
         try:
+            from services.agent_service.main_turn import PlanReference
+
             result = await intake.start_plan(
                 PlanReference(execution_id=reference[0], plan_revision=reference[1]),
                 session_id=session_id,

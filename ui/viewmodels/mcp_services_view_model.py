@@ -21,6 +21,7 @@ import asyncio
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 from core.agent_types import (
     MCP_BUDGET_FIELDS,
@@ -33,17 +34,17 @@ from core.agent_types import (
     RoleMCPServiceBinding,
     validate_role_mcp_assignment,
 )
-from services.agent_service.mcp import MCPConnectionTestReceipt, MCPServerConfig, MCPTransportConfig
-from services.agent_service.mcp_config_store import (
-    LISTING_INVALID,
-    LISTING_PATH_UNAVAILABLE,
-    MCPConfigListEntry,
-)
-from services.agent_service.mcp_lifecycle import MCPServiceDeleteBlocked, MCPServiceLifecycle
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
+
+if TYPE_CHECKING:
+    # N01：``services.agent_service`` 包初始化会拉入 Agent 专用依赖（DBOS / pydantic_ai）。
+    # 类型仅用于标注；运行时只在真正构造配置时惰性导入（见 ``_build_config``）。
+    from services.agent_service.mcp import MCPConnectionTestReceipt, MCPServerConfig
+    from services.agent_service.mcp_config_store import MCPConfigListEntry
+    from services.agent_service.mcp_lifecycle import MCPServiceLifecycle
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +57,25 @@ STATUS_WARNING = "warning"
 STATUS_ERROR = "error"
 
 #: 列表项失效原因 → 行标注 i18n key（未登记的原因不标注，避免臆造文案）。
-_ROW_PROBLEM_KEYS: dict[str, str] = {
-    LISTING_PATH_UNAVAILABLE: "mcp_row_path_invalid",
-    LISTING_INVALID: "mcp_row_invalid",
-}
+#: N01：原因码在首次使用时惰性导入，避免模块级导入 ``services.agent_service``
+#: 触发包初始化拉入 DBOS / pydantic_ai。
+_ROW_PROBLEM_KEYS: dict[str, str] = {}
+
+
+def _row_problem_keys() -> dict[str, str]:
+    """返回「失效原因码 → i18n key」映射（惰性导入，依赖缺失时本模块仍可导入）。"""
+
+    if not _ROW_PROBLEM_KEYS:
+        from services.agent_service.mcp_config_store import LISTING_INVALID, LISTING_PATH_UNAVAILABLE
+
+        _ROW_PROBLEM_KEYS.update(
+            {
+                LISTING_PATH_UNAVAILABLE: "mcp_row_path_invalid",
+                LISTING_INVALID: "mcp_row_invalid",
+            }
+        )
+    return _ROW_PROBLEM_KEYS
+
 
 #: 可在表单中直接编辑的文本字段（白名单，避免 View 传入未知字段）。
 DRAFT_TEXT_FIELDS = frozenset(
@@ -633,6 +649,9 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
             self._set_state(delete_pending=False)
             return
         self._set_state(busy=True, status=None, delete_pending=False)
+        # N01：异常类在命令执行时才导入，避免模块级拉入 Agent 依赖。
+        from services.agent_service.mcp_lifecycle import MCPServiceDeleteBlocked
+
         try:
             receipt = await lifecycle.delete_service(identity, confirmation=True)
         except asyncio.CancelledError:
@@ -744,6 +763,10 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
     def _build_config(self) -> MCPServerConfig:
         """草稿 → ``MCPServerConfig``；结构不合法时抛 ``ValueError``（值为字段名）。"""
 
+        # N01：仅在实际构造配置时导入 Agent 服务层（包初始化会拉入 DBOS / pydantic_ai）；
+        # 依赖缺失时本模块仍可导入，MCP 页按未接线如实不可用。
+        from services.agent_service.mcp import MCPServerConfig, MCPTransportConfig
+
         draft = self._state.draft
         identity = self._draft_identity()
         if identity is None:
@@ -812,7 +835,7 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
                     display_name=config.display_name,
                     transport_kind=config.transport.kind.value,
                     connected=lifecycle.is_connected(config.identity),
-                    problem_key=_ROW_PROBLEM_KEYS.get(entry.problem or ""),
+                    problem_key=_row_problem_keys().get(entry.problem or ""),
                 )
             )
         return tuple(rows)

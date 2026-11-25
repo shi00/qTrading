@@ -19,17 +19,15 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from core.agent_types import Purpose
-from services.agent_service.business_research import (
-    BusinessDraftAlreadyPrepared,
-    BusinessDraftCommitUnknown,
-    BusinessObjectSnapshot,
-    BusinessResearchPreparer,
-    BusinessSourceUnavailable,
-)
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
+
+if TYPE_CHECKING:
+    # N01：Agent 专用依赖（services.agent_service 包初始化会拉入 DBOS / pydantic_ai）
+    # 只在真正接线时惰性导入；依赖缺失时本模块仍可导入，研究入口如实不可用。
+    from services.agent_service.business_research import BusinessObjectSnapshot
 
 #: 桌面单用户域（与 app.agent_wiring 默认 user_scope 一致；UI 层不 import app）。
 LOCAL_DESKTOP_USER_SCOPE = "local-desktop"
@@ -76,6 +74,8 @@ class BusinessResearchRequest:
     period: str | None = None
 
     def as_snapshot(self) -> BusinessObjectSnapshot:
+        from services.agent_service.business_research import BusinessObjectSnapshot
+
         return BusinessObjectSnapshot(
             source_module=self.source_module,
             object_kind=self.object_kind,
@@ -112,7 +112,11 @@ class BusinessResearchViewModel(ObservableViewModelMixin[BusinessResearchState])
     ) -> None:
         self._user_scope = user_scope
         self._service_key = id(service) if service is not None else None
-        self._preparer = BusinessResearchPreparer(service) if service is not None else None
+        self._preparer: Any = None
+        if service is not None:
+            from services.agent_service.business_research import BusinessResearchPreparer
+
+            self._preparer = BusinessResearchPreparer(service)
         self._state = BusinessResearchState(
             available=self._preparer is not None,
             unavailable_reason_key=unavailable_reason_key if self._preparer is None else "",
@@ -132,6 +136,14 @@ class BusinessResearchViewModel(ObservableViewModelMixin[BusinessResearchState])
             return
         if self._state.preparing:
             return  # 重复发起：在途未结束时不再起第二份准备
+        # N01：仅在实际准备（已接线）时导入 Agent 服务层；依赖缺失时模块仍可导入，
+        # 研究入口在 ``_preparer is None`` 分支如实不可用且零派发。
+        from services.agent_service.business_research import (
+            BusinessDraftAlreadyPrepared,
+            BusinessDraftCommitUnknown,
+            BusinessSourceUnavailable,
+        )
+
         self._set_state(preparing=True, notice_key=None, last_error_code=None)
         # 写调用阶段：页面卸载放行自然完成，不宣称「未准备」（磁盘 SSOT）。
         self._mark_inflight_committing()
