@@ -156,6 +156,62 @@ def _refused_response(outcome: ChatTurnOutcome) -> ChatTurnResponse | None:
 
 
 # ---------------------------------------------------------------------------
+# 增量文本投影（W-13：流式呈现只消费受治理片段，合成片段显式标记）
+# ---------------------------------------------------------------------------
+
+#: 片段来源：真实模型输出。
+STREAM_SOURCE_MODEL: Final[str] = "model"
+#: 片段来源：本地合成/占位文本（如「正在生成…」），不得与模型输出混排。
+STREAM_SOURCE_SYNTHETIC: Final[str] = "synthetic"
+
+
+@dataclass(frozen=True, slots=True)
+class StreamedTextFragment:
+    """受治理的增量文本片段（``LeafStreamEvent`` / ``ChatStreamEvent`` 的公开投影）。
+
+    ``sequence`` 为来源事件序号（缺失时由调用方给出）；``source`` 区分真实模型
+    输出与本地合成/占位文本——合成片段可展示为「占位」，但不得混入可复制为
+    结论的正文（R21）。
+    """
+
+    sequence: int
+    text: str
+    source: str = STREAM_SOURCE_MODEL
+
+    @property
+    def synthetic(self) -> bool:
+        """是否为本地合成/占位片段（消费方必须显著标注）。"""
+
+        return self.source == STREAM_SOURCE_SYNTHETIC
+
+
+def project_stream_text_fragment(
+    event: object,
+    *,
+    sequence: int | None = None,
+    source: str = STREAM_SOURCE_MODEL,
+) -> StreamedTextFragment | None:
+    """受治理流事件 → 增量文本片段（非文本事件 / 空增量 → ``None``，不伪造）。
+
+    支持两种既有形态，不新增旁路事件：
+    - ``LeafStreamEvent(kind="text_delta", sequence=..., text_delta=...)``（叶 Agent）；
+    - 带 ``kind="text"`` 与 ``text_delta`` 的流事件（``ChatStreamEvent`` 形态）。
+    工具/终止事件不产生文本片段；空增量不产生空片段。
+    """
+
+    if getattr(event, "kind", None) not in ("text_delta", "text"):
+        return None
+    text = getattr(event, "text_delta", None)
+    if not isinstance(text, str) or not text:
+        return None
+    resolved = sequence
+    if resolved is None:
+        raw_sequence = getattr(event, "sequence", None)
+        resolved = raw_sequence if isinstance(raw_sequence, int) and not isinstance(raw_sequence, bool) else 0
+    return StreamedTextFragment(sequence=resolved, text=text, source=source)
+
+
+# ---------------------------------------------------------------------------
 # SDK 消息 → core ChatTurnRequest 投影（§6.3，未识别 part 明确拒绝）
 # ---------------------------------------------------------------------------
 

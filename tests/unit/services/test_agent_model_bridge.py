@@ -21,6 +21,7 @@
 import asyncio
 import dataclasses
 import json
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -62,13 +63,17 @@ from pydantic_ai.tools import ToolDefinition
 
 from services.agent_service.model import (
     BOUND_MODEL_ALIAS,
+    STREAM_SOURCE_MODEL,
+    STREAM_SOURCE_SYNTHETIC,
     GatewayModel,
     ModelTurnRefusedError,
+    StreamedTextFragment,
     _TurnChannel,
     build_chat_turn_request,
     derive_model_call_id,
     map_finish_reason,
     map_usage,
+    project_stream_text_fragment,
 )
 
 pytestmark = pytest.mark.unit
@@ -1199,3 +1204,41 @@ class TestStreamPath:
                 # 消费取消路径：close_stream 中止生产任务并 join（R2 传播）
                 await streamed.close_stream()
         assert excinfo.type is asyncio.CancelledError  # 取消不转译、继续传播（R2）
+
+
+class TestStreamTextProjection:
+    """W-13：增量文本投影只消费受治理片段，合成片段显式标记（不与模型输出混淆）。"""
+
+    def test_projects_leaf_text_delta(self):
+        event = SimpleNamespace(kind="text_delta", sequence=7, text_delta="结论")
+        fragment = project_stream_text_fragment(event)
+        assert fragment == StreamedTextFragment(sequence=7, text="结论", source=STREAM_SOURCE_MODEL)
+        assert fragment is not None
+        assert fragment.synthetic is False
+
+    def test_projects_chat_stream_text_delta(self):
+        fragment = project_stream_text_fragment(ChatStreamEvent(sequence=3, kind="text", text_delta="ab"))
+        assert fragment is not None
+        assert fragment.sequence == 3
+        assert fragment.text == "ab"
+
+    def test_non_text_and_empty_deltas_are_not_fabricated(self):
+        assert project_stream_text_fragment(SimpleNamespace(kind="tool_call", sequence=1, tool_name="t")) is None
+        assert project_stream_text_fragment(SimpleNamespace(kind="finish", sequence=2)) is None
+        assert project_stream_text_fragment(SimpleNamespace(kind="text_delta", sequence=4, text_delta="")) is None
+
+    def test_synthetic_source_is_explicit(self):
+        fragment = project_stream_text_fragment(
+            SimpleNamespace(kind="text_delta", sequence=1, text_delta="正在生成…"),
+            source=STREAM_SOURCE_SYNTHETIC,
+        )
+        assert fragment is not None
+        assert fragment.synthetic is True
+        assert fragment.source == STREAM_SOURCE_SYNTHETIC
+
+    def test_explicit_sequence_overrides_event_sequence(self):
+        fragment = project_stream_text_fragment(
+            SimpleNamespace(kind="text", sequence=1, text_delta="x"),
+            sequence=9,
+        )
+        assert fragment == StreamedTextFragment(sequence=9, text="x", source=STREAM_SOURCE_MODEL)
