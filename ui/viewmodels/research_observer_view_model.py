@@ -259,7 +259,7 @@ _EVENT_CATCH_UP_PAGE: Final[int] = 50
 _EVENT_CATCH_UP_MAX_PAGES: Final[int] = 20
 CATCH_UP_INCOMPLETE = "catch_up_incomplete"
 
-#: 消息修订/前缀分支/局部复制（W-15）：能力缺失原因 key 与摘要截断上限。
+#: 消息修订/前缀分支/局部复制：能力缺失原因 key 与摘要截断上限。
 MESSAGE_TOOLS_UNAVAILABLE_KEY: Final[str] = "agent_research_message_tools_unavailable"
 MESSAGE_COPY_SUMMARY_LIMIT: Final[int] = 160
 MESSAGE_COPY_EMPTY_KEY: Final[str] = "agent_research_message_copy_selection_empty"
@@ -1009,7 +1009,7 @@ class ResearchObserverState:
     rename_text: str = ""
     #: 当前会话的元数据版（会话 CAS 动作的预期版；读取失败保持 0，动作被拒绝）。
     session_revision: int = 0
-    # --- W-15 消息修订 / 前缀分支 / 局部复制 ---
+    # 消息修订 / 前缀分支 / 局部复制
     #: 能力可用性：修订需 ``change_session`` + 受理端口，分支只需 ``change_session``。
     message_edit_available: bool = False
     message_branch_available: bool = False
@@ -3056,7 +3056,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         return receipt
 
     # ------------------------------------------------------------------
-    # 消息修订 / 前缀分支 / 局部复制（W-15）
+    # 消息修订 / 前缀分支 / 局部复制
     # ------------------------------------------------------------------
 
     def begin_edit_message(self, message_id: str) -> None:
@@ -3845,7 +3845,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         pending_keys = tuple(
             key for key in self._state.artifact_body_pending_keys if key in artifact_keys and key not in cleaned_keys
         )
-        # W-15：修订/复制工具栏只对仍存在的消息有效；消息消失或换会话即清空，
+        # 修订/复制工具栏只对仍存在的消息有效；消息消失或换会话即清空，
         # 避免对已移除消息保留幽灵编辑态/工具栏。
         message_ids = {item.message_id for item in read.messages.items}
         edit_target = self._state.edit_message_id if self._state.edit_message_id in message_ids else None
@@ -3915,7 +3915,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
                 "artifact_selected_keys": tuple(
                     key for key in self._state.artifact_selected_keys if key in artifact_keys
                 ),
-                # W-15：同一会话内消息仍在则保留编辑态/复制工具栏；消息消失即清空。
+                # 同一会话内消息仍在则保留编辑态/复制工具栏；消息消失即清空。
                 "edit_message_id": edit_target,
                 "edit_text": self._state.edit_text if edit_target is not None else "",
                 "copy_toolbar_message_id": copy_target,

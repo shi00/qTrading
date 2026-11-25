@@ -2117,7 +2117,7 @@ def _w15_read(*messages: Any, title: str = "研究 A") -> Any:
 
 
 class TestMessageTools:
-    """W-15：消息修订重发、前缀分支、局部复制工具栏。"""
+    """消息修订重发、前缀分支、局部复制工具栏。"""
 
     def _vm(self, *, messages: tuple[Any, ...], intake: _FakeIntake | None = None, **service_kwargs: Any) -> Any:
         service = _FakeService(
