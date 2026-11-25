@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Final, NoReturn
 
@@ -791,14 +791,22 @@ def _observation_map(
     return mapped
 
 
+#: 尚未启动的显示态（受理初值 ``queued`` / 计划态 ``planned``）。
+_PRE_START_STATES: Final[frozenset[str]] = frozenset({"queued", "planned"})
+
+
 def _lane_reason(state: str | None, reliable: bool | None, note: str | None = None) -> str:
-    if state is None and note is not None:
+    # 明确零派发原因优先：状态缺失或仍是受理初值（未推进）时，拒绝原因就是本路结论。
+    if note is not None and (state is None or state in _PRE_START_STATES):
         if note.startswith(DISPATCH_FAILED_PREFIX):
             return "dispatch_failed"
         if note.startswith(ACCEPT_FAILED_PREFIX):
             return "accept_failed"
     if state is None:
         return "started_no_fact" if note == "started_no_fact" else "not_started"
+    if state in _PRE_START_STATES:
+        # 未启动（排队/计划）不是「保留成果」，与缺失观察同一口径，便于三态区分。
+        return "not_started"
     if state in _UNCONFIRMED_STATES or (state in _TERMINAL_STATES and reliable is None):
         return "result_unconfirmed"
     if state == "complete":
@@ -1030,6 +1038,57 @@ def observations_from_executions(
             execution_id=execution_id if isinstance(execution_id, str) and execution_id else None,
         )
     return tuple(by_lane.values())
+
+
+def apply_persisted_lane_notes(
+    group: FrozenComparisonGroup,
+    observations: tuple[ComparisonLaneObservation, ...],
+    executions: tuple[object, ...],
+    notes: Mapping[str, str],
+) -> tuple[ComparisonLaneObservation, ...]:
+    """把已持久化的**明确拒绝原因**折回逐路观察（只读，零派发，R21）。
+
+    重建摘要只从执行行得到状态，拒绝原因不在行内，故按持久化记录补回；只有
+    「从未推进」的路才接受记录，避免旧拒绝覆盖新的真实事实：
+
+    - ``accept_failed`` 仅用于**尚无执行行**的路（受理失败本就未建执行）；
+    - ``dispatch_failed`` 仅用于已有执行行但从未启动的路（``display_state`` 仍是
+      受理初值 ``queued`` 且无本轮轮次）。
+
+    路一旦推进（有轮次或已离开初值状态），记录视为过时并忽略；正常排队的路没有
+    记录，保持未启动，两者不混淆。
+    """
+
+    lane_ids = {lane.lane_ref for lane in group.lanes}
+    latest: dict[str, object] = {}
+    for row in executions:
+        if getattr(row, "comparison_group_ref", None) != group.group_ref:
+            continue
+        lane_ref = getattr(row, "comparison_lane_ref", None)
+        if isinstance(lane_ref, str) and lane_ref in lane_ids:
+            # 会话按 created_at 升序返回：同一路多次尝试时保留最后一行。
+            latest[lane_ref] = row
+    by_lane = {observation.lane_ref: observation for observation in observations}
+    folded: list[ComparisonLaneObservation] = []
+    for lane in group.lanes:
+        observation = by_lane.get(lane.lane_ref, ComparisonLaneObservation(lane_ref=lane.lane_ref))
+        note = notes.get(lane.lane_ref)
+        if note is not None:
+            row = latest.get(lane.lane_ref)
+            if row is None:
+                applies = note.startswith(ACCEPT_FAILED_PREFIX)
+            else:
+                applies = note.startswith(DISPATCH_FAILED_PREFIX) and _lane_never_advanced(row)
+            if applies:
+                observation = replace(observation, note=note)
+        folded.append(observation)
+    return tuple(folded)
+
+
+def _lane_never_advanced(row: object) -> bool:
+    """该路执行行是否仍停在受理初值（未启动、无任何轮次）。"""
+
+    return getattr(row, "display_state", None) == "queued" and getattr(row, "current_round_id", None) is None
 
 
 def comparison_export_rows(view: ComparisonGroupView) -> tuple[dict[str, str], ...]:
@@ -1368,6 +1427,8 @@ async def execute_group_stop(
 LaneStart = Callable[[ComparisonLaneFrozen], Awaitable[str]]
 LaneObserve = Callable[[tuple[tuple[str, str], ...]], Awaitable[Mapping[str, ComparisonLaneObservation]]]
 StopCheckpoint = Callable[[], Awaitable[bool]]
+#: 明确拒绝原因持久化回调：``(lane_ref, note)``，由调用方决定是否落库与失败策略。
+LaneNoteRecorder = Callable[[str, str], Awaitable[None]]
 
 
 async def drive_comparison_group(
@@ -1381,6 +1442,7 @@ async def drive_comparison_group(
     session_slots: int = COMPARISON_SESSION_SLOTS,
     idle_observation_limit: int | None = None,
     wait_checkpoint: StopCheckpoint | None = None,
+    record_lane_note: LaneNoteRecorder | None = None,
 ) -> ComparisonGroupView:
     """逐路排队推进一组独立完整任务，返回组收敛投影（生产编排入口）。
 
@@ -1395,6 +1457,10 @@ async def drive_comparison_group(
     观察为空且达到 ``idle_observation_limit`` 时：有持久等待检查点则继续，否则
     按本批次结束（保持未收敛，不伪造终态）。生产观察只回传终态事实时，本函数
     自然在一次空观察后返回（发起/推进批次），由再次调用接续完成。
+
+    ``record_lane_note`` 收到本批的**明确拒绝原因**（``dispatch_failed:`` /
+    ``accept_failed:``，不含「已启动未观察」），供调用方持久化，使重开与行导出
+    与即时响应同因；本函数自身不写库、不派发。
     """
 
     capacities = plan_lane_queue(
@@ -1426,12 +1492,15 @@ async def drive_comparison_group(
                 code_value = getattr(code, "value", code)
                 reason = code_value if isinstance(code_value, str) and code_value else type(exc).__name__
                 prefix = getattr(exc, "note_prefix", DISPATCH_FAILED_PREFIX)
+                note = f"{prefix}{reason}"
                 observed[lane.lane_ref] = ComparisonLaneObservation(
                     lane_ref=lane.lane_ref,
                     display_state=None,
                     reliable_result=None,
-                    note=f"{prefix}{reason}",
+                    note=note,
                 )
+                if record_lane_note is not None:
+                    await record_lane_note(lane.lane_ref, note)
                 continue
             started.add(lane.lane_ref)
             running[lane.lane_ref] = workflow_id
@@ -1578,11 +1647,13 @@ __all__ = [
     "ComparisonSubmissionReceipt",
     "ComparisonSubmissionRequest",
     "FrozenComparisonGroup",
+    "LaneNoteRecorder",
     "LaneQueueDecision",
     "LaneStopDecision",
     "LaneStopOutcome",
     "LaneWithdrawal",
     "LaneWithdrawer",
+    "apply_persisted_lane_notes",
     "build_comparison_view",
     "build_lane_accept_request",
     "comparison_export_rows",

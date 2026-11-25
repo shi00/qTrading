@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
@@ -119,8 +120,10 @@ from core.agent_types import (
     decode_json_doc,
     decode_source_version_ref,
 )
+from data.persistence.app_state_service import list_app_state, set_app_state
 from data.persistence.daos.agent_dao import AgentDao
 from data.persistence.daos.ai_usage_dao import AIUsageDao
+from data.persistence.daos.base_dao import EngineDisposedError
 from services.agent_service.comparison import (
     ACCEPT_FAILED_PREFIX,
     DISPATCH_FAILED_PREFIX,
@@ -136,6 +139,7 @@ from services.agent_service.comparison import (
     FrozenComparisonGroup,
     LaneWithdrawal,
     LaneWithdrawer,
+    apply_persisted_lane_notes,
     build_comparison_view,
     build_lane_accept_request,
     comparison_export_rows,
@@ -149,6 +153,7 @@ from services.agent_service.comparison import (
     require_group_lane_consistency,
     verify_group_manifest_authority,
 )
+from services.agent_service.comparison_notes import AppStateComparisonLaneNotes, ComparisonLaneNotesPort
 from services.agent_service.control import RetryLauncher, plan_retry
 from services.agent_service.dispatch import DispatchOutcome, ResearchDispatcher, ResearchWorkflowResult
 from services.agent_service.main_turn import derive_frozen_selection_policy, plan_spec_from_proposal
@@ -161,6 +166,9 @@ from services.agent_service.skills import (
 from services.agent_service.sources import BusinessSourceService
 from utils.error_classifier import classify_error, classify_severity
 from utils.loop_local import get_loop_local
+from utils.sanitizers import DataSanitizer
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from core.model_management_types import StockAgentCall
@@ -439,6 +447,7 @@ class AgentService:
         skills: SkillCatalogService | None = None,
         answer_sender: AnswerSender | None = None,
         lane_withdrawer: LaneWithdrawer | None = None,
+        lane_notes: ComparisonLaneNotesPort | None = None,
         retry_launcher: RetryLauncher | None = None,
     ) -> None:
         """``usage_dao`` 为共享模型调度账本（同一引擎）；缺省时费用投影如实报读取失败。
@@ -451,7 +460,9 @@ class AgentService:
         ``lane_withdrawer`` 为比较组停止的真实撤单端口；未接线时未派发路如实标
         「撤回未确认」，不把停止计划伪装成已撤回。默认（未注入）时直连 DAO
         撤单写接口 ``AgentDao.withdraw_comparison_lane``；DAO 未提供该接口或撤回
-        未确认时逐路如实标未确认。``retry_launcher`` 为单任务重试的原生投递端口
+        未确认时逐路如实标未确认。``lane_notes`` 为比较路明确拒绝原因的持久化端口
+        （N29）：未注入时复用本 DAO 引擎写 ``app_state``（无引擎则不持久化，读取
+        面退回按执行行重建）。``retry_launcher`` 为单任务重试的原生投递端口
         （W-01）；未注入时重试只落持久事实并如实标 ``not_wired``，不伪造已重跑。
         """
 
@@ -461,6 +472,7 @@ class AgentService:
         self._skills = skills
         self._answer_sender = answer_sender
         self._lane_withdrawer = lane_withdrawer
+        self._lane_notes = lane_notes
         self._retry_launcher = retry_launcher
         #: 已停止的比较组（组派发门关闭事实）：在途编排的下一路一律零派发。
         self._stopped_groups: set[str] = set()
@@ -901,6 +913,50 @@ class AgentService:
                 identity,
             ) from exc
 
+    def _lane_note_store(self) -> ComparisonLaneNotesPort | None:
+        """比较路原因存储：显式注入优先；否则复用本 DAO 引擎写 ``app_state``。
+
+        引擎不可得（未接线 / 测试替身）时返回 ``None``：不持久化，读取面按执行行
+        重建（与修复前一致），不伪造已记录原因。
+        """
+
+        if self._lane_notes is not None:
+            return self._lane_notes
+        engine = getattr(self._dao, "engine", None)
+        if engine is None:
+            return None
+        return AppStateComparisonLaneNotes(
+            write=lambda key, value: set_app_state(engine, key, value, strict=True),
+            scan=lambda prefix: list_app_state(engine, prefix),
+        )
+
+    @staticmethod
+    async def _persist_lane_refusal(
+        store: ComparisonLaneNotesPort | None, group_ref: str, lane_ref: str, note: str
+    ) -> None:
+        """持久化明确拒绝原因；排队/已启动不写。
+
+        写失败只告警降级（本批即时回执已如实），不因辅助记事阻断推进；取消照常
+        传播（R2）。
+        """
+
+        if store is None or not note.startswith((DISPATCH_FAILED_PREFIX, ACCEPT_FAILED_PREFIX)):
+            return
+        try:
+            await store.save(group_ref, lane_ref, note)
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            # R5：生命周期错误不得被降级为「记事失败」而静默继续。
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[Comparison] lane refusal note not persisted (group=%s lane=%s): %s",
+                group_ref,
+                lane_ref,
+                DataSanitizer.sanitize_error(exc),
+            )
+
     @staticmethod
     def _lane_receipts(
         accepted: tuple[tuple[str, SubmissionReceipt | None, str | None], ...],
@@ -969,9 +1025,10 @@ class AgentService:
         准入失败均沿用原语义；未注入派发器时零派发）。逐路按 D05 总位/会话单总
         执行顺序推进，单路派发失败只标该路 ``dispatch_failed``，不阻断其他路；
         本批只回传终态事实，未完成的路保持未收敛，再次调用同一输入即可接续
-        （受理与派发均幂等，不重复执行/计费）。被限额挡下、本批未尝试派发的已
-        受理路，回执记 ``dispatch_submitted=False`` 并给出真实容量原因（全局总位
-        或本会话单总执行）。``CancelledError`` 传播（R2）。
+        （受理与派发均幂等，不重复执行/计费）。明确拒绝原因（零派发/受理失败）
+        另按组/路持久化，使重开与行导出与即时响应同因；排队与未知不写。被限额
+        挡下、本批未尝试派发的已受理路，回执记 ``dispatch_submitted=False`` 并
+        给出真实容量原因（全局总位或本会话单总执行）。``CancelledError`` 传播（R2）。
         """
 
         self._require_open("run_comparison")
@@ -998,6 +1055,7 @@ class AgentService:
 
         dispatch_outcomes: dict[str, DispatchOutcome] = {}
         attempted: set[str] = set()
+        note_store = self._lane_note_store()
 
         async def start_lane(lane: Any) -> str:
             attempted.add(lane.lane_ref)
@@ -1040,6 +1098,9 @@ class AgentService:
             active_total_executions=active_total_executions,
             active_session_executions=active_session_executions,
             idle_observation_limit=1,
+            record_lane_note=lambda lane_ref, note: self._persist_lane_refusal(
+                note_store, group.group_ref, lane_ref, note
+            ),
         )
         # 本批被限额挡下、从未尝试派发的路：即时回执给出真实容量原因（总位/会话）。
         capacity_reasons = {
@@ -1147,6 +1208,13 @@ class AgentService:
         dispatch: DispatchOutcome | None = None
         if self._dispatcher is not None:
             dispatch = await self._dispatcher.dispatch(receipt, user_scope=query.user_scope, mode=group.shared.mode)
+            if not dispatch.submitted:
+                await self._persist_lane_refusal(
+                    self._lane_note_store(),
+                    group.group_ref,
+                    lane_ref,
+                    f"{DISPATCH_FAILED_PREFIX}{dispatch.reason or 'not_submitted'}",
+                )
         _, latest = await self._load_comparison(query)
         return ComparisonLaneRetryOutcome(
             group_ref=group.group_ref,
@@ -1184,7 +1252,11 @@ class AgentService:
     async def _load_comparison_state(
         self, query: ComparisonReadQuery
     ) -> tuple[FrozenComparisonGroup, tuple[ComparisonLaneObservation, ...], tuple[object, ...]]:
-        """读比较组共同 manifest + 会话内逐路事实（可选逐路费用，零派发）。"""
+        """读比较组共同 manifest + 会话内逐路事实（可选逐路费用，零派发）。
+
+        逐路事实由执行行重建；明确拒绝原因另从持久化记录补回（仅用于从未推进的
+        路），使重开与行导出与即时响应同因（N29）。
+        """
 
         self._require_open("read_comparison")
         identity = f"{query.user_scope}/{query.session_id}/{query.group_ref}"
@@ -1212,6 +1284,23 @@ class AgentService:
             user_scope=query.user_scope,
         )
         observations = observations_from_executions(group, session.executions)
+        note_store = self._lane_note_store()
+        if note_store is not None:
+            try:
+                notes = await note_store.load(group.group_ref)
+            except asyncio.CancelledError:
+                raise
+            except (AgentServiceError, EngineDisposedError):
+                raise
+            except Exception as exc:
+                # 读取失败不得伪装成「没有拒绝原因」（R21）：明确报持久化不可用。
+                error_code = str(classify_error(exc, context="general").get("code", type(exc).__name__))
+                raise AgentServiceError(
+                    AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                    f"comparison lane notes unreadable: {error_code}",
+                    identity,
+                ) from exc
+            observations = apply_persisted_lane_notes(group, observations, session.executions, notes)
         if query.include_cost:
             observations = tuple(
                 [await self._with_lane_cost(observation, user_scope=query.user_scope) for observation in observations]
