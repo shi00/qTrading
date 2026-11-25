@@ -369,7 +369,7 @@ def _render_panel(
         on_toggle_execution=cbs.get("on_toggle_execution", lambda *_a: None),
         on_select_execution=cbs.get("on_select_execution", lambda *_a: None),
         on_load_artifact=cbs.get("on_load_artifact", lambda *_a: None),
-        on_load_draft=cbs.get("on_load_draft", lambda: None),
+        on_load_draft=cbs.get("on_load_draft", lambda *_a: None),
     )
     run_mount_effects(component)
     result = render_once(component)
@@ -461,6 +461,23 @@ class TestShellResearchEntry:
         assert layout_env["page"].run_task.call_count == before + 1
         assert layout_env["page"].run_task.call_args.args[0] == vm.load_artifact
         assert layout_env["service"].answer_calls == [], "观察面入口不得触发决定提交"
+
+    def test_draft_load_uses_card_bound_identity_not_current_target(self, layout_env) -> None:
+        _open_panel(layout_env)
+        _drive_last_run_task(layout_env)
+        vm = _shared_vm()
+        vm._set_state(session_draft_revision=3)
+        _rerender(layout_env)
+
+        panel = _observation_control(layout_env)
+        assert panel is not None
+        # 卡片渲染后 VM 目标被另一卡片替换（尚未重渲染）：仍按被点卡片的旧身份读回
+        vm._set_state(session_id="s-2", session_draft_revision=5)
+        panel.kwargs["on_load_draft"]("s-1", 3)
+
+        scheduled = layout_env["page"].run_task.call_args
+        assert scheduled.args[0] == vm.load_draft
+        assert scheduled.args[1:] == ("s-1", 3)
 
     def test_session_callbacks_route_to_vm_commands(self, layout_env) -> None:
         _open_panel(layout_env)
@@ -1145,17 +1162,18 @@ class TestObservationPanelHonestBranches:
         assert any(isinstance(control, ft.ProgressRing) for control in _iter_controls(panel))
         assert "agent_research_draft_load" not in self._tooltips(panel)
 
-    def test_session_draft_load_button_forwards_callback(self, monkeypatch) -> None:
-        loaded: list[bool] = []
+    def test_session_draft_load_button_binds_card_identity(self, monkeypatch) -> None:
+        loaded: list[tuple[str, int]] = []
         panel = _render_panel(
             self._state(session_draft_revision=3),
             monkeypatch=monkeypatch,
-            callbacks={"on_load_draft": lambda: loaded.append(True)},
+            callbacks={"on_load_draft": lambda session_id, revision: loaded.append((session_id, revision))},
         )
 
         button = _find_icon_button(panel, "agent_research_draft_load")
         _invoke(button.on_click, MagicMock())
-        assert loaded == [True]
+        # 读回必须绑定本卡渲染时的会话/稿版，而非点击时 VM 的当前目标（N16）
+        assert loaded == [("s-1", 3)]
         # 尚未读回载荷：不渲染草稿详情（不伪造空正文）
         self._assert_text_absent(panel, "agent_research_draft_none")
 
@@ -1494,8 +1512,8 @@ class TestDraftComposerAndDecisionHandlers:
         vm._set_state(composer_available=True)
 
         page.run_task.reset_mock()
-        panel.kwargs["on_load_draft"]()
-        assert list(page.run_task.call_args.args) == [vm.load_draft, "s-1", None]
+        panel.kwargs["on_load_draft"]("s-1", 3)
+        assert list(page.run_task.call_args.args) == [vm.load_draft, "s-1", 3]
 
         page.run_task.reset_mock()
         panel.kwargs["on_send"]()
@@ -1582,7 +1600,7 @@ class TestHandlersWithoutPage:
             ("on_pin_session", ("s-1",)),
             ("on_archive_session", ("s-1",)),
             ("on_load_artifact", ("a-1", 1, "e-1", "r-1")),
-            ("on_load_draft", ()),
+            ("on_load_draft", ("s-1", 3)),
             ("on_send", ()),
             ("on_start_plan", ()),
             ("on_submit", ("d-1", "e-1", "r-1")),
@@ -1760,8 +1778,8 @@ class TestShellCallbackWiring:
         assert list(page.run_task.call_args.args) == [vm.load_mcp_scope]
 
         page.run_task.reset_mock()
-        panel.kwargs["on_load_draft"]()
-        assert list(page.run_task.call_args.args) == [vm.load_draft, vm.state.session_id, None]
+        panel.kwargs["on_load_draft"](vm.state.session_id, 3)
+        assert list(page.run_task.call_args.args) == [vm.load_draft, vm.state.session_id, 3]
 
         page.run_task.reset_mock()
         panel.kwargs["on_retry_delivery"]("d-1")

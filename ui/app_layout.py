@@ -761,13 +761,11 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         if page is not None and research_vm.state.available:
             page.run_task(research_vm.load_artifact, artifact_id, artifact_version, execution_id, round_id)
 
-    def _load_draft() -> None:
-        """按当前会话/稿版只读读回草稿正文（不发送、不创建研究；R2-I23）。"""
+    def _load_draft(session_id: str, draft_revision: int) -> None:
+        """按卡片绑定的会话/稿版只读读回草稿正文（不发送、不创建研究；R2-I23）。"""
         page = _get_page()
-        current = research_vm.state
-        if page is not None and current.available and current.session_id is not None:
-            revision = current.session_draft_revision or None
-            page.run_task(research_vm.load_draft, current.session_id, revision)
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.load_draft, session_id, draft_revision)
 
     def _send_first_question() -> None:
         """首问发送（异步调度；事件处理器内不做同步 IO，R16）。"""

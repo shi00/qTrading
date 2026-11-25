@@ -67,7 +67,7 @@ def _build_body(
     on_toggle_execution: Callable[[str], None],
     on_select_execution: Callable[[str | None], None],
     on_load_artifact: Callable[[str, int, str, str], None],
-    on_load_draft: Callable[[], None],
+    on_load_draft: Callable[[str, int], None],
     on_composer_text: Callable[[str], None],
     on_composer_mode: Callable[[str], None],
     on_send: Callable[[], None],
@@ -159,7 +159,8 @@ def _build_body(
                 color=AppColors.ERROR,
             )
         )
-    if state.session_id is None:
+    session_id = state.session_id
+    if session_id is None:
         if not state.loading:
             rows.append(
                 ft.Text(
@@ -170,7 +171,7 @@ def _build_body(
             )
         return ft.Column(rows, spacing=AppStyles.SPACING_SM)
     if state.session_draft_revision > 0:
-        rows.append(build_session_draft_card(state, on_load_draft=on_load_draft))
+        rows.append(build_session_draft_card(state, session_id=session_id, on_load_draft=on_load_draft))
     rows.extend(build_messages_section(state))
     rows.extend(
         build_execution_section(
@@ -234,7 +235,7 @@ def ResearchObserverPanel(
     on_toggle_execution: Callable[[str], None],
     on_select_execution: Callable[[str | None], None],
     on_load_artifact: Callable[[str, int, str, str], None],
-    on_load_draft: Callable[[], None],
+    on_load_draft: Callable[[str, int], None],
     on_composer_text: Callable[[str], None] = _ignore_text,
     on_composer_mode: Callable[[str], None] = _ignore_mode,
     on_send: Callable[[], None] = _ignore_click,

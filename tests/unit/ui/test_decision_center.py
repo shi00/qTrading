@@ -1192,7 +1192,7 @@ def test_observer_panel_and_business_callbacks_schedule_async_commands(
     env["page"].run_task.reset_mock()
     callbacks["on_load_mcp_scope"]()
     callbacks["on_load_sessions"]()
-    callbacks["on_load_draft"]()
+    callbacks["on_load_draft"]("s-1", 2)
     callbacks["on_send"]()
     callbacks["on_start_plan"]()
     callbacks["on_submit"]("d-1", "e-1", "r-1")

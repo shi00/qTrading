@@ -306,10 +306,12 @@ def build_execution_section(
 def build_session_draft_card(
     state: ResearchObserverState,
     *,
-    on_load_draft: Callable[[], None],
+    session_id: str,
+    on_load_draft: Callable[[str, int], None],
 ) -> ft.Control:
-    """会话草稿只读卡（R2-I23）：读取入口 + 正文/选择/稿版；不发送、不建研究。"""
+    """会话草稿只读卡（R2-I23）：读取入口绑定本卡会话/稿版；不发送、不建研究。"""
 
+    revision = state.session_draft_revision
     header: list[ft.Control] = [
         ft.Text(
             I18n.get("agent_research_draft"),
@@ -331,7 +333,7 @@ def build_session_draft_card(
                 icon=ft.Icons.RESTORE_PAGE,
                 icon_size=AppStyles.FONT_SIZE_TITLE,
                 tooltip=I18n.get("agent_research_draft_load"),
-                on_click=lambda _e: on_load_draft(),
+                on_click=lambda _e, sid=session_id, rev=revision: on_load_draft(sid, rev),
             )
         )
     rows: list[ft.Control] = [ft.Row(header, spacing=AppStyles.SPACING_SM)]
