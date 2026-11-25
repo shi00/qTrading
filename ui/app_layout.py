@@ -467,6 +467,16 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
     # 观察入口按钮引用（每渲染刷新）：显式关闭观察层后把焦点还给入口，避免焦点
     # 随观察层卸载丢失（返焦）。
     research_toggle_holder: Any = ft.use_ref(None)
+    # N08: 导航意图序号 —— 业务导航 / 快捷键切页 / 深链导航同步递增；建稿回执
+    # 迟到时据此核对用户是否已离开发起页，不据过期操作重开观察层。
+    nav_intent_seq_ref: Any = ft.use_ref(None)
+    if nav_intent_seq_ref.current is None:
+        nav_intent_seq_ref.current = 0
+
+    def _note_nav_intent() -> None:
+        """登记一次导航意图（同步递增，供迟到回执判定用户是否已离开）。"""
+
+        nav_intent_seq_ref.current = int(nav_intent_seq_ref.current or 0) + 1
 
     def _collapse_research() -> None:
         """只收起观察层：不清空草稿、不停止/取消研究（观察不控制执行）。
@@ -573,21 +583,41 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         """业务入口发起准备（异步调度；事件处理器内不做同步 IO，R16）。"""
         page = _get_page()
         if page is not None:
-            page.run_task(_prepare_research, request, reader)
+            # N08: 冻结发起时的页面与导航意图序号，回执到达时核对是否已离开。
+            page.run_task(
+                _prepare_research,
+                request,
+                reader,
+                current_tab_ref.current,
+                nav_intent_seq_ref.current or 0,
+            )
 
-    async def _prepare_research(request: BusinessResearchRequest, reader: Any | None) -> None:
-        """只准备草稿（不发送、不派发）；成功/失败都只改提示，不导航、不重跑业务。"""
+    async def _prepare_research(
+        request: BusinessResearchRequest,
+        reader: Any | None,
+        origin_tab: int | None,
+        nav_seq: int,
+    ) -> None:
+        """只准备草稿（不发送、不派发）；成功/失败都只改提示，不导航、不重跑业务。
+
+        N08: 回执可能晚于用户导航到达——仅当用户仍停留在发起页且期间无新导航
+        意图时才展开观察层；已离开则只留提示，不重开、不改当前页。
+        """
         await business_vm.prepare(request, backtest_reader=reader)
         notice_key = business_vm.state.notice_key
         if notice_key is None:
             return
         set_decision_notice(I18n.get(notice_key))
         prepared_session_id = business_vm.state.last_session_id
-        if prepared_session_id is not None and notice_key in (NOTICE_DRAFT_PREPARED, NOTICE_DRAFT_EXISTS):
-            # 草稿已可见：展开观察层并导航到回执给出的精确会话（不以历史首条代替）
-            set_research_open(True)
-            research_open_ref.current = True
-            await research_vm.open_session(prepared_session_id)
+        if prepared_session_id is None or notice_key not in (NOTICE_DRAFT_PREPARED, NOTICE_DRAFT_EXISTS):
+            return
+        if (nav_intent_seq_ref.current or 0) != nav_seq or current_tab_ref.current != origin_tab:
+            # N08: 用户已离开发起页（或有新的导航意图）：不重开观察层、不代用户导航。
+            return
+        # 草稿已可见：展开观察层并导航到回执给出的精确会话（不以历史首条代替）
+        set_research_open(True)
+        research_open_ref.current = True
+        await research_vm.open_session(prepared_session_id)
 
     def _toggle_execution(execution_id: str) -> None:
         """只改子任务树展开态（共享 VM 持久化，切页不丢；不控制执行）。"""
@@ -694,6 +724,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
 
     def _on_nav_change(e: ft.ControlEvent) -> None:
         # P02: 业务导航（含当前业务项）只收起观察层，不清稿、不控制执行
+        _note_nav_intent()
         _collapse_research()
         selected = get_control_attr(e.control, ft.NavigationRail, "selected_index")
         if selected == int(current_tab):
@@ -721,6 +752,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             return
         if action.startswith(SHORTCUT_TAB_PREFIX):
             # P02: Ctrl+1—7（含当前业务项）只收起观察层，不清稿、不控制执行
+            _note_nav_intent()
             _collapse_research()
             target = int(action[len(SHORTCUT_TAB_PREFIX) :])
             page.run_task(_do_tab_switch, target)
@@ -794,6 +826,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             值 (APP-F1); state 写入保持函数式更新。
         """
         # 业务导航（含深链）一律先收起观察层：不清稿、不停止/取消研究
+        _note_nav_intent()
         _collapse_research()
         # F13: 每次 backtest 导航递增透传请求序号 (函数式更新, 防闭包 stale 快照)。
         # 置于 same-tab 早返回之前 —— 即使回测页已挂载或当前 tab 相同, 新序号仍触发

@@ -26,8 +26,11 @@ from tests.unit.ui.component_renderer import (
     render_once,
     run_mount_effects,
 )
+from core.agent_types import stable_id
+from services.agent_service.business_research import snapshot_source
 from ui import agent_decision_arbiter
 from ui.viewmodels import research_observer_view_model as vm_mod
+from ui.viewmodels.business_research_view_model import BusinessResearchRequest
 from ui.viewmodels.research_observer_view_model import (
     ExecutionNodeView,
     LoadedArtifactBody,
@@ -62,6 +65,9 @@ class _FakeService:
         self.search_calls: list[Any] = []
         self.read_calls: list[Any] = []
         self.answer_calls: list[Any] = []
+        self.change_calls: list[Any] = []
+        self.source_registrations: list[Any] = []
+        self.draft_calls: list[Any] = []
 
     async def search(self, query: Any, *, user_scope: str) -> Any:
         self.search_calls.append((query, user_scope))
@@ -107,6 +113,18 @@ class _FakeService:
     async def answer(self, request: Any) -> Any:
         self.answer_calls.append(request)
         return SimpleNamespace(delivery_state=SimpleNamespace(value="not_delivered"))
+
+    async def change_session(self, command: Any) -> Any:
+        self.change_calls.append(command)
+        return SimpleNamespace(session_id=command.session_id)
+
+    async def register_draft_sources(self, **kwargs: Any) -> Any:
+        self.source_registrations.append(kwargs)
+        return SimpleNamespace()
+
+    async def save_draft(self, command: Any) -> Any:
+        self.draft_calls.append(command)
+        return SimpleNamespace(draft_revision=1)
 
 
 class _FakeDecisionVm:
@@ -230,6 +248,48 @@ def _drive_last_run_task(env: dict) -> None:
     scheduled = env["page"].run_task.call_args.args[0]
     assert callable(scheduled), "调度项应为可执行协程函数"
     asyncio.run(scheduled())
+
+
+def _start_research_handler(env: dict) -> Any:
+    """业务页注入的准备回调（壳层下发给业务页的 ``on_start_research``）。
+
+    页面栈为子组件（单测不展开渲染），准备入口以位置参数传入，与
+    ``_build_pages_stack(..., on_start_research, mcp_lifecycle)`` 签名对应。
+    """
+
+    body_region = _body_row(env).controls[2]
+    assert isinstance(body_region, ft.Container)
+    stack: Any = body_region.content
+    handler = stack.args[4] if stack.args else stack.kwargs.get("on_start_research")
+    assert callable(handler), "壳层应把准备入口注入业务页"
+    return handler
+
+
+def _capture_prepare(env: dict) -> tuple[Any, tuple[Any, ...]]:
+    """取出最近一次「准备草稿」调度（协程函数 + 参数），供手动驱动。"""
+
+    call = env["page"].run_task.call_args
+    scheduled = call.args[0]
+    assert callable(scheduled), "调度项应为可执行协程函数"
+    return scheduled, call.args[1:]
+
+
+def _business_request() -> BusinessResearchRequest:
+    return BusinessResearchRequest(
+        source_module="news",
+        object_kind="news_item",
+        object_id="news-1",
+        display_name="资讯 A",
+        summary=(("news_id", "news-1"),),
+        available_at="2026-11-18T01:00:00.000000Z",
+    )
+
+
+def _expected_prepared_session_id() -> str:
+    """按服务层同一规则推导准备回执的精确会话标识（强断言用）。"""
+
+    source = snapshot_source(_business_request().as_snapshot(), user_scope="local-desktop").source
+    return stable_id("session", ["local-desktop", source.source_id, source.version])
 
 
 def _shared_vm() -> Any:
@@ -470,6 +530,56 @@ class TestCollapseKeepsDraftAndExecution:
         )
         _rerender(layout_env)
         assert _observation_control(layout_env) is None
+
+
+class TestDraftReceiptRespectsNavigationIntent:
+    """N08：建稿回执迟到时核对最新导航意图（已离开不重开、不改当前页）。
+
+    观察层收起后，迟到回执不得据过期操作重新展开；仅在用户仍停留在发起页
+    （期间无任何导航）时才展开并导航到回执给出的精确会话。
+    """
+
+    def test_late_receipt_after_leaving_does_not_reopen(self, layout_env) -> None:
+        _start_research_handler(layout_env)(_business_request())
+        scheduled, args = _capture_prepare(layout_env)
+
+        # 用户在准备回执到达前导航离开（业务导航收起观察层，切页经防抖任务调度）
+        _invoke(_nav_rail(layout_env).on_change, SimpleNamespace(control=SimpleNamespace(selected_index=2)))
+        page = layout_env["page"]
+        page.run_task.reset_mock()
+
+        asyncio.run(scheduled(*args))
+        _rerender(layout_env)
+
+        assert _observation_control(layout_env) is None, "已离开发起页：迟到回执不得重开观察层"
+        assert _shared_vm().state.session_id is None, "已离开时不得导航到回执会话"
+        assert page.run_task.call_args_list == [], "迟到回执不得代用户切页/派发任务"
+
+    def test_late_receipt_after_leaving_and_returning_does_not_reopen(self, layout_env) -> None:
+        _start_research_handler(layout_env)(_business_request())
+        scheduled, args = _capture_prepare(layout_env)
+
+        rail = _nav_rail(layout_env)
+        _invoke(rail.on_change, SimpleNamespace(control=SimpleNamespace(selected_index=2)))
+        _invoke(rail.on_change, SimpleNamespace(control=SimpleNamespace(selected_index=0)))
+
+        asyncio.run(scheduled(*args))
+        _rerender(layout_env)
+
+        assert _observation_control(layout_env) is None, "期间发生过导航即视为已离开，不重开"
+        assert _shared_vm().state.session_id is None
+
+    def test_receipt_while_still_on_origin_page_opens_panel(self, layout_env) -> None:
+        _start_research_handler(layout_env)(_business_request())
+        scheduled, args = _capture_prepare(layout_env)
+
+        asyncio.run(scheduled(*args))
+        _rerender(layout_env)
+
+        panel = _observation_control(layout_env)
+        assert panel is not None, "仍在原页：回执应更新原面板"
+        assert panel.kwargs["notice"] == "agent_research_draft_prepared"
+        assert _shared_vm().state.session_id == _expected_prepared_session_id()
 
 
 class TestObservationPanelView:
