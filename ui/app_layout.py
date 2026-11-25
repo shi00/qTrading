@@ -672,6 +672,33 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         """只改观察位置（整会话 / 某执行子树）；不派发、不取消研究。"""
         research_vm.select_execution(execution_id)
 
+    def _control_execution(kind: str, execution_id: str) -> None:
+        """提交显式控制命令（暂停/继续/撤回；异步调度，事件处理器不阻塞，R16）。"""
+        page = _get_page()
+        if page is None or not research_vm.state.available:
+            return
+        if kind == "pause":
+            page.run_task(research_vm.pause_execution, execution_id)
+        elif kind == "resume":
+            page.run_task(research_vm.resume_execution, execution_id)
+        elif kind == "withdraw_queued":
+            page.run_task(research_vm.withdraw_execution, execution_id)
+
+    def _retry_execution(execution_id: str, target_node_id: str) -> None:
+        """提交单任务重试（服务按持久计划重算精确范围；不在 UI 内计算）。"""
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.retry_execution, execution_id, target_node_id)
+
+    def _prompt_control_reason(execution_id: str, kind: str) -> None:
+        """进入终止/未知结案的原因输入态（纯展示，不发命令）。"""
+        research_vm.prompt_control_reason(execution_id, kind)
+
+    def _control_reason_submit() -> None:
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.submit_control_reason)
+
     def _load_artifact(artifact_id: str, artifact_version: int, execution_id: str, round_id: str) -> None:
         """按需只读读取成果正文（异步调度，事件处理器内不做同步 IO）。"""
         page = _get_page()
@@ -1247,6 +1274,13 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             on_cancel_rename=research_vm.cancel_rename,
             on_pin_session=_pin_session,
             on_archive_session=_archive_session,
+            control_actions=research_vm.control_actions,
+            on_control_execution=_control_execution,
+            on_retry_execution=_retry_execution,
+            on_prompt_control_reason=_prompt_control_reason,
+            on_control_reason_change=research_vm.update_control_reason,
+            on_control_reason_submit=_control_reason_submit,
+            on_control_reason_cancel=research_vm.cancel_control_reason,
         )
         if research_open
         else None

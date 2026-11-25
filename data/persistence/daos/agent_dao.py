@@ -124,6 +124,7 @@ from core.agent_types import (
     MarkAnswerDeliveredRequest,
     MessagePage,
     MessagePageItem,
+    NATIVE_CONTROL_NOT_WIRED,
     NON_RECOVERABLE_DISPLAY_STATES,
     OPEN_OPERATION_PHASES,
     OPERATION_PHASES,
@@ -156,6 +157,14 @@ from core.agent_types import (
     RevisionReceipt,
     RoleSkillAssignment,
     RoleSkillAssignmentReceipt,
+    ExecutionControlKind,
+    ExecutionControlReceipt,
+    ExecutionControlRequest,
+    RetryCommandRecord,
+    RetryExecutionReceipt,
+    RETRYABLE_EXECUTION_DISPLAY_STATES,
+    plan_control_transition,
+    validate_control_request,
     ROUND_STOP_REASON_USER_TERMINATION,
     RECOVERY_UNVERIFIED_DISPLAY_STATES,
     SKILL_ASSET_METADATA_VERSION,
@@ -15465,6 +15474,538 @@ class AgentDao(BaseDao):
                 session_event_seq=int(session_row.event_seq),
             )
         return ResearchResult.from_draft(draft, artifact_id=artifact_id, artifact_version=version)
+
+    async def apply_execution_control(self, request: ExecutionControlRequest) -> ExecutionControlReceipt:
+        """单执行/单轮控制事务（W-01：暂停/继续/终止/未知结案/排队撤回）。
+
+        语义（一次显式事务，执行行锁 → 票据行锁 → 会话行锁）：
+
+        - **显式种类**：``kind`` 决定迁移，迁移合法性与幂等点由
+          ``plan_control_transition`` 集中判定；非法迁移 ``REVISION_CONFLICT``，
+          零事实写入；
+        - **身份校验**：执行必须属于请求会话；``round_id`` 给出时必须等于当前有效
+          轮（``INPUT_CONFLICT``，防跨轮误停/误续）；
+        - **CAS**：``expected_execution_revision`` 与行版本不等 → ``REVISION_CONFLICT``
+          （并发控制命令只有一个胜者）；
+        - **命令幂等**：同 ``(user_scope, execution_id, client_command_id)`` 同输入
+          查回原回执（零新行）；同键异输入 ``INPUT_CONFLICT``；
+        - **名额**（R21/§5.5）：暂停/终止/未知结案**不触碰**票据（原生退出未核定，
+          容量保持占用）；只有「无任何轮次」的排队撤回才以「确证未启动」释放票据；
+        - **R22**：会话事件水位走 ``_append_session_event`` 的 GREATEST 语义，不覆盖
+          既有更高水位。
+        """
+
+        self._check_engine()
+        validate_control_request(request)
+        identity = f"{request.user_scope}/{request.execution_id}"
+        kind = request.kind.value
+        command_record_id = stable_id("command", [request.user_scope, request.execution_id, request.client_command_id])
+        input_digest = sha256_hex(
+            json_doc(
+                {
+                    "schema_version": 1,
+                    "kind": kind,
+                    "expected_execution_revision": request.expected_execution_revision,
+                    "round_id": request.round_id,
+                    "reason": request.reason,
+                }
+            )
+        )
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            # 1. 执行行锁（CAS 目标；锁序 execution → slot → session）。
+            exec_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentExecution.session_id,
+                        AgentExecution.revision,
+                        AgentExecution.display_state,
+                        AgentExecution.current_round_id,
+                        AgentExecution.dispatch_closed,
+                    )
+                    .where(
+                        AgentExecution.user_scope == request.user_scope,
+                        AgentExecution.execution_id == request.execution_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if exec_row is None or exec_row.session_id != request.session_id:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "execution does not exist in user scope/session",
+                    identity,
+                )
+            # 2. 命令键查重（同键同输入查回原回执；异输入冲突）。
+            existing = (
+                await conn.execute(
+                    sa.select(
+                        AgentCommand.command_kind,
+                        AgentCommand.input_digest,
+                        AgentCommand.request_payload,
+                    ).where(
+                        AgentCommand.user_scope == request.user_scope,
+                        AgentCommand.target_id == request.execution_id,
+                        AgentCommand.client_command_id == request.client_command_id,
+                    )
+                )
+            ).first()
+            if existing is not None:
+                if existing.command_kind == kind and existing.input_digest == input_digest:
+                    stored = existing.request_payload if isinstance(existing.request_payload, dict) else {}
+                    return ExecutionControlReceipt(
+                        execution_id=request.execution_id,
+                        command_record_id=command_record_id,
+                        kind=kind,
+                        previous_display_state=str(stored.get("previous_display_state", exec_row.display_state)),
+                        display_state=str(stored.get("display_state", exec_row.display_state)),
+                        execution_revision=int(stored.get("execution_revision", exec_row.revision)),
+                        applied=bool(stored.get("applied", False)),
+                        replayed=True,
+                        reason=stored.get("reason") if isinstance(stored.get("reason"), str) else None,
+                        released_slot_ids=tuple(stored.get("released_slot_ids") or ()),
+                        open_slot_ids=tuple(stored.get("open_slot_ids") or ()),
+                        native_control_state=str(stored.get("native_control_state", NATIVE_CONTROL_NOT_WIRED)),
+                    )
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_CONFLICT,
+                    "same control command key with different input",
+                    identity,
+                )
+            # 3. 轮次身份与停止原因（当前有效轮）。
+            round_stop_reason: str | None = None
+            if exec_row.current_round_id is not None:
+                round_row = (
+                    await conn.execute(
+                        sa.select(AgentRound.stop_reason).where(
+                            AgentRound.user_scope == request.user_scope,
+                            AgentRound.round_id == exec_row.current_round_id,
+                        )
+                    )
+                ).first()
+                round_stop_reason = round_row.stop_reason if round_row is not None else None
+            if request.round_id is not None and request.round_id != exec_row.current_round_id:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_CONFLICT,
+                    "round identity does not match execution current round",
+                    identity,
+                )
+            # 4. 状态机判定（非法迁移在此显式拒绝，零事实写入）。
+            decision = plan_control_transition(
+                request.kind,
+                exec_row.display_state,
+                current_round_id=exec_row.current_round_id,
+                dispatch_closed=bool(exec_row.dispatch_closed),
+                round_stop_reason=round_stop_reason,
+                identity=identity,
+            )
+            now = datetime.now(UTC)
+            # 5. 名额：仅「确证未启动」的排队撤回释放票据；其余一律不动。
+            slot_rows = (
+                await conn.execute(
+                    sa.select(
+                        AgentResourceSlot.slot_id,
+                        AgentResourceSlot.released_at,
+                        AgentResourceSlot.release_verified,
+                    )
+                    .where(
+                        AgentResourceSlot.user_scope == request.user_scope,
+                        AgentResourceSlot.execution_id == request.execution_id,
+                    )
+                    .order_by(AgentResourceSlot.slot_id)
+                    .with_for_update()
+                )
+            ).all()
+            open_slot_ids = tuple(
+                row.slot_id for row in slot_rows if row.released_at is None or not row.release_verified
+            )
+            released_slot_ids: tuple[str, ...] = ()
+            if decision.applied and request.kind is ExecutionControlKind.WITHDRAW_QUEUED and open_slot_ids:
+                round_count = (
+                    await conn.execute(
+                        sa.select(sa.func.count())
+                        .select_from(AgentRound)
+                        .where(
+                            AgentRound.user_scope == request.user_scope,
+                            AgentRound.execution_id == request.execution_id,
+                        )
+                    )
+                ).scalar_one()
+                if int(round_count) == 0:
+                    # 从未建轮 = 从未派发：退出可由「无执行记录」确证，容量归还。
+                    await conn.execute(
+                        sa.update(AgentResourceSlot)
+                        .where(
+                            AgentResourceSlot.user_scope == request.user_scope,
+                            AgentResourceSlot.slot_id.in_(open_slot_ids),
+                        )
+                        .values(
+                            released_at=now,
+                            release_verified=True,
+                            revision=AgentResourceSlot.revision + 1,
+                            updated_at=now,
+                        )
+                    )
+                    released_slot_ids = open_slot_ids
+                    open_slot_ids = ()
+            # 6. 状态写入（CAS：并发控制命令只有一个胜者）。
+            execution_revision = exec_row.revision
+            if decision.applied:
+                values: dict[str, Any] = {
+                    "display_state": decision.next_state,
+                    "dispatch_closed": decision.dispatch_closed,
+                    "revision": AgentExecution.revision + 1,
+                    "updated_at": now,
+                }
+                if decision.ends:
+                    values["ended_at"] = now
+                if request.kind is ExecutionControlKind.RESUME:
+                    values["ended_at"] = None
+                cas_result = await conn.execute(
+                    sa.update(AgentExecution)
+                    .where(
+                        AgentExecution.user_scope == request.user_scope,
+                        AgentExecution.execution_id == request.execution_id,
+                        AgentExecution.revision == request.expected_execution_revision,
+                    )
+                    .values(**values)
+                )
+                if cas_result.rowcount != 1:
+                    raise AgentServiceError(
+                        AgentErrorCode.REVISION_CONFLICT,
+                        "execution revision changed concurrently",
+                        identity,
+                    )
+                execution_revision = request.expected_execution_revision + 1
+                if decision.round_stop_reason is not None and exec_row.current_round_id is not None:
+                    await conn.execute(
+                        sa.update(AgentRound)
+                        .where(
+                            AgentRound.user_scope == request.user_scope,
+                            AgentRound.round_id == exec_row.current_round_id,
+                        )
+                        .values(
+                            stop_reason=decision.round_stop_reason,
+                            ended_at=now if decision.ends else None,
+                            active_round=not decision.ends,
+                            revision=AgentRound.revision + 1,
+                            updated_at=now,
+                        )
+                    )
+            # 7. 控制命令事实（保存=committed，待投递/未消费分列，不冒充已生效于原生）。
+            stored_payload: dict[str, Any] = {
+                "schema_version": 1,
+                "kind": kind,
+                "previous_display_state": exec_row.display_state,
+                "display_state": decision.next_state,
+                "execution_revision": execution_revision,
+                "round_id": exec_row.current_round_id,
+                "reason": decision.reason,
+                "applied": decision.applied,
+                "released_slot_ids": list(released_slot_ids),
+                "open_slot_ids": list(open_slot_ids),
+                "native_control_state": NATIVE_CONTROL_NOT_WIRED,
+            }
+            if request.reason is not None:
+                stored_payload["user_reason"] = request.reason
+            await conn.execute(
+                sa.insert(AgentCommand).values(
+                    user_scope=request.user_scope,
+                    command_record_id=command_record_id,
+                    client_command_id=request.client_command_id,
+                    target_id=request.execution_id,
+                    command_kind=kind,
+                    session_id=request.session_id,
+                    execution_id=request.execution_id,
+                    round_id=exec_row.current_round_id,
+                    expected_revision=request.expected_execution_revision,
+                    input_revision=None,
+                    input_digest=input_digest,
+                    request_payload=stored_payload,
+                    commit_state=CommitState.COMMITTED.value,
+                    delivery_state=DeliveryState.NOT_DELIVERED.value,
+                    consumption_state=ConsumptionState.NOT_CONSUMED.value,
+                )
+            )
+            # 8. 会话事件（可靠通知观察侧；纯元数据，无正文/凭据）。
+            session_row = (
+                await conn.execute(
+                    sa.select(AgentSession.event_seq)
+                    .where(
+                        AgentSession.user_scope == request.user_scope,
+                        AgentSession.session_id == request.session_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if session_row is not None:
+                await self._append_session_event(
+                    conn,
+                    user_scope=request.user_scope,
+                    session_id=request.session_id,
+                    message_id=stable_id(
+                        "event_message",
+                        [request.user_scope, request.execution_id, kind, str(execution_revision)],
+                    ),
+                    event_id=stable_id(
+                        "event", [request.user_scope, request.execution_id, kind, str(execution_revision)]
+                    ),
+                    event_kind=EventKind.EXECUTION_CHANGED,
+                    payload_kind="execution_control",
+                    subject_id=request.execution_id,
+                    subject_revision=1,
+                    payload={
+                        "schema_version": 1,
+                        "execution_id": request.execution_id,
+                        "round_id": exec_row.current_round_id,
+                        "display_state": decision.next_state,
+                        "command_kind": kind,
+                        "applied": decision.applied,
+                        "reason": decision.reason,
+                        "released_slot_ids": list(released_slot_ids),
+                        "open_slot_ids": list(open_slot_ids),
+                    },
+                    occurred_at=now,
+                    session_event_seq=int(session_row.event_seq),
+                )
+        return ExecutionControlReceipt(
+            execution_id=request.execution_id,
+            command_record_id=command_record_id,
+            kind=kind,
+            previous_display_state=exec_row.display_state,
+            display_state=decision.next_state,
+            execution_revision=execution_revision,
+            applied=decision.applied,
+            replayed=False,
+            reason=decision.reason,
+            released_slot_ids=released_slot_ids,
+            open_slot_ids=open_slot_ids,
+            native_control_state=NATIVE_CONTROL_NOT_WIRED,
+        )
+
+    async def record_retry_command(self, request: RetryCommandRecord) -> RetryExecutionReceipt:
+        """记录一次精确范围的单任务重试命令（W-01；不新建表、不越权派发）。
+
+        - 前置：执行属于请求会话；``round_id`` 必须是当前有效轮；执行必须处于
+          「可靠失败类」终态（``failed`` / ``ended`` / ``partial``）——完成/撤回/
+          未知结案不得重试（未知不重跑，R21）；
+        - CAS：``expected_execution_revision`` 与行版本不等 → ``REVISION_CONFLICT``；
+        - 状态：置 ``planned``（新轮待绑定派发）、``dispatch_closed=false``、
+          ``ended_at=NULL``，旧轮历史与成果不改写；
+        - 幂等：同命令键同输入查回原事实（零新行）；异输入 ``INPUT_CONFLICT``。
+
+        ``request_payload`` 由调用方给出（服务层已按持久计划计算 ``redo`` /
+        ``preserved`` 并构造父载荷摘要）；本方法只落事实，不判断范围。
+        """
+
+        self._check_engine()
+        identity = f"{request.user_scope}/{request.execution_id}"
+        for name, value in (
+            ("user_scope", request.user_scope),
+            ("session_id", request.session_id),
+            ("execution_id", request.execution_id),
+            ("client_command_id", request.client_command_id),
+            ("round_id", request.round_id),
+        ):
+            if not isinstance(value, str) or value == "":
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{name} must be non-empty text", identity)
+        if not isinstance(request.targets, tuple) or not request.targets:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "targets must be a non-empty tuple", identity)
+        if isinstance(request.expected_execution_revision, bool) or not isinstance(
+            request.expected_execution_revision, int
+        ):
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "expected_execution_revision must be int", identity)
+        if request.expected_execution_revision < 1:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "expected_execution_revision must be >= 1", identity)
+        command_record_id = stable_id("command", [request.user_scope, request.execution_id, request.client_command_id])
+        input_digest = sha256_hex(
+            json_doc(
+                {
+                    "schema_version": 1,
+                    "kind": "retry",
+                    "expected_execution_revision": request.expected_execution_revision,
+                    "round_id": request.round_id,
+                    "targets": list(request.targets),
+                }
+            )
+        )
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            exec_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentExecution.session_id,
+                        AgentExecution.revision,
+                        AgentExecution.display_state,
+                        AgentExecution.current_round_id,
+                    )
+                    .where(
+                        AgentExecution.user_scope == request.user_scope,
+                        AgentExecution.execution_id == request.execution_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if exec_row is None or exec_row.session_id != request.session_id:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID, "execution does not exist in user scope/session", identity
+                )
+            existing = (
+                await conn.execute(
+                    sa.select(AgentCommand.command_kind, AgentCommand.input_digest, AgentCommand.request_payload).where(
+                        AgentCommand.user_scope == request.user_scope,
+                        AgentCommand.target_id == request.execution_id,
+                        AgentCommand.client_command_id == request.client_command_id,
+                    )
+                )
+            ).first()
+            if existing is not None:
+                if existing.command_kind == "retry" and existing.input_digest == input_digest:
+                    stored = existing.request_payload if isinstance(existing.request_payload, dict) else {}
+                    return RetryExecutionReceipt(
+                        execution_id=request.execution_id,
+                        command_record_id=command_record_id,
+                        round_id=request.round_id,
+                        new_round_id=str(stored.get("new_round_id", "")),
+                        redo=tuple(stored.get("redo") or ()),
+                        preserved=tuple(stored.get("preserved") or ()),
+                        plan_digest=str(stored.get("plan_digest", "")),
+                        payload_digest=str(stored.get("payload_digest", "")),
+                        applied=bool(stored.get("applied", False)),
+                        replayed=True,
+                        reason=stored.get("reason") if isinstance(stored.get("reason"), str) else None,
+                    )
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_CONFLICT, "same retry command key with different input", identity
+                )
+            round_row = (
+                await conn.execute(
+                    sa.select(AgentRound.round_id).where(
+                        AgentRound.user_scope == request.user_scope,
+                        AgentRound.round_id == request.round_id,
+                        AgentRound.execution_id == request.execution_id,
+                    )
+                )
+            ).first()
+            if round_row is None:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "round does not belong to execution", identity)
+            if exec_row.current_round_id != request.round_id:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_CONFLICT,
+                    "retry round is not the execution current round",
+                    identity,
+                )
+            if exec_row.display_state not in RETRYABLE_EXECUTION_DISPLAY_STATES:
+                raise AgentServiceError(
+                    AgentErrorCode.REVISION_CONFLICT,
+                    f"execution state is not retryable: {exec_row.display_state}",
+                    identity,
+                )
+            now = datetime.now(UTC)
+            # 服务层已计算范围/载荷；此处的存储载荷只承载重试事实与摘要。
+            stored: dict[str, Any] = {
+                "schema_version": 1,
+                "kind": "retry",
+                "round_id": request.round_id,
+                "new_round_id": request.new_round_id,
+                "targets": list(request.targets),
+                "redo": list(request.redo),
+                "preserved": list(request.preserved),
+                "plan_digest": request.plan_digest,
+                "payload_digest": request.payload_digest,
+                "applied": True,
+                "reason": None,
+            }
+            cas_result = await conn.execute(
+                sa.update(AgentExecution)
+                .where(
+                    AgentExecution.user_scope == request.user_scope,
+                    AgentExecution.execution_id == request.execution_id,
+                    AgentExecution.revision == request.expected_execution_revision,
+                )
+                .values(
+                    display_state="planned",
+                    dispatch_closed=False,
+                    ended_at=None,
+                    revision=AgentExecution.revision + 1,
+                    updated_at=now,
+                )
+            )
+            if cas_result.rowcount != 1:
+                raise AgentServiceError(
+                    AgentErrorCode.REVISION_CONFLICT, "execution revision changed concurrently", identity
+                )
+            await conn.execute(
+                sa.insert(AgentCommand).values(
+                    user_scope=request.user_scope,
+                    command_record_id=command_record_id,
+                    client_command_id=request.client_command_id,
+                    target_id=request.execution_id,
+                    command_kind="retry",
+                    session_id=request.session_id,
+                    execution_id=request.execution_id,
+                    round_id=request.round_id,
+                    expected_revision=request.expected_execution_revision,
+                    input_revision=None,
+                    input_digest=input_digest,
+                    request_payload=stored,
+                    commit_state=CommitState.COMMITTED.value,
+                    delivery_state=DeliveryState.NOT_DELIVERED.value,
+                    consumption_state=ConsumptionState.NOT_CONSUMED.value,
+                )
+            )
+            session_row = (
+                await conn.execute(
+                    sa.select(AgentSession.event_seq)
+                    .where(
+                        AgentSession.user_scope == request.user_scope,
+                        AgentSession.session_id == request.session_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if session_row is not None:
+                await self._append_session_event(
+                    conn,
+                    user_scope=request.user_scope,
+                    session_id=request.session_id,
+                    message_id=stable_id(
+                        "event_message",
+                        [request.user_scope, request.execution_id, "retry", request.client_command_id],
+                    ),
+                    event_id=stable_id(
+                        "event", [request.user_scope, request.execution_id, "retry", request.client_command_id]
+                    ),
+                    event_kind=EventKind.EXECUTION_CHANGED,
+                    payload_kind="execution_retry",
+                    subject_id=request.execution_id,
+                    subject_revision=1,
+                    payload={
+                        "schema_version": 1,
+                        "execution_id": request.execution_id,
+                        "round_id": request.round_id,
+                        "new_round_id": request.new_round_id,
+                        "redo": list(request.redo),
+                        "preserved": list(request.preserved),
+                    },
+                    occurred_at=now,
+                    session_event_seq=int(session_row.event_seq),
+                )
+        return RetryExecutionReceipt(
+            execution_id=request.execution_id,
+            command_record_id=command_record_id,
+            round_id=request.round_id,
+            new_round_id=request.new_round_id,
+            redo=request.redo,
+            preserved=request.preserved,
+            plan_digest=request.plan_digest,
+            payload_digest=request.payload_digest,
+            applied=True,
+            replayed=False,
+            reason=None,
+        )
 
     async def record_execution_terminal_state(
         self,

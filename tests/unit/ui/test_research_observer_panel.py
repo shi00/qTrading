@@ -210,6 +210,74 @@ def test_body_keeps_composer_visible_without_session() -> None:
     assert any("暂无" in text or "无" in text for text in texts)
 
 
+def test_body_default_callbacks_are_safe_noops() -> None:
+    """宿主未注入可选回调时，默认回调一律安全空操作（不误发命令）。"""
+
+    from ui.viewmodels.research_observer_view_model import ControlActionView, ExecutionNodeView
+
+    node = ExecutionNodeView(
+        execution_id="e-1",
+        parent_execution_id=None,
+        display_state="running",
+        goal_coverage="partial",
+        model_attempt_count=1,
+        tool_call_count=0,
+        active_ms=100,
+        depth=0,
+        has_children=False,
+    )
+    state = ResearchObserverState(
+        available=True,
+        session_id="s-1",
+        composer_available=True,
+        composer_mode="discuss",
+        sessions=(_session("s-1"), _session("s-2")),
+        execution_nodes=(node,),
+        control_reason_execution_id="e-1",
+        control_reason_kind="terminate",
+        control_reason_text="",
+    )
+    body = _build_body(
+        state,
+        on_draft_change=lambda _d, _t: None,
+        on_submit=lambda _d, _e, _r: None,
+        on_toggle_execution=lambda _e: None,
+        on_select_execution=lambda _e: None,
+        on_load_artifact=lambda _a, _v, _e, _r: None,
+        on_load_draft=_noop,
+        on_composer_text=_noop_text,
+        on_composer_mode=_noop_mode,
+        on_send=_noop,
+        on_start_plan=_noop,
+        control_actions=lambda _e: (
+            ControlActionView(
+                kind="pause",
+                label_key="agent_research_control_pause",
+                enabled=True,
+                disabled_reason_key=None,
+            ),
+        ),
+    )
+
+    pause = _find_text_button(body, I18n.get("agent_research_control_pause"))
+    assert cast(Any, pause.on_click)(SimpleNamespace()) is None
+
+    confirm = _find_text_button(body, I18n.get("agent_research_control_confirm"))
+    assert cast(Any, confirm.on_click)(SimpleNamespace()) is None
+
+    switch = _find_text_button(body, I18n.get("agent_research_session_switch"))
+    assert cast(Any, switch.on_click)(SimpleNamespace(control=SimpleNamespace(value="s-1"))) is None
+
+    mode = next(
+        item
+        for item in _walk(body)
+        if isinstance(item, (ft.FilledButton, ft.OutlinedButton))
+        and isinstance(item.content, ft.Text)
+        and item.content.value == I18n.get("agent_research_mode_discuss")
+    )
+    assert cast(Any, mode.on_click)(SimpleNamespace()) is None
+
+
 def test_answer_preview_renders_real_text_only() -> None:
     state = ResearchObserverState(available=True, last_answer_text="银行股要看息差")
 

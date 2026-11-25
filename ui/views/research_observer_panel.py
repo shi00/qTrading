@@ -8,6 +8,7 @@
 - ``research_observer_conversation``：主会话消息、执行树、会话草稿卡
 - ``research_observer_artifacts``：成果卡/正文按需读取/比较入口占位
 - ``research_observer_decisions``：必要决定卡、跨会话待处理概览
+- ``research_observer_controls``：执行控制表（暂停/继续/终止/未知结案/重试/撤回）
 - ``research_observer_widgets``：分区标题与卡片容器等共享小构件
 """
 
@@ -19,9 +20,10 @@ import flet as ft
 
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
-from ui.viewmodels.research_observer_view_model import ResearchObserverState
+from ui.viewmodels.research_observer_view_model import ControlActionView, ResearchObserverState
 from ui.views.research_observer_artifacts import build_artifacts_section
 from ui.views.research_observer_composer import build_answer_preview, build_composer, build_plan_preview
+from ui.views.research_observer_controls import build_control_section
 from ui.views.research_observer_conversation import (
     build_execution_section,
     build_messages_section,
@@ -46,6 +48,14 @@ def _ignore_click() -> None:
 
 
 def _ignore_decision(_decision_id: str) -> None:
+    pass
+
+
+def _ignore_actions(_execution_id: str) -> tuple[ControlActionView, ...]:
+    return ()
+
+
+def _ignore_two_texts(_first: str, _second: str) -> None:
     pass
 
 
@@ -75,6 +85,13 @@ def _build_body(
     on_cancel_rename: Callable[[], None] = _ignore_click,
     on_pin_session: Callable[[str], None] = _ignore_text,
     on_archive_session: Callable[[str], None] = _ignore_text,
+    control_actions: Callable[[str], tuple[ControlActionView, ...]] = _ignore_actions,
+    on_control_execution: Callable[[str, str], None] = _ignore_two_texts,
+    on_retry_execution: Callable[[str, str], None] = _ignore_two_texts,
+    on_prompt_control_reason: Callable[[str, str], None] = _ignore_two_texts,
+    on_control_reason_change: Callable[[str], None] = _ignore_text,
+    on_control_reason_submit: Callable[[], None] = _ignore_click,
+    on_control_reason_cancel: Callable[[], None] = _ignore_click,
 ) -> ft.Control:
     """面板主体：会话列表 / 首问 / 计划预览 / 主会话 / 子任务树 / 成果 / 待处理决定。"""
 
@@ -150,6 +167,18 @@ def _build_body(
             on_select_execution=on_select_execution,
         )
     )
+    rows.extend(
+        build_control_section(
+            state,
+            control_actions=control_actions,
+            on_control=on_control_execution,
+            on_retry=on_retry_execution,
+            on_prompt_reason=on_prompt_control_reason,
+            on_reason_change=on_control_reason_change,
+            on_reason_submit=on_control_reason_submit,
+            on_reason_cancel=on_control_reason_cancel,
+        )
+    )
     rows.extend(build_artifacts_section(state, on_load_artifact=on_load_artifact))
     rows.extend(build_decisions_section(state, on_draft_change=on_draft_change, on_submit=on_submit))
     # --- 跨会话待处理（P1-05）：记录/交付/消费分列，不只取首条会话 ---
@@ -199,6 +228,13 @@ def ResearchObserverPanel(
     on_cancel_rename: Callable[[], None] = _ignore_click,
     on_pin_session: Callable[[str], None] = _ignore_text,
     on_archive_session: Callable[[str], None] = _ignore_text,
+    control_actions: Callable[[str], tuple[ControlActionView, ...]] = _ignore_actions,
+    on_control_execution: Callable[[str, str], None] = _ignore_two_texts,
+    on_retry_execution: Callable[[str, str], None] = _ignore_two_texts,
+    on_prompt_control_reason: Callable[[str, str], None] = _ignore_two_texts,
+    on_control_reason_change: Callable[[str], None] = _ignore_text,
+    on_control_reason_submit: Callable[[], None] = _ignore_click,
+    on_control_reason_cancel: Callable[[], None] = _ignore_click,
 ) -> ft.Container:
     """非模态研究观察层（右侧公共区；收起只隐藏，不卸载业务页、不清草稿）。"""
 
@@ -288,6 +324,13 @@ def ResearchObserverPanel(
             on_cancel_rename=on_cancel_rename,
             on_pin_session=on_pin_session,
             on_archive_session=on_archive_session,
+            control_actions=control_actions,
+            on_control_execution=on_control_execution,
+            on_retry_execution=on_retry_execution,
+            on_prompt_control_reason=on_prompt_control_reason,
+            on_control_reason_change=on_control_reason_change,
+            on_control_reason_submit=on_control_reason_submit,
+            on_control_reason_cancel=on_control_reason_cancel,
         )
     )
     return ft.Container(
