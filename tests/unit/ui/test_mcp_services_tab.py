@@ -313,6 +313,28 @@ class TestToolsAndActions:
             icons = _of(view, ft.Icon)
             assert icons and icons[0].color == token
 
+    def test_refresh_failure_renders_separately_from_operation_status(
+        self, monkeypatch: pytest.MonkeyPatch, mock_i18n_state: Any, mock_app_colors_state: Any
+    ) -> None:
+        """刷新失败另列展示，操作回执（已断开）不被替换。"""
+
+        state = _state(
+            status=Message("mcp_status_disconnected", {"service_id": "svc"}),
+            status_level="info",
+            rows=(_row("svc", connected=False),),
+            refresh_status=Message("mcp_status_list_refresh_failed", {"reason": "db is down"}),
+        )
+        view, _vm, _page = _render(monkeypatch, state)
+
+        texts = [control.value for control in _of(view, ft.Text)]
+        assert I18n.get("mcp_status_disconnected", service_id="svc") in texts
+        assert I18n.get("mcp_status_list_refresh_failed", reason="db is down") in texts
+        assert I18n.get("mcp_status_error") not in texts
+
+        warning_icons = [icon for icon in _of(view, ft.Icon) if icon.icon == ft.Icons.WARNING_AMBER]
+        assert len(warning_icons) == 1
+        assert warning_icons[0].color == AppColors.WARNING
+
 
 class TestFieldWiring:
     def test_text_field_change_updates_vm(

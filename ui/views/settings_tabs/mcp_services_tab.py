@@ -654,6 +654,21 @@ def MCPServicesTab(lifecycle: Any | None = None) -> ft.Container:
         if status_text
         else ft.Container()
     )
+    # 列表刷新失败另列展示，不覆盖上面的操作回执。
+    refresh_text = (
+        I18n.get(state.refresh_status.key, **state.refresh_status.params) if state.refresh_status is not None else ""
+    )
+    refresh_row = (
+        ft.Row(
+            [
+                ft.Icon(ft.Icons.WARNING_AMBER, size=AppStyles.FONT_SIZE_TITLE, color=AppColors.WARNING),
+                ft.Text(refresh_text, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.WARNING),
+            ],
+            spacing=AppStyles.SPACING_XS,
+        )
+        if refresh_text
+        else ft.Container()
+    )
 
     btn_save = ft.Button(
         content=I18n.get("mcp_btn_save"),
@@ -817,6 +832,7 @@ def MCPServicesTab(lifecycle: Any | None = None) -> ft.Container:
                             ),
                             delete_confirm_row,
                             status_row,
+                            refresh_row,
                         ],
                         spacing=AppStyles.SPACING_SM,
                     )
