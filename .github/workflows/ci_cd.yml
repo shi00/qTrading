@@ -939,6 +939,7 @@ jobs:
               tests/e2e/test_news_risk.py
               tests/e2e/test_r01_dialog_height.py
               tests/e2e/test_sidecar_real_smoke.py
+              tests/e2e/test_agent_research_journey.py
     # 拆分前单 job 串行耗时 >45 分钟（run 30183636080 在 45 分钟 timeout 被取消）；
     # 2026-10-31 run 41202057746 实测 5 腿 pytest 用时 93~279s，已按此把
     # test_production_mount.py 从 scenarios 移入 onboarding 以平衡尾部；
