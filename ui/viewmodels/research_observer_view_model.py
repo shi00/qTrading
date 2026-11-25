@@ -36,6 +36,7 @@ from core.agent_types import (
     CommandRef,
     DraftRead,
     DraftReadQuery,
+    EventReadQuery,
     HistoryPage,
     HistoryQuery,
     HistoryRoundSelection,
@@ -61,6 +62,7 @@ if TYPE_CHECKING:
     # N01：``services.agent_service`` 包初始化会拉入 Agent 专用依赖（DBOS / pydantic_ai）。
     # 该导入只用于类型标注；运行时仅在已接线（intake 存在）路径内惰性导入。
     from services.agent_service.main_turn import MainTurnIntakeResult, PlanReference
+    from services.agent_service.model import StreamedTextFragment
 
 #: 桌面单用户域（与 app.agent_wiring 的默认 user_scope 保持一致；UI 层不 import app）。
 LOCAL_DESKTOP_USER_SCOPE = "local-desktop"
@@ -154,6 +156,32 @@ _DURATION_MESSAGE_PAGE_LIMIT: Final[int] = 20
 
 #: 累计费用覆盖的执行数上限（每个执行需一次快照 + 一次费用投影；超出如实标注截断）。
 CUMULATIVE_EXECUTION_LIMIT: Final[int] = 10
+
+#: 首层进度文案 key（W-13）：「在做什么 / 等什么 / 已保存 / 下一步」。
+#: 数据缺失一律用 ``PROGRESS_UNKNOWN_KEY`` 显式未知，不填业务上合法的默认值（R21）。
+PROGRESS_UNKNOWN_KEY = "agent_research_progress_unknown"
+PROGRESS_DOING_STREAMING = "agent_research_progress_doing_streaming"
+PROGRESS_DOING_RUNNING = "agent_research_progress_doing_running"
+PROGRESS_DOING_WAITING_USER = "agent_research_progress_doing_waiting_user"
+PROGRESS_DOING_IDLE = "agent_research_progress_doing_idle"
+PROGRESS_DOING_NONE = "agent_research_progress_doing_none"
+PROGRESS_WAITING_USER = "agent_research_progress_waiting_user"
+PROGRESS_WAITING_NONE = "agent_research_progress_waiting_none"
+PROGRESS_SAVED_ARTIFACTS = "agent_research_progress_saved_artifacts"
+PROGRESS_SAVED_NONE = "agent_research_progress_saved_none"
+PROGRESS_NEXT_ANSWER = "agent_research_progress_next_answer"
+PROGRESS_NEXT_WAIT = "agent_research_progress_next_wait"
+PROGRESS_NEXT_IDLE = "agent_research_progress_next_idle"
+
+#: 在途执行展示状态（排队/运行/依赖/人工等待/暂停中/已暂停/收尾中）。
+_ACTIVE_DISPLAY_STATES: Final[frozenset[str]] = frozenset(
+    {"queued", "running", "waiting_dependency", "waiting_user", "pausing", "paused", "ending"}
+)
+
+#: 返焦/重连追平的页大小与页数上限（有界读取；未追平如实报码，不宣称已核）。
+_EVENT_CATCH_UP_PAGE: Final[int] = 50
+_EVENT_CATCH_UP_MAX_PAGES: Final[int] = 20
+CATCH_UP_INCOMPLETE = "catch_up_incomplete"
 
 
 class MainTurnIntakePort(Protocol):
@@ -485,6 +513,52 @@ class DurationSegment:
 
 
 @dataclass(frozen=True)
+class ProgressSummaryView:
+    """首层进度四问的 i18n key（数据缺失为 ``PROGRESS_UNKNOWN_KEY``，不猜）。"""
+
+    doing_key: str = PROGRESS_UNKNOWN_KEY
+    waiting_key: str = PROGRESS_UNKNOWN_KEY
+    saved_key: str = PROGRESS_UNKNOWN_KEY
+    next_key: str = PROGRESS_UNKNOWN_KEY
+
+
+#: 未读到会话时的默认进度（四项均为显式未知）。
+_UNKNOWN_PROGRESS: Final[ProgressSummaryView] = ProgressSummaryView()
+
+
+@dataclass(frozen=True)
+class ObservationViewState:
+    """返回现场（仅展示状态）：滚动锚点与离开时选中的子执行。
+
+    由 View 在导航前上报，VM 原样保存并在返回父级时恢复；VM 不解释锚点语义。
+    """
+
+    scroll_anchor: str | None = None
+    selected_execution_id: str | None = None
+
+
+class ObservationViewStateStore(Protocol):
+    """观察现场存储端口（可注入；默认内存实现，进程重启即失效，不冒充持久化）。"""
+
+    def save(self, session_id: str, execution_id: str, view: ObservationViewState) -> None: ...
+
+    def load(self, session_id: str, execution_id: str) -> ObservationViewState | None: ...
+
+
+class InMemoryObservationViewStateStore:
+    """观察现场的内存实现（会话内有效；跨进程不复用，避免把过期锚点当现场）。"""
+
+    def __init__(self) -> None:
+        self._views: dict[tuple[str, str], ObservationViewState] = {}
+
+    def save(self, session_id: str, execution_id: str, view: ObservationViewState) -> None:
+        self._views[(session_id, execution_id)] = view
+
+    def load(self, session_id: str, execution_id: str) -> ObservationViewState | None:
+        return self._views.get((session_id, execution_id))
+
+
+@dataclass(frozen=True)
 class ResearchObserverState:
     """观察层不可变快照。
 
@@ -561,6 +635,21 @@ class ResearchObserverState:
     rename_text: str = ""
     #: 当前会话的元数据版（会话 CAS 动作的预期版；读取失败保持 0，动作被拒绝）。
     session_revision: int = 0
+    #: 增量流式（W-13）：受治理片段按序合并；``stream_text`` 只含真实模型片段，
+    #: 合成/占位片段以 ``stream_synthetic_visible`` 单独标记（不与真实输出混淆）。
+    stream_fragments: tuple[StreamedTextFragment, ...] = ()
+    stream_text: str = ""
+    stream_synthetic_visible: bool = False
+    #: 返焦/重连权威核对水位（0 表示尚未核对）；持久事件为权威，内存增量不得替代。
+    authoritative_seq: int = 0
+    last_catch_up_error_code: str | None = None
+    #: 首层进度文案（R21：数据缺失为显式未知，不填默认值）。
+    progress: ProgressSummaryView = _UNKNOWN_PROGRESS
+    #: 子会话两级返回（父→子→返回父）：父链 + 返回目标 + 返回后恢复的现场。
+    observation_path: tuple[str, ...] = ()
+    return_to_execution_id: str | None = None
+    restored_scroll_anchor: str | None = None
+    restored_child_selection: str | None = None
 
     # --- W-12 研究侧模型/角色选择、费用透明与耗时分段 ---
     model_selection_available: bool = False
@@ -1331,6 +1420,57 @@ def _default_token_counter(text: str, model: str | None) -> tuple[int, bool]:
     return count_tokens_with_basis(text, model)
 
 
+def _ancestor_path(executions: tuple[Any, ...], execution_id: str | None) -> tuple[str, ...]:
+    """从根到该执行的父链（不含自身；父不在本页或环形引用即截断）。"""
+
+    if execution_id is None:
+        return ()
+    parents = {execution.execution_id: execution.parent_execution_id for execution in executions}
+    path: list[str] = []
+    seen: set[str] = set()
+    current = parents.get(execution_id)
+    while isinstance(current, str) and current in parents and current not in seen:
+        seen.add(current)
+        path.append(current)
+        current = parents[current]
+    path.reverse()
+    return tuple(path)
+
+
+def _progress_summary(
+    *,
+    session_known: bool,
+    executions: Sequence[Any],
+    pending_count: int,
+    artifact_count: int,
+    streaming: bool,
+) -> ProgressSummaryView:
+    """首层进度四问（由已知事实推导；未读到会话时四项全为显式未知，R21）。"""
+
+    if not session_known:
+        return _UNKNOWN_PROGRESS
+    active = any(getattr(item, "display_state", None) in _ACTIVE_DISPLAY_STATES for item in executions)
+    if streaming:
+        doing = PROGRESS_DOING_STREAMING
+    elif active:
+        doing = PROGRESS_DOING_RUNNING
+    elif pending_count > 0:
+        doing = PROGRESS_DOING_WAITING_USER
+    elif executions:
+        doing = PROGRESS_DOING_IDLE
+    else:
+        doing = PROGRESS_DOING_NONE
+    waiting = PROGRESS_WAITING_USER if pending_count > 0 else PROGRESS_WAITING_NONE
+    saved = PROGRESS_SAVED_ARTIFACTS if artifact_count > 0 else PROGRESS_SAVED_NONE
+    if pending_count > 0:
+        next_key = PROGRESS_NEXT_ANSWER
+    elif streaming or active:
+        next_key = PROGRESS_NEXT_WAIT
+    else:
+        next_key = PROGRESS_NEXT_IDLE
+    return ProgressSummaryView(doing_key=doing, waiting_key=waiting, saved_key=saved, next_key=next_key)
+
+
 class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState]):
     """壳层公共研究观察层 VM（共享实例；观察不控制执行）。"""
 
@@ -1344,6 +1484,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         mcp_catalog: MCPScopeCatalogPort | None = None,
         model_catalog: ModelCatalogPort | None = None,
         token_counter: Callable[[str, str | None], tuple[int, bool]] | None = None,
+        view_store: ObservationViewStateStore | None = None,
     ) -> None:
         self._service = service
         self._user_scope = user_scope
@@ -1355,6 +1496,10 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         self._token_counter = token_counter if token_counter is not None else _default_token_counter
         #: 连接定义快照（预算估算读计费子域；不缓存秘密，仅含展示/计价字段）。
         self._connection_rows: dict[str, Mapping[str, Any]] = {}
+        #: 观察现场存储（可注入；默认内存实现，返回父级时恢复锚点/选中项）。
+        self._view_store: ObservationViewStateStore = (
+            view_store if view_store is not None else InMemoryObservationViewStateStore()
+        )
         #: 目录身份映射（identity_key → 服务身份）；范围选择提交时据此还原强类型身份。
         self._mcp_identities: dict[str, MCPServiceIdentity] = {}
         self._session_key: int | None = id(service) if service is not None else None
@@ -1774,6 +1919,17 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             durations_execution_id=None,
             model_selection_frozen=None,
             role_selection_frozen=None,
+            # W-13：流式增量、权威水位、进度与观察现场随会话消失（不保留上一会话残影）。
+            stream_fragments=(),
+            stream_text="",
+            stream_synthetic_visible=False,
+            authoritative_seq=0,
+            last_catch_up_error_code=None,
+            progress=_UNKNOWN_PROGRESS,
+            observation_path=(),
+            return_to_execution_id=None,
+            restored_scroll_anchor=None,
+            restored_child_selection=None,
         )
 
     async def _read_pending_overview(self) -> tuple[PendingAnswerPage | None, str | None]:
@@ -1904,6 +2060,18 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             artifact_bodies=artifact_bodies,
             session_draft=loaded_draft,
             draft_error_code=None,
+            # 持久化首读为权威：内存增量片段被快照取代（返焦/重连不得只靠内存增量）。
+            stream_fragments=(),
+            stream_text="",
+            stream_synthetic_visible=False,
+            progress=_progress_summary(
+                session_known=True,
+                executions=self._raw_executions,
+                pending_count=pending_count,
+                artifact_count=len(self._raw_artifacts),
+                streaming=False,
+            ),
+            **self._observation_changes(selected),
             **switch_changes,
             **self._projection_changes(selected=selected, collapsed=collapsed),
         )
@@ -1931,17 +2099,235 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             ),
         )
 
-    def select_execution(self, execution_id: str | None) -> None:
-        """改变观察位置（整会话 / 某执行子树）；只改展示过滤，不改变研究执行。"""
+    def select_execution(self, execution_id: str | None, *, scroll_anchor: str | None = None) -> None:
+        """改变观察位置（整会话 / 某执行子树）；只改展示过滤，不改变研究执行。
 
+        子会话为只读视图，返回父级即恢复到上一现场：``scroll_anchor`` 由 View 上报
+        当前滚动锚点，离开节点前存入可注入的现场存储；返回该节点时恢复锚点与
+        离开时选中的子执行（父→子→返回父两级返回）。
+        """
+
+        current = self._state.selected_execution_id
         selected = _normalized_selection(self._raw_executions, execution_id)
+        self._save_view_state(current, scroll_anchor=scroll_anchor, leaving_to=selected)
+        restored = self._load_view_state(selected)
         self._set_state(
             selected_execution_id=selected,
+            restored_scroll_anchor=restored.scroll_anchor if restored is not None else None,
+            restored_child_selection=restored.selected_execution_id if restored is not None else None,
+            **self._observation_changes(selected),
+            **self._progress_changes(),
             **self._projection_changes(
                 selected=selected,
                 collapsed=self._state.collapsed_execution_ids,
             ),
         )
+
+    def _save_view_state(
+        self,
+        execution_id: str | None,
+        *,
+        scroll_anchor: str | None,
+        leaving_to: str | None,
+    ) -> None:
+        """离开某观察节点前保存现场（会话隔离；无会话不保存，避免跨会话锚点）。"""
+
+        session_id = self._state.session_id
+        if session_id is None:
+            return
+        self._view_store.save(
+            session_id,
+            execution_id or "",
+            ObservationViewState(scroll_anchor=scroll_anchor, selected_execution_id=leaving_to),
+        )
+
+    def _load_view_state(self, execution_id: str | None) -> ObservationViewState | None:
+        session_id = self._state.session_id
+        if session_id is None:
+            return None
+        return self._view_store.load(session_id, execution_id or "")
+
+    def _observation_changes(self, selected: str | None) -> dict[str, Any]:
+        """观察位置派生：父链与「返回父级」目标（无父即整会话，返回 None）。"""
+
+        path = _ancestor_path(self._raw_executions, selected)
+        return {
+            "observation_path": path,
+            "return_to_execution_id": path[-1] if path else None,
+        }
+
+    def _progress_changes(self, *, streaming: bool | None = None) -> dict[str, Any]:
+        """按当前已知事实重算首层进度（未读到会话时显式未知，R21）。
+
+        ``streaming`` 由调用方在改 state 前显式给出（避免读到上一帧的片段集合）。
+        """
+
+        return {
+            "progress": _progress_summary(
+                session_known=self._state.session_id is not None,
+                executions=self._raw_executions,
+                pending_count=self._state.pending_count,
+                artifact_count=len(self._raw_artifacts),
+                streaming=bool(self._state.stream_fragments) if streaming is None else streaming,
+            )
+        }
+
+    # ------------------------------------------------------------------
+    # 增量流式呈现（W-13：受治理片段；合成片段显式标记，不混入真实正文）
+    # ------------------------------------------------------------------
+
+    def apply_stream_event(self, event: object, *, synthetic: bool = False) -> None:
+        """合并一个受治理流事件（``LeafStreamEvent`` / ``ChatStreamEvent`` 形态）。
+
+        按 ``sequence`` 幂等合并：重复序号忽略、乱序按序插入（展示顺序恒为来源
+        顺序）；``synthetic=True`` 标记本地合成/占位片段，不进入 ``stream_text``。
+        本方法只改展示状态，不落库、不推进执行；权威补齐仍以持久事件为准。
+        """
+
+        # N01：惰性导入，避免 UI 模块导入期拉入 ``services.agent_service`` 重依赖。
+        from services.agent_service.model import (
+            STREAM_SOURCE_MODEL,
+            STREAM_SOURCE_SYNTHETIC,
+            project_stream_text_fragment,
+        )
+
+        fragment = project_stream_text_fragment(
+            event,
+            source=STREAM_SOURCE_SYNTHETIC if synthetic else STREAM_SOURCE_MODEL,
+        )
+        if fragment is None:
+            return
+        self._merge_stream_fragment(fragment)
+
+    def apply_stream_text(
+        self,
+        text: str,
+        *,
+        sequence: int | None = None,
+        synthetic: bool = False,
+    ) -> None:
+        """合并一段增量文本（无来源事件时的入口；``sequence`` 缺省按已并入序号 +1）。"""
+
+        if not text:
+            return
+        # N01：惰性导入，避免 UI 模块导入期拉入 ``services.agent_service`` 重依赖。
+        from services.agent_service.model import (
+            STREAM_SOURCE_MODEL,
+            STREAM_SOURCE_SYNTHETIC,
+            StreamedTextFragment,
+        )
+
+        resolved = sequence if sequence is not None else self._next_stream_sequence()
+        self._merge_stream_fragment(
+            StreamedTextFragment(
+                sequence=resolved,
+                text=text,
+                source=STREAM_SOURCE_SYNTHETIC if synthetic else STREAM_SOURCE_MODEL,
+            )
+        )
+
+    def _merge_stream_fragment(self, fragment: StreamedTextFragment) -> None:
+        """按序号幂等合并（重复序号覆盖为同一片段，乱序按序插入）。"""
+
+        # N01：惰性导入，避免 UI 模块导入期拉入 ``services.agent_service`` 重依赖。
+        from services.agent_service.model import STREAM_SOURCE_MODEL
+
+        fragments = [item for item in self._state.stream_fragments if item.sequence != fragment.sequence]
+        fragments.append(fragment)
+        fragments.sort(key=lambda item: item.sequence)
+        self._set_state(
+            stream_fragments=tuple(fragments),
+            stream_text="".join(item.text for item in fragments if item.source == STREAM_SOURCE_MODEL),
+            stream_synthetic_visible=any(item.synthetic for item in fragments),
+            **self._progress_changes(streaming=True),
+        )
+
+    def reset_stream(self) -> None:
+        """清空内存增量片段（断线/切会话；不影响持久化消息与执行）。"""
+
+        self._set_state(
+            stream_fragments=(),
+            stream_text="",
+            stream_synthetic_visible=False,
+            **self._progress_changes(streaming=False),
+        )
+
+    def _next_stream_sequence(self) -> int:
+        fragments = self._state.stream_fragments
+        return (max((item.sequence for item in fragments), default=0)) + 1
+
+    # ------------------------------------------------------------------
+    # 返焦/重连：以持久化事件为权威补齐（W-13）
+    # ------------------------------------------------------------------
+
+    async def catch_up(self) -> None:
+        """窗口返焦或连接恢复时自动核权威：先追平持久事件，再重读会话快照。
+
+        内存增量只用于即时呈现；本方法以 ``read_events`` 的持久水位为权威，
+        并把会话首读重新投影（消息/成果/进度均来自持久化事实）。重复事件按
+        ``session_seq`` 幂等：没有新事件时不改动已呈现的增量片段。
+        """
+
+        if self._service is None or not self._state.available:
+            return
+        session_id = self._state.session_id
+        if session_id is None:
+            await self.refresh()
+            return
+        await self._reconcile_persisted_events(session_id)
+        await self.refresh()
+
+    async def _reconcile_persisted_events(self, session_id: str) -> None:
+        """按 ``authoritative_seq`` 有界追平持久事件；未追平如实报码，不宣称已核。
+
+        可靠事件包络不含 TextDelta（临时事件无可靠 ``session_seq``，见
+        ``ResearchEvent`` 契约），因此增量文本永远以 ``refresh`` 的会话快照为准；
+        追平只确认「持久事实已前进」，用于判定内存增量是否已被快照取代。
+        """
+
+        service = self._service
+        reader = getattr(service, "read_events", None) if service is not None else None
+        if not callable(reader):
+            # 未接线事件读取：仍以会话首读为权威（refresh），不报成功也不报错。
+            return
+        read_events = cast("Callable[[EventReadQuery], Awaitable[Any]]", reader)
+        after_seq = self._state.authoritative_seq
+        cursor = after_seq
+        incomplete = False
+        try:
+            for _page_index in range(_EVENT_CATCH_UP_MAX_PAGES):
+                page = await read_events(
+                    EventReadQuery(
+                        user_scope=self._user_scope,
+                        session_id=session_id,
+                        after_seq=cursor,
+                        limit=_EVENT_CATCH_UP_PAGE,
+                    )
+                )
+                for event in getattr(page, "events", ()):
+                    seq = getattr(event, "session_seq", None)
+                    if isinstance(seq, int) and not isinstance(seq, bool) and seq > cursor:
+                        cursor = seq
+                last_seq = getattr(page, "last_seq", None)
+                if isinstance(last_seq, int) and not isinstance(last_seq, bool) and last_seq > cursor:
+                    cursor = last_seq
+                if not bool(getattr(page, "has_more", False)):
+                    break
+            else:
+                incomplete = True  # 达到页数上限仍有更多：不宣称已核（R21）
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self._set_state(last_catch_up_error_code=self._error_code(e))
+            return
+        changes: dict[str, Any] = {
+            "last_catch_up_error_code": CATCH_UP_INCOMPLETE if incomplete else None,
+            "authoritative_seq": cursor,
+        }
+        if cursor > after_seq:
+            # 持久事件确认了更新事实：内存增量被权威快照取代（后续 refresh 投影）。
+            changes.update(stream_fragments=(), stream_text="", stream_synthetic_visible=False)
+        self._set_state(**changes)
 
     async def load_artifact(
         self,

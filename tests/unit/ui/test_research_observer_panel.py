@@ -11,18 +11,26 @@ from typing import Any, cast
 import flet as ft
 import pytest
 
+from services.agent_service.model import STREAM_SOURCE_SYNTHETIC, StreamedTextFragment
 from ui.i18n import I18n
 from ui.viewmodels.research_observer_view_model import (
     PENDING_SCOPE_ALL,
+    PROGRESS_DOING_RUNNING,
+    PROGRESS_NEXT_WAIT,
+    PROGRESS_SAVED_ARTIFACTS,
+    PROGRESS_WAITING_NONE,
     BudgetEstimate,
     DispatchReasonView,
+    ExecutionNodeView,
     ModelConnectionOption,
     PendingAnswerView,
     PendingDecision,
     PlanStepView,
+    ProgressSummaryView,
     ResearchObserverState,
     RoleOption,
     SessionListItemView,
+    SessionMessageView,
     build_duration_segments,
     cost_state_view,
 )
@@ -33,6 +41,7 @@ from ui.views.research_observer_composer import (
     build_plan_preview as _build_plan_preview,
     dispatch_reason_text,
 )
+from ui.views.research_observer_conversation import build_execution_section, build_messages_section
 from ui.views.research_observer_decisions import build_decisions_section, build_pending_overview
 from ui.views.research_observer_panel import _build_body
 from ui.views.research_observer_session_list import build_session_list
@@ -776,3 +785,129 @@ def test_composer_budget_unknown_never_renders_zero() -> None:
     assert I18n.get("agent_research_cost_state_reserved") in "\n".join(texts)
     assert not any("¥" in text for text in texts), "未知/预留费用不得渲染成金额"
     assert not any(I18n.get("agent_research_duration_value_fmt").format(ms=0) in text for text in texts)
+
+
+def _control_texts(root: Any) -> list[str]:
+    return [control.value for control in _walk(root) if isinstance(control, ft.Text)]
+
+
+def test_progress_section_shows_four_questions_with_explicit_unknown() -> None:
+    rows = build_messages_section(ResearchObserverState(available=True))
+    texts = _control_texts(rows)
+
+    assert I18n.get("agent_research_progress") in texts
+    for label in (
+        I18n.get("agent_research_progress_doing"),
+        I18n.get("agent_research_progress_waiting"),
+        I18n.get("agent_research_progress_saved"),
+        I18n.get("agent_research_progress_next"),
+    ):
+        assert label in texts
+    unknown = I18n.get("agent_research_progress_unknown")
+    assert texts.count(unknown) == 4, "未读到会话时四项都必须显式未知（R21）"
+
+
+def test_progress_section_renders_state_keys() -> None:
+    state = ResearchObserverState(
+        available=True,
+        progress=ProgressSummaryView(
+            doing_key=PROGRESS_DOING_RUNNING,
+            waiting_key=PROGRESS_WAITING_NONE,
+            saved_key=PROGRESS_SAVED_ARTIFACTS,
+            next_key=PROGRESS_NEXT_WAIT,
+        ),
+    )
+
+    texts = _control_texts(build_messages_section(state))
+
+    assert I18n.get(PROGRESS_DOING_RUNNING) in texts
+    assert I18n.get(PROGRESS_SAVED_ARTIFACTS) in texts
+    assert I18n.get(PROGRESS_NEXT_WAIT) in texts
+
+
+def test_stream_section_keeps_synthetic_text_out_of_conclusion() -> None:
+    state = ResearchObserverState(
+        available=True,
+        stream_fragments=(
+            StreamedTextFragment(sequence=1, text="真实结论"),
+            StreamedTextFragment(sequence=2, text="占位文本", source=STREAM_SOURCE_SYNTHETIC),
+        ),
+        stream_text="真实结论",
+        stream_synthetic_visible=True,
+    )
+
+    texts = _control_texts(build_messages_section(state))
+
+    assert "真实结论" in texts
+    assert "占位文本" not in texts, "合成片段不得渲染成模型结论正文"
+    assert I18n.get("agent_research_stream_synthetic_badge") in texts
+
+
+def test_execution_section_back_button_returns_to_parent_and_marks_readonly() -> None:
+    calls: list[str | None] = []
+    state = ResearchObserverState(
+        available=True,
+        selected_execution_id="e-2",
+        observation_path=("e-1",),
+        return_to_execution_id="e-1",
+        restored_child_selection="e-2",
+        execution_nodes=(
+            ExecutionNodeView(
+                execution_id="e-2",
+                parent_execution_id="e-1",
+                display_state="running",
+                goal_coverage="partial",
+                model_attempt_count=1,
+                tool_call_count=0,
+                active_ms=10,
+                depth=0,
+                has_children=False,
+            ),
+        ),
+    )
+
+    rows = build_execution_section(
+        state,
+        on_toggle_execution=lambda _execution_id: None,
+        on_select_execution=calls.append,
+    )
+
+    assert I18n.get("agent_research_child_readonly") in _control_texts(rows)
+    history_icons = [
+        control for control in _walk(rows) if isinstance(control, ft.Icon) and control.icon == ft.Icons.HISTORY
+    ]
+    assert history_icons, "返回父级后应标出上次从此处查看的子任务"
+    back = _find_text_button(rows, I18n.get("agent_research_observation_back"))
+    _invoke(back.on_click, SimpleNamespace(control=None))
+    assert calls == ["e-1"]
+
+
+def test_messages_section_marks_restored_scroll_anchor_target() -> None:
+    state = ResearchObserverState(
+        available=True,
+        restored_scroll_anchor="m-2",
+        messages=(
+            SessionMessageView(
+                message_id="m-1",
+                role="user",
+                body_text="问题",
+                body_available=True,
+                execution_id=None,
+                occurred_at="2026-11-17T01:00:00.000000Z",
+            ),
+            SessionMessageView(
+                message_id="m-2",
+                role="assistant",
+                body_text="答复",
+                body_available=True,
+                execution_id=None,
+                occurred_at="2026-11-17T01:01:00.000000Z",
+            ),
+        ),
+    )
+
+    rows = build_messages_section(state)
+    keys = [control.key for control in _walk(rows) if isinstance(control, ft.Container)]
+
+    assert "agent_research_anchor_m-2" in keys
+    assert "agent_research_anchor_m-1" not in keys

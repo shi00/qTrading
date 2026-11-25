@@ -36,8 +36,11 @@ def _role_label(role: str | None) -> str:
     return I18n.get(key) if key is not None else role
 
 
-def build_message_row(message: SessionMessageView) -> ft.Control:
-    """单条主会话消息（正文未随首屏返回时如实标注，不显示空正文）。"""
+def build_message_row(message: SessionMessageView, *, anchor: bool = False) -> ft.Control:
+    """单条主会话消息（正文未随首屏返回时如实标注，不显示空正文）。
+
+    ``anchor`` 为返回现场时的滚动锚点目标（以控件 key 标识该消息，供视图恢复定位）。
+    """
 
     rows: list[ft.Control] = [
         ft.Row(
@@ -65,19 +68,86 @@ def build_message_row(message: SessionMessageView) -> ft.Control:
             )
         )
     return ft.Container(
+        key=f"agent_research_anchor_{message.message_id}" if anchor else None,
         content=ft.Column(rows, spacing=AppStyles.SPACING_XS),
         padding=ft.Padding.symmetric(vertical=AppStyles.SPACING_XS),
     )
 
 
-def build_messages_section(state: ResearchObserverState) -> list[ft.Control]:
-    """主会话消息区（只读；正文未载入如实标注）。"""
+def build_progress_section(state: ResearchObserverState) -> list[ft.Control]:
+    """首层进度四问（在做什么 / 等什么 / 已保存 / 下一步）。
 
-    rows: list[ft.Control] = [section_title("agent_research_messages")]
+    取值均为 i18n key；数据未读到时会话层给出显式「未知」，不显示为已完成（R21）。
+    """
+
+    pairs = (
+        ("agent_research_progress_doing", state.progress.doing_key),
+        ("agent_research_progress_waiting", state.progress.waiting_key),
+        ("agent_research_progress_saved", state.progress.saved_key),
+        ("agent_research_progress_next", state.progress.next_key),
+    )
+    rows: list[ft.Control] = [section_title("agent_research_progress")]
+    for label_key, value_key in pairs:
+        rows.append(
+            ft.Row(
+                [
+                    ft.Text(
+                        I18n.get(label_key),
+                        size=AppStyles.FONT_SIZE_CAPTION,
+                        color=AppColors.TEXT_HINT,
+                    ),
+                    ft.Text(
+                        I18n.get(value_key),
+                        size=AppStyles.FONT_SIZE_CAPTION,
+                        color=AppColors.TEXT_PRIMARY,
+                    ),
+                ],
+                spacing=AppStyles.SPACING_SM,
+            )
+        )
+    return rows
+
+
+def build_stream_section(state: ResearchObserverState) -> list[ft.Control]:
+    """增量流式呈现（真实模型片段与合成/占位片段分列，不混排为结论正文）。"""
+
+    if not state.stream_fragments:
+        return []
+    rows: list[ft.Control] = [section_title("agent_research_stream")]
+    if state.stream_text:
+        rows.append(
+            ft.Text(
+                state.stream_text,
+                size=AppStyles.FONT_SIZE_BODY_SM,
+                color=AppColors.TEXT_PRIMARY,
+            )
+        )
+    else:
+        rows.append(hint_text("agent_research_stream_no_model_text"))
+    if state.stream_synthetic_visible:
+        rows.append(
+            ft.Text(
+                I18n.get("agent_research_stream_synthetic_badge"),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.WARNING,
+            )
+        )
+    return rows
+
+
+def build_messages_section(state: ResearchObserverState) -> list[ft.Control]:
+    """主会话消息区（只读；正文未载入如实标注）。
+
+    进度四问与增量流式块随消息区一并渲染（同一分区，避免调用方多处分发）。
+    """
+
+    rows: list[ft.Control] = [*build_progress_section(state), *build_stream_section(state)]
+    rows.append(section_title("agent_research_messages"))
     if not state.messages:
         rows.append(hint_text("agent_research_no_messages"))
+    anchor = state.restored_scroll_anchor
     for message in state.messages:
-        rows.append(build_message_row(message))
+        rows.append(build_message_row(message, anchor=anchor is not None and message.message_id == anchor))
     if state.messages_has_more:
         rows.append(hint_text("agent_research_more_items"))
     return rows
@@ -88,10 +158,15 @@ def build_execution_row(
     *,
     collapsed: bool,
     selected: bool,
+    restored_selected: bool,
     on_toggle_execution: Callable[[str], None],
     on_select_execution: Callable[[str | None], None],
 ) -> ft.Control:
-    """子任务树节点：只读进度 + 展开/收起 + 切换观察位置（均不控制执行）。"""
+    """子任务树节点：只读进度 + 展开/收起 + 切换观察位置（均不控制执行）。
+
+    ``restored_selected`` 标记返回父级时恢复的「上次选中的子执行」（现场提示，
+    不代表正在执行或正在跟随）。
+    """
 
     leading: list[ft.Control] = []
     if node.has_children:
@@ -114,6 +189,15 @@ def build_execution_row(
                 size=AppStyles.FONT_SIZE_BODY_SM,
                 color=AppColors.PRIMARY,
                 tooltip=I18n.get("agent_research_selected"),
+            )
+        )
+    if restored_selected:
+        leading.append(
+            ft.Icon(
+                ft.Icons.HISTORY,
+                size=AppStyles.FONT_SIZE_BODY_SM,
+                color=AppColors.TEXT_HINT,
+                tooltip=I18n.get("agent_research_child_last_selected"),
             )
         )
     leading.append(
@@ -173,6 +257,28 @@ def build_execution_section(
             )
         )
     rows: list[ft.Control] = [ft.Row(execution_header, alignment=ft.MainAxisAlignment.SPACE_BETWEEN)]
+    if state.observation_path:
+        rows.append(
+            ft.Text(
+                I18n.get("agent_research_observation_path_fmt").format(
+                    path=" › ".join(state.observation_path),
+                ),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.TEXT_HINT,
+            )
+        )
+        # 子会话是只读视图：观察位置切换不改执行；返回父级用同一导航入口。
+        rows.append(hint_text("agent_research_child_readonly"))
+    if state.return_to_execution_id is not None:
+        rows.append(
+            ft.TextButton(
+                content=ft.Text(
+                    I18n.get("agent_research_observation_back"),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                ),
+                on_click=lambda _e: on_select_execution(state.return_to_execution_id),
+            )
+        )
     if state.selected_execution_id is not None:
         rows.append(
             ft.Text(
@@ -189,6 +295,7 @@ def build_execution_section(
                 node,
                 collapsed=state.is_collapsed(node.execution_id),
                 selected=state.selected_execution_id == node.execution_id,
+                restored_selected=state.restored_child_selection == node.execution_id,
                 on_toggle_execution=on_toggle_execution,
                 on_select_execution=on_select_execution,
             )

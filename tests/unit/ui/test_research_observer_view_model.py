@@ -8,6 +8,16 @@ import pytest
 
 from core.agent_types import DraftPayload, DraftRead, MCPServiceIdentity, Mode, Purpose, SessionAction
 from ui.viewmodels.research_observer_view_model import (
+    CATCH_UP_INCOMPLETE,
+    PROGRESS_DOING_RUNNING,
+    PROGRESS_DOING_STREAMING,
+    PROGRESS_NEXT_ANSWER,
+    PROGRESS_NEXT_WAIT,
+    PROGRESS_SAVED_ARTIFACTS,
+    PROGRESS_SAVED_NONE,
+    PROGRESS_UNKNOWN_KEY,
+    PROGRESS_WAITING_NONE,
+    PROGRESS_WAITING_USER,
     SESSION_STATUS_ACTIVE,
     SESSION_STATUS_ARCHIVED,
     SESSION_STATUS_CLEANED,
@@ -15,6 +25,9 @@ from ui.viewmodels.research_observer_view_model import (
     UNAVAILABLE_NOT_READY,
     UNAVAILABLE_NOT_WIRED,
     DispatchReasonView,
+    InMemoryObservationViewStateStore,
+    ObservationViewState,
+    ProgressSummaryView,
     ResearchObserverState,
     ResearchObserverViewModel,
     reset_shared_research_observer,
@@ -1779,3 +1792,281 @@ class TestSessionListAndMetadata:
         assert vm.state.session_revision == 0
         assert vm.state.rename_target_session_id is None
         assert vm.state.composer_text == "草稿"
+
+
+class _EventsService(_FakeService):
+    """持久事件读取替身：按 after_seq 增量返回（重复调用幂等）。"""
+
+    def __init__(self, events: tuple[Any, ...]) -> None:
+        super().__init__()
+        self.events = events
+        self.event_calls: list[Any] = []
+
+    async def read_events(self, query: Any) -> Any:
+        self.event_calls.append(query)
+        remaining = tuple(event for event in self.events if event.session_seq > query.after_seq)
+        page = remaining[: query.limit]
+        last_seq = page[-1].session_seq if page else query.after_seq
+        return SimpleNamespace(events=page, last_seq=last_seq, has_more=False)
+
+
+def _stream_event(sequence: int, text: str) -> Any:
+    return SimpleNamespace(kind="text_delta", sequence=sequence, text_delta=text)
+
+
+class TestStreamingAndCatchUp:
+    """W-13：增量合并顺序、synthetic 标记与返焦/重连权威补齐。"""
+
+    @pytest.mark.asyncio
+    async def test_stream_fragments_merge_in_sequence_and_keep_synthetic_separate(self) -> None:
+        vm = ResearchObserverViewModel(_FakeService())
+        await vm.refresh()
+
+        vm.apply_stream_event(_stream_event(2, "世界"))
+        vm.apply_stream_event(_stream_event(1, "你好"))
+        vm.apply_stream_event(_stream_event(1, "你好"))  # 重复序号幂等
+        vm.apply_stream_text("正在生成…", sequence=3, synthetic=True)
+
+        state = vm.state
+        assert [fragment.sequence for fragment in state.stream_fragments] == [1, 2, 3]
+        assert state.stream_text == "你好世界", "合成片段不得混入真实模型正文"
+        assert state.stream_synthetic_visible is True
+        assert state.progress.doing_key == PROGRESS_DOING_STREAMING
+        assert state.progress.next_key == PROGRESS_NEXT_WAIT
+
+    def test_stream_unknown_session_keeps_progress_unknown(self) -> None:
+        vm = ResearchObserverViewModel(_FakeService())
+        vm.apply_stream_text("增量")
+
+        assert vm.state.stream_text == "增量"
+        assert vm.state.progress == ProgressSummaryView(), "未读到会话时进度四项必须显式未知（R21）"
+        assert vm.state.progress.doing_key == PROGRESS_UNKNOWN_KEY
+
+    @pytest.mark.asyncio
+    async def test_non_text_events_ignored_and_auto_sequence_and_reset(self) -> None:
+        vm = ResearchObserverViewModel(_FakeService())
+        await vm.refresh()
+
+        vm.apply_stream_event(SimpleNamespace(kind="finish", sequence=9))
+        assert vm.state.stream_fragments == (), "终止/工具事件不产生文本片段"
+
+        vm.apply_stream_text("甲")
+        vm.apply_stream_text("乙")
+        assert [fragment.sequence for fragment in vm.state.stream_fragments] == [1, 2]
+
+        vm.reset_stream()
+        assert vm.state.stream_fragments == ()
+        assert vm.state.stream_text == ""
+        assert vm.state.stream_synthetic_visible is False
+        assert vm.state.progress.doing_key == PROGRESS_DOING_RUNNING
+
+    @pytest.mark.asyncio
+    async def test_catch_up_uses_persisted_events_and_is_idempotent(self) -> None:
+        service = _EventsService(
+            (SimpleNamespace(session_seq=5), SimpleNamespace(session_seq=9)),
+        )
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+        vm.apply_stream_text("临时增量", sequence=4)
+
+        await vm.catch_up()
+
+        assert vm.state.authoritative_seq == 9
+        assert vm.state.stream_text == "", "持久事件确认更新后，内存增量由权威快照取代"
+        messages_after_first = vm.state.messages
+
+        await vm.catch_up()
+
+        assert vm.state.authoritative_seq == 9, "重复返焦不得推进水位或重复应用事件"
+        assert vm.state.messages == messages_after_first
+        assert vm.state.last_catch_up_error_code is None
+        assert len(service.event_calls) >= 2, "每次返焦都按水位重新核对持久事件"
+
+    @pytest.mark.asyncio
+    async def test_catch_up_reports_error_without_faking_success(self) -> None:
+        vm = ResearchObserverViewModel(_FailingEventsService())
+        await vm.refresh()
+
+        await vm.catch_up()
+
+        assert vm.state.authoritative_seq == 0
+        assert vm.state.last_catch_up_error_code == "PERSISTENCE_UNAVAILABLE"
+
+
+class _FailingEventsService(_FakeService):
+    """事件读取失败的替身：如实报码，不伪装成已核水位。"""
+
+    async def read_events(self, query: Any) -> Any:
+        raise _FakeError("PERSISTENCE_UNAVAILABLE")
+
+
+class TestProgressSummary:
+    """W-13：首层进度四问的文案状态（含显式未知，R21）。"""
+
+    @pytest.mark.asyncio
+    async def test_running_execution_and_no_pending(self) -> None:
+        vm = ResearchObserverViewModel(_FakeService(read=_session_read()))
+
+        await vm.refresh()
+
+        assert vm.state.progress.doing_key == PROGRESS_DOING_RUNNING
+        assert vm.state.progress.waiting_key == PROGRESS_WAITING_NONE
+        assert vm.state.progress.saved_key == PROGRESS_SAVED_NONE
+        assert vm.state.progress.next_key == PROGRESS_NEXT_WAIT
+
+    @pytest.mark.asyncio
+    async def test_pending_decision_switches_waiting_and_next(self) -> None:
+        vm = ResearchObserverViewModel(_FakeService(read=_session_read(decisions=(_decision(),))))
+
+        await vm.refresh()
+
+        assert vm.state.progress.waiting_key == PROGRESS_WAITING_USER
+        assert vm.state.progress.next_key == PROGRESS_NEXT_ANSWER
+
+    @pytest.mark.asyncio
+    async def test_saved_artifacts_are_reported(self) -> None:
+        vm = ResearchObserverViewModel(_FakeService(read=_session_read(artifacts=(_artifact(),))))
+
+        await vm.refresh()
+
+        assert vm.state.progress.saved_key == PROGRESS_SAVED_ARTIFACTS
+
+
+class _RecordingViewStore:
+    """注入式现场存储替身：记录调用并返回固定现场。"""
+
+    def __init__(self) -> None:
+        self.saved: list[tuple[str, str, ObservationViewState]] = []
+        self.loaded: list[tuple[str, str]] = []
+        self.restore: ObservationViewState | None = None
+
+    def save(self, session_id: str, execution_id: str, view: ObservationViewState) -> None:
+        self.saved.append((session_id, execution_id, view))
+
+    def load(self, session_id: str, execution_id: str) -> ObservationViewState | None:
+        self.loaded.append((session_id, execution_id))
+        return self.restore
+
+
+class TestSubSessionReturn:
+    """W-13：子会话只读视图与两级返回（父→子→返回父）现场恢复。"""
+
+    @pytest.mark.asyncio
+    async def test_return_to_parent_restores_scroll_anchor_and_child_selection(self) -> None:
+        read = _session_read(
+            executions=(_execution("e-1"), _execution("e-2", parent_execution_id="e-1")),
+        )
+        vm = ResearchObserverViewModel(_FakeService(read=read))
+        await vm.refresh()
+
+        vm.select_execution("e-1")
+        assert vm.state.return_to_execution_id is None
+        vm.select_execution("e-2", scroll_anchor="m-7")
+        assert vm.state.observation_path == ("e-1",)
+        assert vm.state.return_to_execution_id == "e-1"
+
+        vm.select_execution("e-1")
+
+        assert vm.state.selected_execution_id == "e-1"
+        assert vm.state.return_to_execution_id is None
+        assert vm.state.restored_scroll_anchor == "m-7"
+        assert vm.state.restored_child_selection == "e-2"
+
+    @pytest.mark.asyncio
+    async def test_injected_view_store_is_used_for_save_and_restore(self) -> None:
+        store = _RecordingViewStore()
+        store.restore = ObservationViewState(scroll_anchor="saved-anchor", selected_execution_id="e-2")
+        read = _session_read(
+            executions=(_execution("e-1"), _execution("e-2", parent_execution_id="e-1")),
+        )
+        vm = ResearchObserverViewModel(_FakeService(read=read), view_store=store)
+        await vm.refresh()
+
+        vm.select_execution("e-1", scroll_anchor="current-anchor")
+
+        assert store.saved[-1] == ("s-1", "", ObservationViewState("current-anchor", "e-1"))
+        assert ("s-1", "e-1") in store.loaded
+        assert vm.state.restored_scroll_anchor == "saved-anchor"
+        assert vm.state.restored_child_selection == "e-2"
+
+    @pytest.mark.asyncio
+    async def test_default_view_store_is_in_memory_and_session_scoped(self) -> None:
+        store = InMemoryObservationViewStateStore()
+        store.save("s-1", "e-1", ObservationViewState(scroll_anchor="a", selected_execution_id="e-2"))
+
+        assert store.load("s-1", "e-1") == ObservationViewState("a", "e-2")
+        assert store.load("s-2", "e-1") is None, "现场必须按会话隔离，不跨会话复用锚点"
+
+    @pytest.mark.asyncio
+    async def test_catch_up_before_first_read_refreshes_instead_of_guessing(self) -> None:
+        service = _EventsService((SimpleNamespace(session_seq=2),))
+        vm = ResearchObserverViewModel(service)
+
+        await vm.catch_up()
+
+        assert vm.state.session_id == "s-1", "无当前会话时返焦应先完成权威首读"
+        assert service.event_calls == [], "首读前没有可核对的水位，不伪造追平"
+
+    @pytest.mark.asyncio
+    async def test_catch_up_without_event_reader_still_reprojects_session(self) -> None:
+        vm = ResearchObserverViewModel(_FakeService())
+        await vm.refresh()
+
+        await vm.catch_up()
+
+        assert vm.state.authoritative_seq == 0
+        assert vm.state.last_catch_up_error_code is None, "未接线事件读取不报错也不宣称已核"
+
+    @pytest.mark.asyncio
+    async def test_catch_up_follows_pages_until_exhausted(self) -> None:
+        class _PagedService(_FakeService):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            async def read_events(self, query: Any) -> Any:
+                self.calls += 1
+                if query.after_seq >= 30:
+                    return SimpleNamespace(events=(), last_seq=query.after_seq, has_more=False)
+                page = (SimpleNamespace(session_seq=query.after_seq + 10),)
+                return SimpleNamespace(events=page, last_seq=query.after_seq + 10, has_more=True)
+
+        vm = ResearchObserverViewModel(_PagedService())
+        await vm.refresh()
+
+        await vm.catch_up()
+
+        assert vm.state.authoritative_seq == 30
+        assert vm.state.last_catch_up_error_code is None
+
+    @pytest.mark.asyncio
+    async def test_catch_up_page_cap_reports_incomplete_not_success(self) -> None:
+        class _EndlessService(_FakeService):
+            def __init__(self) -> None:
+                super().__init__()
+                self.cursor = 0
+
+            async def read_events(self, query: Any) -> Any:
+                self.cursor = query.after_seq + 1
+                return SimpleNamespace(
+                    events=(SimpleNamespace(session_seq=self.cursor),),
+                    last_seq=self.cursor,
+                    has_more=True,
+                )
+
+        vm = ResearchObserverViewModel(_EndlessService())
+        await vm.refresh()
+
+        await vm.catch_up()
+
+        assert vm.state.last_catch_up_error_code == CATCH_UP_INCOMPLETE, "未追平必须如实报码（R21）"
+
+    def test_select_without_loaded_session_does_not_save_placeholder_view(self) -> None:
+        vm = ResearchObserverViewModel(_FakeService())
+
+        vm.select_execution("e-1")
+        vm.apply_stream_text("")
+
+        assert vm.state.selected_execution_id is None
+        assert vm.state.restored_scroll_anchor is None
+        assert vm.state.stream_fragments == ()
