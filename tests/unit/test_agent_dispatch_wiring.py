@@ -161,6 +161,20 @@ class _FakeGate:
         return self._closed
 
 
+class _ToggleGate:
+    """可在派发过程中被合上的门闩（模拟关闭链与在途派发竞态）。"""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close_dispatch(self) -> bool:
+        self.closed = True
+        return True
+
+    def dispatch_closed(self) -> bool:
+        return self.closed
+
+
 class _RecordingSubmitter:
     def __init__(self, *, error: BaseException | None = None) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -484,6 +498,63 @@ def test_dispatch_plan_unavailable_reason_is_structured() -> None:
     assert outcome.reason_code == PLAN_UNAVAILABLE
     assert outcome.reason_params == (("cause", "plan_not_saved"),)
     assert submit.calls == []
+
+
+def test_dispatch_closed_gate_during_plan_fetch_is_zero_dispatch() -> None:
+    """N31：异步取计划期间关闭门合上，返回后必须复验，零额外提交。"""
+
+    submit = _RecordingSubmitter()
+    gate = _ToggleGate()
+
+    async def _plan_closing(user_scope: str, execution_id: str) -> PlanSpecProposal:
+        gate.close_dispatch()
+        return _PLAN
+
+    dispatcher = _dispatcher(gate=gate, submit=submit, plan_provider=_plan_closing)
+
+    outcome = asyncio.run(dispatcher.dispatch(_receipt(), user_scope=_USER_SCOPE))
+
+    assert outcome.submitted is False
+    assert outcome.reason == DISPATCH_CLOSED
+    assert submit.calls == []
+
+
+def test_dispatch_closed_gate_during_binding_resolution_is_zero_dispatch() -> None:
+    """N31：其它准入异步阶段（绑定身份）合门同样必须零提交。"""
+
+    submit = _RecordingSubmitter()
+    gate = _ToggleGate()
+
+    async def _binding_closing(user_scope: str, execution_id: str) -> ParentBindIdentity:
+        gate.close_dispatch()
+        return ParentBindIdentity(
+            user_scope=user_scope,
+            session_id="s1",
+            workflow_code_version="1.0.0",
+            run_epoch=1,
+            expected_input_revision=1,
+        )
+
+    dispatcher = _dispatcher(gate=gate, submit=submit, binding_identity_provider=_binding_closing)
+
+    outcome = asyncio.run(dispatcher.dispatch(_receipt(), user_scope=_USER_SCOPE))
+
+    assert outcome.submitted is False
+    assert outcome.reason == DISPATCH_CLOSED
+    assert submit.calls == []
+
+
+def test_dispatch_open_gate_after_plan_fetch_still_submits() -> None:
+    """N31 对照：门未合上时照常提交（复验不误伤正常派发）。"""
+
+    submit = _RecordingSubmitter()
+    gate = _ToggleGate()
+    dispatcher = _dispatcher(gate=gate, submit=submit)
+
+    outcome = asyncio.run(dispatcher.dispatch(_receipt(), user_scope=_USER_SCOPE))
+
+    assert outcome.submitted is True
+    assert [workflow_id for workflow_id, _ in submit.calls] == [_WORKFLOW_ID]
 
 
 def test_dispatch_uncommitted_receipt_is_zero_dispatch() -> None:

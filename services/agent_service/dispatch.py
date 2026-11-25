@@ -5,6 +5,7 @@
 - **只投递已可靠保存的受理**：``commit_state`` 非 ``COMMITTED`` 一律零派发；
 - **门闩关闭即零派发**：宿主未 launch（配置门闩关闭）或关闭链已关派发时返回
   ``submitted=False`` 与原因，受理事实保持原样（不把「未派发」写成「已派发」）；
+  门闩在异步取计划/准入解析期间合上时，提交前复验并零派发（N31）；
 - **门闩关闭/计划缺失/投递失败都不产生研究执行**；``CancelledError`` 原样传播
   （R2），其余失败如实进 ``reason``，不伪造已派发（R21）；
 - **重复派发幂等**：host 入口以稳定 ``workflow_id`` + ``return-existing`` 启动，
@@ -299,6 +300,14 @@ class ResearchDispatcher:
                 detail=type(exc).__name__,
                 params=(("error", type(exc).__name__),),
             )
+        if self._gate.dispatch_closed():
+            # 异步取计划/准入解析期间关闭门可能已合上（N31）：提交前复验，零额外提交。
+            logger.info(
+                "[ResearchDispatch] dispatch closed during plan resolution, zero dispatch (execution=%s workflow=%s)",
+                execution_id,
+                receipt.workflow_id,
+            )
+            return zero_dispatch(execution_id, receipt.workflow_id, DISPATCH_CLOSED)
         try:
             await self._submit(receipt.workflow_id, payload)
         except asyncio.CancelledError:
