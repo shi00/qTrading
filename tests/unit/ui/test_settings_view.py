@@ -315,6 +315,7 @@ class TestBuildTabs:
             patch("ui.views.settings_view.AutomationTab") as self.mock_auto,
             patch("ui.views.settings_view.NotificationsTab") as self.mock_notify,
             patch("ui.views.settings_view.SystemTab") as self.mock_system,
+            patch("ui.views.settings_view.SkillsTab") as self.mock_skills,
         ):
             self.mock_data.return_value = MagicMock(name="DataSourceTab")
             self.mock_db.return_value = MagicMock(name="DatabaseTab")
@@ -323,13 +324,14 @@ class TestBuildTabs:
             self.mock_auto.return_value = MagicMock(name="AutomationTab")
             self.mock_notify.return_value = MagicMock(name="NotificationsTab")
             self.mock_system.return_value = MagicMock(name="SystemTab")
+            self.mock_skills.return_value = MagicMock(name="SkillsTab")
             yield
 
     def test_build_tabs_returns_7_tabs(self):
         from ui.views.settings_view import _build_tabs
 
         tabs = _build_tabs(MagicMock())
-        assert len(tabs) == 7
+        assert len(tabs) == 8
 
     def test_build_tabs_calls_each_tab_constructor(self):
         """Task 7.2: 惰性构造 — 只构造 current_tab 对应的 tab, 其他为空 Container。"""
@@ -372,7 +374,7 @@ class TestBuildTabs:
         # current_tab=2 (AIBrainTab)
         tabs = _build_tabs(show_snack, current_tab=2)
 
-        assert len(tabs) == 7
+        assert len(tabs) == 8
         # 只有 AIBrainTab 被构造
         self.mock_ai.assert_called_once_with(show_snack)
         # 其他 tab 工厂不应被调用
@@ -409,7 +411,7 @@ class TestBuildTabs:
         show_snack = MagicMock()
         tabs = _build_tabs(show_snack, current_tab=2, visited_tabs={0, 2})
 
-        assert len(tabs) == 7
+        assert len(tabs) == 8
         self.mock_data.assert_called_once_with(show_snack)  # tab 0 visited
         self.mock_ai.assert_called_once_with(show_snack)  # tab 2 visited
         # 未访问 Tab 不构造
@@ -424,7 +426,7 @@ class TestBuildTabs:
         from ui.views.settings_view import _build_tabs
 
         tabs = _build_tabs(MagicMock(), current_tab=1, visited_tabs={0, 1})
-        assert len(tabs) == 7
+        assert len(tabs) == 8
         # current_tab=1 → tabs[1].visible=True
         assert tabs[1].visible is True
         # tab 0 visited 但非 current → visible=False, content 非 None
@@ -452,10 +454,10 @@ class TestBuildTabs:
 class TestTabConfig:
     """_TAB_CONFIG 顺序与 _build_tabs 返回顺序一致。"""
 
-    def test_tab_config_has_7_entries(self):
+    def test_tab_config_has_8_entries(self):
         from ui.views.settings_view import _TAB_CONFIG
 
-        assert len(_TAB_CONFIG) == 7
+        assert len(_TAB_CONFIG) == 8
 
     def test_tab_config_entries_are_tuples(self):
         from ui.views.settings_view import _TAB_CONFIG
@@ -521,6 +523,7 @@ class TestSettingsViewComponentBody:
             patch("ui.views.settings_view.AutomationTab") as self.mock_auto,
             patch("ui.views.settings_view.NotificationsTab") as self.mock_notify,
             patch("ui.views.settings_view.SystemTab") as self.mock_system,
+            patch("ui.views.settings_view.SkillsTab") as self.mock_skills,
         ):
             self.mock_data.return_value = MagicMock(name="DataSourceTab")
             self.mock_db.return_value = MagicMock(name="DatabaseTab")
@@ -529,6 +532,7 @@ class TestSettingsViewComponentBody:
             self.mock_auto.return_value = MagicMock(name="AutomationTab")
             self.mock_notify.return_value = MagicMock(name="NotificationsTab")
             self.mock_system.return_value = MagicMock(name="SystemTab")
+            self.mock_skills.return_value = MagicMock(name="SkillsTab")
             yield
 
     def _mount(self, mock_i18n_state, mock_app_colors_state):
@@ -552,7 +556,7 @@ class TestSettingsViewComponentBody:
         _, result = self._mount(mock_i18n_state, mock_app_colors_state)
         assert isinstance(result, ft.Container)
 
-    def test_mount_renders_seven_tab_buttons(
+    def test_mount_renders_eight_tab_buttons(
         self,
         mock_i18n_state,
         mock_app_colors_state,
@@ -560,7 +564,7 @@ class TestSettingsViewComponentBody:
         """挂载后 tab_bar 包含 7 个 ft.Button (每个 tab 一个)。"""
         _, result = self._mount(mock_i18n_state, mock_app_colors_state)
         buttons = _find_buttons(result)
-        assert len(buttons) == 7
+        assert len(buttons) == 8
 
     def test_mount_first_tab_selected_by_default(
         self,
@@ -775,7 +779,7 @@ class TestSettingsViewComponentBody:
 def _selected_tab_index(result: object) -> int:
     """返回当前 selected 状态的 tab button 索引 (bgcolor=PRIMARY)."""
     buttons = _find_buttons(result)
-    assert len(buttons) == 7, f"应有 7 个 tab button, 实际 {len(buttons)}"
+    assert len(buttons) == 8, f"应有 8 个 tab button, 实际 {len(buttons)}"
     for i, btn in enumerate(buttons):
         bgcolor = getattr(btn.style, "bgcolor", None)
         if bgcolor is None and isinstance(btn.style, dict):
@@ -811,6 +815,7 @@ class TestSettingsViewTargetSubtab:
             patch("ui.views.settings_view.AutomationTab") as self.mock_auto,
             patch("ui.views.settings_view.NotificationsTab") as self.mock_notify,
             patch("ui.views.settings_view.SystemTab") as self.mock_system,
+            patch("ui.views.settings_view.SkillsTab") as self.mock_skills,
         ):
             self.mock_data.return_value = MagicMock(name="DataSourceTab")
             self.mock_db.return_value = MagicMock(name="DatabaseTab")
@@ -819,6 +824,7 @@ class TestSettingsViewTargetSubtab:
             self.mock_auto.return_value = MagicMock(name="AutomationTab")
             self.mock_notify.return_value = MagicMock(name="NotificationsTab")
             self.mock_system.return_value = MagicMock(name="SystemTab")
+            self.mock_skills.return_value = MagicMock(name="SkillsTab")
             yield
 
     def _mount(self, target_subtab: object):
@@ -942,4 +948,5 @@ class TestSettingsSubtabIndex:
             "tasks": 4,
             "notify": 5,
             "system": 6,
+            "skills": 7,
         }

@@ -6,6 +6,7 @@ import shutil
 from utils import config_handler as cfg_mod
 from utils.config_handler import ConfigHandler
 from utils.config.secrets import SaveOutcome
+from utils.config_models import PresetDeleteOutcome
 import pytest
 
 
@@ -3125,29 +3126,29 @@ class TestConfigHandlerStrategyPresets:
 
     # --- delete_strategy_preset：锁内基于磁盘判定存在性 ---
 
-    def test_delete_preset_exists_returns_true(self, preset_config):
-        """删除存在的预设 → 返回 True, 预设从盘面移除"""
+    def test_delete_preset_exists_returns_deleted(self, preset_config):
+        """删除存在的预设 → DELETED, 预设从盘面移除"""
         self._write_presets(preset_config, {"保守型": {"pe": 15}})
-        assert ConfigHandler.delete_strategy_preset("value_strategy", "保守型") is True
+        assert ConfigHandler.delete_strategy_preset("value_strategy", "保守型") is PresetDeleteOutcome.DELETED
         assert self._read_presets(preset_config) == {}
 
-    def test_delete_preset_not_exists_returns_false(self, preset_config):
-        """删除不存在的预设 → 返回 False, 不写盘"""
+    def test_delete_preset_not_exists_returns_not_found(self, preset_config):
+        """删除不存在的预设 → NOT_FOUND（非写失败）, 不写盘"""
         self._write_presets(preset_config, {"保守型": {"pe": 15}})
         with patch.object(cfg_mod.ConfigHandler, "_save_json_atomically") as mock_save:
-            assert ConfigHandler.delete_strategy_preset("value_strategy", "不存在") is False
+            assert ConfigHandler.delete_strategy_preset("value_strategy", "不存在") is PresetDeleteOutcome.NOT_FOUND
             mock_save.assert_not_called()
         assert self._read_presets(preset_config) == {"保守型": {"pe": 15}}
 
-    def test_delete_preset_empty_config_returns_false(self, preset_config):
-        """配置无预设时删除 → 返回 False，且不创建配置文件"""
-        assert ConfigHandler.delete_strategy_preset("value_strategy", "任何") is False
+    def test_delete_preset_empty_config_returns_not_found(self, preset_config):
+        """配置无预设时删除 → NOT_FOUND，且不创建配置文件"""
+        assert ConfigHandler.delete_strategy_preset("value_strategy", "任何") is PresetDeleteOutcome.NOT_FOUND
         assert not preset_config.exists()
 
-    def test_delete_preset_invalid_type_returns_false(self, preset_config):
-        """预设字段类型非法时删除 → 返回 False (防御性)"""
+    def test_delete_preset_invalid_type_returns_not_found(self, preset_config):
+        """预设字段类型非法时删除 → NOT_FOUND (防御性)"""
         self._write_presets(preset_config, "not_a_dict")
-        assert ConfigHandler.delete_strategy_preset("value_strategy", "任何") is False
+        assert ConfigHandler.delete_strategy_preset("value_strategy", "任何") is PresetDeleteOutcome.NOT_FOUND
 
     def test_delete_preset_stale_cache_does_not_resurrect(self, preset_config):
         """D02-F06：A 的旧快照仍含 old，B 已删除 old → A 的操作不得复活 old。
@@ -3157,21 +3158,36 @@ class TestConfigHandlerStrategyPresets:
         self._write_presets(preset_config, {"old": {"pe": 1}, "keep": {"pe": 2}})
         ConfigHandler.load_config()  # A 的旧快照仍含 old
         self._write_presets(preset_config, {"keep": {"pe": 2}})  # B 已删除 old
-        assert ConfigHandler.delete_strategy_preset("value_strategy", "old") is False
+        assert ConfigHandler.delete_strategy_preset("value_strategy", "old") is PresetDeleteOutcome.NOT_FOUND
         assert ConfigHandler.save_strategy_preset("value_strategy", "A", {"pe": 3}) is True
         assert self._read_presets(preset_config) == {"keep": {"pe": 2}, "A": {"pe": 3}}
 
     def test_delete_preset_write_failure_keeps_disk_and_cache(self, preset_config):
-        """删除写失败 → 磁盘与缓存保持已提交值（不得半提交）。"""
+        """删除写失败 → WRITE_FAILED（区别于目标缺失），磁盘与缓存保持已提交值（不得半提交）。"""
         self._write_presets(preset_config, {"a": {"pe": 1}, "b": {"pe": 2}})
         ConfigHandler.load_config()
         with patch.object(cfg_mod.ConfigHandler, "_save_json_atomically", return_value=False):
-            assert ConfigHandler.delete_strategy_preset("value_strategy", "a") is False
+            assert ConfigHandler.delete_strategy_preset("value_strategy", "a") is PresetDeleteOutcome.WRITE_FAILED
         assert self._read_presets(preset_config) == {"a": {"pe": 1}, "b": {"pe": 2}}
         assert ConfigHandler.load_config()["strategy_presets_value_strategy"] == {
             "a": {"pe": 1},
             "b": {"pe": 2},
         }
+
+    def test_delete_preset_lock_timeout_returns_write_failed(self, preset_config):
+        """文件锁超时（存储未提交）→ WRITE_FAILED，不得报为目标缺失。"""
+        from utils.config.storage import ConfigFileLockTimeoutError
+
+        self._write_presets(preset_config, {"a": {"pe": 1}})
+        with patch("utils.config.storage._config_file_lock", side_effect=ConfigFileLockTimeoutError("timeout")):
+            assert ConfigHandler.delete_strategy_preset("value_strategy", "a") is PresetDeleteOutcome.WRITE_FAILED
+        assert self._read_presets(preset_config) == {"a": {"pe": 1}}
+
+    def test_delete_preset_read_error_returns_write_failed(self, preset_config):
+        """磁盘读取失败 → WRITE_FAILED，不得报为目标缺失。"""
+        self._write_presets(preset_config, {"a": {"pe": 1}})
+        with patch("utils.config.storage._read_disk_dict", return_value=(None, "boom")):
+            assert ConfigHandler.delete_strategy_preset("value_strategy", "a") is PresetDeleteOutcome.WRITE_FAILED
 
     # --- 缓存引用隔离（深拷贝回归） ---
 
@@ -3198,7 +3214,7 @@ class TestConfigHandlerStrategyPresets:
         self._write_presets(preset_config, {"a": {"pe": 1}, "b": {"pe": 2}})
         ConfigHandler.load_config()
         with patch.object(cfg_mod.ConfigHandler, "_save_json_atomically", return_value=False):
-            assert ConfigHandler.delete_strategy_preset("value_strategy", "a") is False
+            assert ConfigHandler.delete_strategy_preset("value_strategy", "a") is PresetDeleteOutcome.WRITE_FAILED
         assert ConfigHandler.load_config()["strategy_presets_value_strategy"] == {
             "a": {"pe": 1},
             "b": {"pe": 2},
@@ -3256,13 +3272,13 @@ class TestConfigHandlerStrategyPresets:
     def test_overwrite_then_delete_flow(self, preset_config):
         """② 重名覆盖 → 删除流程
 
-        保存 "my" 预设 (pe=15) → 重名覆盖 (pe=20) → 删除 → 返回 True
+        保存 "my" 预设 (pe=15) → 重名覆盖 (pe=20) → 删除 → DELETED
         """
         self._write_presets(preset_config, {"my": {"pe": 15}})
         assert ConfigHandler.save_strategy_preset("value_strategy", "my", {"pe": 20}) is True
         assert self._read_presets(preset_config)["my"] == {"pe": 20}
 
-        assert ConfigHandler.delete_strategy_preset("value_strategy", "my") is True
+        assert ConfigHandler.delete_strategy_preset("value_strategy", "my") is PresetDeleteOutcome.DELETED
         assert self._read_presets(preset_config) == {}
 
 

@@ -587,6 +587,39 @@ def _guarded_http_client(
     return factory
 
 
+class _LivenessSignal:
+    """子进程自行退出的**一次性**信号（登记前后都不丢事件）。
+
+    stdio 传输可能在 ``open`` 返回后、管理器登记会话前就观测到进程退出；信号先
+    记下已退出，待处理函数登记时立即补发，避免这段窗口内的退出被静默丢弃
+    （否则又回到「进程已退出但仍显示已连接」）。HTTP/SSE 无子进程，不会触发。
+    """
+
+    def __init__(self) -> None:
+        self._fired = False
+        self._handler: Callable[[], None] | None = None
+
+    @property
+    def fired(self) -> bool:
+        """进程是否已自行退出（发送门据此拒绝新请求）。"""
+        return self._fired
+
+    def fire(self) -> None:
+        """标记退出并通知已登记的处理函数；重复调用只通知一次。"""
+        if self._fired:
+            return
+        self._fired = True
+        handler = self._handler
+        if handler is not None:
+            handler()
+
+    def on_lost(self, handler: Callable[[], None]) -> None:
+        """登记处理函数；若退出已发生则立即补发。"""
+        self._handler = handler
+        if self._fired:
+            handler()
+
+
 class MCPSendGate:
     """每次出站请求前的门：会话存活 + 本次 operation 独立 deadline；记录出站次数。"""
 
@@ -636,6 +669,7 @@ class FastMCPSession:
         stderr_drain: _SanitizedStderrDrain | None,
         on_close: Callable[[], None],
         stdio_env: _ManagedStdioEnvironment | None = None,
+        liveness: _LivenessSignal | None = None,
     ) -> None:
         self._client = client
         self._config = config
@@ -645,6 +679,7 @@ class FastMCPSession:
         self._stderr_drain = stderr_drain
         self._on_close = on_close
         self._stdio_env = stdio_env
+        self._liveness = liveness if liveness is not None else _LivenessSignal()
         self._closed = False
         self._stderr_drain_closed = False
 
@@ -655,6 +690,10 @@ class FastMCPSession:
     @property
     def gate(self) -> MCPSendGate:
         return self._gate
+
+    def set_lost_handler(self, handler: Callable[[], None]) -> None:
+        """登记「子进程自行退出」通知；退出已发生则立即补发（登记窗口不丢事件）。"""
+        self._liveness.on_lost(handler)
 
     async def list_tools(self, *, deadline_s: int) -> tuple[MCPToolDescriptor, ...]:
         deadline = self._gate.before_send("list_tools", deadline_s=deadline_s)
@@ -785,6 +824,8 @@ class FastMCPClientFactory:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"invalid mcp config: {exc.code}", label) from exc
         # 诊断先于 client 构造：HTTP 目标核验在传输层记录，须与连接期共用同一实例。
         diagnostics = MCPSessionDiagnostics()
+        # 子进程自行退出的信号：stdio 传输直接触发，发送门与共享连接管理器据此失效。
+        liveness = _LivenessSignal()
         is_stdio = config.transport.kind is MCPTransportKind.STDIO
         http_headers: dict[str, str] | None = None
         if not is_stdio and config.transport.headers:
@@ -819,6 +860,7 @@ class FastMCPClientFactory:
                 label=label,
                 headers=http_headers,
                 inbound=guard,
+                on_process_exit=liveness.fire,
             )
         except Exception as exc:
             _discard_drain(drain)
@@ -859,7 +901,7 @@ class FastMCPClientFactory:
             closed = True
 
         def _alive() -> bool:
-            return not closed
+            return not closed and not liveness.fired
 
         return FastMCPSession(
             client,
@@ -874,6 +916,7 @@ class FastMCPClientFactory:
             stderr_drain=drain,
             on_close=_mark_closed,
             stdio_env=stdio_env,
+            liveness=liveness,
         )
 
     # -- 内部 ---------------------------------------------------------------
@@ -888,6 +931,7 @@ class FastMCPClientFactory:
         label: str,
         headers: dict[str, str] | None = None,
         inbound: MCPBudgetGuard | None = None,
+        on_process_exit: Callable[[], None] | None = None,
     ) -> Any:
         transport = config.transport
         if transport.kind is MCPTransportKind.STDIO:
@@ -905,6 +949,7 @@ class FastMCPClientFactory:
                 errlog=cast("TextIO", drain),
                 on_exit_status=diagnostics.set_exit_status,
                 on_limit_exceeded=lambda family: diagnostics.record(f"inbound_limit:{family}"),
+                on_process_exit=on_process_exit,
             )
         assert transport.url is not None
         factory = _guarded_http_client(_ApprovedHTTPTarget.from_url(transport.url), diagnostics, label, inbound=inbound)

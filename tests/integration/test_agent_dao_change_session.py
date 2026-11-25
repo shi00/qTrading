@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -27,6 +28,8 @@ from core.agent_types import (
     AgentServiceError,
     CommandRef,
     CommitState,
+    EventKind,
+    EventReadQuery,
     SessionAction,
     SessionChangeCommand,
 )
@@ -216,6 +219,39 @@ class TestMetadataActions:
         assert row.revision == 2
         assert row.updated_at > before.updated_at
 
+    async def test_rename_read_back_revision_and_reuse_for_next_action(self, real_embedded_pg: ConnectionInfo) -> None:
+        """N23：改名后只读查回与改名回执同版，且该版本可作为下一动作的 CAS 令牌。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        renamed = await dao.change_session(
+            _command(action=SessionAction.RENAME, expected=1, title="改名后", command_id="cmd-rename")
+        )
+        assert renamed.current_revision == 2
+
+        read = await dao.read_command(
+            CommandRef(
+                user_scope=_USER,
+                source_module="ui",
+                business_request_id="req-cmd-rename",
+                command_id="cmd-rename",
+                expected_revision=1,
+            ),
+            user_scope=_USER,
+            target_id="s1",
+        )
+        assert read.current_revision == renamed.current_revision == 2
+        # 只读查回不产生新命令（不执行第二次改名）。
+        assert len(await _command_rows(real_embedded_pg.url)) == 1
+
+        pinned = await dao.change_session(
+            _command(action=SessionAction.PIN, expected=read.current_revision, title=None, command_id="cmd-pin")
+        )
+        assert pinned.current_revision == 3
+        row = await _session_row(real_embedded_pg.url)
+        assert row.title == "改名后" and row.pinned is True and row.revision == 3
+        assert len(await _command_rows(real_embedded_pg.url)) == 2
+
     async def test_stale_rename_conflicts_with_zero_new_facts(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao)
@@ -341,3 +377,49 @@ class TestMetadataActions:
         row = await _session_row(real_embedded_pg.url)
         assert row.revision == 1
         assert await _command_rows(real_embedded_pg.url) == []
+
+
+class TestMetadataEvents:
+    """N22：元数据动作提交后从原水位可追平一条准确 ``session_changed`` 事件。"""
+
+    async def test_rename_pin_archive_append_accurate_watermarked_events(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        await dao.change_session(
+            _command(action=SessionAction.RENAME, expected=1, title="改名后", command_id="c-rename")
+        )
+        await dao.change_session(_command(action=SessionAction.PIN, expected=2, title=None, command_id="c-pin"))
+        await dao.change_session(_command(action=SessionAction.ARCHIVE, expected=3, title=None, command_id="c-arc"))
+
+        page = await dao.read_events(EventReadQuery(user_scope=_USER, session_id="s1", after_seq=0))
+        assert [event.session_seq for event in page.events] == [1, 2, 3]
+        assert all(event.event_kind is EventKind.SESSION_CHANGED for event in page.events)
+        assert all(event.payload_kind == "session_changed" for event in page.events)
+        assert [event.subject_revision for event in page.events] == [2, 3, 4]
+        payloads = [json.loads(event.payload_canonical_json) for event in page.events]
+        assert [payload["action"] for payload in payloads] == ["rename", "pin", "archive"]
+        assert [payload["session_revision"] for payload in payloads] == [2, 3, 4]
+        assert payloads[0]["title"] == "改名后" and payloads[0]["title_user_set"] is True
+        assert payloads[1]["pinned"] is True
+        assert payloads[2]["archived"] is True
+
+        # 水位推进：从 seq=2 续读只得到第 3 条（增量订阅不再漏报）。
+        tail = await dao.read_events(EventReadQuery(user_scope=_USER, session_id="s1", after_seq=2))
+        assert [event.session_seq for event in tail.events] == [3]
+
+    async def test_replay_and_conflict_append_no_extra_events(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        command = _command(action=SessionAction.RENAME, expected=1, title="改名后")
+        first = await dao.change_session(command)
+        assert await dao.change_session(command) == first
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.change_session(_command(action=SessionAction.PIN, expected=1, title=None, command_id="c-stale"))
+        _expect_error(excinfo, AgentErrorCode.REVISION_CONFLICT)
+
+        page = await dao.read_events(EventReadQuery(user_scope=_USER, session_id="s1", after_seq=0))
+        assert [event.session_seq for event in page.events] == [1]
+        assert json.loads(page.events[0].payload_canonical_json)["session_revision"] == 2

@@ -107,6 +107,8 @@ class ScreenerViewModel(
         # Immutable state + subscribers (§3.0.1)
         self._state: ScreenerState = ScreenerState()
         self._init_mixin_fields()
+        # N09: 方案列表刷新所有权 token（内部状态，不进 state；见 refresh_presets）。
+        self._preset_refresh_token: object | None = None
 
         # Internal mutable data (双轨制, not in state)
         self._full_results: pd.DataFrame | None = None

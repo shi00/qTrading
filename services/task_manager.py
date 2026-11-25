@@ -111,6 +111,20 @@ class TaskStatus(Enum):
     INTERRUPTED = "INTERRUPTED"  # Was running when the app closed unexpectedly
 
 
+def _resolve_business_db_url(cache: Any) -> str | None:
+    """由当前缓存引擎解析业务库连接串（非 SQLAlchemy 引擎返回 ``None``）。
+
+    返回值只用于建立所有权锁连接，不写日志（连接串含口令，R9）。
+    """
+
+    from sqlalchemy.engine import URL
+
+    url = getattr(getattr(cache, "engine", None), "url", None)
+    if not isinstance(url, URL):
+        return None
+    return url.render_as_string(hide_password=False)
+
+
 # Terminal statuses — used for clear/evict/UI filtering
 TERMINAL_STATUSES = (
     TaskStatus.COMPLETED,
@@ -275,6 +289,10 @@ class TaskManager:
             if inst is not None and inst._flush_handle is not None:
                 inst._flush_handle.cancel()  # D6-4: drop loop-bound timer before teardown
                 inst._flush_handle = None
+            if inst is not None:
+                # D05-N02: 单例重置即放弃业务库唯一所有权（连接关闭 → 会话锁释放），
+                # 否则残留锁会让同进程的下一次初始化误判为「另一存活实例」。
+                inst._release_ownership_lock()
             cls._instance = None
             cls._initialized = False
             # R7: 清空工厂注册表，防止测试间注册泄漏（测试内显式重注册所需工厂）
@@ -293,9 +311,13 @@ class TaskManager:
         正常路径（``cancel_all_running_async`` 正确 await）成立。正常关机已完成时短路，
         避免重复 cancel（日志噪音 + 无意义兜底）。
         """
+        # D05-N02: 进程退出即放弃业务库唯一所有权（连接关闭 → 会话锁释放）；
+        # 放在优雅关停短路之前，确保正常退出路径也显式收口独立锁引擎。
+        inst = cls._instance
+        if inst is not None:
+            inst._release_ownership_lock()
         if is_graceful_shutdown_completed():
             return
-        inst = cls._instance
         if inst is not None:
             for task in list(inst._tasks.values()):
                 if task._asyncio_task and not task._asyncio_task.done():
@@ -334,6 +356,9 @@ class TaskManager:
 
             # History loaded from DB (read-only, separate from active _tasks)
             self._history: list[AppTask] = []
+            # D05-N02: 业务库唯一所有权锁（会话级 advisory lock，独立单连接引擎）。
+            # 持有期间证明本进程是业务库唯一存活执行者；非 None 即本进程已取得所有权。
+            self._ownership_lock: Any | None = None
             self._db_ready = False
             self._loop: asyncio.AbstractEventLoop | None = None  # Captured in init_db
             self._persist_pending_count = 0
@@ -1159,8 +1184,14 @@ class TaskManager:
             return None
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
-    async def init_db(self):
-        """Initialize persistence layer. Called once from main.py after CacheManager.init_db()."""
+    async def init_db(self, *, ownership_lock: Any | None = None):
+        """Initialize persistence layer. Called once from main.py after CacheManager.init_db().
+
+        Args:
+            ownership_lock: 业务库唯一所有权锁端口（``InstanceOwnershipLock`` 形状，
+                测试可注入替身）。缺省时按当前引擎连接目标自建；无法解析
+                SQLAlchemy 引擎（测试替身）时按既有行为放行。
+        """
         logger.info("[TaskManager] init_db started")
         from data.cache.cache_manager import CacheManager
 
@@ -1168,6 +1199,16 @@ class TaskManager:
 
         # Capture the running loop so thread-pool callers can schedule back
         self._loop = asyncio.get_running_loop()
+
+        # D05-N02：stale 回填只在「本进程是业务库唯一存活执行者」时成立。第二个进程
+        # 连到同一已就绪外置库时，首进程仍在跑的任务行仍是活的；无 owner 条件的回填
+        # 会把它们显示成「已中断」，却停不掉首进程的实际执行。故先取 PG 会话级唯一
+        # 所有权锁，取不到即在本函数任何业务写库（UPDATE/DELETE）之前停止，也不开放
+        # 业务提交准入（零副作用）。
+        if not await self._acquire_ownership(cache, ownership_lock):
+            from data.persistence.instance_lock import InstanceOwnershipConflictError
+
+            raise InstanceOwnershipConflictError()
 
         # D03-001: 启动/重启边界重新开放业务提交准入（递增代际，拒绝上一代际遗留的
         # 延迟 _enqueue 闭包）。停机路径由 close_admission 关闭。
@@ -1237,6 +1278,38 @@ class TaskManager:
 
         self._db_ready = True
         logger.info("[TaskManager] Persistence layer initialized.")
+
+    async def _acquire_ownership(self, cache: Any, ownership_lock: Any | None) -> bool:
+        """取得业务库唯一所有权（已持有则幂等）；无 SQLAlchemy 引擎目标时按无锁放行。
+
+        生产 ``CacheManager.engine`` 恒为 ``AsyncEngine``（带 ``url``），故正常路径必然
+        建立跨进程证据；非 SQLAlchemy 引擎只出现在测试替身，此时保持既有回填行为。
+        """
+
+        lock = ownership_lock if ownership_lock is not None else self._ownership_lock
+        if lock is not None:
+            return bool(await lock.acquire())
+        url = _resolve_business_db_url(cache)
+        if url is None:
+            logger.debug(
+                "[TaskManager] Business database URL unresolvable on the current engine; "
+                "task ownership lock not enforced"
+            )
+            return True
+        from data.persistence.instance_lock import InstanceOwnershipLock
+
+        lock = InstanceOwnershipLock(url)
+        if not await lock.acquire():
+            return False
+        self._ownership_lock = lock
+        return True
+
+    def _release_ownership_lock(self) -> None:
+        """放弃业务库唯一所有权（单例重置/进程退出；连接关闭即释放会话锁）。"""
+
+        lock, self._ownership_lock = self._ownership_lock, None
+        if lock is not None:
+            lock.force_release()
 
     def _rehydrate_retry_info(self, t: "AppTask", row) -> None:
         """从 DB 行回填崩溃重试所需信息 (LIFE-01)。

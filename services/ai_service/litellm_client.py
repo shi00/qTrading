@@ -373,12 +373,16 @@ class _StrictNoDropResendGuard:
     httpx response 钩子抛出的异常会被 OpenAI SDK 归为连接错误（不携带状态码），
     故由 :func:`_strict_params_policy_error` 依据 ``rejected_status`` 重新给出
     策略异常，保证错误语义与 attempt 身份可核。
+
+    ``close_error``（N04）：尝试结束时的 client 关闭失败——只作收尾状态单列，
+    不回写本次尝试的结果/用量（关闭在响应解析与计量之后，失败不影响已获响应）。
     """
 
-    __slots__ = ("rejected_status",)
+    __slots__ = ("close_error", "rejected_status")
 
     def __init__(self) -> None:
         self.rejected_status: int | None = None
+        self.close_error: Exception | None = None
 
     async def on_response(self, response: httpx.Response) -> None:
         # httpx.AsyncClient 会 await 响应钩子，故必须是协程；在 SDK 解析 422 前抛错，
@@ -452,6 +456,11 @@ async def _strict_egress_dispatch(
     注入的 ``client`` 键覆盖 LiteLLM 的默认客户端，端点/凭据与本次连接声明一致；
     代理按目标 host 显式决策（不依赖 ``ProxyManager.litellm_env_context()`` 写入的
     env 默认值，避免本机端点被环境代理劫持）。
+
+    N04：关闭属于收尾动作——已获响应与报告用量已在离开本上下文前解析完毕，关闭
+    失败（异常 / 挂起超时）只降级为 warning 并单列到 ``guard.close_error``，不得
+    改写本次尝试的结果与用量（有界宽限同 ``_close_chat_stream``）。取消始终传播
+    （R2）。
     """
     guard = _StrictNoDropResendGuard()
     client = _build_strict_guard_client(
@@ -469,7 +478,19 @@ async def _strict_egress_dispatch(
         yield guard
     finally:
         if client is not None:
-            await client.close()
+            try:
+                await asyncio.wait_for(client.close(), timeout=_STREAM_CLOSE_GRACE_S)
+            except asyncio.CancelledError:
+                raise  # R2: 必须传播
+            except Exception as close_err:
+                guard.close_error = close_err
+                import services.ai_service as _ai
+
+                logger.warning(
+                    "[AIService] Strict egress | Injected client close failed after dispatch "
+                    "(response kept, cleanup status single-column): %s",
+                    _ai.DataSanitizer.sanitize_error(close_err),
+                )
 
 
 def _strict_params_policy_error(
@@ -1262,6 +1283,9 @@ class LiteLLMClient:
         # 「已出站但无审计」或「失败被记成 sent」。异常解释与结果记录都在同一
         # try/except 内完成，保证每次尝试恰一条记录（无意图+结果双记）。
         strict_guard: _StrictNoDropResendGuard | None = None
+        content: str | None = None
+        usage: NormalizedLLMUsage | None = None
+        actual_model: str | None = None
         try:
             with ProxyManager.litellm_env_context():
                 async with _strict_egress_dispatch(
@@ -1271,36 +1295,40 @@ class LiteLLMClient:
                     api_version=api_version,
                 ) as strict_guard:
                     response = await _ai.acompletion(**request_params)
-
-            # F27 内容安全拒绝提取（云响应 → 策略终态信号）：只读 content 会把 refusal /
-            # content_filter 伪装成「无输出」，Executor 将按输出非法类切换候选绕过安全
-            # 拒绝。此处将拒绝信号提炼为 AIContentRefusedError（策略终态，Executor 终止
-            # 整个候选遍历，禁止重试与换候选绕过）。
-            # 覆盖边界（R21 诚实声明）：识别 OpenAI 兼容 chat completions 响应模式的
-            # ``message.refusal`` 与 ``finish_reason == "content_filter"``（OpenAI / Azure
-            # 及 LiteLLM 归一化透传该模式的 provider；SDK 层内容策略异常
-            # ContentPolicyViolationError 由 Executor 异常分类承载）；Anthropic / Gemini
-            # 等原生拒绝块格式（如 Gemini promptFeedback.blockReason）未核验、不伪装
-            # 已覆盖。Retry-After 同理仅承诺数值形态（见 Executor _backoff）。
-            choice = response.choices[0]
-            message = choice.message  # type: ignore[union-attr]
-            content = message.content  # type: ignore[union-attr]
-            refusal = getattr(message, "refusal", None)
-            finish_reason = getattr(choice, "finish_reason", None)
-            if (isinstance(refusal, str) and refusal.strip()) or finish_reason == "content_filter":
-                logger.warning(
-                    "[AIService] UnifiedChain | Content refused by provider policy "
-                    "(refusal=%s, finish_reason=%s) — raising terminal refusal for scenario '%s'",
-                    bool(refusal),
-                    finish_reason,
-                    request.scenario_id,
-                )
-                raise AIContentRefusedError(
-                    Message("llm_err_content_policy"),
-                    detail="Provider content policy refusal extracted from non-streaming response "
-                    "(message.refusal / finish_reason=content_filter).",
-                )
-            usage = normalize_litellm_usage(getattr(response, "usage", None))
+                    # N04：响应解析与用量归一化在**关闭注入 client 之前**完成——
+                    # 关闭属收尾动作，其失败（见 _strict_egress_dispatch）不得让已获
+                    # 响应与报告用量随之丢失。
+                    #
+                    # F27 内容安全拒绝提取（云响应 → 策略终态信号）：只读 content 会把
+                    # refusal / content_filter 伪装成「无输出」，Executor 将按输出非法类
+                    # 切换候选绕过安全拒绝。此处将拒绝信号提炼为 AIContentRefusedError
+                    # （策略终态，Executor 终止整个候选遍历，禁止重试与换候选绕过）。
+                    # 覆盖边界（R21 诚实声明）：识别 OpenAI 兼容 chat completions 响应模式的
+                    # ``message.refusal`` 与 ``finish_reason == "content_filter"``（OpenAI / Azure
+                    # 及 LiteLLM 归一化透传该模式的 provider；SDK 层内容策略异常
+                    # ContentPolicyViolationError 由 Executor 异常分类承载）；Anthropic / Gemini
+                    # 等原生拒绝块格式（如 Gemini promptFeedback.blockReason）未核验、不伪装
+                    # 已覆盖。Retry-After 同理仅承诺数值形态（见 Executor _backoff）。
+                    choice = response.choices[0]
+                    message = choice.message  # type: ignore[union-attr]
+                    content = message.content  # type: ignore[union-attr]
+                    refusal = getattr(message, "refusal", None)
+                    finish_reason = getattr(choice, "finish_reason", None)
+                    if (isinstance(refusal, str) and refusal.strip()) or finish_reason == "content_filter":
+                        logger.warning(
+                            "[AIService] UnifiedChain | Content refused by provider policy "
+                            "(refusal=%s, finish_reason=%s) — raising terminal refusal for scenario '%s'",
+                            bool(refusal),
+                            finish_reason,
+                            request.scenario_id,
+                        )
+                        raise AIContentRefusedError(
+                            Message("llm_err_content_policy"),
+                            detail="Provider content policy refusal extracted from non-streaming response "
+                            "(message.refusal / finish_reason=content_filter).",
+                        )
+                    usage = normalize_litellm_usage(getattr(response, "usage", None))
+                    actual_model = getattr(response, "model", None)
         except asyncio.CancelledError:
             await _audit_egress_outcome(status="cancelled", error_category="cancelled", **audit_kwargs)
             raise  # R2: 必须传播
@@ -1319,12 +1347,16 @@ class LiteLLMClient:
                 raise policy_exc from exc
             raise
 
+        # N04：收尾（client 关闭）失败只单列状态，不改变本次尝试的成功语义与用量。
+        adapter_metadata: dict[str, Any] = {}
+        if strict_guard is not None and strict_guard.close_error is not None:
+            adapter_metadata["cleanup_status"] = "close_failed"
         await _audit_egress_outcome(status="sent", **audit_kwargs)
         return AdapterResponse(
             content=content,
             usage=usage,
-            actual_model=getattr(response, "model", None),
-            metadata={},
+            actual_model=actual_model,
+            metadata=adapter_metadata,
         )
 
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE, log_args=False)

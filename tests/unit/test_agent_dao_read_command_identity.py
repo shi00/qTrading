@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from core.agent_types import (
     AgentErrorCode,
     AgentServiceError,
+    CommandReceipt,
     CommandRef,
     CommitState,
     ConsumptionState,
@@ -35,6 +36,8 @@ from core.agent_types import (
     DraftTransferReceipt,
     DraftTransferSourceKind,
     SendableOwner,
+    decode_command_receipt,
+    encode_command_receipt,
     encode_draft_transfer_receipt,
 )
 from data.persistence.daos.agent_dao import AgentDao
@@ -259,6 +262,104 @@ class TestReadCommandIdentityPreFilter:
             await _dao(store).read_command(_ref(), user_scope="u1", target_id="")
         assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
         assert store.statements == []
+
+
+def _command_receipt_payload(*, revision: int, command_id: str = "c-1", target_id: str = "s1") -> dict[str, Any]:
+    """命令行保存的 CommandReceipt（改名等 CAS 命令推进的实体版本存于此）。"""
+
+    return encode_command_receipt(
+        CommandReceipt(
+            command=_ref(command_id=command_id),
+            target_id=target_id,
+            current_revision=revision,
+            commit_state=CommitState.COMMITTED,
+            delivery_state=DeliveryState.NOT_DELIVERED,
+            consumption_state=ConsumptionState.NOT_CONSUMED,
+            updated_at="2026-06-01T12:00:00.000000Z",
+            error_code=None,
+            next_action=None,
+        )
+    )
+
+
+class TestReadCommandCurrentRevision:
+    """N23：只读查回的 ``current_revision`` 取保存时落库的回执版本，与重放同版。
+
+    会话改名把会话 ``revision`` 1→2 并存入命令回执，但命令行自身 ``revision``
+    恒为初值；直接把命令行修订号当 ``current_revision`` 会让调用方拿旧 CAS 令牌
+    续做归档等操作而无故 ``REVISION_CONFLICT``。
+    """
+
+    async def test_change_session_returns_landed_revision_not_command_row_revision(self) -> None:
+        store = _CommandStore(
+            [
+                _command_row(
+                    command_kind="change_session",
+                    expected_revision=1,
+                    receipt_payload=_command_receipt_payload(revision=2),
+                )
+            ]
+        )
+
+        receipt = await _dao(store).read_command(_ref(expected_revision=1), user_scope="u1", target_id="s1")
+
+        assert receipt.current_revision == 2
+        assert receipt.target_id == "s1"
+
+    async def test_read_matches_replay_receipt_revision(self) -> None:
+        payload = _command_receipt_payload(revision=2)
+        store = _CommandStore(
+            [_command_row(command_kind="change_session", expected_revision=1, receipt_payload=payload)]
+        )
+
+        receipt = await _dao(store).read_command(_ref(expected_revision=1), user_scope="u1", target_id="s1")
+
+        # 重放路径（change_session 步骤 1）直接解码同一 receipt_payload。
+        assert receipt.current_revision == decode_command_receipt(payload).current_revision
+
+    async def test_data_consent_revoke_returns_landed_revision(self) -> None:
+        store = _CommandStore(
+            [
+                _command_row(
+                    command_kind="data_consent_revoke",
+                    expected_revision=1,
+                    receipt_payload=_command_receipt_payload(revision=3),
+                )
+            ]
+        )
+
+        receipt = await _dao(store).read_command(_ref(expected_revision=1), user_scope="u1", target_id="s1")
+
+        assert receipt.current_revision == 3
+
+    async def test_command_kind_without_command_receipt_keeps_row_revision(self) -> None:
+        store = _CommandStore([_command_row(command_kind="submit", expected_revision=1, receipt_payload=None)])
+
+        receipt = await _dao(store).read_command(_ref(expected_revision=1), user_scope="u1", target_id="s1")
+
+        assert receipt.current_revision == 1
+
+    async def test_missing_receipt_for_receipt_bearing_kind_is_unknown(self) -> None:
+        store = _CommandStore([_command_row(command_kind="change_session", expected_revision=1, receipt_payload=None)])
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _dao(store).read_command(_ref(expected_revision=1), user_scope="u1", target_id="s1")
+        assert excinfo.value.code is AgentErrorCode.OPERATION_UNKNOWN
+
+    async def test_undecodable_receipt_for_receipt_bearing_kind_is_unknown(self) -> None:
+        store = _CommandStore(
+            [
+                _command_row(
+                    command_kind="change_session",
+                    expected_revision=1,
+                    receipt_payload={"current_revision": "not-an-int"},
+                )
+            ]
+        )
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _dao(store).read_command(_ref(expected_revision=1), user_scope="u1", target_id="s1")
+        assert excinfo.value.code is AgentErrorCode.OPERATION_UNKNOWN
 
 
 class TestReadDraftTransferIdentityPreFilter:

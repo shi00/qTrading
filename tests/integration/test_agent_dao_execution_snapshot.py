@@ -346,8 +346,12 @@ async def _seed_ledger(
     cost_cny: str | None,
     reservation_state: str | None = None,
     extra_attempt_ids: tuple[str, ...] = (),
+    owner_lease_expires_at: datetime = datetime(2099, 1, 1, 12, 0, 0),
 ) -> None:
-    """原账本最小合法行（ai_invocation + ai_attempt），可选活跃预留。"""
+    """原账本最小合法行（ai_invocation + ai_attempt），可选活跃预留。
+
+    默认 owner 租约远未到期（普通预留计入活跃）；需验证过租释放时显式传过去时刻。
+    """
 
     reservations: list[dict] = []
     if reservation_state is not None:
@@ -361,7 +365,7 @@ async def _seed_ledger(
                 reservations=reservations,
                 owner_session_id="s-snap",
                 owner_epoch=1,
-                owner_lease_expires_at=datetime(2026, 6, 1, 12, 0, 0),
+                owner_lease_expires_at=owner_lease_expires_at,
             )
         )
         for current_attempt_id in (attempt_id, *extra_attempt_ids):
@@ -638,6 +642,61 @@ class TestSnapshotCredibility:
 
         assert snap.usage.cost_state == "reserved"
         assert snap.limitations == ()
+        assert snap.observation.reliable is True
+
+    async def test_expired_reservation_is_not_active(self, real_embedded_pg) -> None:
+        """N25：普通预留过租即失权（fencing 保证不可再推进），不再视为活跃占用。"""
+        dao = await _setup(real_embedded_pg.url)
+        _, execution_id, round_id = await _seed_chain(dao)
+        assert isinstance(round_id, str)
+        await _seed_snapshot_extras(
+            dao,
+            execution_id,
+            round_id,
+            verification=VerificationState.PROGRAM_VERIFIED,
+            invocation_id="inv-6",
+        )
+        # execution 记录 2 次调用：账本须覆盖全部调用，才能把「过租不再计活跃」与
+        # 「覆盖缺口导致未知」区分开（R21），本用例只验证前者。
+        await _seed_ledger(
+            dao,
+            invocation_id="inv-6",
+            attempt_id="att-6",
+            cost_cny="0.5",
+            extra_attempt_ids=("att-6b",),
+            reservation_state="reserved",
+            owner_lease_expires_at=datetime(2020, 1, 1, 12, 0, 0),
+        )
+
+        snap = await dao.get_execution_snapshot(execution_id, user_scope=USER_SCOPE)
+
+        assert snap.usage.cost_state == "known"
+        assert snap.limitations == ()
+
+    async def test_held_unconfirmed_reservation_survives_expired_lease(self, real_embedded_pg) -> None:
+        """N25：held_unconfirmed 为结果未知，过租仍明示保留为活跃占用。"""
+        dao = await _setup(real_embedded_pg.url)
+        _, execution_id, round_id = await _seed_chain(dao)
+        assert isinstance(round_id, str)
+        await _seed_snapshot_extras(
+            dao,
+            execution_id,
+            round_id,
+            verification=VerificationState.PROGRAM_VERIFIED,
+            invocation_id="inv-7",
+        )
+        await _seed_ledger(
+            dao,
+            invocation_id="inv-7",
+            attempt_id="att-7",
+            cost_cny="0.5",
+            reservation_state="held_unconfirmed",
+            owner_lease_expires_at=datetime(2020, 1, 1, 12, 0, 0),
+        )
+
+        snap = await dao.get_execution_snapshot(execution_id, user_scope=USER_SCOPE)
+
+        assert snap.usage.cost_state == "reserved"
         assert snap.observation.reliable is True
 
     async def test_unverified_source_blocks_reliable_even_if_cost_known(self, real_embedded_pg) -> None:

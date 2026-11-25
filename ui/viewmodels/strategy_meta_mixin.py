@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 from ui.viewmodels import Message
 from ui.viewmodels.screener_types import PRESET_NAME_MAX_LENGTH, PresetSavePlan, ScreenerState, StrategyDepRow
 from utils.config_handler import ConfigHandler
+from utils.config_models import PresetDeleteOutcome
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -40,6 +41,8 @@ class StrategyMetaMixin:
     strategy_mgr: StrategyManager
     _set_state: Callable[..., None]
     cancel_retry: Callable[[], None]
+    # N09: 方案列表刷新所有权 token —— 迟到回读只在仍是最新刷新且策略未切换时写回 state。
+    _preset_refresh_token: object | None
 
     async def get_strategies(self) -> dict[str, str]:
         return self.strategy_mgr.get_all_names()
@@ -188,11 +191,20 @@ class StrategyMetaMixin:
         """刷新当前策略的已保存方案名列表到 state (R2-I12, 排序稳定).
 
         ``strategy_key`` 为空时清空列表；读配置经 IO 线程池提交 (R16)。
+
+        N09: 回读期间用户可能切换策略或触发更新的刷新，旧操作迟到完成时不得
+        覆盖当前列表（否则旧策略的方案名会渲染到新策略下拉框，或被删除方案回填）。
+        仅当本操作仍是最新刷新且 ``strategy_key`` 仍是当前选中策略时才写回。
         """
         if not strategy_key:
+            self._preset_refresh_token = None  # 使在途回读失效
             self._set_state(preset_names=())
             return
+        token = object()
+        self._preset_refresh_token = token
         presets = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.get_strategy_presets, strategy_key)
+        if self._preset_refresh_token is not token or self._state.selected_strategy != strategy_key:
+            return  # 迟到回读：策略已切换或已有更新刷新发起，不得写回
         self._set_state(preset_names=tuple(sorted(presets.keys())))
 
     async def apply_preset(self, name: str, strategy_key: str) -> bool:
@@ -252,15 +264,16 @@ class StrategyMetaMixin:
         presets = ConfigHandler.get_strategy_presets(strategy_key)
         return presets.get(name, {})
 
-    async def delete_preset(self, name: str, strategy_key: str) -> bool:
+    async def delete_preset(self, name: str, strategy_key: str) -> PresetDeleteOutcome:
         """删除命名参数预设 (Task 4.1).
 
         Returns:
-            bool: True 表示已删除, False 表示预设不存在.
+            ``DELETED`` 已删除；``NOT_FOUND`` 预设不存在；``WRITE_FAILED`` 存储写入
+            失败（配置未提交，可重试）。调用方须区分后两者，不得把写失败提示为不存在。
         """
 
-        return bool(
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.delete_strategy_preset, strategy_key, name)
+        return await ThreadPoolManager().run_async(
+            TaskType.IO, ConfigHandler.delete_strategy_preset, strategy_key, name
         )
 
     def get_column_alias(self, table_name: str | None, col: str) -> str:

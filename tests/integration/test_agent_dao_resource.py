@@ -806,6 +806,103 @@ class TestGlobalLimits:
         assert outcomes == ["budget", "ok", "ok"], f"expect exactly two winners, got {outcomes}"
 
 
+#: 竞争压测轮次：20 轮为默认基线；100 轮以 ``slow`` 标记可选（CI 可 ``-m "not slow"``
+#: 排除长压测，避免默认门禁时长失控）。
+_CONTENTION_ROUNDS = (
+    pytest.param(20, id="baseline-20"),
+    pytest.param(100, id="stress-100", marks=pytest.mark.slow),
+)
+
+
+class TestContendedClaimUnderRepeat:
+    """N 轮同资源并发认领（QAC02/QAC09/NFR-P04）。
+
+    每轮 4 个不同 owner（root + 3 条比较路）同时认领同一 ``slot_id``：guard 行锁
+    串行下恰 1 个成功、其余 3 个明确 ``INPUT_CONFLICT``（票据身份不同，既不伪成功
+    也不误报预算耗尽）；成功票据与 ``agent_resource_slot`` 行一一对应（同 owner /
+    未释放），确认释放后下一轮可重新竞争（容量真实归还，不是靠计数缓存）。
+    """
+
+    @pytest.mark.parametrize("rounds", _CONTENTION_ROUNDS)
+    async def test_many_rounds_same_slot_single_owner(self, real_embedded_pg: ConnectionInfo, rounds: int) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await _seed_execution(dao, "u1", "s1", "root-race", "root", "root")
+        contenders = tuple(f"lane-race-{index}" for index in range(1, 4))
+        for index, execution_id in enumerate(contenders, start=1):
+            await _seed_execution(dao, "u1", "s1", execution_id, "comparison_lane", f"lane-{index}")
+
+        engine = create_test_engine(real_embedded_pg.url)
+        successes = 0
+        try:
+            for round_index in range(rounds):
+                slot_id = f"slot-race-{round_index:03d}"
+                requests = [_total_request(execution_id="root-race", slot_id=slot_id)]
+                requests.extend(
+                    _total_request(execution_id=execution_id, node_id=f"lane-{index}", slot_id=slot_id)
+                    for index, execution_id in enumerate(contenders, start=1)
+                )
+                results = await asyncio.gather(
+                    *(dao.claim_resource(request) for request in requests),
+                    return_exceptions=True,
+                )
+                tickets = [result for result in results if isinstance(result, ResourceTicket)]
+                conflicts = [
+                    result
+                    for result in results
+                    if isinstance(result, AgentServiceError) and result.code is AgentErrorCode.INPUT_CONFLICT
+                ]
+                assert len(tickets) == 1, f"round {round_index}: expect exactly one owner, got {results}"
+                assert len(conflicts) == 3, f"round {round_index}: expect three explicit conflicts, got {results}"
+
+                ticket = tickets[0]
+                async with engine.connect() as conn:
+                    owner = (
+                        await conn.execute(
+                            sa.select(
+                                AgentResourceSlot.execution_id,
+                                AgentResourceSlot.node_id,
+                                AgentResourceSlot.released_at,
+                            ).where(
+                                AgentResourceSlot.user_scope == "u1",
+                                AgentResourceSlot.slot_id == slot_id,
+                            )
+                        )
+                    ).one()
+                assert (owner.execution_id, owner.node_id) == (ticket.execution_id, ticket.node_id)
+                assert owner.released_at is None
+                successes += 1
+
+                await dao.release_resource(
+                    ResourceReleaseRequest(
+                        user_scope="u1",
+                        slot_id=slot_id,
+                        execution_id=ticket.execution_id,
+                        node_id=ticket.node_id,
+                        owner_epoch=1,
+                        exit_verified=True,
+                    )
+                )
+
+            async with engine.connect() as conn:
+                records = (
+                    await conn.execute(
+                        sa.select(sa.func.count())
+                        .select_from(AgentResourceSlot)
+                        .where(
+                            AgentResourceSlot.user_scope == "u1",
+                            AgentResourceSlot.slot_id.like("slot-race-%"),
+                        )
+                    )
+                ).scalar_one()
+            assert records == successes == rounds, (
+                f"success count must map to claim records: {records}/{successes}/{rounds}"
+            )
+        finally:
+            await engine.dispose()
+            await dao.engine.dispose()  # type: ignore[union-attr]  # 释放测试引擎
+
+
 # ------------------------------------------------------------------
 # 权威身份/代次门（检视 D21）
 # ------------------------------------------------------------------

@@ -744,3 +744,94 @@ class TestCleanupAttemptStageResume:
         assert [call[0] for call in executor.calls] == ["preflight"]
         assert dao.stages == []
         assert dao.phases[0]["error_category"] == "native_target_missing"
+
+
+class TestCleanupPreflightFailureKeepsDeletionProgress:
+    """N43：删除尝试之后的临时预检失败不得覆盖「已删除」证据。"""
+
+    @pytest.mark.asyncio
+    async def test_transient_preflight_error_after_deletion_records_dedicated_category(self) -> None:
+        record = _record(
+            phase=CleanupPhase.RETRY_PENDING,
+            fence_committed=True,
+            prior_error_category="cleanup_native_deleted_tombstone_pending",
+        )
+        service, _, dao, _ = _service(
+            record, executor=_Executor(preflight_error=RuntimeError("temporary read failure"))
+        )
+
+        with pytest.raises(RuntimeError) as exc:
+            await service.confirm_and_execute(_command(record))
+
+        assert str(exc.value) == "temporary read failure"
+        assert dao.phases[0]["phase"] is CleanupPhase.RETRY_PENDING
+        assert dao.phases[0]["error_category"] == "cleanup_preflight_failed_after_delete"
+        assert dao.stages == []
+        assert dao.tombstones == []
+
+    @pytest.mark.asyncio
+    async def test_transient_preflight_error_after_deletion_resumes_to_verified(self) -> None:
+        """隔断：已删除 → 正文未收尾 → 暂时读取失败 → 恢复后沿原集合与 fence 完成。"""
+
+        first = _record()
+        service, _, dao, _ = _service(first, dao=_Dao(residual=1))
+        first_receipt = await service.confirm_and_execute(_command(first))
+        assert first_receipt.phase is CleanupPhase.RETRY_PENDING
+        after_delete = str(dao.phases[0]["error_category"])
+        assert after_delete == "cleanup_residual_content"
+
+        second = _record(
+            phase=CleanupPhase.RETRY_PENDING,
+            fence_committed=True,
+            prior_error_category=after_delete,
+        )
+        service2, store2, dao2, _ = _service(
+            second, executor=_Executor(preflight_error=ConnectionError("temporary read failure"))
+        )
+        with pytest.raises(ConnectionError) as exc:
+            await service2.confirm_and_execute(_command(second))
+
+        assert str(exc.value) == "temporary read failure"
+        recorded = str(dao2.phases[0]["error_category"])
+        assert recorded == "cleanup_preflight_failed_after_delete"
+        # 失败只改类别：原集合与 fence 保持不变。
+        assert store2.record.exact_ids == _IDS
+        assert store2.record.fence_committed is True
+
+        third = _record(
+            phase=CleanupPhase.RETRY_PENDING,
+            fence_committed=True,
+            prior_error_category=recorded,
+        )
+        service3, _, dao3, executor3 = _service(third, executor=_Executor(missing=_IDS))
+
+        receipt = await service3.confirm_and_execute(_command(third))
+
+        assert receipt.phase is CleanupPhase.VERIFIED
+        assert [call[0] for call in executor3.calls] == ["preflight", "delete"]
+        assert executor3.calls[1][1] == _IDS
+        assert dao3.tombstones[0][0] == "owner-1"
+        assert dao3.phases[-1]["phase"] is CleanupPhase.VERIFIED
+        assert dao3.phases[-1]["complete"] is True
+
+    @pytest.mark.asyncio
+    async def test_transient_preflight_error_without_deletion_still_refuses_missing(self) -> None:
+        """从未删除：预检异常记普通类别，恢复后真缺行仍拒绝（不得借新类别放行）。"""
+
+        first = _record(phase=CleanupPhase.PREPARED, fence_committed=True)
+        service, _, dao, _ = _service(first, executor=_Executor(preflight_error=RuntimeError("boom")))
+        with pytest.raises(RuntimeError) as exc:
+            await service.confirm_and_execute(_command(first))
+        assert str(exc.value) == "boom"
+        recorded = str(dao.phases[0]["error_category"])
+        assert recorded == "cleanup_preflight_failed"
+
+        again = _record(phase=CleanupPhase.RETRY_PENDING, fence_committed=True, prior_error_category=recorded)
+        service2, _, dao2, executor2 = _service(again, executor=_Executor(missing=("wf-a",)))
+
+        with pytest.raises(AgentServiceError) as exc:
+            await service2.confirm_and_execute(_command(again))
+
+        assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+        assert [call[0] for call in executor2.calls] == ["preflight"]
+        assert dao2.phases[0]["error_category"] == "native_target_missing"

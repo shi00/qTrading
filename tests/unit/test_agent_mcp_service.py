@@ -1430,3 +1430,102 @@ class TestConnectSingleFlight:
         assert len(factory.opened) == 2
         assert manager.is_connected(_identity()) is True
         assert manager.is_connected(other) is True
+
+
+class _LivenessSession(_FakeSession):
+    """支持「进程自行退出」通知的假会话（与 ``FastMCPSession.set_lost_handler`` 同形）。
+
+    退出可在处理函数登记前发生：通知按「先记下、登记时补发」保存，避免启连登记
+    窗口内的退出被静默丢弃（那正是「已退出仍显示已连接」的成因）。
+    """
+
+    def __init__(self, tools: tuple[MCPToolDescriptor, ...], *, exit_during_list: bool = False) -> None:
+        super().__init__(tools)
+        self._lost_handler: Callable[[], None] | None = None
+        self._pending_lost = False
+        self._exit_during_list = exit_during_list
+
+    def set_lost_handler(self, handler: Callable[[], None]) -> None:
+        self._lost_handler = handler
+        if self._pending_lost:
+            handler()
+
+    def exit_process(self) -> None:
+        """子进程自行退出：通知已登记的处理函数（未登记则记下待补发）。"""
+        if self._lost_handler is None:
+            self._pending_lost = True
+            return
+        self._lost_handler()
+
+    async def list_tools(self, *, deadline_s: int) -> tuple[MCPToolDescriptor, ...]:
+        tools = await super().list_tools(deadline_s=deadline_s)
+        if self._exit_during_list:
+            self._exit_during_list = False
+            self.exit_process()
+        return tools
+
+
+class _SequenceFactory:
+    """按顺序返回不同会话的工厂：用于验证旧代次退出不影响新连接。"""
+
+    def __init__(self, sessions: list[_LivenessSession]) -> None:
+        self._sessions = sessions
+        self.opened = 0
+
+    async def open(self, config: MCPServerConfig, *, guard: Any = None) -> _LivenessSession:
+        session = self._sessions[self.opened]
+        self.opened += 1
+        return session
+
+
+class TestProcessExitInvalidatesConnection:
+    """N11：本地 MCP 进程自行退出后不得继续显示已连接，且不自动重建连接。"""
+
+    @pytest.mark.asyncio
+    async def test_process_exit_marks_disconnected_before_close_and_never_reopens(self) -> None:
+        session = _LivenessSession((MCPToolDescriptor("read_file", _SCHEMA),))
+        manager, _store, factory, _probe = _manager(session=session)
+        await manager.save_config(_config())
+        await manager.connect(_identity())
+        assert manager.is_connected(_identity()) is True
+
+        session.exit_process()
+
+        # 同步失效：刷新读取连接判据时立即为未连接，不等句柄关闭。
+        assert manager.is_connected(_identity()) is False
+        with pytest.raises(AgentServiceError) as exc:
+            manager.connection_generation(_identity())
+        assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+
+        await _wait_until(lambda: session.closed)
+        assert factory.opened == 1  # 不自动新建连接
+
+    @pytest.mark.asyncio
+    async def test_process_exit_during_registration_is_not_served_as_connected(self) -> None:
+        session = _LivenessSession((MCPToolDescriptor("read_file", _SCHEMA),), exit_during_list=True)
+        manager, _store, factory, _probe = _manager(session=session)
+        await manager.save_config(_config())
+
+        await manager.connect(_identity())
+
+        assert manager.is_connected(_identity()) is False
+        await _wait_until(lambda: session.closed)
+        assert factory.opened == 1
+
+    @pytest.mark.asyncio
+    async def test_old_generation_exit_does_not_invalidate_new_connection(self) -> None:
+        first = _LivenessSession((MCPToolDescriptor("read_file", _SCHEMA),))
+        second = _LivenessSession((MCPToolDescriptor("read_file", _SCHEMA),))
+        manager, store = _factory_manager(_SequenceFactory([first, second]))
+        await store.save(_config())
+        await manager.connect(_identity())
+        previous = manager.connection_generation(_identity())
+        await manager.disconnect(_identity())
+        await manager.connect(_identity())
+        current = manager.connection_generation(_identity())
+        assert current > previous
+
+        first.exit_process()  # 旧代次进程退出（其句柄已被显式断开）
+
+        assert manager.is_connected(_identity()) is True
+        assert manager.connection_generation(_identity()) == current

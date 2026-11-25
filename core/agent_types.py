@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Iterable, Mapping, Sequence, Set as AbstractSet
 from dataclasses import dataclass, is_dataclass
@@ -228,24 +229,35 @@ def _fixed_point(value: Decimal, field_path: str = "$") -> str:
     return format(value, "f")
 
 
-def _to_jsonable(value: object, field_path: str) -> Any:
-    """递归转为 JSON 可承载结构；不支持的类型显式拒绝，不走默认 float 转换。"""
+def _to_jsonable(value: object, field_path: str, *, allow_finite_floats: bool = False) -> Any:
+    """递归转为 JSON 可承载结构；不支持的类型显式拒绝，不走默认 float 转换。
+
+    ``allow_finite_floats`` 仅用于「已落库值的再序列化」边界（JSONB 解码把小数
+    还原为 Python ``float``）：有限 ``float`` 按最短可往返词法输出为 JSON number，
+    数值语义保真；默认 False 时仍拒绝 ``float``（须先经 encode_exact_number）。
+    """
 
     if value is None or isinstance(value, (bool, int, str)):
         return value
     if isinstance(value, Decimal):
         return _fixed_point(value, field_path)
     if isinstance(value, float):
+        if allow_finite_floats:
+            if not math.isfinite(value):
+                _fail("non_finite_number", field_path)
+            return value
         # 禁止把原数值直接交给默认 float 转换（§3.1）；须先经 encode_exact_number。
         _fail("invalid_type", field_path)
         return None  # pragma: no cover - _fail 总是抛出
     if isinstance(value, Enum):
-        return _to_jsonable(value.value, field_path)
+        return _to_jsonable(value.value, field_path, allow_finite_floats=allow_finite_floats)
     if isinstance(value, Selection):
         # wire 合同：all 没有 ranges 键（§3.3.1）
         wire: dict[str, Any] = {"kind": value.kind}
         if value.kind == "limited":
-            wire["ranges"] = _to_jsonable(list(value.ranges), f"{field_path}.ranges")
+            wire["ranges"] = _to_jsonable(
+                list(value.ranges), f"{field_path}.ranges", allow_finite_floats=allow_finite_floats
+            )
         return wire
     if isinstance(value, ExactNumber):
         return {
@@ -256,7 +268,7 @@ def _to_jsonable(value: object, field_path: str) -> Any:
         }
     if is_dataclass(value) and not isinstance(value, type):
         return {
-            name: _to_jsonable(getattr(value, name), f"{field_path}.{name}")
+            name: _to_jsonable(getattr(value, name), f"{field_path}.{name}", allow_finite_floats=allow_finite_floats)
             for name in value.__dataclass_fields__  # pyright: ignore[reportAttributeAccessIssue]  # 运行期为 dataclass 实例，字段名由标准库提供
         }
     if isinstance(value, dict):
@@ -264,18 +276,27 @@ def _to_jsonable(value: object, field_path: str) -> Any:
         for key, item in value.items():
             if not isinstance(key, str):
                 _fail("invalid_json", field_path)
-            result[key] = _to_jsonable(item, f"{field_path}.{key}")
+            result[key] = _to_jsonable(item, f"{field_path}.{key}", allow_finite_floats=allow_finite_floats)
         return result
     if isinstance(value, (list, tuple)):
-        return [_to_jsonable(item, f"{field_path}[{index}]") for index, item in enumerate(value)]
+        return [
+            _to_jsonable(item, f"{field_path}[{index}]", allow_finite_floats=allow_finite_floats)
+            for index, item in enumerate(value)
+        ]
     _fail("invalid_json", field_path)
     return None  # pragma: no cover - _fail 总是抛出
 
 
-def json_doc(value: object) -> CanonicalJson:
-    """规范 JSON：UTF-8 语义、键排序、无空白、禁 NaN/Infinity（§3.1）。"""
+def json_doc(value: object, *, allow_finite_floats: bool = False) -> CanonicalJson:
+    """规范 JSON：UTF-8 语义、键排序、无空白、禁 NaN/Infinity（§3.1）。
 
-    encoded = _to_jsonable(value, "$")
+    ``allow_finite_floats`` 仅供「已落库 JSONB 值的再序列化」使用（如
+    ``AgentDao.read_operation`` 读回 ``result_payload``）：JSONB 解码把小数还原为
+    ``float``，此时按最短可往返词法输出为 JSON number，读回仍是数字而非字符串；
+    非有限值与其它不支持类型依旧显式拒绝。构造新 wire 文档不得开启该开关。
+    """
+
+    encoded = _to_jsonable(value, "$", allow_finite_floats=allow_finite_floats)
     return json.dumps(encoded, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
@@ -4933,9 +4954,10 @@ class CostProjection:
       此时 ``known_cny`` 可为 ``Decimal("0")``（已知零，与未知可区分）；
     - **已知金额**：``known_cny`` 为已计价 attempt 金额合计；无任何已计价 attempt
       时为 ``None``（未知，禁止填 0）；
-    - **预留中**：``reserved_cny`` 为活跃预留（reserved / dispatched /
-      held_unconfirmed）金额合计；账本无活跃预留为 ``Decimal("0")``（事实零），
-      无引用可投影时为 ``None``；
+    - **预留中**：``reserved_cny`` 为活跃预留金额合计——``reserved`` / ``dispatched``
+      仅计 owner 租约未过期者（过租即失权、预留不再可推进，按事实零释放），
+      ``held_unconfirmed``（结果未知）不随租约释放、明示保留计入；账本无活跃预留为
+      ``Decimal("0")``（事实零），无引用可投影时为 ``None``；
     - **未计价**：``unpriced_attempts``（cost 为 NULL，或引用存在但账本无行）与
       对应 ``unpriced_input_tokens`` / ``unpriced_output_tokens``（未知成本的用量规模）。
 
@@ -7141,6 +7163,9 @@ class ArtifactRead:
     用户确认清理删除；``next_cursor`` 只在正文还有后续码点时给出。``result_payload``
     保留结构/限制/证据等元数据，不复制整份正文（§9.7）。``source_ref_states`` 为
     成果引用的每个来源版本的当前可得性（逐项核定；无来源引用时为空元组）。
+    ``question_public_text`` 为本成果所回答问题的**获准公开表示**（用户消息的公开
+    导出投影，已中和/脱敏），不是用户原文；无法安全确定时为 ``None``（R21，调用
+    方不得把缺失当完整交付）。
     """
 
     artifact_id: str
@@ -7165,6 +7190,7 @@ class ArtifactRead:
     body_available: bool
     unavailable_reason: str | None
     source_ref_states: tuple[ArtifactSourceState, ...] = ()
+    question_public_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -7894,6 +7920,32 @@ class SkillAssetReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class SkillVersionView:
+    """已登记 Skill 版本的只读投影（设置页列表/角色校验用，不含脚本内容）。"""
+
+    skill_id: str
+    display_name: str
+    version: int
+    read_state: str
+    content_digest: str
+    file_count: int = 0
+    expanded_bytes: int = 0
+    license_id: str = ""
+    dependencies: tuple[str, ...] = ()
+    missing_dependencies: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SkillUninstallReceipt:
+    """Skill 版本卸载回执：``files_removed`` 表示受管目录是否确认清除（不伪报）。"""
+
+    user_scope: str
+    skill_id: str
+    version: int
+    files_removed: bool
+
+
+@dataclass(frozen=True, slots=True)
 class RoleSkillAssignment:
     """角色版本对 Skill 版本的引用（F13）。
 
@@ -7976,6 +8028,125 @@ def role_skill_assignment_digest(assignment: RoleSkillAssignment) -> str:
 
     validate_role_skill_assignment(assignment)
     return sha256_hex(json_doc(assignment.wire()))
+
+
+# ---------------------------------------------------------------------------
+# E-03-4b MCP 服务与角色版本的引用（F14 残余 / F15 / AC11 / J25）
+# ---------------------------------------------------------------------------
+
+#: 角色版本对 MCP 服务引用（可用集合/默认服务/工具白名单）的 wire 版本。
+ROLE_MCP_ASSIGNMENT_VERSION: Final = 1
+
+_ROLE_MCP_ASSIGNMENT_KEYS: Final = frozenset(
+    {"schema_version", "role_id", "role_version", "available", "default_service"}
+)
+_ROLE_MCP_SERVICE_BINDING_KEYS: Final = frozenset({"service", "tools"})
+
+
+@dataclass(frozen=True, slots=True)
+class RoleMCPServiceBinding:
+    """角色可用的一个 MCP 服务版本 + 该服务上允许调用的工具白名单。
+
+    空 ``tools`` 表示「该服务可用但零工具」（不解释为全部工具，§6 默认拒绝）。
+    """
+
+    identity: MCPServiceIdentity
+    tools: tuple[str, ...] = ()
+
+    def wire(self) -> dict[str, Any]:
+        return {
+            "service": encode_mcp_service_identity(self.identity),
+            "tools": list(self.tools),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RoleMCPAssignment:
+    """角色版本对 MCP 服务的引用（F14 残余 / J25）。
+
+    ``available`` 是本次角色可选的完整服务集合（按 ``stable_key`` 唯一）；
+    ``default_service`` 必须属于该集合或为 ``None``（未设默认）。工具白名单只表达
+    「角色允许」，实际可调用还需该服务已启连且工具在声明范围内（服务层保存时校验）。
+    """
+
+    role_id: str
+    role_version: str
+    available: tuple[RoleMCPServiceBinding, ...]
+    default_service: MCPServiceIdentity | None = None
+
+    def wire(self) -> dict[str, Any]:
+        """规范 wire（键排序由 CanonicalJson 承担；集合按服务身份排序稳定）。"""
+
+        return {
+            "schema_version": ROLE_MCP_ASSIGNMENT_VERSION,
+            "role_id": require_identity(self.role_id, "$.role.role_id"),
+            "role_version": require_identity(self.role_version, "$.role.role_version"),
+            "available": [
+                binding.wire() for binding in sorted(self.available, key=lambda item: item.identity.stable_key())
+            ],
+            "default_service": (
+                None if self.default_service is None else encode_mcp_service_identity(self.default_service)
+            ),
+        }
+
+
+def validate_role_mcp_assignment(assignment: RoleMCPAssignment) -> None:
+    """校验角色 MCP 分配：身份非空、服务唯一、默认⊆可用、工具名唯一合法。"""
+
+    require_identity(assignment.role_id, "$.role.role_id")
+    require_identity(assignment.role_version, "$.role.role_version")
+    seen: set[str] = set()
+    for index, binding in enumerate(assignment.available):
+        key = binding.identity.stable_key()
+        if key in seen:
+            _fail("duplicate_mcp_service", f"$.role.available[{index}]")
+        seen.add(key)
+        if len(set(binding.tools)) != len(binding.tools):
+            _fail("duplicate_mcp_tool", f"$.role.available[{index}].tools")
+        for tool_index, name in enumerate(binding.tools):
+            require_identity(name, f"$.role.available[{index}].tools[{tool_index}]")
+    if assignment.default_service is not None:
+        assignment.default_service.stable_key()
+        if assignment.default_service.stable_key() not in seen:
+            _fail("default_service_not_available", "$.role.default_service")
+
+
+def decode_role_mcp_assignment(value: object, path: str = "$.role_mcp_assignment") -> RoleMCPAssignment:
+    """严格解码角色 MCP 分配 wire：全键必填、禁额外键、默认⊆可用。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _ROLE_MCP_ASSIGNMENT_KEYS, path)
+    _require_schema_version(value["schema_version"], ROLE_MCP_ASSIGNMENT_VERSION, f"{path}.schema_version")
+    raw_available = value["available"]
+    if not isinstance(raw_available, list):
+        _fail("invalid_type", f"{path}.available")
+    bindings: list[RoleMCPServiceBinding] = []
+    for index, item in enumerate(raw_available):
+        item_path = f"{path}.available[{index}]"
+        if not isinstance(item, dict):
+            _fail("invalid_type", item_path)
+        _require_keys(item, _ROLE_MCP_SERVICE_BINDING_KEYS, item_path)
+        raw_tools = item["tools"]
+        if not isinstance(raw_tools, list) or any(not isinstance(name, str) for name in raw_tools):
+            _fail("invalid_type", f"{item_path}.tools")
+        bindings.append(
+            RoleMCPServiceBinding(
+                identity=decode_mcp_service_identity(item["service"], f"{item_path}.service"),
+                tools=tuple(raw_tools),
+            )
+        )
+    raw_default = value["default_service"]
+    assignment = RoleMCPAssignment(
+        role_id=require_identity(value["role_id"], f"{path}.role_id"),
+        role_version=require_identity(value["role_version"], f"{path}.role_version"),
+        available=tuple(bindings),
+        default_service=(
+            None if raw_default is None else decode_mcp_service_identity(raw_default, f"{path}.default_service")
+        ),
+    )
+    validate_role_mcp_assignment(assignment)
+    return assignment
 
 
 # ---------------------------------------------------------------------------
@@ -8372,13 +8543,20 @@ def _draft_fragment(value: object, path: str, *, require_source_module: bool = F
     return doc
 
 
-def _sorted_source_refs(refs: Iterable[SourceVersionRef]) -> tuple[SourceVersionRef, ...]:
+def _checked_source_refs(refs: Iterable[SourceVersionRef]) -> tuple[SourceVersionRef, ...]:
+    """草稿资料引用只做去重校验，**保持用户选序**（UX P03「顺序保持用户选择」）。
+
+    资料卡顺序是用户可见的选择事实，不是可规范化的集合：排序会把「重开草稿」
+    变成换序，并让仅换序的同命令键重放误判为原输入。去重键仍是源身份
+    （kind/id/version），同一引用重复出现即拒绝。
+    """
+
     items = tuple(refs)
     encoded = [encode_source_version_ref(ref) for ref in items]
     keys = [(item["source_kind"], item["source_id"], item["source_version"]) for item in encoded]
     if len(set(keys)) != len(keys):
         _fail("duplicate_source_ref", "$.payload.source_refs")
-    return tuple(sorted(items, key=lambda ref: (ref.source_kind.value, ref.source_id, ref.source_version)))
+    return items
 
 
 def _sorted_skill_refs(refs: Iterable[SkillVersionRef]) -> tuple[SkillVersionRef, ...]:
@@ -8455,6 +8633,10 @@ class DraftPayload:
     截止（带时区 ISO-8601 时点，与受理 ``decision_cutoff`` 同口径）。两者分列：
     17:00 截止不会被降级成日界，排队（19:00）也不改写它。``cutoff=None`` 表示
     精确截止未知（未选择或旧 v1 稿仅日界），排队前须澄清（:func:`draft_cutoff_requires_clarification`）。
+
+    ``source_refs`` 为**有序**资料选择：顺序即用户在资料卡上的选择顺序（UX P03），
+    编解码与命令摘要均按原序承载，不得排序。``skill_versions`` / ``mcp_selection``
+    / ``customized_fields`` 是集合语义（排序去重）。
     """
 
     schema_version: int
@@ -8485,7 +8667,11 @@ def draft_cutoff_requires_clarification(payload: DraftPayload) -> bool:
 
 
 def encode_draft_payload(payload: DraftPayload) -> dict[str, Any]:
-    """DraftPayload → 规范 wire 对象（v2 15 键全量，集合规范化排序去重）。"""
+    """DraftPayload → 规范 wire 对象（v2 15 键全量）。
+
+    ``source_refs`` 保持用户选序（UX P03）；``skill_versions`` / ``mcp_selection``
+    / ``customized_fields`` 为集合语义，规范化排序去重。
+    """
 
     _require_schema_version(payload.schema_version, DRAFT_PAYLOAD_SCHEMA_VERSION, "$.payload.schema_version")
     if not isinstance(payload.text, str):
@@ -8521,7 +8707,7 @@ def encode_draft_payload(payload: DraftPayload) -> dict[str, Any]:
         "text": payload.text,
         "mode": payload.mode.value,
         "model_selection": None if payload.model_selection is None else decode_json_doc(payload.model_selection),
-        "source_refs": [encode_source_version_ref(ref) for ref in _sorted_source_refs(payload.source_refs)],
+        "source_refs": [encode_source_version_ref(ref) for ref in _checked_source_refs(payload.source_refs)],
         "skill_versions": [encode_skill_version_ref(ref) for ref in _sorted_skill_refs(payload.skill_versions)],
         "mcp_selection": [encode_mcp_service_identity(ref) for ref in _sorted_mcp_selection(payload.mcp_selection)],
         "purpose": None if payload.purpose is None else payload.purpose.value,
@@ -8546,7 +8732,9 @@ def decode_draft_payload(value: object, path: str = "$.payload") -> DraftPayload
 
     v2 为当前写入形态（研究日期 + 精确截止分列）。v1 旧稿只读兼容：旧
     ``cutoff`` 为纯日期日界，提升为 ``research_date``；精确 ``cutoff`` 置
-    ``None``（未知），不补造时点，排队前须澄清（R21）。
+    ``None``（未知），不补造时点，排队前须澄清（R21）。``source_refs`` 按 wire
+    原序回读（不重排），保证草稿重开保持用户选择顺序（UX P03）；旧稿已落库的
+    顺序原样回读。
     """
 
     if not isinstance(value, dict):
@@ -8617,7 +8805,7 @@ def decode_draft_payload(value: object, path: str = "$.payload") -> DraftPayload
         text=text,
         mode=mode,
         model_selection=_opt_draft_fragment(value["model_selection"], f"{path}.model_selection"),
-        source_refs=_sorted_source_refs(
+        source_refs=_checked_source_refs(
             decode_source_version_ref(item, f"{path}.source_refs[{index}]")
             for index, item in enumerate(source_refs_raw)
         ),
@@ -10346,6 +10534,7 @@ _DELIVERY_METADATA_ORDER: Final[tuple[str, ...]] = (
     "session_id",
     "execution_id",
     "round_id",
+    "question_public",
     "artifact_kind",
     "input_revision",
     "actual_input_digest",
@@ -10568,6 +10757,10 @@ def build_delivery_fields(
     状态（写入 ``source`` 记录域，一项一行，缺来源行不得被聚合列掩盖）；
     ``current_source_state`` 是该集合的聚合单列，只在无逐项引用时直接采用。
     未显式提供时按 ``unknown``（未核 ≠ 可用，R21）。三者都按统一词表口径规范化。
+
+    交付文件必须能独立说明答复针对的问题：``read.question_public_text`` 为获准
+    公开表示，缺失/无法安全取得即拒绝（``question_public_unavailable``），不得
+    用私密原文补齐、也不得渲染空问题冒充完整交付（R9/R21）。
     """
 
     if not isinstance(read, ArtifactRead):
@@ -10577,6 +10770,8 @@ def build_delivery_fields(
     full_body = body_text if body_text is not None else read.body_text
     if read.body_available and full_body is None:
         _fail("body_missing", "$.delivery.artifact_read.body_text")
+    if not isinstance(read.question_public_text, str) or not read.question_public_text:
+        _fail("question_public_unavailable", "$.delivery.artifact_read.question_public_text")
 
     states = tuple(current_source_states)
     if any(not isinstance(state, ArtifactSourceState) for state in states):
@@ -10596,6 +10791,7 @@ def build_delivery_fields(
         "session_id": read.session_id,
         "execution_id": read.execution_id,
         "round_id": read.round_id,
+        "question_public": read.question_public_text,
         "artifact_kind": read.artifact_kind,
         "input_revision": read.input_revision,
         "actual_input_digest": read.actual_input_digest,

@@ -100,6 +100,32 @@ class TestJsonDocEncode:
             json_doc({"v": 0.1})
         assert code_of(exc) == "invalid_type"
 
+    def test_stored_payload_finite_float_kept_as_number(self) -> None:
+        """N38：JSONB 读回的小数再序列化仍是 number（不降级为字符串），语义保真。"""
+
+        doc = json_doc({"ratio": 0.5, "nested": {"best": 1.25}, "rows": [1, 2.5]}, allow_finite_floats=True)
+        assert doc == '{"nested":{"best":1.25},"ratio":0.5,"rows":[1,2.5]}'
+        decoded = decode_doc(doc)
+        assert decoded == {"ratio": Decimal("0.5"), "nested": {"best": Decimal("1.25")}, "rows": [1, Decimal("2.5")]}
+        assert isinstance(decoded["rows"][0], int)
+
+    def test_stored_payload_keeps_int_and_exponent_semantics(self) -> None:
+        doc = json_doc({"big": 2**60, "tiny": 1e-07, "wide": 1e20}, allow_finite_floats=True)
+        decoded = decode_doc(doc)
+        assert decoded["big"] == 2**60
+        assert isinstance(decoded["big"], int)
+        assert decoded["tiny"] == Decimal("1e-07")
+        assert decoded["wide"] == Decimal("1e+20")
+
+    def test_stored_payload_non_finite_and_unsupported_still_rejected(self) -> None:
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with pytest.raises(AgentValidationError) as exc:
+                json_doc({"v": [bad]}, allow_finite_floats=True)
+            assert code_of(exc) == "non_finite_number", bad
+        with pytest.raises(AgentValidationError) as exc:
+            json_doc({"v": b"bytes"}, allow_finite_floats=True)
+        assert code_of(exc) == "invalid_json"
+
     def test_bool_and_none_and_empty_string_distinct(self) -> None:
         doc = json_doc({"a": None, "b": False, "c": "", "d": 0})
         decoded = decode_doc(doc)

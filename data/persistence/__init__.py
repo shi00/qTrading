@@ -12,6 +12,10 @@ if TYPE_CHECKING:
 # which leaves the subpackage attribute unset on the new module object.
 _SUBPACKAGES = frozenset({"daos", "embedded_postgres"})
 
+#: 需在父包属性访问时惰性加载的普通子模块（同上：模块被 ``del sys.modules[...]`` 重建后
+#: 子模块属性会丢失，字符串路径 patch 会因 ``getattr`` 失败而报错）。
+_SUBMODULES = frozenset({"instance_lock"})
+
 
 def __getattr__(name):
     if name == "DataExplorerQueryClient":
@@ -31,7 +35,7 @@ def __getattr__(name):
         except Exception:
             del globals()["models"]
             raise
-    if name in _SUBPACKAGES:
+    if name in _SUBPACKAGES or name in _SUBMODULES:
         mod = importlib.import_module(f"{__name__}.{name}")
         globals()[name] = mod
         return mod

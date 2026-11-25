@@ -32,7 +32,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 
 import sqlalchemy as sa
 from jsonschema.exceptions import SchemaError
@@ -173,6 +173,7 @@ from core.agent_types import (
     SessionSummary,
     SkillAssetReceipt,
     SkillAssetRegistration,
+    SkillVersionView,
     SkillVersionRef,
     SourceClaimBinding,
     SourceClaimFact,
@@ -287,7 +288,8 @@ from core.agent_types import (
     validate_role_skill_assignment,
     validate_session_read_query,
 )
-from data.persistence.daos.base_dao import BaseDao
+from data.persistence.daos.base_dao import BaseDao, EngineDisposedError
+from utils.error_classifier import classify_error
 from utils.prompt_guard import (
     UntrustedTextRepresentations,
     convert_untrusted_text,
@@ -763,6 +765,12 @@ def _parse_answer_payload(answer_payload: CanonicalJson, identity: str) -> dict[
 #: 跨会话待处理聚合的单类上限（P1-05）：达到上限标记截断，不冒充完整集合。
 _PENDING_ANSWER_LIMIT_MAX: Final[int] = 500
 
+#: 命令类型集合：命令行 ``receipt_payload`` 存的是 ``CommandReceipt``（N23）。
+#: 其余命令类型存专用回执（受理/草稿/转移/许可绑定）或不存回执，不得按
+#: ``CommandReceipt`` 解码；``read_command`` 只对这些类型从原回执取
+#: ``current_revision``（CAS 令牌），与同键重放查回的原回执同版。
+_COMMAND_RECEIPT_KINDS: Final[frozenset[str]] = frozenset({"change_session", "data_consent_revoke"})
+
 
 def _pending_answer_facts(rows: Sequence[Any], *, stage: str) -> list[PendingAnswerFact]:
     """聚合行 → 待处理事实（阶段由调用分类给定；命令态仅在命令阶段出现）。"""
@@ -941,6 +949,53 @@ def _command_input_replays(
     return json_doc(stored_payload) == json_doc(json.loads(manifest_payload))
 
 
+#: 修订后需随新输入版重新登记成员边的来源类别（N24）：与受理期资产来源准入集合
+#: 同语义；``user_message`` 的新版源边由 M2/S2 步骤写入，``mcp_return`` 不属用户
+#: 手选资料集合，均不在本处登记。
+_REVISED_INPUT_SOURCE_KINDS: Final = frozenset(
+    {SourceKind.BUSINESS_SNAPSHOT, SourceKind.ATTACHMENT, SourceKind.RESULT, SourceKind.SUMMARY}
+)
+
+
+def _revised_input_source_refs(manifest_payload: CanonicalJson, identity: str) -> tuple[SourceVersionRef, ...]:
+    """修订 manifest 中仍选的资产来源版本引用（去重保序；无 ``source_refs`` 即空）。
+
+    只解释冻结 manifest **显式声明**的清单：缺键不推断历史源集，移除项便不会被
+    借旧边读取。``shared`` 块存在但不是对象、清单不是列表或引用不合契约 →
+    ``INPUT_INVALID``（manifest 是修订输入的一部分，坏形状不得静默按空处理）。
+    """
+
+    try:
+        document = decode_json_doc(manifest_payload)
+    except AgentValidationError as exc:
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "frozen manifest is not valid JSON", identity) from exc
+    if not isinstance(document, dict):
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "frozen manifest must be an object", identity)
+    section: Any = document
+    if "shared" in document:
+        if not isinstance(document["shared"], dict):
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID, "frozen manifest shared section must be an object", identity
+            )
+        section = document["shared"]
+    raw_refs = section.get("source_refs")
+    if raw_refs is None:
+        return ()
+    if not isinstance(raw_refs, list):
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "frozen manifest source_refs must be a list", identity)
+    decoded: list[SourceVersionRef] = []
+    for position, raw in enumerate(raw_refs):
+        try:
+            ref = decode_source_version_ref(raw, f"$.manifest_payload.source_refs[{position}]")
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID, "frozen manifest source ref is invalid", identity
+            ) from exc
+        if ref.source_kind in _REVISED_INPUT_SOURCE_KINDS:
+            decoded.append(ref)
+    return tuple(dict.fromkeys(decoded))
+
+
 def _assert_command_key_binding(existing: Any | None, execution_id: str, request: AcceptRequest) -> None:
     """同命令键必须绑定本次重放的目标执行（P1-03/§3.2）。
 
@@ -978,12 +1033,74 @@ def _validate_plan_items_for_save(items: object, *, execution_id: str, identity:
     return item_tuple
 
 
+#: 写事务「确定未提交」说明：COMMIT 未发出（或服务端已回滚），同一命令键重试安全。
+_WRITE_NOT_COMMITTED_MESSAGE = "write transaction not committed; retry with the same command id"
+#: 写事务「提交结果未知」说明：COMMIT 已发出但确认中断，按原身份查回，禁止换键补写。
+_WRITE_COMMIT_UNKNOWN_MESSAGE = "commit outcome unknown; query the original identity, do not resubmit with a new key"
+
+
+def _commit_confirmation_lost(exc: Exception) -> bool:
+    """COMMIT 已发出后的失败是否属于「确认通道中断」（服务端可能已提交）。
+
+    只有传输层中断（连接失效/超时/对端无响应）才可能出现「已提交但客户端收不到
+    确认」；服务端返回的错误（约束冲突、序列化失败等）表示 PostgreSQL 已回滚，
+    属确定未提交。
+    """
+
+    if isinstance(exc, (TimeoutError, OSError)):
+        return True
+    if isinstance(exc, DBAPIError) and exc.connection_invalidated:
+        return True
+    return classify_error(exc, "db")["code"] == "interrupted"
+
+
 class AgentDao(BaseDao):
     """Agent 应用表 DAO（CacheManager.agent_dao）。
 
     引擎经构造注入（BaseDao.__init__）， disposed 守卫与维护门闩由
     BaseDao 基线统一提供；C-02+ 事务方法按上方契约基线逐步落地。
     """
+
+    @contextlib.asynccontextmanager
+    async def _write_transaction(self, *, identity: str) -> AsyncIterator[AsyncConnection]:
+        """受理/存稿写事务信封：区分「确定未提交」与「提交已发起但结果未知」（N12）。
+
+        - 事务体正常结束即退出 ``engine.begin()``（发起 COMMIT）；只有此后的失败才
+          可能是「服务端已提交、确认中断」，按传输层故障判定为
+          ``OPERATION_UNKNOWN``：调用方必须按**原身份**查回，不得换键补写；
+        - 取连接、开事务、语句执行阶段的失败：COMMIT 未发出，PostgreSQL 不会提交
+          （COMMIT 返回服务端错误亦已回滚），按 ``PERSISTENCE_UNAVAILABLE`` 上抛，
+          同一命令键重试安全；
+        - 领域错误 ``AgentServiceError`` 与取消原样传播（R2：取消必须 raise）。
+        """
+
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        body_completed = False
+        try:
+            async with engine.begin() as conn:
+                yield conn
+                # 事务体正常走完（含 return）：退出时将发起 COMMIT，失败即「结果未知」。
+                body_completed = True
+        except AgentServiceError:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except (EngineDisposedError, AgentValidationError):
+            # 引擎已释放（R5）与合同校验失败是明确领域信号，不降级为「存储不可用」。
+            raise
+        except Exception as exc:
+            if body_completed and _commit_confirmation_lost(exc):
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN,
+                    _WRITE_COMMIT_UNKNOWN_MESSAGE,
+                    identity,
+                ) from exc
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                _WRITE_NOT_COMMITTED_MESSAGE,
+                identity,
+            ) from exc
 
     async def accept_request(self, request: AcceptRequest) -> SubmissionReceipt:
         """受理事务（SQ-01/§5.3/§3.3.2）：intent 查重/冲突 + execution + command
@@ -1039,6 +1156,11 @@ class AgentDao(BaseDao):
                 REVISION_CONFLICT（预期草稿版与当前稿版不一致）/
                 OPERATION_UNKNOWN（原回执不可得）/ POLICY_DENIED（目标会话已删除
                 fence 或已归档，新键受理拒绝）。
+
+        写事务失败分列（N12）：事务未提交（取连接/开事务/语句失败，含 COMMIT 返回
+        服务端错误）→ ``PERSISTENCE_UNAVAILABLE``，同一命令键重试安全；COMMIT
+        已发出但确认中断（连接失效/超时）→ ``OPERATION_UNKNOWN``，须按**原身份**
+        查回，不得换键补写（``_write_transaction``）。
         """
 
         self._check_engine()
@@ -1057,7 +1179,7 @@ class AgentDao(BaseDao):
         )
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
-        async with engine.begin() as conn:
+        async with self._write_transaction(identity=_identity_str(request)) as conn:
             # 1. 目标会话存在性 + 行锁（序号分配与草稿版 CAS 的线性化点，§5.4.4）。
             session_row = (
                 await conn.execute(
@@ -1572,6 +1694,12 @@ class AgentDao(BaseDao):
           ``INPUT_INVALID``，回执不得回显与存行矛盾的引用；
         - 存储状态/错误码不在冻结枚举内 → ``OPERATION_UNKNOWN``（fail-closed，
           R21：坏事实不得被读成确定的保存/投递/消费）；
+        - ``current_revision`` 取该命令**保存时落库的回执版本**（``receipt_payload``），
+          与同键重放查回的原回执同版：改名等 CAS 命令推进的是实体版本（如会话
+          ``revision`` 1→2），而命令行自身 ``revision`` 恒为初值——直接读命令行
+          会把旧 CAS 令牌当当前版，调用方续做归档等操作无故 ``REVISION_CONFLICT``；
+          该类型回执缺失/坏载荷 → ``OPERATION_UNKNOWN``（R21，不把未知读成确定
+          版本）；回执非 ``CommandReceipt`` 的命令类型仍回报命令行自身版本；
         - ``next_action`` 为 None：本方法只回报已存事实，下一步由调用方按命令类型
           决定（不在读取面发明动作）。
         """
@@ -1612,6 +1740,7 @@ class AgentDao(BaseDao):
             candidates = (
                 sa.select(
                     AgentCommand.target_id,
+                    AgentCommand.command_kind,
                     AgentCommand.expected_revision,
                     AgentCommand.revision,
                     AgentCommand.commit_state,
@@ -1619,6 +1748,7 @@ class AgentDao(BaseDao):
                     AgentCommand.consumption_state,
                     AgentCommand.updated_at,
                     AgentCommand.error_code,
+                    AgentCommand.receipt_payload,
                     # 根意图键（source_module/business_request_id）只存于 execution：
                     # 根/比较路非空，叶为 NULL（§9.4）。
                     AgentExecution.source_module.label("intent_source_module"),
@@ -1662,10 +1792,26 @@ class AgentDao(BaseDao):
                 f"unreadable command state: {type(exc).__name__}",
                 identity,
             ) from exc
+        current_revision = int(row.revision)
+        if row.command_kind in _COMMAND_RECEIPT_KINDS:
+            # 命令行 ``revision`` 是命令自身版本（初值），不是被改实体的 CAS 令牌；
+            # 以保存时落库的原回执为准（与重放同版），缺失/坏载荷 fail-closed。
+            if row.receipt_payload is None:
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN, "original command receipt unavailable", identity
+                )
+            try:
+                current_revision = decode_command_receipt(row.receipt_payload).current_revision
+            except AgentValidationError as exc:
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN,
+                    f"stored command receipt invalid: {exc.code}",
+                    identity,
+                ) from exc
         return CommandReceipt(
             command=ref,
             target_id=row.target_id,
-            current_revision=row.revision,
+            current_revision=current_revision,
             commit_state=commit_state,
             delivery_state=delivery_state,
             consumption_state=consumption_state,
@@ -2479,7 +2625,9 @@ class AgentDao(BaseDao):
         - 行内容严格解码（冻结值域），坏行 → ``OPERATION_UNKNOWN``；
         - 正文取 ``body_text`` 或 ``body_ref`` 载荷（核 owner 三元组/编码/长度/
           SHA-256），按码点分页并给下一游标，不静默截断；失效游标 → ``INPUT_INVALID``；
-        - 正文未保存与已清理分开报告，不用空正文冒充成果（R21）。
+        - 正文未保存与已清理分开报告，不用空正文冒充成果（R21）；
+        - 附带本成果所回答问题的**获准公开表示**（用户消息 ``search_text`` 投影）；
+          取不到/歧义时为 ``None``，不回落私密原文（R9/R21）。
         """
 
         self._check_engine()
@@ -2562,6 +2710,7 @@ class AgentDao(BaseDao):
             source_ref_states = await self._artifact_source_states(
                 conn, payload=item.result_payload, user_scope=user_scope, identity=identity
             )
+            question_public_text = await self._artifact_question_public(conn, item=item, user_scope=user_scope)
             return ArtifactRead(
                 artifact_id=item.artifact_id,
                 artifact_version=item.artifact_version,
@@ -2585,7 +2734,88 @@ class AgentDao(BaseDao):
                 body_available=body_available,
                 unavailable_reason=unavailable_reason,
                 source_ref_states=source_ref_states,
+                question_public_text=question_public_text,
             )
+
+    async def _artifact_question_public(
+        self,
+        conn: AsyncConnection,
+        *,
+        item: Any,
+        user_scope: str,
+    ) -> str | None:
+        """成果所回答问题的**获准公开表示**（用户消息 ``search_text`` 公开投影）。
+
+        - 只认该执行本输入版绑定的受理输入源（``accepted_input``，``consumer_version``
+          即输入版），从源资产的 ``user_message_origin`` 定位原消息；
+        - 只输出消息的公开导出投影 ``search_text``（中和 + R9 脱敏）；正文
+          ``body_text`` 为私密原文，绝不用于导出，也不作为回退（R9）；
+        - 无候选 / 多候选文本不一致 / 消息缺失 / 投影为空 → ``None``：调用方不得
+          把「取不到」当完整交付，也不得用原文补齐（R21）。
+        """
+
+        rows = (
+            await conn.execute(
+                sa.select(AgentAssetVersion.metadata_payload)
+                .join(
+                    AgentSourceLink,
+                    sa.and_(
+                        AgentSourceLink.user_scope == AgentAssetVersion.user_scope,
+                        AgentSourceLink.source_id == AgentAssetVersion.asset_id,
+                        AgentSourceLink.source_version == AgentAssetVersion.asset_version,
+                    ),
+                )
+                .where(
+                    AgentSourceLink.user_scope == user_scope,
+                    AgentSourceLink.consumer_kind == "execution",
+                    AgentSourceLink.consumer_id == item.execution_id,
+                    AgentSourceLink.consumer_version == str(item.input_revision),
+                    AgentSourceLink.relation_kind == SourceRelationKind.ACCEPTED_INPUT.value,
+                    AgentAssetVersion.asset_kind == "source",
+                )
+            )
+        ).fetchall()
+        message_ids: list[str] = []
+        for row in rows:
+            metadata = row.metadata_payload
+            if not isinstance(metadata, dict):
+                continue
+            origin = metadata.get("user_message_origin")
+            if not isinstance(origin, dict):
+                continue
+            message_id = origin.get("message_id")
+            if isinstance(message_id, str) and message_id:
+                message_ids.append(message_id)
+        if not message_ids:
+            return None
+        message_rows = (
+            await conn.execute(
+                sa.select(
+                    AgentMessage.message_id,
+                    AgentMessage.role,
+                    AgentMessage.search_text,
+                    AgentMessage.payload,
+                ).where(
+                    AgentMessage.user_scope == user_scope,
+                    AgentMessage.message_id.in_(list(dict.fromkeys(message_ids))),
+                )
+            )
+        ).fetchall()
+        texts: set[str] = set()
+        for row in message_rows:
+            if row.role != "user":
+                continue
+            payload = row.payload
+            if isinstance(payload, dict) and (
+                payload.get("message_id") not in (None, row.message_id) or payload.get("role") not in (None, "user")
+            ):
+                continue
+            text = row.search_text
+            if isinstance(text, str) and text:
+                texts.add(text)
+        if len(texts) != 1:
+            return None
+        return texts.pop()
 
     @staticmethod
     def _artifact_source_refs(payload: CanonicalJson | None, identity: str) -> tuple[SourceVersionRef, ...]:
@@ -2735,7 +2965,8 @@ class AgentDao(BaseDao):
         - 坏枚举/坏行 → ``OPERATION_UNKNOWN``；``phase='unknown'`` 或
           ``effect_state='unknown'`` 原样返回并置 ``result_available=False``；
         - 返回体优先取 ``result_ref`` 同库正文（核 owner 自洽/编码/长度/SHA-256，
-          按码点分页），否则取 ``result_payload`` 原子；``result_saved`` 却两者皆空
+          按码点分页），否则取 ``result_payload`` 原子（读回保留 JSON number 语义，
+          JSONB 还原的小数仍是数字、不降级为字符串）；``result_saved`` 却两者皆空
           且所属会话已清理（``cleaned_at`` 非空）时按「结果已清理」返回
           （``unavailable_reason='result_cleaned'``），否则按坏行拒绝，不用空结果
           冒充成功（R21）。
@@ -2843,7 +3074,7 @@ class AgentDao(BaseDao):
                         "cursor is not applicable to atomic result payload",
                         identity,
                     )
-                result_text = json_doc(row.result_payload)
+                result_text = json_doc(row.result_payload, allow_finite_floats=True)
             elif row.phase == "result_saved":
                 if await self._operation_owner_is_cleaned(
                     conn, user_scope=user_scope, session_id=row.session_id, execution_id=row.execution_id
@@ -2877,7 +3108,9 @@ class AgentDao(BaseDao):
                 parameter_digest=row.parameter_digest,
                 request_ref=row.request_ref,
                 result_ref=row.result_ref,
-                result_payload=json_doc(row.result_payload) if row.result_payload is not None else None,
+                result_payload=(
+                    json_doc(row.result_payload, allow_finite_floats=True) if row.result_payload is not None else None
+                ),
                 worker_refs=json_doc(row.worker_refs) if row.worker_refs is not None else None,
                 deadline_at=self._opt_wire_time(row.deadline_at),
                 dispatched_at=self._opt_wire_time(row.dispatched_at),
@@ -4693,6 +4926,11 @@ class AgentDao(BaseDao):
         phase ``failed_confirmed`` / effect ``not_dispatched``（仅确定未发生时使用）；
         ``unknown`` → phase ``unknown`` / effect ``unknown``（后效未知，保留归属）。
         operation 不存在或归属不符即拒绝，不凭空建行。
+
+        结果事实与其 ``tool_result_saved`` 可靠事件（N39）在**同一事务**提交：
+        事件载荷指向 operation/结果引用，观察侧从原水位按 ``after_seq`` 即可增量
+        续读；``event_id`` 由 (operation, 结果态) 派生，同结果重放不写第二条，
+        写失败整体回滚（不出现「结果已存但没有事件」的半状态）。
         """
 
         self._check_engine("tool result")
@@ -4735,16 +4973,81 @@ class AgentDao(BaseDao):
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
         async with engine.begin() as conn:
-            result = await conn.execute(
-                sa.update(AgentOperation)
-                .where(
-                    AgentOperation.user_scope == request.user_scope,
-                    AgentOperation.operation_id == request.operation_id,
+            row = (
+                await conn.execute(
+                    sa.update(AgentOperation)
+                    .where(
+                        AgentOperation.user_scope == request.user_scope,
+                        AgentOperation.operation_id == request.operation_id,
+                    )
+                    .values(**values)
+                    .returning(
+                        AgentOperation.session_id,
+                        AgentOperation.execution_id,
+                        AgentOperation.round_id,
+                        AgentOperation.step_id,
+                        AgentOperation.tool_call_id,
+                        AgentOperation.parameter_digest,
+                        AgentOperation.revision,
+                    )
                 )
-                .values(**values)
-            )
-            if result.rowcount != 1:
+            ).first()
+            if row is None:
                 raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "tool operation does not exist", identity)
+            if row.session_id is None:
+                # 结果必须落在可观察会话上；无会话归属即无法发布可靠事件，
+                # 整体回滚（不把结果留在观察不到的状态，R21）。
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "tool operation has no session", identity)
+            watermarks = await self._lock_session_event_watermarks(
+                conn, user_scope=request.user_scope, session_ids=[row.session_id]
+            )
+            session_event_seq = watermarks.get(row.session_id)
+            if session_event_seq is None:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "tool operation session does not exist", identity)
+            # 同事务可靠事件（N39）：结果提交即发布 tool_result_saved，增量订阅可
+            # 按 after_seq 续读到；event_id 按 (operation, 结果态) 派生使同结果重放
+            # 不写第二条；水位由助手以 GREATEST 单调推进（R22）。
+            await self._append_session_event(
+                conn,
+                user_scope=request.user_scope,
+                session_id=row.session_id,
+                message_id=stable_id(
+                    "event_message",
+                    [
+                        request.user_scope,
+                        row.session_id,
+                        "tool_result_saved",
+                        request.operation_id,
+                        request.outcome_state,
+                    ],
+                ),
+                event_id=derive_event_identity(
+                    execution_id=None,
+                    round_id=None,
+                    node_id=None,
+                    native_event_id=f"tool_result_saved:{request.operation_id}:{request.outcome_state}",
+                ),
+                event_kind=EventKind.TOOL_RESULT_SAVED,
+                payload_kind="tool_result_saved",
+                subject_id=request.operation_id,
+                subject_revision=int(row.revision),
+                payload={
+                    "schema_version": 1,
+                    "operation_id": request.operation_id,
+                    "tool_call_id": row.tool_call_id,
+                    "execution_id": row.execution_id,
+                    "round_id": row.round_id,
+                    "node_id": row.step_id,
+                    "parameter_digest": row.parameter_digest,
+                    "outcome_state": request.outcome_state,
+                    "phase": phase,
+                    "io_state": io_state,
+                    "result_ref": request.result_ref,
+                    "error_code": request.error_code,
+                },
+                occurred_at=occurred,
+                session_event_seq=session_event_seq,
+            )
 
     async def _cas_grant_state(
         self,
@@ -4964,6 +5267,9 @@ class AgentDao(BaseDao):
         **源自身版与执行输入版分列**：新消息/新源 id 是不可变新源，自身
         ``message_version`` / ``source_version`` 恒为 "1"（AR-07），execution
         输入版 N 只由源边的 ``consumer_version`` 承载（检视 D13）。
+        仍选资料（新版 manifest ``source_refs`` 中的资产来源）同在事务内登记到
+        输入版 N（N24）：只登记本执行已受理记录过的来源版本，移除项不登记、
+        旧版边不删不改，故精确读取只按新输入版成员放行仍选资料。
         归档与清理 fence 门（R2-I22 / D08）：取 session 行锁后先核已提交清理
         fence（清理后保留会话不得追加新正文/新源边），再核 ``archived``（归档
         会话不得修改待发输入，须先解档）；二者均 ``POLICY_DENIED``、零新事实，
@@ -4995,6 +5301,8 @@ class AgentDao(BaseDao):
         command_record_id = stable_id("command", [request.user_scope, request.execution_id, request.client_command_id])
         message_id = stable_id("user_message", [request.user_scope, request.session_id, command_record_id])
         source_id = stable_id("message_source", [request.user_scope, request.session_id, message_id])
+        # 修订 manifest 中仍选的资产来源（N24）：解析先于事务，坏 manifest 零 DB 写入。
+        revised_source_refs = _revised_input_source_refs(request.manifest_payload, identity)
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
         async with engine.begin() as conn:
@@ -5268,6 +5576,17 @@ class AgentDao(BaseDao):
                         relation_kind=relation.value,
                     )
                 )
+            # 9b. 仍选资料登记到新输入版（N24）：只登记本执行已受理记录过的来源版本，
+            #     未记录的新来源拒绝（不借修订绕过受理期准入）；移除项不在 manifest
+            #     中，旧输入版边保持不变（旧版历史不改）。
+            await self._register_revised_input_sources(
+                conn,
+                user_scope=request.user_scope,
+                execution_id=request.execution_id,
+                input_revision=input_revision,
+                refs=revised_source_refs,
+                identity=identity,
+            )
             # 10. revise 命令（target=execution_id；保存=committed，待投递事实）。
             await conn.execute(
                 sa.insert(AgentCommand).values(
@@ -5307,6 +5626,83 @@ class AgentDao(BaseDao):
                 input_revision=input_revision,
                 execution_revision=request.expected_execution_revision + 1,
                 session_seq=session_seq,
+            )
+
+    async def _register_revised_input_sources(
+        self,
+        conn: AsyncConnection,
+        *,
+        user_scope: str,
+        execution_id: str,
+        input_revision: int,
+        refs: tuple[SourceVersionRef, ...],
+        identity: str,
+    ) -> None:
+        """修订事务内把仍选资料登记到新输入版成员边（N24）。
+
+        精确读取按「准确输入版」核成员（``consumer_version=N``），故修订只改正文时
+        仍选资料也必须有新输入版成员边，否则按新版本读取被拒。
+
+        - 只登记**本执行已受理记录过**的来源版本（任一旧输入版的 execution 边）：
+          未被记录的新来源 ``INPUT_INVALID``，不借修订绕过受理期准入（R21/R24）；
+        - 摘要与存量资产版本不符同样 fail-closed（不静默登记与事实不同的版本）；
+        - 已存在本输入版成员边则跳过（幂等）；旧输入版边不删不改（旧版历史不变）；
+        - 移除项不在新 manifest 中，自然不登记，不可借旧边读取。
+
+        调用方须在同一显式事务内调用（失败即整体回滚，不留下半套边）。
+        """
+
+        for ref in refs:
+            prior_rows = (
+                await conn.execute(
+                    sa.select(AgentSourceLink.consumer_version, AgentSourceLink.locator_payload).where(
+                        AgentSourceLink.user_scope == user_scope,
+                        AgentSourceLink.consumer_kind == "execution",
+                        AgentSourceLink.execution_id == execution_id,
+                        AgentSourceLink.source_id == ref.source_id,
+                        AgentSourceLink.source_version == ref.source_version,
+                    )
+                )
+            ).all()
+            if not prior_rows:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "revised manifest references a source version not accepted for this execution",
+                    identity,
+                )
+            if str(input_revision) in {str(row.consumer_version) for row in prior_rows}:
+                continue
+            asset = (
+                await conn.execute(
+                    sa.select(AgentAssetVersion.digest).where(
+                        AgentAssetVersion.user_scope == user_scope,
+                        AgentAssetVersion.asset_id == ref.source_id,
+                        AgentAssetVersion.asset_version == ref.source_version,
+                    )
+                )
+            ).first()
+            if asset is None or asset.digest != ref.source_digest:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "revised source digest does not match stored source version",
+                    identity,
+                )
+            await conn.execute(
+                sa.insert(AgentSourceLink).values(
+                    user_scope=user_scope,
+                    link_id=stable_id(
+                        "source_link",
+                        [user_scope, ref.source_id, ref.source_version, "execution", execution_id, str(input_revision)],
+                    ),
+                    source_id=ref.source_id,
+                    source_version=ref.source_version,
+                    consumer_kind="execution",
+                    consumer_id=execution_id,
+                    consumer_version=str(input_revision),
+                    execution_id=execution_id,
+                    locator_payload=prior_rows[0].locator_payload,
+                    relation_kind=SourceRelationKind.ACCEPTED_INPUT.value,
+                )
             )
 
     # ------------------------------------------------------------------
@@ -5950,9 +6346,13 @@ class AgentDao(BaseDao):
     ) -> DataConsentAuthority | None:
         """按 execution/round/node 定位权威资料许可决定（I43，只读）。
 
-        规则：同 execution+round+node 取最新 revision；多条同 revision 且载荷内容
-        不同 → ``OPERATION_UNKNOWN``（不猜，R21 fail-closed）；无决定行 → ``None``
-        （由调用方按「无许可即拒绝」处置）。载荷不可靠重读同样 fail-closed。
+        规则：每条决定只由自己的已提交 ``data_consent_save`` 权威命令绑定——同
+        execution+round+node 取「最近一次明确保存（批准）」的决定，**不跨决定比较
+        行内 revision**（新决定独立起版，revision 只在本决定内单调）；无已提交
+        save 命令的决定不参与选择（无权威绑定即不授权）。最近一次权威命令时刻相同
+        且载荷不同 → ``OPERATION_UNKNOWN``（不猜，R21 fail-closed）；无决定行 →
+        ``None``（由调用方按「无许可即拒绝」处置）。旧决定保持历史行不被改写，其
+        过期/撤销状态仍由消费侧核权拒绝。载荷不可靠重读同样 fail-closed。
         """
 
         self._check_engine()
@@ -5970,6 +6370,18 @@ class AgentDao(BaseDao):
                         AgentDecision.decision_id,
                         AgentDecision.revision,
                         AgentDecision.data_consent_payload,
+                        AgentCommand.created_at.label("authority_command_at"),
+                        AgentCommand.command_record_id.label("authority_command_id"),
+                    )
+                    .select_from(AgentDecision)
+                    .join(
+                        AgentCommand,
+                        sa.and_(
+                            AgentCommand.user_scope == AgentDecision.user_scope,
+                            AgentCommand.target_id == AgentDecision.decision_id,
+                            AgentCommand.command_kind == "data_consent_save",
+                            AgentCommand.commit_state == CommitState.COMMITTED.value,
+                        ),
                     )
                     .where(
                         AgentDecision.user_scope == facts.user_scope,
@@ -5978,22 +6390,31 @@ class AgentDao(BaseDao):
                         AgentDecision.node_id == node_id,
                         AgentDecision.decision_kind == "data_consent",
                     )
-                    .order_by(AgentDecision.revision.desc(), AgentDecision.updated_at.desc())
+                    .order_by(AgentCommand.created_at.desc(), AgentCommand.command_record_id.desc())
                 )
             ).all()
         if not rows:
             return None
-        top_revision = int(rows[0].revision)
-        top = [row for row in rows if int(row.revision) == top_revision]
+        # 每条决定只取自己最近的 save 命令（SQL 已按命令时刻降序，首次出现即最新）。
+        latest_by_decision: dict[str, Any] = {}
+        for row in rows:
+            latest_by_decision.setdefault(row.decision_id, row)
+        candidates = sorted(
+            latest_by_decision.values(),
+            key=lambda row: (row.authority_command_at, row.authority_command_id),
+            reverse=True,
+        )
+        top_at = candidates[0].authority_command_at
+        top = [row for row in candidates if row.authority_command_at == top_at]
         if len(top) > 1:
             payloads = {json_doc(row.data_consent_payload) for row in top if row.data_consent_payload is not None}
             if len(payloads) != 1 or any(row.data_consent_payload is None for row in top):
                 raise AgentServiceError(
                     AgentErrorCode.OPERATION_UNKNOWN,
-                    "data consent authority ambiguous at same revision",
+                    "data consent authority ambiguous at same authoritative command",
                     identity_str,
                 )
-        chosen = top[0]
+        chosen = min(top, key=lambda row: row.decision_id) if len(top) > 1 else top[0]
         if chosen.data_consent_payload is None:
             raise AgentServiceError(
                 AgentErrorCode.OPERATION_UNKNOWN,
@@ -6426,9 +6847,11 @@ class AgentDao(BaseDao):
     ) -> bool:
         """事务内追加纯 session 可靠事件（检视 D29：让写入族成为唯一可靠事件生产者）。
 
-        - 调用方必须**已在本事务持有该 session 行锁**（``FOR UPDATE``）并已通过
-          D08 清理 fence 门；本助手不重复取 session 锁、不重复查 fence（同一事务内
-          门禁结论不变，避免额外 ``FOR SHARE`` 与重复查询）；
+        - 调用方必须**已在本事务持有该 session 行锁**（``FOR UPDATE``；本事务内
+          新建的会话视同持锁）；产生正文/新引用的写入族还须已通过 D08 清理 fence
+          门，只含元数据的 ``session_changed``（无正文/凭据）可在保留的清理
+          tombstone 会话上追加。本助手不重复取 session 锁、不重复查 fence（同一
+          事务内门禁结论不变，避免额外 ``FOR SHARE`` 与重复查询）；
         - 水位 ``session_seq = session.event_seq + 1``，写回 ``GREATEST`` 保持单调（R22）；
         - ``event_id`` 由调用方按既有身份规则派生；同 (session, event_id) 已存在即
           视为重放，返回 ``False`` 且不写第二条事件（崩溃重放不漏投、不重复）；
@@ -7366,7 +7789,8 @@ class AgentDao(BaseDao):
     # -- 快照可信度/费用投影 helper（§4.3 usage/observation，R21） --------------
 
     #: 活跃预留状态（与 AIUsageDao.read_active_reserved_cny 同口径：占用预算至
-    #: settled/released）。
+    #: settled/released）。``reserved`` / ``dispatched`` 另须 owner 租约未过期
+    #: （N25，与预算门一致）；``held_unconfirmed`` 为结果未知，不随租约释放。
     _SNAPSHOT_ACTIVE_RESERVATION_STATES: Final = ("reserved", "dispatched", "held_unconfirmed")
     #: attempt_refs 未冻结结构（ADR-0014）中可承载 attempt_id 的键；其余形状按不可读处理。
     _ATTEMPT_REF_KEYS: Final = ("attempt", "attempts", "attempt_ids", "attempt_refs")
@@ -7525,13 +7949,21 @@ class AgentDao(BaseDao):
         if reservation_refs:
             reservation_rows = (
                 await conn.execute(
-                    sa.select(AiInvocation.reservations).where(AiInvocation.invocation_id.in_(reservation_refs))
+                    sa.select(AiInvocation.reservations, AiInvocation.owner_lease_expires_at).where(
+                        AiInvocation.invocation_id.in_(reservation_refs)
+                    )
                 )
             ).all()
+            # 列 ``owner_lease_expires_at`` 为 naive UTC 墙钟（models.py），故 now 同形比较。
+            lease_now = datetime.now(UTC).replace(tzinfo=None)
             for reservation_row in reservation_rows:
                 entries = reservation_row.reservations
+                lease_alive = reservation_row.owner_lease_expires_at > lease_now
+                # N25：普通预留过租即失权不计活跃；held_unconfirmed（结果未知）明示保留。
                 if isinstance(entries, list) and any(
-                    isinstance(entry, dict) and entry.get("state") in self._SNAPSHOT_ACTIVE_RESERVATION_STATES
+                    isinstance(entry, dict)
+                    and entry.get("state") in self._SNAPSHOT_ACTIVE_RESERVATION_STATES
+                    and (entry.get("state") == "held_unconfirmed" or lease_alive)
                     for entry in entries
                 ):
                     has_active_reservation = True
@@ -8273,15 +8705,65 @@ class AgentDao(BaseDao):
         return day_from, day_to_excl
 
     @staticmethod
+    def _history_session_created_window_predicate(
+        session_id_column: sa.ColumnElement[Any],
+        *,
+        user_scope: str,
+        day_from: datetime | None,
+        day_to_excl: datetime | None,
+    ) -> sa.ColumnElement[bool]:
+        """time_basis='created' 的日期窗口：所属会话创建时刻（N21/F18）。
+
+        消息/成果行各自的 ``created_at`` 是写入时刻（提交、重放重写都晚于会话
+        创建日），拿它作「会话创建日」筛选会把跨日会话的次日消息/成果漏掉，
+        或按次日误纳该会话。同一用户域的相关 EXISTS（不 JOIN 放大行数），
+        两分支共用同一口径；不排除已清理会话（历史仍可查回）。
+        """
+
+        conditions: list[sa.ColumnElement[bool]] = [
+            AgentSession.user_scope == user_scope,
+            AgentSession.session_id == session_id_column,
+        ]
+        if day_from is not None:
+            conditions.append(AgentSession.created_at >= day_from)
+        if day_to_excl is not None:
+            conditions.append(AgentSession.created_at < day_to_excl)
+        return sa.exists().where(sa.and_(*conditions))
+
+    @staticmethod
     def _history_like_pattern(query_text: str) -> str:
         """query_text → LIKE 子串模式（通配符按字面量转义；各分支共用同一语义）。"""
 
         escaped = query_text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         return f"%{escaped}%"
 
+    @classmethod
+    def _history_like_patterns(cls, query_text: str) -> tuple[str, ...]:
+        """query_text → LIKE 模式集合：原写法 + 写入侧公开投影（符号中和）。
+
+        公开检索列（消息 ``search_text`` / 成果摘要 / 会话标题）写入时经
+        ``project_public_text`` 中和尖括号（``<``/``>`` → ``‹``/``›``），查询若只
+        用原写法转义会漏掉这些公开行。故原写法与同一投影各生成一个模式（去重后
+        取「任一命中」）：``PE < 20`` 与 ``PE ‹ 20`` 命中同一公开消息。仅扩展查询
+        侧模式，不改变检索列，私有原文仍不进索引。
+        """
+
+        patterns: list[str] = []
+        for candidate in (query_text, project_public_text(query_text)):
+            pattern = cls._history_like_pattern(candidate)
+            if pattern not in patterns:
+                patterns.append(pattern)
+        return tuple(patterns)
+
+    @staticmethod
+    def _history_text_like(column: sa.ColumnElement[Any], patterns: Sequence[str]) -> sa.ColumnElement[bool]:
+        """检索列按模式集合 ILIKE（同一通配符转义语义），任一模式命中即可。"""
+
+        return sa.or_(*(column.ilike(pattern, escape="\\") for pattern in patterns))
+
     @staticmethod
     def _history_session_title_predicate(
-        session_id_column: sa.ColumnElement[Any], *, user_scope: str, pattern: str
+        session_id_column: sa.ColumnElement[Any], *, user_scope: str, patterns: Sequence[str]
     ) -> sa.ColumnElement[bool]:
         """会话标题命中（检视 D18）：标题可搜，中文按 ILIKE 子串（不依赖分词）。
 
@@ -8296,12 +8778,12 @@ class AgentDao(BaseDao):
                 AgentSession.user_scope == user_scope,
                 AgentSession.session_id == session_id_column,
                 AgentSession.cleaned_at.is_(None),
-                AgentSession.title.ilike(pattern, escape="\\"),
+                AgentDao._history_text_like(AgentSession.title, patterns),
             )
         )
 
     @staticmethod
-    def _history_artifact_body_predicate(pattern: str) -> sa.ColumnElement[bool]:
+    def _history_artifact_body_predicate(patterns: Sequence[str]) -> sa.ColumnElement[bool]:
         """成果 ``body_ref`` 载荷公开正文命中（检视 D18：完整公开表示，含尾词）。
 
         正文在 ``agent_body_payload.payload_bytes``（单块 BYTEA；``encoding`` 由表
@@ -8316,7 +8798,7 @@ class AgentDao(BaseDao):
             sa.and_(
                 AgentBodyPayload.user_scope == AgentArtifact.user_scope,
                 AgentBodyPayload.body_ref == AgentArtifact.body_ref,
-                body_text_expr.ilike(pattern, escape="\\"),
+                AgentDao._history_text_like(body_text_expr, patterns),
             )
         )
 
@@ -8452,8 +8934,12 @@ class AgentDao(BaseDao):
           child = ``leaf`` / ``comparison_lane``；消息与成果同口径（成果
           execution_id 为 NOT NULL，不得以 IS NULL 判 main）；关联走相关 EXISTS
           子查询，不 JOIN 放大行数；state_filter 作用于
-          execution.display_state（值集未冻结，留痕）；date 窗口
-          作用于 time_basis 对应列；agent_filter execution_agent 按执行三元组限定；
+          execution.display_state（值集未冻结，留痕）；date 窗口口径由
+          time_basis 决定且不混用（N21/F18）：``created`` = 所属会话创建时刻
+          ``agent_session.created_at``（消息/成果行各自的 created_at 是写入
+          时刻，不得冒充会话创建日），``message`` = 消息发生 ``occurred_at``
+          （成果无发生时刻，取行 created_at），``updated`` = 行 ``updated_at``；
+          agent_filter execution_agent 按执行三元组限定；
           **role_identity 只约束消息**（消息 role_id/role_version）——成果的
           「产生时角色」在持久化层无权威来源（计划持久化形态 PlanProposal 无
           role_key，frozen_manifest/actual_input 为调用方任意 JSON），故成果不按
@@ -8469,6 +8955,10 @@ class AgentDao(BaseDao):
           不把大文本拉到 Python）三路任一命中；三者与消息同一通配符转义；
           ④ 未公开（``published_at IS NULL``）与已清理（``cleaned_at`` 非空）的
           成果原件在关键词搜索中**显式排除**，不靠「恰好搜不到」；
+          ⑤ 符号写法等价（N26）：公开检索列写入时经 ``project_public_text`` 中和
+          尖括号（``<``/``>`` → ``‹``/``›``），故查询按原写法与同一投影各生成
+          一个模式（任一命中），``PE < 20`` 与 ``PE ‹ 20`` 命中同一公开消息；检索列
+          不变，私有原文仍不进索引；
         - 缺投影显式失败（检视 D18）：关键词搜索先核对候选范围（与本查询命中同一
           scope/round/type/role/agent/state/date/固定上界，不含关键词与游标）——
           若存在公开消息（``event_kind='public_message_saved'``）已有 ``body_text``
@@ -8739,13 +9229,26 @@ class AgentDao(BaseDao):
                         )
                     )
                 day_from, day_to_excl = self._history_date_bounds(query, identity_str)
-                if day_from is not None:
-                    message_filters.append(message_moment >= day_from)
-                if day_to_excl is not None:
-                    message_filters.append(message_moment < day_to_excl)
+                if query.time_basis == "created":
+                    # 会话创建口径（N21/F18）：消息行 created_at 是写入时刻，不能
+                    # 当作会话创建日；窗口落在所属会话的 agent_session.created_at。
+                    if day_from is not None or day_to_excl is not None:
+                        message_filters.append(
+                            self._history_session_created_window_predicate(
+                                AgentMessage.session_id,
+                                user_scope=user_scope,
+                                day_from=day_from,
+                                day_to_excl=day_to_excl,
+                            )
+                        )
+                else:
+                    if day_from is not None:
+                        message_filters.append(message_moment >= day_from)
+                    if day_to_excl is not None:
+                        message_filters.append(message_moment < day_to_excl)
                 message_stmt = sa.select(*message_cols).where(*message_filters)
                 if query.query_text:
-                    pattern = self._history_like_pattern(query.query_text)
+                    patterns = self._history_like_patterns(query.query_text)
                     # 缺投影先于关键词过滤核对：缺失即显式失败，不返回残缺页（检视 D18）
                     await self._history_require_search_projection(
                         conn,
@@ -8754,12 +9257,13 @@ class AgentDao(BaseDao):
                         identity_str=identity_str,
                     )
                     # 关键词命中：消息公开文本投影（含尾词）或所属会话标题（中文按
-                    # ILIKE 子串，不依赖分词）；两路共用同一通配符转义。
+                    # ILIKE 子串，不依赖分词）；原写法与写入侧公开投影（符号中和）
+                    # 两种模式共用同一通配符转义，两种写法命中同一公开消息（N26）。
                     message_stmt = message_stmt.where(
                         sa.or_(
-                            AgentMessage.search_text.ilike(pattern, escape="\\"),
+                            self._history_text_like(AgentMessage.search_text, patterns),
                             self._history_session_title_predicate(
-                                AgentMessage.session_id, user_scope=user_scope, pattern=pattern
+                                AgentMessage.session_id, user_scope=user_scope, patterns=patterns
                             ),
                         )
                     )
@@ -8859,16 +9363,16 @@ class AgentDao(BaseDao):
                     # 公开正文 / 会话标题四路任一命中，同一转义语义；未公开（
                     # published_at IS NULL）与已清理（cleaned_at 非空）原件显式
                     # 排除（不靠「恰好搜不到」），不把不可得结果伪装成可搜。
-                    pattern = self._history_like_pattern(query.query_text)
+                    patterns = self._history_like_patterns(query.query_text)
                     artifact_stmt = artifact_stmt.where(
                         AgentArtifact.published_at.is_not(None),
                         AgentArtifact.cleaned_at.is_(None),
                         sa.or_(
-                            AgentArtifact.summary.ilike(pattern, escape="\\"),
-                            AgentArtifact.body_text.ilike(pattern, escape="\\"),
-                            self._history_artifact_body_predicate(pattern),
+                            self._history_text_like(AgentArtifact.summary, patterns),
+                            self._history_text_like(AgentArtifact.body_text, patterns),
+                            self._history_artifact_body_predicate(patterns),
                             self._history_session_title_predicate(
-                                AgentArtifact.session_id, user_scope=user_scope, pattern=pattern
+                                AgentArtifact.session_id, user_scope=user_scope, patterns=patterns
                             ),
                         ),
                     )
@@ -8883,10 +9387,23 @@ class AgentDao(BaseDao):
                         )
                     )
                 day_from, day_to_excl = self._history_date_bounds(query, identity_str)
-                if day_from is not None:
-                    artifact_stmt = artifact_stmt.where(artifact_moment >= day_from)
-                if day_to_excl is not None:
-                    artifact_stmt = artifact_stmt.where(artifact_moment < day_to_excl)
+                if query.time_basis == "created":
+                    # 与消息分支同一「会话创建日」口径（N21/F18）：成果行 created_at
+                    # 为写入时刻，跨日会话次日成果不得被创建日筛选漏掉或误纳。
+                    if day_from is not None or day_to_excl is not None:
+                        artifact_stmt = artifact_stmt.where(
+                            self._history_session_created_window_predicate(
+                                AgentArtifact.session_id,
+                                user_scope=user_scope,
+                                day_from=day_from,
+                                day_to_excl=day_to_excl,
+                            )
+                        )
+                else:
+                    if day_from is not None:
+                        artifact_stmt = artifact_stmt.where(artifact_moment >= day_from)
+                    if day_to_excl is not None:
+                        artifact_stmt = artifact_stmt.where(artifact_moment < day_to_excl)
                 artifact_base_stmt = artifact_stmt
                 if cursor_window_digest is not None:
                     # 集合修订即显式失效并要求重首读（F-04/V-06）：续读不得在已修订
@@ -12979,6 +13496,10 @@ class AgentDao(BaseDao):
         Raises:
             AgentServiceError: INPUT_INVALID / INPUT_CONFLICT / REVISION_CONFLICT /
                 POLICY_DENIED（目标会话已删除 fence，新键写稿拒绝）。
+
+        写事务失败分列（N12）：未提交 → ``PERSISTENCE_UNAVAILABLE``，同一命令键重试
+        安全；COMMIT 已发出但确认中断 → ``OPERATION_UNKNOWN``，按原身份查回、不换键
+        补写（``_write_transaction``）。
         """
 
         self._check_engine()
@@ -12995,9 +13516,7 @@ class AgentDao(BaseDao):
         digest = draft_save_input_digest(command)
         payload_object = encode_draft_payload(command.payload)
         command_record_id = stable_id("command", [user_scope, command.session_id, command.command.command_id])
-        engine = self.engine
-        assert isinstance(engine, AsyncEngine)
-        async with engine.begin() as conn:
+        async with self._write_transaction(identity=identity) as conn:
             # 1. 会话行锁（草稿 CAS 与命令幂等的线性化点；event_seq 同锁内读取，
             #    供步骤 4 同事务事件分配水位，检视 D29）。
             session_row = (
@@ -13255,7 +13774,10 @@ class AgentDao(BaseDao):
           消息/成果正文、不迁 workflow/批准**；
         - ``rename`` / ``pin`` / ``archive`` / ``unarchive``：会话行锁下 CAS
           （``expected_session_revision`` 必须等于行 ``revision``），成功
-          ``revision+1``；归档不改执行（§9.3「归档不终止执行」）；
+          ``revision+1``；归档不改执行（§9.3「归档不终止执行」）；提交后同事务
+          追加一条 ``session_changed`` 可靠事件（N22，元数据动作各一条、含准确
+          动作与结果值），观察侧 ``read_events`` / ``observe_session_events``
+          按 ``after_seq`` 即可从原水位追平；同命令键重放/预期版冲突零新事件；
         - ``revise``：核原消息属于本会话且版本匹配，并解析（校验）新因果前缀
           （源消息之前最近一条，或显式截点）；**不改会话因果头、不改原消息/成果、
           不建消息、不派发**（R2-I25：编辑旧问题只准备新稿；取消编辑不改变既有
@@ -13264,7 +13786,10 @@ class AgentDao(BaseDao):
         - 同命令键同输入 → 查回原回执；异输入 → ``INPUT_CONFLICT``；
         - 会话/原消息不存在或不在调用用户域 → ``INPUT_INVALID``；原消息版本
           不符 → ``REVISION_CONFLICT``（零新事实）；
-        - 动作本身不改草稿、不派发、不产生费用（元数据 CAS 与运行分离）。
+        - 动作本身不改草稿、不派发、不产生费用（元数据 CAS 与运行分离）；
+        - 事件只覆盖可观察元数据变更（``rename`` / ``pin`` / ``archive`` /
+          ``unarchive``）：``revise`` 只推进 CAS 令牌、不改元数据，``create`` /
+          ``branch`` 由目录快照发现新会话，均不追加事件。
 
         Raises:
             AgentServiceError: INPUT_INVALID / INPUT_CONFLICT / REVISION_CONFLICT /
@@ -13290,7 +13815,7 @@ class AgentDao(BaseDao):
             if command.action not in (SessionAction.CREATE, SessionAction.BRANCH):
                 locked_row = (
                     await conn.execute(
-                        sa.select(AgentSession.revision)
+                        sa.select(AgentSession.revision, AgentSession.event_seq)
                         .where(
                             AgentSession.user_scope == user_scope,
                             AgentSession.session_id == command.session_id,
@@ -13329,6 +13854,10 @@ class AgentDao(BaseDao):
                     ) from exc
 
             now = datetime.now(UTC)
+            # 事件水位（行锁内读取，仅元数据动作使用）与本次实际改写的字段：
+            # ``changed`` 非空即需追加一条 ``session_changed``（N22）。
+            session_event_seq: int | None = None
+            changed: dict[str, Any] = {}
             if command.action in (SessionAction.CREATE, SessionAction.BRANCH):
                 parent_session_id: str | None = None
                 branch_metadata: dict[str, Any] | None = None
@@ -13460,16 +13989,16 @@ class AgentDao(BaseDao):
                         AgentErrorCode.REVISION_CONFLICT, "session revision does not match expected", identity
                     )
                 current_revision = int(locked_row.revision) + 1
+                session_event_seq = int(locked_row.event_seq)
                 values: dict[str, Any] = {"revision": current_revision, "updated_at": now}
                 if command.action is SessionAction.RENAME:
-                    values["title"] = command.title
-                    values["title_user_set"] = True
+                    changed = {"title": command.title, "title_user_set": True}
                 elif command.action is SessionAction.PIN:
-                    values["pinned"] = True
+                    changed = {"pinned": True}
                 elif command.action is SessionAction.ARCHIVE:
-                    values["archived"] = True
+                    changed = {"archived": True}
                 elif command.action is SessionAction.UNARCHIVE:
-                    values["archived"] = False
+                    changed = {"archived": False}
                 elif command.action is SessionAction.REVISE:
                     source = (
                         await conn.execute(
@@ -13514,7 +14043,7 @@ class AgentDao(BaseDao):
                         AgentSession.user_scope == user_scope,
                         AgentSession.session_id == command.session_id,
                     )
-                    .values(**values)
+                    .values(**values, **changed)
                 )
 
             receipt = CommandReceipt(
@@ -13546,6 +14075,45 @@ class AgentDao(BaseDao):
                     verified_at=now,
                 )
             )
+            # 同事务可靠事件（N22）：元数据动作提交后必须留下一条 ``session_changed``，
+            # 观察侧提交即按 ``after_seq`` 从原水位追平（不再只能靠完整快照发现）；
+            # 会话行锁内读到的 ``event_seq`` 是本次追加的起点（水位单调由
+            # ``_append_session_event`` 的 GREATEST 保护，R22）；同命令键重放/预期版
+            # 冲突已在上面返回或抛出，不走到这里，故不重复追加。``changed`` 只含
+            # 本次实际改写的元数据字段（``revise`` 为空 → 不写事件）。事件载荷不含
+            # 正文/凭据，清理 tombstone 会话上的元数据事件因此不触碰 D08 正文门。
+            if changed:
+                assert session_event_seq is not None
+                await self._append_session_event(
+                    conn,
+                    user_scope=user_scope,
+                    session_id=command.session_id,
+                    message_id=stable_id(
+                        "event_message",
+                        [user_scope, command.session_id, "session_changed", command.command.command_id],
+                    ),
+                    event_id=derive_event_identity(
+                        execution_id=None,
+                        round_id=None,
+                        node_id=None,
+                        native_event_id=f"session_changed:{command.command.command_id}",
+                    ),
+                    event_kind=EventKind.SESSION_CHANGED,
+                    payload_kind="session_changed",
+                    subject_id=command.session_id,
+                    subject_revision=current_revision,
+                    payload={
+                        "schema_version": 1,
+                        "session_id": command.session_id,
+                        "action": command.action.value,
+                        "session_revision": current_revision,
+                        "command_record_id": command_record_id,
+                        "input_digest": digest,
+                        **changed,
+                    },
+                    occurred_at=now,
+                    session_event_seq=session_event_seq,
+                )
             return receipt
 
     async def _resolve_causal_cutoff(
@@ -14682,6 +15250,129 @@ class AgentDao(BaseDao):
             )
         return desired, False
 
+    async def list_skill_version_views(self, *, user_scope: str) -> tuple[SkillVersionView, ...]:
+        """用户域全部已登记 Skill 版本的只读投影（版本升序，供设置页/角色校验）。"""
+
+        self._check_engine()
+        identity = f"{user_scope}/skill"
+        _require_text_field(user_scope, "user_scope", identity)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    sa.select(
+                        AgentAssetVersion.asset_id,
+                        AgentAssetVersion.asset_version,
+                        AgentAssetVersion.display_name,
+                        AgentAssetVersion.digest,
+                        AgentAssetVersion.read_state,
+                        AgentAssetVersion.metadata_payload,
+                    )
+                    .where(
+                        AgentAssetVersion.user_scope == user_scope,
+                        AgentAssetVersion.asset_kind == "skill",
+                    )
+                    .order_by(AgentAssetVersion.asset_id, AgentAssetVersion.asset_version)
+                )
+            ).all()
+        views: list[SkillVersionView] = []
+        for row in rows:
+            try:
+                version = int(row.asset_version)
+            except (TypeError, ValueError) as exc:
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN, "skill asset version is not numeric", identity
+                ) from exc
+            metadata = row.metadata_payload or {}
+            if not isinstance(metadata, dict):
+                raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "skill asset metadata unreadable", identity)
+            views.append(
+                SkillVersionView(
+                    skill_id=str(row.asset_id),
+                    display_name=str(row.display_name),
+                    version=version,
+                    read_state=str(row.read_state),
+                    content_digest=str(row.digest),
+                    file_count=_metadata_int(metadata, "file_count", identity),
+                    expanded_bytes=_metadata_int(metadata, "expanded_bytes", identity),
+                    license_id=_metadata_text(metadata, "license"),
+                    dependencies=_metadata_text_tuple(metadata, "dependencies"),
+                    missing_dependencies=_metadata_text_tuple(metadata, "missing_dependencies"),
+                )
+            )
+        return tuple(views)
+
+    async def remove_skill_version(self, *, user_scope: str, skill_id: str, version: int) -> None:
+        """卸载一个 Skill 版本（单事务；被角色版本或会话冻结请求引用即阻删）。
+
+        - 引用保护在同一事务内核对：``agent_source_link`` 的角色绑定边，以及
+          ``agent_round.frozen_manifest`` 中仍引用该版本的会话请求；
+        - 只删除该准确版本行与指向它的谱系边，不触碰同名其它版本目录；
+        - 目录清理由应用服务在提交后执行，不把「已删登记」伪报成「已删文件」。
+        """
+
+        self._check_engine()
+        identity = f"{user_scope}/skill/{skill_id}@{version}"
+        _require_text_field(user_scope, "user_scope", identity)
+        _require_text_field(skill_id, "skill_id", identity)
+        if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "version must be a positive integer", identity)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(AgentAssetVersion.asset_kind)
+                    .where(
+                        AgentAssetVersion.user_scope == user_scope,
+                        AgentAssetVersion.asset_id == skill_id,
+                        AgentAssetVersion.asset_version == str(version),
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if row is None or row.asset_kind != "skill":
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "skill version does not exist", identity)
+            role_refs = await _lock_role_skill_references(
+                conn,
+                user_scope=user_scope,
+                skill_id=skill_id,
+                source_version=str(version),
+            )
+            if role_refs:
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    f"skill version is referenced by role: {','.join(role_refs)}",
+                    identity,
+                )
+            session_refs = await _session_skill_references(
+                conn,
+                user_scope=user_scope,
+                skill_id=skill_id,
+                source_version=str(version),
+            )
+            if session_refs:
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    f"skill version is referenced by session: {','.join(session_refs)}",
+                    identity,
+                )
+            await conn.execute(
+                sa.delete(AgentSourceLink).where(
+                    AgentSourceLink.user_scope == user_scope,
+                    AgentSourceLink.source_id == skill_id,
+                    AgentSourceLink.source_version == str(version),
+                )
+            )
+            await conn.execute(
+                sa.delete(AgentAssetVersion).where(
+                    AgentAssetVersion.user_scope == user_scope,
+                    AgentAssetVersion.asset_id == skill_id,
+                    AgentAssetVersion.asset_version == str(version),
+                )
+            )
+
     # ------------------------------------------------------------------
     # R2-I08 研究成果保存（唯一执行循环的成果生产者端口）
     # ------------------------------------------------------------------
@@ -15113,6 +15804,55 @@ async def _lock_role_skill_references(
         )
     ).all()
     return tuple(f"{row.consumer_id}@{row.consumer_version}" for row in rows)
+
+
+def _metadata_int(metadata: Mapping[str, Any], key: str, identity: str) -> int:
+    value = metadata.get(key, 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, f"skill metadata {key} unreadable", identity)
+    return value
+
+
+def _metadata_text(metadata: Mapping[str, Any], key: str) -> str:
+    value = metadata.get(key)
+    return value if isinstance(value, str) else ""
+
+
+def _metadata_text_tuple(metadata: Mapping[str, Any], key: str) -> tuple[str, ...]:
+    value = metadata.get(key)
+    if not isinstance(value, list):
+        return ()
+    return tuple(item for item in value if isinstance(item, str))
+
+
+async def _session_skill_references(
+    conn: AsyncConnection, *, user_scope: str, skill_id: str, source_version: str
+) -> tuple[str, ...]:
+    """会话冻结请求中仍引用该 Skill 版本的会话（``agent_round.frozen_manifest``）。"""
+
+    pair = [[skill_id, source_version]]
+    rows = (
+        await conn.execute(
+            sa.select(AgentExecution.session_id)
+            .select_from(AgentRound)
+            .join(
+                AgentExecution,
+                sa.and_(
+                    AgentExecution.user_scope == AgentRound.user_scope,
+                    AgentExecution.execution_id == AgentRound.execution_id,
+                ),
+            )
+            .where(
+                AgentRound.user_scope == user_scope,
+                AgentRound.frozen_manifest.isnot(None),
+                sa.or_(
+                    AgentRound.frozen_manifest["skill_refs"].contains(pair),
+                    AgentRound.frozen_manifest["shared"]["skill_refs"].contains(pair),
+                ),
+            )
+        )
+    ).all()
+    return tuple(sorted({str(row.session_id) for row in rows if isinstance(row.session_id, str)}))
 
 
 def _compare_skill_asset_row(

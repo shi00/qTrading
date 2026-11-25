@@ -30,6 +30,7 @@ from typing import Any, Final, Literal, Protocol, cast
 
 from pydantic_ai import Agent, DeferredToolRequests, UnexpectedModelBehavior
 from pydantic_ai.agent import EventStreamHandler
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import RunTimedOut
 from pydantic_ai.messages import (
     FinalResultEvent,
@@ -51,6 +52,7 @@ from core.agent_types import (
 )
 from core.model_management_types import ModelTurnProtocolError
 from services.agent_service.capability_wiring import build_leaf_boundary
+from services.agent_service.context_compaction import build_leaf_compaction
 from services.agent_service.leaf_runtime import (
     AGENT_RESEARCH_SCENARIO_ID,
     AdmissionCountingToolExecutor,
@@ -61,7 +63,7 @@ from services.agent_service.leaf_runtime import (
     LeafModelBinding,
     require_leaf_turn_timeout,
 )
-from services.agent_service.model import GatewayModel
+from services.agent_service.model import GatewayModel, ModelTurnRefusedError
 from services.agent_service.tool_loop import ToolLoopPorts, run_agent_tool_loop
 from services.agent_service.tool_runtime import ToolRunScope, ToolRuntimeFactory
 from services.agent_service.workflows import NodeOutcome
@@ -78,11 +80,13 @@ __all__ = [
     "LEAF_INPUT_DIGEST_MISSING",
     "LEAF_MODEL_FAILED",
     "LEAF_MODEL_PROTOCOL_FAILED",
+    "LEAF_MODEL_REFUSED",
     "LEAF_MODEL_REF_UNAVAILABLE",
     "LEAF_POLICY_DENIED",
     "LEAF_PREDECESSOR_ARTIFACT_UNAVAILABLE",
     "LEAF_RESULT_KIND",
     "LEAF_RESULT_SAVE_FAILED",
+    "LEAF_RESULT_SAVE_UNCONFIRMED",
     "LEAF_ROLE_PROMPT_KEY",
     "LEAF_ROLE_PROMPT_UNAVAILABLE",
     "LEAF_TIMEOUT_UNAVAILABLE",
@@ -121,6 +125,8 @@ LEAF_EMPTY_RESULT: Final[str] = "leaf_empty_result"
 LEAF_MODEL_FAILED: Final[str] = "leaf_model_failed"
 LEAF_POLICY_DENIED: Final[str] = "leaf_policy_denied"
 LEAF_RESULT_SAVE_FAILED: Final[str] = "leaf_result_save_failed"
+#: 保存确认丢失且按原成果身份无法证明已保存（未知，不固化失败，R21）。
+LEAF_RESULT_SAVE_UNCONFIRMED: Final[str] = "leaf_result_save_unconfirmed"
 LEAF_ROLE_PROMPT_UNAVAILABLE: Final[str] = "leaf_role_prompt_unavailable"
 LEAF_TOOL_SETUP_FAILED: Final[str] = "leaf_tool_setup_failed"
 LEAF_TOOL_BUDGET_EXCEEDED: Final[str] = "tool_budget_exceeded"
@@ -130,6 +136,9 @@ LEAF_TIMEOUT_UNAVAILABLE: Final[str] = "leaf_timeout_unavailable"
 LEAF_DEADLINE_EXHAUSTED: Final[str] = "leaf_deadline_exhausted"
 #: 桥层协议事实失败（如截断流无 finish 确认 / 收尾未核）：不保存成果（R21）。
 LEAF_MODEL_PROTOCOL_FAILED: Final[str] = "leaf_model_protocol_failed"
+#: 提供方确定内容拒绝（完成的模型回合，Executor 已 halt 且保住用量）：与协议 /
+#: 普通模型失败分类不同，不保存成果；拒绝原文不进入终态 / 日志（R9/R21）。
+LEAF_MODEL_REFUSED: Final[str] = "leaf_model_refused"
 
 
 #: 叶模型回合公开事件的受治理类别（不含思考、工具参数、供应商载荷）。
@@ -392,6 +401,60 @@ def _failed(context: LeafExecutionContext, code: str) -> NodeOutcome:
     return NodeOutcome(node_id=context.node.node_id, state="failed", error_code=code)
 
 
+def _is_confirmed_result(saved: object, draft: ResearchResultDraft) -> bool:
+    """保存确认：已保存成果须报告 ``final_output_saved`` 且身份与本叶草稿逐项一致。
+
+    身份核对按原成果稳定身份（同用户域/执行/轮/节点/输入版/输入指纹），避免把
+    他叶成果或旧输入版的成果当成本叶成果（R21）。
+    """
+
+    return (
+        isinstance(saved, ResearchResult)
+        and saved.final_output_saved is True
+        and saved.user_scope == draft.user_scope
+        and saved.execution_id == draft.execution_id
+        and saved.round_id == draft.round_id
+        and saved.node_id == draft.node_id
+        and saved.input_revision == draft.input_revision
+        and saved.actual_input_digest == draft.actual_input_digest
+    )
+
+
+async def _lookup_saved_result(store: LeafResultStore, draft: ResearchResultDraft) -> ResearchResult | None:
+    """提交确认丢失后按原成果身份查回（同身份同摘要幂等重放，零新版本）。
+
+    ``save_research_result`` 以 ``(user_scope, execution, round, node, result_kind)``
+    派生稳定成果身份并按 ``result_digest`` 幂等：原事务已提交时返回原成果版本
+    （不新增版本、不重复写事件）；原事务确未提交时补写本次成果（仍只有一行，
+    不产生重复成果）。以同一 draft 重放即「按原成果身份查回」，不重跑模型。
+    返回 ``None`` = 无法证明（重放再次异常或返回未确认/身份不符）。
+    """
+
+    try:
+        saved = await store.save_research_result(draft)
+    except asyncio.CancelledError:
+        raise
+    except AgentServiceError as e:
+        logger.warning(
+            "[LeafAgent] research result identity lookup rejected: %s (execution=%s node=%s)",
+            e.code.value,
+            draft.execution_id,
+            draft.node_id,
+        )
+        return None
+    except Exception as e:
+        logger.warning(
+            "[LeafAgent] research result identity lookup failed: %s (execution=%s node=%s)",
+            type(e).__name__,
+            draft.execution_id,
+            draft.node_id,
+        )
+        return None
+    if not _is_confirmed_result(saved, draft):
+        return None
+    return saved
+
+
 def _resolve_agent_dao(dao: Any | None) -> Any | None:
     """未显式注入时惰性取共享 ``CacheManager().agent_dao``（不新建引擎）。"""
 
@@ -553,6 +616,16 @@ async def run_leaf_agent(
             )
             return _failed(context, LEAF_TOOL_SETUP_FAILED)
     tools = tool_runtime.tools if tool_runtime is not None else ()
+    # 长上下文压缩：预算取真实授权连接窗口并预留输出；摘要回合复用本叶
+    # 绑定模型（同一账本），摘要期限取本回合剩余冻结期限。
+    compaction = build_leaf_compaction(
+        binding,
+        scenario_id=AGENT_RESEARCH_SCENARIO_ID,
+        timeout_seconds=lambda: require_leaf_turn_timeout(binding),
+    )
+    capabilities: tuple[AbstractCapability[Any], ...] = (
+        (boundary, compaction) if compaction is not None else (boundary,)
+    )
     agent: Agent[LeafAgentDeps, Any] = Agent(
         model,
         name=LEAF_AGENT_NAME,
@@ -562,7 +635,7 @@ async def run_leaf_agent(
         retries=0,
         instructions=_leaf_instructions(context, role_prompt),
         tools=tools,
-        capabilities=(boundary,),
+        capabilities=capabilities,
     )
     deps = LeafAgentDeps(
         user_scope=facts.user_scope,
@@ -630,6 +703,15 @@ async def run_leaf_agent(
             context.node.node_id,
         )
         return _failed(context, LEAF_MODEL_PROTOCOL_FAILED)
+    except ModelTurnRefusedError:
+        # 确定拒绝（完成的模型回合）：与协议 / 普通失败区分；拒绝原文只留在
+        # 异常 body，不写入日志 / 终态（R9/R21），用量已由 Executor 落账
+        logger.warning(
+            "[LeafAgent] leaf model turn refused by provider policy (execution=%s node=%s)",
+            context.execution_id,
+            context.node.node_id,
+        )
+        return _failed(context, LEAF_MODEL_REFUSED)
     except AgentServiceError as e:
         if e.code is AgentErrorCode.BUDGET_BLOCKED:
             code = LEAF_TOOL_BUDGET_EXCEEDED
@@ -702,19 +784,44 @@ async def run_leaf_agent(
         parent_artifact_refs=parent_artifact_refs,
         source_refs=context.node.source_refs,
     )
+    store = DaoLeafResultStore(dao)
     try:
-        saved = await DaoLeafResultStore(dao).save_research_result(draft)
+        saved: object = await store.save_research_result(draft)
     except asyncio.CancelledError:
         raise
-    except Exception as e:
+    except AgentServiceError as e:
+        # 明确拒绝（执行/轮次/会话不符、清理 fence）：该事务提交前已回滚，成果
+        # 确证未保存，如实报失败；不查回、不补写（提交前确证回滚不在丢确认内）。
         logger.warning(
-            "[LeafAgent] research result save failed: %s (execution=%s node=%s)",
-            type(e).__name__,
+            "[LeafAgent] research result save rejected: %s (execution=%s node=%s)",
+            e.code.value,
             context.execution_id,
             context.node.node_id,
         )
         return _failed(context, LEAF_RESULT_SAVE_FAILED)
-    if not isinstance(saved, ResearchResult) or saved.final_output_saved is not True:
+    except Exception as e:
+        # 提交确认丢失（提交可能已生效）：按原成果身份查回，不把未知固化为失败。
+        logger.warning(
+            "[LeafAgent] research result save confirmation lost: %s (execution=%s node=%s)",
+            type(e).__name__,
+            context.execution_id,
+            context.node.node_id,
+        )
+        saved = await _lookup_saved_result(store, draft)
+        if saved is None:
+            logger.warning(
+                "[LeafAgent] research result save unconfirmed after identity lookup; leaf keeps unknown "
+                "(execution=%s node=%s)",
+                context.execution_id,
+                context.node.node_id,
+            )
+            return NodeOutcome(
+                node_id=context.node.node_id,
+                state="unknown",
+                error_code=LEAF_RESULT_SAVE_UNCONFIRMED,
+                input_digest=digest,
+            )
+    if not _is_confirmed_result(saved, draft):
         logger.warning(
             "[LeafAgent] research result save not confirmed (execution=%s node=%s)",
             context.execution_id,

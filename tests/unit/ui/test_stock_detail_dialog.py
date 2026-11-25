@@ -11,6 +11,7 @@
 """
 
 import contextlib
+import typing
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1470,6 +1471,79 @@ class TestStockDetailDialogComponent:
         dialog = page._dialogs.controls[-1]
         assert callable(dialog.on_dismiss)
         dialog.on_dismiss(None)
+        sentiment_on_cancel.assert_called_once_with()
+
+
+# ---------------------------------------------------------------------------
+# N15: 从详情发起研究后收起详情弹窗
+# ---------------------------------------------------------------------------
+class TestResearchActionClosesDialog:
+    """N15: 详情内「发起研究」→ 先转发回执数据，再收起详情（避免两层观察界面叠加）。
+
+    回执路径不变：``on_start_research`` 仍收到原始 stock_data，且仅调用一次；
+    收尾复用既有 ``_close`` 路径（取消在途新闻/情绪任务 + 通知消费方清空详情）。
+    """
+
+    @staticmethod
+    def _research_button(dialog: ft.AlertDialog) -> ft.TextButton:
+        buttons = [
+            action
+            for action in (dialog.actions or [])
+            if isinstance(action, ft.TextButton) and action.icon == ft.Icons.SCIENCE_OUTLINED
+        ]
+        assert len(buttons) == 1, "详情弹窗应渲染唯一「发起研究」按钮"
+        return buttons[0]
+
+    def test_research_action_forwards_then_closes(self, mock_i18n_state, mock_app_colors_state, monkeypatch):
+        """点击发起研究 → 转发同一份数据 → 收起详情（含取消在途任务）。"""
+        from tests.unit.ui.component_renderer import (
+            FakePage,
+            make_component,
+            render_once,
+            run_mount_effects,
+        )
+        from ui.components import stock_detail_dialog as mod
+
+        mock_i18n = MagicMock()
+        mock_i18n.get.side_effect = lambda key, *a, **kw: key
+        monkeypatch.setattr(mod, "I18n", mock_i18n)
+
+        order: list[str] = []
+        stock_data = {"ts_code": "000001.SZ", "name": "测试"}
+        on_start_research = MagicMock(side_effect=lambda _data: order.append("research"))
+        on_close = MagicMock(side_effect=lambda: order.append("close"))
+        news_on_cancel = MagicMock()
+        sentiment_on_cancel = MagicMock()
+
+        component = make_component(
+            mod.StockDetailDialog,
+            stock_data=stock_data,
+            data_processor=None,
+            page=None,
+            open_state=True,
+            on_close=on_close,
+            on_start_research=on_start_research,
+            news_on_cancel=news_on_cancel,
+            sentiment_on_cancel=sentiment_on_cancel,
+        )
+        page = FakePage()
+        run_mount_effects(component, page=page)
+        render_once(component)
+
+        dialog = page._dialogs.controls[-1]
+        button = self._research_button(dialog)
+        assert callable(button.on_click)
+        on_click = typing.cast(typing.Any, button.on_click)
+        on_click(None)
+        # 重复点击（同帧）不得重复准备草稿、不得重复关闭
+        on_click(None)
+
+        # 回执路径不变：同一份数据、仅一次、先于关闭
+        on_start_research.assert_called_once_with(stock_data)
+        assert order == ["research", "close"]
+        # 收起走既有 _close：通知消费方 + 取消在途任务
+        on_close.assert_called_once_with()
+        news_on_cancel.assert_called_once_with()
         sentiment_on_cancel.assert_called_once_with()
 
 

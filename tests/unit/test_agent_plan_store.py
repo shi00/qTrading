@@ -1,12 +1,13 @@
 """PlanStore 六方法适配（DD §10.3；HANDOFF §7.3，E-04-3）。
 
-以假 DAO 验证适配语义：读固定绑定版、写以预期版 CAS 推进、冲突原样上抛、
-重复/缺失操作零 DB 写、返回值为脱离副本。真实持久化由
+以假 DAO 验证适配语义：读固定绑定版、写以「读取基线版」CAS 推进、冲突原样
+上抛、重复/缺失操作零 DB 写、返回值为脱离副本。真实持久化由
 ``tests/integration/test_agent_dao_plan_proposal.py`` 覆盖。
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 
 import pytest
@@ -61,6 +62,43 @@ def _item(item_id: str = "a1", *, content: str = "第一步", status: TaskStatus
 
 def _store(dao: FakePlanDao, *, revision: int = 0) -> PlanProposalStore:
     return build_plan_store(dao, PlanStoreBinding(user_scope="u1", execution_id="exec-1", plan_revision=revision))
+
+
+class _BarrierAfterReadDao(FakePlanDao):
+    """读返回后等齐参与者再放行，制造「两个编辑都基于同一旧版内容」的交错。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.barrier: asyncio.Barrier | None = None
+
+    async def read_plan_proposal(
+        self, *, user_scope: str, execution_id: str, plan_revision: int
+    ) -> PlanProposal | None:
+        proposal = await super().read_plan_proposal(
+            user_scope=user_scope, execution_id=execution_id, plan_revision=plan_revision
+        )
+        if self.barrier is not None:
+            await self.barrier.wait()
+        return proposal
+
+
+class _GateAfterReadDao(FakePlanDao):
+    """读返回后挂起直到外部放行，用于固定「旧内容 → 新 CAS」的交错。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.read_reached = asyncio.Event()
+        self.release_read = asyncio.Event()
+
+    async def read_plan_proposal(
+        self, *, user_scope: str, execution_id: str, plan_revision: int
+    ) -> PlanProposal | None:
+        proposal = await super().read_plan_proposal(
+            user_scope=user_scope, execution_id=execution_id, plan_revision=plan_revision
+        )
+        self.read_reached.set()
+        await self.release_read.wait()
+        return proposal
 
 
 class TestReadPaths:
@@ -250,3 +288,65 @@ class TestBinding:
         store = _store(dao, revision=3)
         assert store.binding == PlanStoreBinding(user_scope="u1", execution_id="exec-1", plan_revision=3)
         assert store.revision == 3
+
+
+class TestConcurrentEdits:
+    """同实例并发增量编辑：不得双成功而头版丢步骤（N34）。"""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_adds_from_same_baseline_keep_one_and_conflict_the_other(self) -> None:
+        dao = _BarrierAfterReadDao()
+        store = _store(dao)
+        await store.set_items([_item()])
+
+        dao.barrier = asyncio.Barrier(2)
+        outcomes = await asyncio.wait_for(
+            asyncio.gather(
+                store.add_item(_item("b2", content="第二步")),
+                store.add_item(_item("c3", content="第三步")),
+                return_exceptions=True,
+            ),
+            timeout=10,
+        )
+        dao.barrier = None
+
+        winners = [outcome for outcome in outcomes if isinstance(outcome, PlanItem)]
+        conflicts = [outcome for outcome in outcomes if isinstance(outcome, AgentServiceError)]
+        assert len(winners) == 1
+        assert len(conflicts) == 1
+        assert conflicts[0].code is AgentErrorCode.REVISION_CONFLICT
+        head = await store.get_items()
+        assert [item.id for item in head] == ["a1", winners[0].id]
+        assert store.revision == 2
+
+    @pytest.mark.asyncio
+    async def test_incremental_edit_based_on_old_content_conflicts_after_replace(self) -> None:
+        dao = _GateAfterReadDao()
+        store = _store(dao)
+        await store.set_items([_item()])
+
+        pending = asyncio.create_task(store.add_item(_item("b2", content="第二步")))
+        await asyncio.wait_for(dao.read_reached.wait(), timeout=10)
+        await store.set_items([_item("z9", content="整表替换")])
+
+        dao.release_read.set()
+        with pytest.raises(AgentServiceError) as error:
+            await asyncio.wait_for(pending, timeout=10)
+        assert error.value.code is AgentErrorCode.REVISION_CONFLICT
+        assert [item.id for item in await store.get_items()] == ["z9"]
+        assert store.revision == 2
+
+    @pytest.mark.asyncio
+    async def test_stale_store_instance_conflicts_without_clobbering(self) -> None:
+        dao = FakePlanDao()
+        await _store(dao).set_items([_item()])
+        first = _store(dao, revision=1)
+        second = _store(dao, revision=1)
+
+        await first.update_item("a1", status=TaskStatus.completed)
+        with pytest.raises(AgentServiceError) as error:
+            await second.update_item("a1", content="旧内容改名")
+        assert error.value.code is AgentErrorCode.REVISION_CONFLICT
+        stored = await first.get_item("a1")
+        assert stored is not None
+        assert (stored.content, stored.status) == ("第一步", TaskStatus.completed)

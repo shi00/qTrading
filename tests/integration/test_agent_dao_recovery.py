@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -33,6 +34,7 @@ from core.agent_types import (
     ResourceReleaseRequest,
     ResourceSlotKind,
     StartupIsolationRecord,
+    assess_research_completion,
     json_doc,
     stable_id,
 )
@@ -51,6 +53,9 @@ from tests._helpers import create_test_engine, make_alembic_cfg
 pytestmark = [pytest.mark.integration, pytest.mark.embedded_real]
 
 _USER = "user-recovery"
+
+#: 恢复兼容矩阵中的当前应用版本（与 ``_seed_round`` 默认代码版本一致）。
+_APP_VERSION = "0.11.7"
 
 
 async def _reset_schema(url: str) -> None:
@@ -87,6 +92,8 @@ async def _seed_execution(
     node_id: str = "root",
     dispatch_closed: bool = False,
     owner_epoch: int = 1,
+    parent_execution_id: str | None = None,
+    ended_at: datetime | None = None,
 ) -> None:
     values: dict = {
         "user_scope": _USER,
@@ -98,6 +105,8 @@ async def _seed_execution(
         "goal_coverage": "unknown",
         "dispatch_closed": dispatch_closed,
         "owner_epoch": owner_epoch,
+        "parent_execution_id": parent_execution_id,
+        "ended_at": ended_at,
     }
     if kind in ("root", "comparison_lane"):
         values["source_module"] = "ui"
@@ -266,6 +275,22 @@ async def _fetch_slot(dao: AgentDao, slot_id: str = "slot-total") -> Any:
                     AgentResourceSlot.released_at,
                     AgentResourceSlot.release_verified,
                 ).where(AgentResourceSlot.user_scope == _USER, AgentResourceSlot.slot_id == slot_id)
+            )
+        ).one()
+
+
+async def _fetch_state(dao: AgentDao, execution_id: str) -> Any:
+    """逐项查回执行权威事实（状态/代次/结束时刻/修订号）。"""
+
+    async with dao.engine.connect() as conn:  # type: ignore[union-attr]  # 测试内直接查回
+        return (
+            await conn.execute(
+                sa.select(
+                    AgentExecution.display_state,
+                    AgentExecution.owner_epoch,
+                    AgentExecution.ended_at,
+                    AgentExecution.revision,
+                ).where(AgentExecution.user_scope == _USER, AgentExecution.execution_id == execution_id)
             )
         ).one()
 
@@ -823,6 +848,191 @@ class TestRecoverySlotTakeover:
             assert resumed == []
             assert dict(receipt.blocked)["exec-a"] == "slot_takeover_unverified"
             assert "no_granted_execution" in receipt.blocking_reasons
+        finally:
+            await dao.engine.dispose()  # type: ignore[union-attr]
+
+
+class _RecordingClient:
+    """记录被复接的 workflow（必要叶由原生列举负责，本用例无直属叶）。"""
+
+    def __init__(self) -> None:
+        self.resumed: list[str] = []
+
+    async def list_workflows_async(self, **kwargs: Any) -> list[Any]:
+        return []
+
+    async def cancel_workflows_async(self, workflow_ids: list[str], **kwargs: Any) -> None:
+        raise AssertionError("cancel not expected")
+
+    async def resume_workflows_async(self, workflow_ids: list[str]) -> list[Any]:
+        self.resumed.extend(workflow_ids)
+        return []
+
+
+class TestDagInterruptedRecovery:
+    """A/B/C DAG 中断后恢复逐项查回（QAC05/QAC07/NFR-R01/R02）。
+
+    场景：根 R 已结束；叶 A 已成功结束；叶 B 崩溃时在途（``display_state=unknown``）；
+    叶 C 依赖 B、尚未开始。恢复必须同时满足：
+
+    - **不重派已完成节点**：A/R 不进入恢复候选；误把已完成节点纳入选择时整批
+      ``preflight_incomplete`` 拒绝（不静默跳过、不部分恢复）；
+    - **不丢未完成节点**：C 可被授予新代次并复接，重启后仍逐项查回；
+    - **未知态显式呈现**：B 阻塞为 ``state_unverified``，完成核定保持 ``unknown``，
+      不因「有成果/目标 full」被伪装成完成。
+    """
+
+    async def test_dag_recovery_never_redispatches_done_and_keeps_unknown(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        ended_at = datetime(2026, 11, 20, 9, 30, tzinfo=UTC)
+        try:
+            await _seed_session(dao, "s-1")
+            # R：整棵研究已结束
+            await _seed_execution(
+                dao, execution_id="exec-root", session_id="s-1", display_state="ended", ended_at=ended_at
+            )
+            # A：已完成成功叶（不应再被派发）
+            await _seed_execution(
+                dao,
+                execution_id="exec-a",
+                session_id="s-1",
+                kind="leaf",
+                node_id="a",
+                parent_execution_id="exec-root",
+                display_state="ended",
+                ended_at=ended_at,
+            )
+            await _seed_round(dao, round_id="round-a", execution_id="exec-a", workflow_id="agent_leaf:a", active=False)
+            await _link_round(dao, execution_id="exec-a", round_id="round-a")
+            # B：崩溃时在途，结果未知（不得伪装完成）
+            await _seed_execution(
+                dao,
+                execution_id="exec-b",
+                session_id="s-1",
+                kind="leaf",
+                node_id="b",
+                parent_execution_id="exec-root",
+                display_state="unknown",
+            )
+            await _seed_round(dao, round_id="round-b", execution_id="exec-b", workflow_id="agent_leaf:b")
+            await _link_round(dao, execution_id="exec-b", round_id="round-b")
+            # C：依赖 B 的后继，尚未开始（不得丢失）
+            await _seed_execution(
+                dao,
+                execution_id="exec-c",
+                session_id="s-1",
+                kind="leaf",
+                node_id="c",
+                parent_execution_id="exec-root",
+                display_state="queued",
+            )
+            await _seed_round(dao, round_id="round-c", execution_id="exec-c", workflow_id="agent_leaf:c")
+            await _link_round(dao, execution_id="exec-c", round_id="round-c")
+
+            # 1) 候选投影只含非终态节点：已完成 A/R 不重回派发面。
+            items = await dao.list_recovery_executions(_USER)
+            assert [item.execution_id for item in items] == ["exec-b", "exec-c"]
+            by_id = {item.execution_id: item for item in items}
+            assert by_id["exec-b"].display_state == "unknown"
+            assert by_id["exec-b"].workflow_id == "agent_leaf:b"
+            assert by_id["exec-c"].workflow_id == "agent_leaf:c"
+
+            client = _RecordingClient()
+            # 2) 误选已完成节点：整批 fail-closed（不静默跳过、零授权零复接）。
+            rejected = await resume_selected_workflows(
+                user_scope=_USER,
+                execution_ids=("exec-root", "exec-a", "exec-b", "exec-c"),
+                owner_epoch=2,
+                run_epoch=2,
+                application_version=_APP_VERSION,
+                client=client,
+                registry=dao,
+            )
+            assert rejected.ready is False
+            assert rejected.granted_execution_ids == ()
+            assert rejected.resumed_workflow_ids == ()
+            assert client.resumed == []
+            assert dict(rejected.blocked) == {
+                "exec-root": "workflow_unknown",
+                "exec-a": "workflow_unknown",
+            }
+            assert rejected.blocking_reasons == ("preflight_incomplete",)
+
+            # 3) 只选未完成 C：授予新代次并复接；不扩入未选节点。
+            recovered = await resume_selected_workflows(
+                user_scope=_USER,
+                execution_ids=("exec-c",),
+                owner_epoch=2,
+                run_epoch=2,
+                application_version=_APP_VERSION,
+                client=client,
+                registry=dao,
+            )
+            assert recovered.ready is True
+            assert recovered.granted_execution_ids == ("exec-c",)
+            assert recovered.resumed_workflow_ids == ("agent_leaf:c",)
+            assert recovered.blocked == ()
+            assert client.resumed == ["agent_leaf:c"]
+
+            # 4) 未知 B 显式拒绝恢复（不是「已完成」，也不是可静默跳过）。
+            blocked_b = await dao.grant_recovery_epoch(
+                RecoveryGrantRequest(
+                    user_scope=_USER,
+                    execution_ids=("exec-b",),
+                    owner_epoch=2,
+                    run_epoch=2,
+                    application_version=_APP_VERSION,
+                )
+            )
+            assert blocked_b.granted_execution_ids == ()
+            assert dict(blocked_b.blocked) == {"exec-b": "state_unverified"}
+
+            state_a = await _fetch_state(dao, "exec-a")
+            assert (state_a.display_state, state_a.owner_epoch) == ("ended", 1)
+            assert state_a.ended_at is not None
+            state_b = await _fetch_state(dao, "exec-b")
+            assert (state_b.display_state, state_b.owner_epoch, state_b.ended_at) == ("unknown", 1, None)
+            state_c = await _fetch_state(dao, "exec-c")
+            assert state_c.owner_epoch == 2
+            assert await _fetch_round(dao, "round-c") == 2
+
+            # 5) 模拟崩溃重启：新 DAO 实例只凭持久事实逐项查回。
+            restarted = AgentDao(create_test_engine(real_embedded_pg.url))
+            try:
+                reread = await restarted.list_recovery_executions(_USER)
+                assert [item.execution_id for item in reread] == ["exec-b", "exec-c"]
+                reread_c = next(item for item in reread if item.execution_id == "exec-c")
+                assert (reread_c.owner_epoch, reread_c.run_epoch, reread_c.dispatch_closed) == (2, 2, False)
+                assert next(item for item in reread if item.execution_id == "exec-b").display_state == "unknown"
+
+                # 同代次重放：不双写、不丢 C（R22 代次必须前进）。
+                revision_before = (await _fetch_state(restarted, "exec-c")).revision
+                replay = await restarted.grant_recovery_epoch(
+                    RecoveryGrantRequest(
+                        user_scope=_USER,
+                        execution_ids=("exec-c",),
+                        owner_epoch=2,
+                        run_epoch=2,
+                        application_version=_APP_VERSION,
+                    )
+                )
+                assert replay.granted_execution_ids == ()
+                assert dict(replay.blocked) == {"exec-c": "epoch_not_advanced"}
+                assert (await _fetch_state(restarted, "exec-c")).revision == revision_before
+
+                # 未知态在重启后仍是 unknown，且完成核定不冒充完成。
+                unknown_state = (await _fetch_state(restarted, "exec-b")).display_state
+                assert unknown_state == "unknown"
+                assessment = assess_research_completion(
+                    execution_state=unknown_state,
+                    final_output_saved=True,
+                    goal_coverage="full",
+                    convergence_confirmed=True,
+                )
+                assert assessment.execution_ended is None
+                assert assessment.outcome == "unknown"
+            finally:
+                await restarted.engine.dispose()  # type: ignore[union-attr]  # 释放测试引擎
         finally:
             await dao.engine.dispose()  # type: ignore[union-attr]
 

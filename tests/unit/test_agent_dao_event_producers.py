@@ -1,10 +1,11 @@
 """写入族同事务可靠事件契约测试（检视 D29）。
 
 观察侧只读 ``agent_message``（``read_events`` / ``observe_session_events``）：
-``save_draft`` 与 ``save_plan_proposal`` 提交后必须留下可被 ``after_seq`` 过滤
-取到的事件；同命令键（草稿）/同内容（提案）重放不写第二条事件；D08 清理
-fence 下仍拒绝且零事件。真实事务/唯一约束行为由 sidecar PG 集成测试覆盖，
-本文件用 capture conn 断言语句序列与行载荷。
+``save_draft``、``save_plan_proposal`` 与 ``change_session``（改名/置顶/归档/解档）
+提交后必须留下可被 ``after_seq`` 过滤取到的事件；同命令键（草稿）/同内容（提案）
+重放、元数据动作重放/预期版冲突均不写第二条事件；D08 清理 fence 下仍拒绝且零事件。
+真实事务/唯一约束行为由 sidecar PG 集成测试覆盖，本文件用 capture conn 断言语句
+序列与行载荷。
 """
 
 from __future__ import annotations
@@ -27,8 +28,12 @@ from core.agent_types import (
     Mode,
     PlanItemSnapshot,
     Purpose,
+    SessionAction,
+    SessionChangeCommand,
     draft_save_input_digest,
+    encode_command_receipt,
     encode_draft_receipt,
+    session_change_input_digest,
 )
 from data.persistence.daos.agent_dao import AgentDao
 
@@ -101,11 +106,12 @@ class _WriteEventConn:
         *,
         draft_revision: int = 1,
         event_seq: int = 0,
+        revision: int = 1,
         fenced_sessions: list[str] | None = None,
         execution_session_id: str | None = "s1",
         command_row: Any = None,
     ) -> None:
-        self.session = SimpleNamespace(draft_revision=draft_revision, event_seq=event_seq)
+        self.session = SimpleNamespace(draft_revision=draft_revision, event_seq=event_seq, revision=revision)
         self.fenced_sessions = [] if fenced_sessions is None else list(fenced_sessions)
         self.execution = None
         if execution_session_id is not None:
@@ -322,4 +328,113 @@ class TestSavePlanProposalEvent:
                 user_scope="u1", execution_id="exec-1", expected_revision=0, items=_plan_items()
             )
         assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert conn.messages == []
+
+
+def _session_command(
+    *,
+    action: SessionAction,
+    expected: int = 1,
+    title: str | None = None,
+    command_id: str = "cmd-s1",
+) -> SessionChangeCommand:
+    return SessionChangeCommand(
+        command=CommandRef(
+            user_scope="u1",
+            source_module="ui",
+            business_request_id=f"req-{command_id}",
+            command_id=command_id,
+            expected_revision=expected,
+        ),
+        action=action,
+        session_id="s1",
+        expected_session_revision=expected,
+        title=title,
+    )
+
+
+class TestChangeSessionEvent:
+    """N22：改名/置顶/归档提交后留下可被 after_seq 追平的 session_changed 事件。"""
+
+    async def test_rename_leaves_single_observable_event(self) -> None:
+        conn = _WriteEventConn()
+        dao = _dao(conn)
+        receipt = await dao.change_session(_session_command(action=SessionAction.RENAME, title="改名后"))
+        assert receipt.current_revision == 2
+
+        assert len(conn.messages) == 1
+        values = conn.messages[0]
+        assert values["event_kind"] == EventKind.SESSION_CHANGED.value
+        assert values["payload_kind"] == "session_changed"
+        assert values["session_seq"] == 1
+        assert values["subject_id"] == "s1"
+        assert values["subject_revision"] == 2
+        assert values["payload"]["action"] == SessionAction.RENAME.value
+        assert values["payload"]["session_revision"] == 2
+        assert values["payload"]["title"] == "改名后"
+        # 事件与命令同事务：命令事实先写，事件随后。
+        assert conn.statements.index(next(s for s in conn.statements if "INSERT INTO agent_command" in s)) < (
+            conn.statements.index(next(s for s in conn.statements if "INSERT INTO agent_message" in s))
+        )
+
+        page = await dao.read_events(EventReadQuery(user_scope="u1", session_id="s1", after_seq=0))
+        assert [event.event_kind for event in page.events] == [EventKind.SESSION_CHANGED]
+        assert page.last_seq == 1
+        assert (await dao.read_events(EventReadQuery(user_scope="u1", session_id="s1", after_seq=1))).events == ()
+
+    async def test_pin_archive_unarchive_each_leave_accurate_event(self) -> None:
+        cases = (
+            (SessionAction.PIN, "pinned", True),
+            (SessionAction.ARCHIVE, "archived", True),
+            (SessionAction.UNARCHIVE, "archived", False),
+        )
+        for action, field, expected in cases:
+            conn = _WriteEventConn()
+            await _dao(conn).change_session(_session_command(action=action))
+            assert len(conn.messages) == 1
+            payload = conn.messages[0]["payload"]
+            assert payload["action"] == action.value
+            assert payload[field] is expected
+            assert conn.messages[0]["event_kind"] == EventKind.SESSION_CHANGED.value
+
+    async def test_sequential_metadata_changes_advance_watermark_by_one(self) -> None:
+        conn = _WriteEventConn()
+        dao = _dao(conn)
+        await dao.change_session(_session_command(action=SessionAction.RENAME, title="第一版", command_id="c1"))
+        conn.session.revision = 2
+        await dao.change_session(_session_command(action=SessionAction.PIN, expected=2, command_id="c2"))
+
+        assert [values["session_seq"] for values in conn.messages] == [1, 2]
+        page = await dao.read_events(EventReadQuery(user_scope="u1", session_id="s1", after_seq=1))
+        assert [event.session_seq for event in page.events] == [2]
+        assert page.events[0].payload_kind == "session_changed"
+
+    async def test_same_command_replay_does_not_append_event(self) -> None:
+        conn = _WriteEventConn()
+        dao = _dao(conn)
+        command = _session_command(action=SessionAction.RENAME, title="改名后")
+        first = await dao.change_session(command)
+        conn.command_row = SimpleNamespace(
+            input_digest=session_change_input_digest(command),
+            receipt_payload=encode_command_receipt(first),
+        )
+        replay = await dao.change_session(command)
+
+        assert replay == first
+        assert len(conn.messages) == 1
+
+    async def test_same_command_key_with_different_input_conflicts_without_event(self) -> None:
+        # 同命令键异输入：在行锁内查重即拒（零新事实），不追加事件。
+        conn = _WriteEventConn()
+        conn.command_row = SimpleNamespace(input_digest="stale-digest", receipt_payload=None)
+        with pytest.raises(AgentServiceError) as exc:
+            await _dao(conn).change_session(_session_command(action=SessionAction.RENAME, title="C", command_id="c2"))
+        assert exc.value.code is AgentErrorCode.INPUT_CONFLICT
+        assert conn.messages == []
+
+    async def test_revision_conflict_writes_no_event(self) -> None:
+        conn = _WriteEventConn(revision=5)
+        with pytest.raises(AgentServiceError) as exc:
+            await _dao(conn).change_session(_session_command(action=SessionAction.ARCHIVE, expected=1))
+        assert exc.value.code is AgentErrorCode.REVISION_CONFLICT
         assert conn.messages == []

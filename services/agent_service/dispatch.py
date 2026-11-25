@@ -5,6 +5,7 @@
 - **只投递已可靠保存的受理**：``commit_state`` 非 ``COMMITTED`` 一律零派发；
 - **门闩关闭即零派发**：宿主未 launch（配置门闩关闭）或关闭链已关派发时返回
   ``submitted=False`` 与原因，受理事实保持原样（不把「未派发」写成「已派发」）；
+  门闩在异步取计划/准入解析期间合上时，提交前复验并零派发（N31）；
 - **门闩关闭/计划缺失/投递失败都不产生研究执行**；``CancelledError`` 原样传播
   （R2），其余失败如实进 ``reason``，不伪造已派发（R21）；
 - **重复派发幂等**：host 入口以稳定 ``workflow_id`` + ``return-existing`` 启动，
@@ -56,6 +57,10 @@ CAPABILITY_POLICY_UNAVAILABLE: Final[str] = "capability_policy_unavailable"
 BINDING_IDENTITY_UNAVAILABLE: Final[str] = "binding_identity_unavailable"
 #: 零派发原因：绑定身份与受理回执不一致（会话/用户域不符，不得写入错身份）。
 BINDING_IDENTITY_MISMATCH: Final[str] = "binding_identity_mismatch"
+#: 零派发原因：计划载荷非法（图/能力/角色未通过派发前准入）。
+PLAN_INVALID: Final[str] = "plan_invalid"
+#: 零派发原因：根 workflow 投递失败（已如实记零派发，不冒充已启动）。
+SUBMIT_FAILED: Final[str] = "submit_failed"
 
 #: 计划来源端口：``(user_scope, execution_id) -> 已保存计划版``；不可得返回 None。
 PlanSpecProvider = Callable[[str, str], Awaitable[PlanSpecProposal | None]]
@@ -85,13 +90,41 @@ RootWorkflowResultReader = Callable[[str], Awaitable[ResearchWorkflowResult]]
 
 @dataclass(frozen=True, slots=True)
 class DispatchOutcome:
-    """一次派发尝试的回执：``submitted`` 只表示已投递到持久 workflow。"""
+    """一次派发尝试的回执：``submitted`` 只表示已投递到持久 workflow。
+
+    ``reason`` 为诊断文本（日志/回溯用）；面向用户的原因必须读结构化字段
+    ``reason_code`` + ``reason_params``（稳定原因码 + 键值参数，由 UI 按码 i18n），
+    不得把诊断文本直接当展示文案拼接。
+    """
 
     execution_id: str
     workflow_id: str
     submitted: bool
     reason: str | None = None
     round_id: str | None = None
+    reason_code: str | None = None
+    reason_params: tuple[tuple[str, str], ...] = ()
+
+
+def zero_dispatch(
+    execution_id: str,
+    workflow_id: str,
+    code: str,
+    *,
+    detail: str | None = None,
+    params: tuple[tuple[str, str], ...] = (),
+) -> DispatchOutcome:
+    """构造「未派发」回执（原因码 + 参数；诊断文本保留既有 ``code:detail`` 形态）。"""
+
+    return DispatchOutcome(
+        execution_id,
+        workflow_id,
+        False,
+        f"{code}:{detail}" if detail else code,
+        None,
+        code,
+        params,
+    )
 
 
 class ResearchDispatcher:
@@ -129,11 +162,12 @@ class ResearchDispatcher:
         execution_id = receipt.execution_id
         if receipt.commit_state is not CommitState.COMMITTED:
             # 未提交 / 提交未知都不得投递，且两者保持可区分（INV-07 不折叠 unknown）
-            return DispatchOutcome(
+            return zero_dispatch(
                 execution_id,
                 receipt.workflow_id,
-                False,
-                f"{NOT_COMMITTED}:{receipt.commit_state.value}",
+                NOT_COMMITTED,
+                detail=receipt.commit_state.value,
+                params=(("state", receipt.commit_state.value),),
             )
         if mode is not None and mode is not Mode.EXECUTE:
             logger.info(
@@ -142,11 +176,12 @@ class ResearchDispatcher:
                 receipt.workflow_id,
                 mode.value,
             )
-            return DispatchOutcome(
+            return zero_dispatch(
                 execution_id,
                 receipt.workflow_id,
-                False,
-                f"{MODE_RESEARCH_DISABLED}:{mode.value}",
+                MODE_RESEARCH_DISABLED,
+                detail=mode.value,
+                params=(("mode", mode.value),),
             )
         if self._gate.dispatch_closed():
             logger.info(
@@ -154,7 +189,7 @@ class ResearchDispatcher:
                 execution_id,
                 receipt.workflow_id,
             )
-            return DispatchOutcome(execution_id, receipt.workflow_id, False, DISPATCH_CLOSED)
+            return zero_dispatch(execution_id, receipt.workflow_id, DISPATCH_CLOSED)
         plan: PlanSpecProposal | None
         if self._plan_provider is None:
             plan = None
@@ -170,11 +205,12 @@ class ResearchDispatcher:
                     receipt.workflow_id,
                     DataSanitizer.sanitize_error(exc),
                 )
-                return DispatchOutcome(
+                return zero_dispatch(
                     execution_id,
                     receipt.workflow_id,
-                    False,
-                    f"plan_unavailable:{type(exc).__name__}",
+                    PLAN_UNAVAILABLE,
+                    detail=type(exc).__name__,
+                    params=(("error", type(exc).__name__),),
                 )
         if plan is None:
             logger.warning(
@@ -182,7 +218,12 @@ class ResearchDispatcher:
                 execution_id,
                 receipt.workflow_id,
             )
-            return DispatchOutcome(execution_id, receipt.workflow_id, False, PLAN_UNAVAILABLE)
+            return zero_dispatch(
+                execution_id,
+                receipt.workflow_id,
+                PLAN_UNAVAILABLE,
+                params=(("cause", "plan_not_saved"),),
+            )
 
         round_id = derive_round_id(
             user_scope=user_scope,
@@ -196,34 +237,40 @@ class ResearchDispatcher:
                 execution_id,
                 receipt.workflow_id,
             )
-            return DispatchOutcome(execution_id, receipt.workflow_id, False, PLAN_ADMISSION_UNCONFIGURED)
-        policy, policy_error = await self._resolve_role_capabilities(user_scope, execution_id)
+            return zero_dispatch(execution_id, receipt.workflow_id, PLAN_ADMISSION_UNCONFIGURED)
+        policy, policy_code, policy_detail = await self._resolve_role_capabilities(user_scope, execution_id)
         if policy is None:
+            code = policy_code or PLAN_ADMISSION_UNCONFIGURED
             logger.warning(
                 "[ResearchDispatch] plan admission policy unavailable, zero dispatch (execution=%s workflow=%s): %s",
                 execution_id,
                 receipt.workflow_id,
-                policy_error or PLAN_ADMISSION_UNCONFIGURED,
+                f"{code}:{policy_detail}" if policy_detail else code,
             )
-            return DispatchOutcome(
+            return zero_dispatch(
                 execution_id,
                 receipt.workflow_id,
-                False,
-                policy_error or PLAN_ADMISSION_UNCONFIGURED,
+                code,
+                detail=policy_detail,
+                params=(("error", policy_detail),) if policy_detail else (),
             )
-        binding_identity, binding_error = await self._resolve_binding_identity(user_scope, execution_id, receipt)
+        binding_identity, binding_code, binding_detail = await self._resolve_binding_identity(
+            user_scope, execution_id, receipt
+        )
         if binding_identity is None:
+            code = binding_code or BINDING_IDENTITY_UNAVAILABLE
             logger.warning(
                 "[ResearchDispatch] binding identity unavailable, zero dispatch (execution=%s workflow=%s): %s",
                 execution_id,
                 receipt.workflow_id,
-                binding_error or BINDING_IDENTITY_UNAVAILABLE,
+                f"{code}:{binding_detail}" if binding_detail else code,
             )
-            return DispatchOutcome(
+            return zero_dispatch(
                 execution_id,
                 receipt.workflow_id,
-                False,
-                binding_error or BINDING_IDENTITY_UNAVAILABLE,
+                code,
+                detail=binding_detail,
+                params=(("error", binding_detail),) if binding_detail else (),
             )
         try:
             plan_digest = plan_spec_digest(plan)
@@ -246,7 +293,21 @@ class ResearchDispatcher:
                 receipt.workflow_id,
                 DataSanitizer.sanitize_error(exc),
             )
-            return DispatchOutcome(execution_id, receipt.workflow_id, False, f"plan_invalid:{type(exc).__name__}")
+            return zero_dispatch(
+                execution_id,
+                receipt.workflow_id,
+                PLAN_INVALID,
+                detail=type(exc).__name__,
+                params=(("error", type(exc).__name__),),
+            )
+        if self._gate.dispatch_closed():
+            # 异步取计划/准入解析期间关闭门可能已合上（N31）：提交前复验，零额外提交。
+            logger.info(
+                "[ResearchDispatch] dispatch closed during plan resolution, zero dispatch (execution=%s workflow=%s)",
+                execution_id,
+                receipt.workflow_id,
+            )
+            return zero_dispatch(execution_id, receipt.workflow_id, DISPATCH_CLOSED)
         try:
             await self._submit(receipt.workflow_id, payload)
         except asyncio.CancelledError:
@@ -258,34 +319,41 @@ class ResearchDispatcher:
                 receipt.workflow_id,
                 DataSanitizer.sanitize_error(exc),
             )
-            return DispatchOutcome(execution_id, receipt.workflow_id, False, f"submit_failed:{type(exc).__name__}")
+            return zero_dispatch(
+                execution_id,
+                receipt.workflow_id,
+                SUBMIT_FAILED,
+                detail=type(exc).__name__,
+                params=(("error", type(exc).__name__),),
+            )
         return DispatchOutcome(execution_id, receipt.workflow_id, True, None, round_id)
 
     async def _resolve_role_capabilities(
         self, user_scope: str, execution_id: str
-    ) -> tuple[Mapping[str, AbstractSet[str]] | None, str | None]:
+    ) -> tuple[Mapping[str, AbstractSet[str]] | None, str | None, str | None]:
         """按请求解析角色能力策略：优先逐请求来源，回退构造期静态映射。
 
-        逐请求来源抛错时返回 ``(None, 原因)``（零派发）；``CancelledError`` 原样
-        传播（R2）。不做「读取失败即视为无限制」的降级（R21）。
+        返回 ``(策略, 原因码, 诊断明细)``：不可得时策略为 ``None``（零派发），
+        原因码供 UI 按码 i18n；``CancelledError`` 原样传播（R2）。不做「读取失败
+        即视为无限制」的降级（R21）。
         """
 
         provider = self._capability_provider
         if provider is None:
-            return self._role_capabilities, None
+            return self._role_capabilities, None, None
         try:
             policy = await provider(user_scope, execution_id)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            return None, f"{CAPABILITY_POLICY_UNAVAILABLE}:{type(exc).__name__}"
+            return None, CAPABILITY_POLICY_UNAVAILABLE, type(exc).__name__
         if policy is None:
-            return None, None
-        return policy, None
+            return None, None, None
+        return policy, None, None
 
     async def _resolve_binding_identity(
         self, user_scope: str, execution_id: str, receipt: SubmissionReceipt
-    ) -> tuple[ParentBindIdentity | None, str | None]:
+    ) -> tuple[ParentBindIdentity | None, str | None, str | None]:
         """解析应用轮次绑定身份：不可得/不一致即零派发（不写入错身份）。
 
         身份必须同时满足「来源存在」与「与受理回执一致」：用户域等于本次派发
@@ -295,18 +363,18 @@ class ResearchDispatcher:
 
         provider = self._binding_identity_provider
         if provider is None:
-            return None, BINDING_IDENTITY_UNAVAILABLE
+            return None, BINDING_IDENTITY_UNAVAILABLE, None
         try:
             identity = await provider(user_scope, execution_id)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            return None, f"{BINDING_IDENTITY_UNAVAILABLE}:{type(exc).__name__}"
+            return None, BINDING_IDENTITY_UNAVAILABLE, type(exc).__name__
         if identity is None:
-            return None, BINDING_IDENTITY_UNAVAILABLE
+            return None, BINDING_IDENTITY_UNAVAILABLE, None
         if identity.user_scope != user_scope or identity.session_id != receipt.session_id:
-            return None, BINDING_IDENTITY_MISMATCH
-        return identity, None
+            return None, BINDING_IDENTITY_MISMATCH, None
+        return identity, None, None
 
     async def read_result(self, workflow_id: str) -> ResearchWorkflowResult:
         """读回派发结果的持久事实（原生状态 + 成功输出）；未接线即显式拒绝。"""
