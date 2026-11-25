@@ -6,7 +6,8 @@
 
 ```text
 QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
-      ↘        ↘ INTERRUPTED (应用异常退出：残留 RUNNING / QUEUED 启动时回填)
+      ↘        ↘ INTERRUPTED (应用异常退出：残留 RUNNING / QUEUED 启动时回填；
+                               仅当本进程取得业务库唯一所有权锁后回填)
 ```
 
 - 任务通过 `submit_task()` 提交，`name` 与 `task_type` 为必填位置参数，`coroutine_factory` 是接收 `task_id` 关键字参数（并可透传 `**kwargs`）的可调用对象（返回 coroutine），可选参数含 `cancellable` / `unique_key` / `factory_key` / `exclusive_group`。`unique_key` 承载任务去重语义：同一 key 重复提交会被同步拦截并返回 `None`，任务结束（无论成功/失败/取消）后 key 释放可重新提交。最小调用样例：
@@ -31,7 +32,7 @@ QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
   - 看门狗（`SchedulerService._watch_config_changes`）在同组任务运行/排队中或 `cache_clear` 运行期间跳过本轮补偿检查（下个周期重判）；misfire 路径不加此守卫。
 - 使用 `update_progress(progress)` 报告进度 (0.0-1.0)，内置节流避免 UI 风暴
 - 工作协程内部使用 `is_cancelled()` 检测取消信号 (用户主动取消 / 应用退出)
-- 任务持久化到数据库（`task_history` 表，经 `services/task_manager.py::_persist_task` 异步写库）；应用重启时 `init_db()` 会把上次会话遗留的 `RUNNING` 与 `QUEUED` 任务统一回填为 `INTERRUPTED`，用户可经 `retry_task` 重新发起
+- 任务持久化到数据库（`task_history` 表，经 `services/task_manager.py::_persist_task` 异步写库）；应用重启时 `init_db()` 会把上次会话遗留的 `RUNNING` 与 `QUEUED` 任务统一回填为 `INTERRUPTED`，用户可经 `retry_task` 重新发起。**回填带唯一所有权条件（N02）**：`init_db()` 先用 `data/persistence/instance_lock.py::InstanceOwnershipLock` 取业务库会话级 advisory lock（独立单连接），取不到即说明另一存活实例仍在用同一库，本进程在任何业务写库前抛 `InstanceOwnershipConflictError` 停止（不改写对方任务行）；锁保持到单例重置/进程退出，崩溃后 PG 自动释放以便下次启动接管。
 
 > **操作指引**：TaskManager 后台任务的完整触发与编排方式见 [docs/guides/how-to.md](../guides/how-to.md) 与 [data-sync.md](./data-sync.md) 的落地路径；新增异步任务须遵循 CLAUDE.md §3.1 R2（取消传播）。
 
