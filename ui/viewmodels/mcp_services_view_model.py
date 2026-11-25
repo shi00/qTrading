@@ -76,6 +76,7 @@ def _row_problem_keys() -> dict[str, str]:
         )
     return _ROW_PROBLEM_KEYS
 
+
 #: 可在表单中直接编辑的文本字段（白名单，避免 View 传入未知字段）。
 DRAFT_TEXT_FIELDS = frozenset(
     {
