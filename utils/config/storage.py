@@ -46,6 +46,11 @@ _PRESERVED_RUNTIME_CONFIG_KEYS: frozenset[str] = frozenset(
         "llm_recent_selections",  # utils/llm_providers.py：最近模型选择记录
         "local_model_sha256",  # services/local_model_manager.py：本地模型完整性基线
         "local_model_sha256_path",  # services/local_model_manager.py：基线对应模型路径
+        # utils/config/llm.py：研究配置统一入口（W-18）——研究默认角色与摘要策略
+        "agent_research_role",
+        "agent_research_summary_enabled",
+        "agent_research_summary_keep_messages",
+        "agent_research_summary_prompt",
     }
 )
 

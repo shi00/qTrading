@@ -332,6 +332,34 @@ summary 必须像交易界面的核心提示，尽量包含"是否可参与 + �
 }
 
 
+# 研究长上下文摘要 Prompt 默认资产（W-18；与 W-10 压缩模块对齐）。
+# 正文与 ``services/agent_service/context_compaction.py`` 的摘要 Prompt 逐字一致：
+# 该模块是运行期唯一消费者（本模块不反向依赖 services），设置页据此提供
+# 「默认资产只读 + 可编辑 + 恢复默认」，单测守护两者不漂移。
+RESEARCH_SUMMARY_PROMPT_DEFAULT = """\
+下面这段对话将被你的摘要替代，请承载继续任务所需的全部信息。
+
+按以下小节组织，没有内容的小节可以省略：
+## 目标
+用户的总体目标与仍然有效的要求、约束或偏好。
+## 关键决定
+已做出的选择与理由，避免被重新讨论。
+## 已用资料与标识
+涉及的文件、路径、接口、参数、来源标识等，按原文引用。
+## 当前状态
+已完成与进行中的工作。
+## 下一步
+完成任务的直接动作。
+## 未解决问题
+未解决的疑问或阻塞。
+
+只输出摘要正文，不要前言，不要 Markdown 代码围栏。
+
+<messages>
+{messages}
+</messages>"""
+
+
 def _clean_rules(text: str | None) -> str:
     """Strip ``_UNIVERSAL_RULES`` and the trailing ``【输出格式】`` block from ``text``.
 

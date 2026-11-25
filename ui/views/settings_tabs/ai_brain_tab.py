@@ -39,6 +39,7 @@ from ui.components.settings_widgets import DashboardCard, SectionHeader, Setting
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
+from ui.views.settings_tabs.research_config_card import ResearchConfigCard
 from ui.viewmodels.ai_brain_settings_view_model import (
     ROLE_PROMPT_VARIABLES,
     ROLE_VERSION_UNSAVED_KEY,
@@ -267,7 +268,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         )
     )
     routes_state, routes_vm = use_viewmodel(factory=lambda: ModelRoutesViewModel(_model_configuration_service()))
-    _usage_state, usage_vm = use_viewmodel(
+    usage_state, usage_vm = use_viewmodel(
         factory=lambda: ModelUsageViewModel(
             dao_provider=_ai_usage_dao_provider,
             reservation_releaser=_release_unconfirmed_reservation,
@@ -326,6 +327,8 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
     # F35 / J26: 研究角色区域 UI 临时状态（教程展开 / 恢复确认目标角色）。
     open_role_tutorial, set_open_role_tutorial = ft.use_state("")
     reset_role_dialog, set_reset_role_dialog = ft.use_state("")
+    # W-18: 研究摘要 Prompt 恢复默认确认。
+    reset_summary_prompt_dialog_open, set_reset_summary_prompt_dialog_open = ft.use_state(False)
 
     # --- 异步保存 (R2: CancelledError 显式 raise; 调用 VM commands) ---
     async def _do_save_ai_settings() -> None:
@@ -415,6 +418,56 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
     def _do_cancel_reset_news_prompt() -> None:
         """ConfirmDialog on_cancel: 关闭对话框, 不执行重置。"""
         set_reset_news_dialog_open(False)
+
+    # --- W-18 研究配置统一入口：保存 / 摘要 Prompt 恢复默认 ---
+    async def _do_save_research_config() -> None:
+        """保存研究配置（角色 + 摘要策略）；反馈来自 VM 的 research_save_state。"""
+        UILogger.log_action("AIBrainTab", "Click", "btn_save_research_config")
+        try:
+            saved = await ai_settings_vm.save_research_config()
+            current_state = ai_settings_vm.state
+            if saved:
+                show_snack_callback(I18n.get("research_config_saved"), color=AppColors.SUCCESS)
+            else:
+                warning_key = current_state.research_warning_key or "research_config_save_failed"
+                show_snack_callback(I18n.get(warning_key), color=AppColors.ERROR)
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
+        except Exception as e:
+            from utils.error_classifier import classify_error, classify_severity
+
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            sanitized = DataSanitizer.sanitize_error(e)  # R9 异常消息脱敏
+            if severity == "system":
+                logger.critical(
+                    "[AIBrainTab] SYSTEM-LEVEL failure saving research config: %s", sanitized, exc_info=True
+                )
+            else:
+                logger.error(
+                    "[AIBrainTab] Error saving research config (%s): %s",
+                    error_info["code"],
+                    sanitized,
+                    exc_info=True,
+                )
+            show_snack_callback(I18n.get("research_config_save_failed"), color=AppColors.ERROR)
+
+    def _on_save_research_config() -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_save_research_config)
+
+    def _on_request_reset_summary_prompt() -> None:
+        set_reset_summary_prompt_dialog_open(True)
+
+    def _do_confirm_reset_summary_prompt() -> None:
+        """ConfirmDialog on_confirm: 摘要 Prompt 恢复默认资产（随后点保存落盘）。"""
+        ai_settings_vm.reset_research_summary_prompt()
+        show_snack_callback(I18n.get("settings_snack_prompt_reset"))
+        set_reset_summary_prompt_dialog_open(False)
+
+    def _do_cancel_reset_summary_prompt() -> None:
+        set_reset_summary_prompt_dialog_open(False)
 
     def _on_reset_role_prompt(role_key: str) -> None:
         """打开角色恢复确认（明确将清空该角色追加内容）。"""
@@ -829,6 +882,21 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         ),
     )
 
+    # --- W-18: 研究配置统一入口（模型 / 角色 / 预算 / 摘要策略集中一处） ---
+    # 模型与预算值来自各自单一来源（LLM 配置 / 模型使用 VM），本页不复制第二份默认值。
+    budget_text = (
+        ""
+        if usage_state.monthly_limit_unknown or usage_state.monthly_limit_cny is None
+        else str(usage_state.monthly_limit_cny)
+    )
+    card_research_config = ResearchConfigCard(
+        state=ai_settings_state,
+        vm=ai_settings_vm,
+        budget_text=budget_text,
+        on_save=_on_save_research_config,
+        on_request_reset_prompt=_on_request_reset_summary_prompt,
+    )
+
     # --- SEC-03 第二步: 「仅本地模式」开关卡片 (禁用全部云端 LLM, 数据不出本机) ---
     # 开关仅更新 VM state (ai_local_only_mode), 点「保存 AI 设置」时随 save_ai_settings 持久化。
     def _on_local_only_toggle(e: ft.ControlEvent) -> None:
@@ -1019,6 +1087,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
                 card_tuning,
                 card_prompt,
                 card_role_prompts,
+                card_research_config,
                 card_local_only,
                 card_egress,
                 ft.Container(
@@ -1071,6 +1140,17 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
                     ),
                     on_confirm=_do_confirm_reset_role_prompt,
                     on_cancel=_do_cancel_reset_role_prompt,
+                    confirm_text=I18n.get("common_confirm"),
+                    cancel_text=I18n.get("common_cancel"),
+                    destructive=True,
+                ),
+                # W-18: 摘要 Prompt 恢复默认确认（覆盖用户自定义内容 → 危险色）。
+                ConfirmDialog(
+                    open_state=reset_summary_prompt_dialog_open,
+                    title=I18n.get("research_config_prompt_reset_title"),
+                    body=I18n.get("research_config_prompt_reset_body"),
+                    on_confirm=_do_confirm_reset_summary_prompt,
+                    on_cancel=_do_cancel_reset_summary_prompt,
                     confirm_text=I18n.get("common_confirm"),
                     cancel_text=I18n.get("common_cancel"),
                     destructive=True,
