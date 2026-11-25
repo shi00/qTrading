@@ -227,6 +227,22 @@ class TestReadOperationFacts:
         await dao.engine.dispose()  # type: ignore[union-attr]
 
     @pytest.mark.asyncio(loop_scope="session")
+    async def test_not_dispatched_operation_reports_determinate_state(self, real_embedded_pg: ConnectionInfo) -> None:
+        """未开始派发是确定态：报 ``not_dispatched``，与「已派发未终结」区分，不报错。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+        await _seed_operation(dao, phase="prepared", effect_state="not_dispatched", io_state="not_started")
+
+        read = await dao.read_operation(_query(), user_scope=_USER)
+
+        assert read.phase == "prepared"
+        assert read.effect_state is EffectState.NOT_DISPATCHED
+        assert read.result_available is False
+        assert read.unavailable_reason == "not_dispatched"
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_finite_decimal_payload_reads_back_with_number_semantics(
         self, real_embedded_pg: ConnectionInfo
     ) -> None:

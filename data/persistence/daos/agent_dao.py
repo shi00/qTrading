@@ -2973,6 +2973,9 @@ class AgentDao(BaseDao):
           亦拒绝（不借 operation_id 放行他人他轮事实）；
         - 坏枚举/坏行 → ``OPERATION_UNKNOWN``；``phase='unknown'`` 或
           ``effect_state='unknown'`` 原样返回并置 ``result_available=False``；
+        - 未开始派发（``phase='prepared'`` 且 effect ``not_dispatched``）给出确定
+          ``unavailable_reason='not_dispatched'``（与已认领/已派发但未终结的
+          ``result_pending`` 区分，不把初始态读成「处理中」）；
         - 返回体优先取 ``result_ref`` 同库正文（核 owner 自洽/编码/长度/SHA-256，
           按码点分页），否则取 ``result_payload`` 原子（读回保留 JSON number 语义，
           JSONB 还原的小数仍是数字、不降级为字符串）；``result_saved`` 却两者皆空
@@ -3095,6 +3098,9 @@ class AgentDao(BaseDao):
                     )
             elif row.phase == "failed_confirmed":
                 unavailable_reason = "failed_confirmed"
+            elif row.phase == "prepared" and effect_state is EffectState.NOT_DISPATCHED:
+                # 从未开始派发：确定「未派发」，不冒充「结果处理中」（不猜已发/已完，R21）。
+                unavailable_reason = "not_dispatched"
             else:
                 unavailable_reason = "result_pending"
             return OperationRead(
