@@ -15,6 +15,7 @@ import json
 import os
 from collections.abc import Callable
 from collections.abc import Iterator
+from enum import StrEnum
 
 import filelock
 from pydantic import ValidationError
@@ -626,7 +627,22 @@ def save_config(config_data, replace=False):
         return False
 
 
-def update_config_key(key: str, mutate: Callable[[dict], bool]) -> bool:
+class ConfigMutationOutcome(StrEnum):
+    """``update_config_key_outcome`` 的三态结果（区分「无变更」与「写失败」）。
+
+    - ``COMMITTED``: 变更已落盘且缓存已同步。
+    - ``NOT_APPLIED``: ``mutate`` 回调判定无需变更（如目标条目不存在），未写盘；
+      磁盘与缓存保持已提交值，这不是存储故障。
+    - ``FAILED``: 存储未能提交（读盘失败 / 安全子域损坏 / schema 校验失败 /
+      原子写失败 / 锁超时 / 未预期异常），磁盘与缓存保持已提交值（不半提交）。
+    """
+
+    COMMITTED = "committed"
+    NOT_APPLIED = "not_applied"
+    FAILED = "failed"
+
+
+def update_config_key_outcome(key: str, mutate: Callable[[dict], bool]) -> ConfigMutationOutcome:
     """在「文件锁 → RWLock」内对单个顶层键执行 read-modify-write（D02-F06）。
 
     与 ``save_config`` 的区别：调用方不在锁外构造整份嵌套 dict 作为覆盖值，
@@ -639,9 +655,8 @@ def update_config_key(key: str, mutate: Callable[[dict], bool]) -> bool:
             就地修改；返回 True 表示需要落盘，False 表示无需变更（不写盘）。
 
     Returns:
-        True 已提交（磁盘与缓存同步更新）；False 无变更 / 磁盘损坏 / 安全子域
-        损坏 / schema 校验失败 / 原子写失败 / 锁超时——此时磁盘与本进程缓存均
-        保持上次已提交值（不半提交）。
+        三态结果：``COMMITTED`` 已提交；``NOT_APPLIED`` 回调判定无需变更（未写盘）；
+        ``FAILED`` 存储未能提交——后两者磁盘与本进程缓存均保持上次已提交值（不半提交）。
 
     磁盘损坏与安全子域结构损坏沿用 ``save_config`` 的 fail-closed 拒写语义，
     不以空基底或缓存基底覆盖损坏文件。
@@ -655,7 +670,7 @@ def update_config_key(key: str, mutate: Callable[[dict], bool]) -> bool:
                     cfg.logger.error(
                         "[ConfigHandler] update_config_key: config file unreadable, aborting save: %s", err
                     )
-                    return False
+                    return ConfigMutationOutcome.FAILED
                 if data is not None:
                     try:
                         validate_security_subdomain_integrity(data.get("model_management"))
@@ -664,7 +679,7 @@ def update_config_key(key: str, mutate: Callable[[dict], bool]) -> bool:
                             "[ConfigHandler] update_config_key: security subdomain corruption, aborting: %s",
                             DataSanitizer.sanitize_error(e),
                         )
-                        return False
+                        return ConfigMutationOutcome.FAILED
                     _normalize_ai_external_acknowledged(data)
                     current_config = data
                 elif cfg.ConfigHandler._config_cache is not None:
@@ -675,7 +690,7 @@ def update_config_key(key: str, mutate: Callable[[dict], bool]) -> bool:
                 raw_section = current_config.get(key)
                 section = copy.deepcopy(raw_section) if isinstance(raw_section, dict) else {}
                 if not mutate(section):
-                    return False
+                    return ConfigMutationOutcome.NOT_APPLIED
                 current_config[key] = section
 
                 try:
@@ -686,19 +701,28 @@ def update_config_key(key: str, mutate: Callable[[dict], bool]) -> bool:
                         "[ConfigHandler] update_config_key: invalid config data: %s",
                         DataSanitizer.sanitize_error(e),
                     )
-                    return False
+                    return ConfigMutationOutcome.FAILED
 
                 if not cfg.ConfigHandler._save_json_atomically(final_config, cfg.CONFIG_FILE):
-                    return False
+                    return ConfigMutationOutcome.FAILED
                 cfg.ConfigHandler._config_cache = final_config
-                return True
+                return ConfigMutationOutcome.COMMITTED
     except ConfigFileLockTimeoutError as e:
         cfg.logger.error("[ConfigHandler] update_config_key: file lock timeout: %s", DataSanitizer.sanitize_error(e))
-        return False
+        return ConfigMutationOutcome.FAILED
     # NOTE(lazy): 配置管理整体兜底避免单点失败阻断流程. ceiling: 配置管理内部逻辑不应抛异常. upgrade: 配置管理内部统一走 classify_error.
     except Exception as e:
         cfg.logger.error("update_config_key failed: %s", DataSanitizer.sanitize_error(e))
-        return False
+        return ConfigMutationOutcome.FAILED
+
+
+def update_config_key(key: str, mutate: Callable[[dict], bool]) -> bool:
+    """兼容包装：仅返回是否已提交（``False`` 同时覆盖「无变更」与「写失败」）。
+
+    需要区分「回调判定无需变更」与「存储写入失败」时，改用
+    :func:`update_config_key_outcome`。
+    """
+    return update_config_key_outcome(key, mutate) is ConfigMutationOutcome.COMMITTED
 
 
 def compare_and_save_model_management(

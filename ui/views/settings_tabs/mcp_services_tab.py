@@ -26,6 +26,7 @@ from ui.viewmodels.mcp_services_view_model import (
     STATUS_SUCCESS,
     STATUS_WARNING,
     MCPConfigDraft,
+    MCPServiceRow,
     MCPServicesState,
     MCPServicesViewModel,
 )
@@ -166,6 +167,50 @@ def MCPServicesTab(lifecycle: Any | None = None) -> ft.Container:
 
     def _on_retry_residue(_e: ft.ControlEvent) -> None:
         _run(vm.retry_test_residue_close)
+
+    # -- 删除与角色分配事件 -------------------------------------------------
+
+    def _on_request_delete(_e: ft.ControlEvent) -> None:
+        vm.request_delete()
+
+    def _on_cancel_delete(_e: ft.ControlEvent) -> None:
+        vm.cancel_delete()
+
+    def _on_confirm_delete(_e: ft.ControlEvent) -> None:
+        _run(vm.confirm_delete)
+
+    def _on_role_text(field: str) -> Callable[[ft.ControlEvent], None]:
+        def _handler(e: ft.ControlEvent) -> None:
+            vm.set_role_text(field, str(get_control_value(e.control, ft.TextField) or ""))
+
+        return _handler
+
+    def _on_toggle_role_service(identity_key: str) -> Callable[[ft.ControlEvent], None]:
+        def _handler(_e: ft.ControlEvent) -> None:
+            vm.toggle_role_service(identity_key)
+
+        return _handler
+
+    def _on_role_default(e: ft.ControlEvent) -> None:
+        vm.set_role_default(str(get_control_value(e.control, ft.Dropdown) or ""))
+
+    def _on_role_tools(identity_key: str) -> Callable[[ft.ControlEvent], None]:
+        def _handler(e: ft.ControlEvent) -> None:
+            vm.set_role_tools(identity_key, str(get_control_value(e.control, ft.TextField) or ""))
+
+        return _handler
+
+    def _on_select_role(role_id: str, role_version: str) -> Callable[[ft.ControlEvent], None]:
+        def _handler(_e: ft.ControlEvent) -> None:
+            vm.select_role_assignment(role_id, role_version)
+
+        return _handler
+
+    def _on_new_role(_e: ft.ControlEvent) -> None:
+        vm.begin_role_new()
+
+    def _on_save_role(_e: ft.ControlEvent) -> None:
+        _run(vm.save_role_assignment)
 
     # -- 字段构造 -----------------------------------------------------------
 
@@ -336,62 +381,81 @@ def MCPServicesTab(lifecycle: Any | None = None) -> ft.Container:
             spacing=AppStyles.SPACING_SM,
         )
 
+    def _row_status(row: MCPServiceRow) -> ft.Text:
+        """行状态：失效原因优先（不把已知不可用渲染成「未连接」）。"""
+
+        if row.problem_key is not None:
+            return ft.Text(I18n.get(row.problem_key), size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.WARNING)
+        return ft.Text(
+            I18n.get("mcp_state_connected" if row.connected else "mcp_state_disconnected"),
+            size=AppStyles.FONT_SIZE_BODY_SM,
+            color=AppColors.SUCCESS if row.connected else AppColors.TEXT_SECONDARY,
+        )
+
     def _build_service_list(current: MCPServicesState) -> ft.Control:
         if not current.loaded:
-            return ft.Text(
+            body: ft.Control = ft.Text(
                 I18n.get("mcp_not_loaded"),
                 size=AppStyles.FONT_SIZE_BODY_SM,
                 color=AppColors.WARNING,
             )
-        if not current.rows:
-            return ft.Text(
+        elif not current.rows:
+            body = ft.Text(
                 I18n.get("mcp_list_empty"),
                 size=AppStyles.FONT_SIZE_BODY_SM,
                 color=AppColors.TEXT_SECONDARY,
             )
-        rows = [
-            ft.DataRow(
-                cells=[
-                    ft.DataCell(ft.Text(row.display_name, size=AppStyles.FONT_SIZE_BODY_SM)),
-                    ft.DataCell(ft.Text(row.service_id, size=AppStyles.FONT_SIZE_BODY_SM)),
-                    ft.DataCell(ft.Text(str(row.config_version), size=AppStyles.FONT_SIZE_BODY_SM)),
-                    ft.DataCell(
-                        ft.Text(
-                            I18n.get(_TRANSPORT_LABEL_KEYS.get(row.transport_kind, "mcp_field_transport")),
-                            size=AppStyles.FONT_SIZE_BODY_SM,
-                        )
-                    ),
-                    ft.DataCell(
-                        ft.Text(
-                            I18n.get("mcp_state_connected" if row.connected else "mcp_state_disconnected"),
-                            size=AppStyles.FONT_SIZE_BODY_SM,
-                            color=AppColors.SUCCESS if row.connected else AppColors.TEXT_SECONDARY,
-                        )
-                    ),
-                    ft.DataCell(
-                        ft.TextButton(
-                            I18n.get("mcp_btn_select"),
-                            on_click=safe_on_click(_on_select(row.identity_key)),
-                            disabled=current.busy,
-                        )
-                    ),
-                ]
+        else:
+            rows = [
+                ft.DataRow(
+                    cells=[
+                        ft.DataCell(ft.Text(row.display_name, size=AppStyles.FONT_SIZE_BODY_SM)),
+                        ft.DataCell(ft.Text(row.service_id, size=AppStyles.FONT_SIZE_BODY_SM)),
+                        ft.DataCell(ft.Text(str(row.config_version), size=AppStyles.FONT_SIZE_BODY_SM)),
+                        ft.DataCell(
+                            ft.Text(
+                                I18n.get(_TRANSPORT_LABEL_KEYS.get(row.transport_kind, "mcp_field_transport")),
+                                size=AppStyles.FONT_SIZE_BODY_SM,
+                            )
+                        ),
+                        ft.DataCell(_row_status(row)),
+                        ft.DataCell(
+                            ft.TextButton(
+                                I18n.get("mcp_btn_select"),
+                                on_click=safe_on_click(_on_select(row.identity_key)),
+                                disabled=current.busy,
+                            )
+                        ),
+                    ]
+                )
+                for row in current.rows
+            ]
+            body = ft.DataTable(
+                columns=[
+                    ft.DataColumn(label=ft.Text(I18n.get("mcp_col_service"))),
+                    ft.DataColumn(label=ft.Text(I18n.get("mcp_col_service_id"))),
+                    ft.DataColumn(label=ft.Text(I18n.get("mcp_col_version")), numeric=True),
+                    ft.DataColumn(label=ft.Text(I18n.get("mcp_col_transport"))),
+                    ft.DataColumn(label=ft.Text(I18n.get("mcp_col_status"))),
+                    ft.DataColumn(label=ft.Text("")),
+                ],
+                rows=rows,
+                heading_row_color=AppColors.TABLE_HEADER_BG,
+                border=ft.Border.all(1, AppColors.DIVIDER),
+                vertical_lines=ft.BorderSide(1, AppColors.DIVIDER),
             )
-            for row in current.rows
-        ]
-        return ft.DataTable(
-            columns=[
-                ft.DataColumn(label=ft.Text(I18n.get("mcp_col_service"))),
-                ft.DataColumn(label=ft.Text(I18n.get("mcp_col_service_id"))),
-                ft.DataColumn(label=ft.Text(I18n.get("mcp_col_version")), numeric=True),
-                ft.DataColumn(label=ft.Text(I18n.get("mcp_col_transport"))),
-                ft.DataColumn(label=ft.Text(I18n.get("mcp_col_status"))),
-                ft.DataColumn(label=ft.Text("")),
+        if current.unreadable_count <= 0:
+            return body
+        return ft.Column(
+            [
+                body,
+                ft.Text(
+                    I18n.get("mcp_list_unreadable_hint", count=str(current.unreadable_count)),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.WARNING,
+                ),
             ],
-            rows=rows,
-            heading_row_color=AppColors.TABLE_HEADER_BG,
-            border=ft.Border.all(1, AppColors.DIVIDER),
-            vertical_lines=ft.BorderSide(1, AppColors.DIVIDER),
+            spacing=AppStyles.SPACING_XS,
         )
 
     def _build_tools_section(current: MCPServicesState) -> ft.Column:
@@ -420,6 +484,137 @@ def MCPServicesTab(lifecycle: Any | None = None) -> ft.Container:
             ],
             spacing=AppStyles.SPACING_XS,
         )
+
+    # -- 角色分配 -----------------------------------------------------------
+
+    def _service_label(identity_key: str) -> str:
+        for row in state.rows:
+            if row.identity_key == identity_key:
+                return row.display_name or row.service_id
+        return identity_key
+
+    def _build_role_section(current: MCPServicesState) -> ft.Column:
+        rows: list[ft.Control] = [
+            ft.Text(I18n.get("mcp_role_desc"), size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_HINT)
+        ]
+        if not current.roles_available:
+            rows.append(
+                ft.Text(
+                    I18n.get("mcp_role_unavailable"),
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=AppColors.WARNING,
+                )
+            )
+            return ft.Column(rows, spacing=AppStyles.SPACING_XS)
+        assignment_rows: list[ft.Control] = [
+            ft.TextButton(
+                f"{item.role_id}@{item.role_version}",
+                icon=ft.Icons.EDIT,
+                on_click=safe_on_click(_on_select_role(item.role_id, item.role_version)),
+                disabled=current.busy,
+            )
+            for item in current.role_assignments
+        ]
+        if not assignment_rows:
+            assignment_rows.append(
+                ft.Text(
+                    I18n.get("mcp_role_empty"),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.TEXT_HINT,
+                )
+            )
+        rows.append(ft.Row(assignment_rows, spacing=AppStyles.SPACING_XS, wrap=True))
+        draft = current.role_draft
+        rows.append(
+            ft.ResponsiveRow(
+                [
+                    ft.Container(
+                        ft.TextField(
+                            label=I18n.get("mcp_role_id"),
+                            value=draft.role_id,
+                            on_change=safe_on_change(_on_role_text("role_id")),
+                            disabled=current.busy,
+                            **_input_style(),
+                        ),
+                        col=AppStyles.COL_HALF,
+                    ),
+                    ft.Container(
+                        ft.TextField(
+                            label=I18n.get("mcp_role_version"),
+                            value=draft.role_version,
+                            keyboard_type=ft.KeyboardType.NUMBER,
+                            on_change=safe_on_change(_on_role_text("role_version")),
+                            disabled=current.busy,
+                            **_input_style(),
+                        ),
+                        col=AppStyles.COL_HALF,
+                    ),
+                ],
+                run_spacing=AppStyles.SPACING_SM,
+            )
+        )
+        rows.append(
+            ft.Text(I18n.get("mcp_role_available"), size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_SECONDARY)
+        )
+        rows.extend(
+            ft.Checkbox(
+                label=_service_label(row.identity_key),
+                value=row.identity_key in draft.available_keys,
+                on_change=safe_on_change(_on_toggle_role_service(row.identity_key)),
+                disabled=current.busy,
+                active_color=AppColors.PRIMARY,
+            )
+            for row in current.rows
+        )
+        default_options = [ft.dropdown.Option(key="", text=I18n.get("mcp_role_default_none"))]
+        default_options.extend(ft.dropdown.Option(key=key, text=_service_label(key)) for key in draft.available_keys)
+        rows.append(
+            ft.Dropdown(
+                label=I18n.get("mcp_role_default"),
+                value=draft.default_key or "",
+                options=default_options,
+                on_select=safe_on_change(_on_role_default),
+                disabled=current.busy,
+                **_input_style(),
+            )
+        )
+        tools_map = dict(draft.tools_text)
+        for key in draft.available_keys:
+            rows.append(
+                ft.TextField(
+                    label=I18n.get("mcp_role_tools_fmt").format(service=_service_label(key)),
+                    value=tools_map.get(key, ""),
+                    hint_text=I18n.get("mcp_role_tools_hint"),
+                    multiline=True,
+                    min_lines=2,
+                    max_lines=6,
+                    text_size=AppStyles.FONT_SIZE_BODY_SM,
+                    on_change=safe_on_change(_on_role_tools(key)),
+                    disabled=current.busy,
+                    **_input_style(),
+                )
+            )
+        rows.append(
+            ft.Row(
+                [
+                    ft.TextButton(
+                        I18n.get("mcp_role_new"),
+                        icon=ft.Icons.ADD,
+                        on_click=safe_on_click(_on_new_role),
+                        disabled=current.busy,
+                    ),
+                    ft.Button(
+                        content=I18n.get("mcp_role_save"),
+                        icon=ft.Icons.SAVE,
+                        on_click=safe_on_click(_on_save_role),
+                        style=AppStyles.primary_button(),
+                        disabled=current.busy,
+                    ),
+                ],
+                spacing=AppStyles.SPACING_XS,
+            )
+        )
+        return ft.Column(rows, spacing=AppStyles.SPACING_XS)
 
     # -- 状态与按钮 ---------------------------------------------------------
 
@@ -490,6 +685,38 @@ def MCPServicesTab(lifecycle: Any | None = None) -> ft.Container:
         icon=ft.Icons.REFRESH,
         on_click=safe_on_click(_on_retry_residue),
         disabled=state.busy,
+    )
+    btn_delete = ft.OutlinedButton(
+        content=I18n.get("mcp_btn_delete"),
+        icon=ft.Icons.DELETE_OUTLINE,
+        on_click=safe_on_click(_on_request_delete),
+        disabled=state.busy or not state.draft_saved or state.delete_pending,
+    )
+    delete_confirm_row: ft.Control = (
+        ft.Row(
+            [
+                ft.Text(
+                    I18n.get("mcp_delete_confirm"),
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=AppColors.WARNING,
+                ),
+                ft.Button(
+                    content=I18n.get("mcp_delete_confirm_action"),
+                    icon=ft.Icons.DELETE_FOREVER,
+                    on_click=safe_on_click(_on_confirm_delete),
+                    disabled=state.busy,
+                ),
+                ft.TextButton(
+                    I18n.get("mcp_delete_cancel"),
+                    on_click=safe_on_click(_on_cancel_delete),
+                    disabled=state.busy,
+                ),
+            ],
+            spacing=AppStyles.SPACING_XS,
+            wrap=True,
+        )
+        if state.delete_pending
+        else ft.Container()
     )
 
     return ft.Container(
@@ -572,13 +799,23 @@ def MCPServicesTab(lifecycle: Any | None = None) -> ft.Container:
                 DashboardCard(
                     content=ft.Column(
                         [
+                            SectionHeader(I18n.get("mcp_role_title"), title_key="mcp_role_title"),
+                            _build_role_section(state),
+                        ],
+                        spacing=AppStyles.SPACING_SM,
+                    )
+                ),
+                DashboardCard(
+                    content=ft.Column(
+                        [
                             SectionHeader(I18n.get("mcp_tools_title"), title_key="mcp_tools_title"),
                             _build_tools_section(state),
                             ft.Row(
-                                [btn_save, btn_test, btn_connect, btn_disconnect, btn_retry_close],
+                                [btn_save, btn_test, btn_connect, btn_disconnect, btn_retry_close, btn_delete],
                                 spacing=AppStyles.SPACING_SM,
                                 wrap=True,
                             ),
+                            delete_confirm_row,
                             status_row,
                         ],
                         spacing=AppStyles.SPACING_SM,

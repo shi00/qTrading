@@ -657,6 +657,89 @@ class TestRolePromptDefaultsAndAppend:
         assert "Sample Industry" in role.preview
         assert "{stock_name}" not in role.preview
 
+    def test_placeholder_and_literal_example_templates_get_distinct_versions(self, mock_config_handler):
+        """原模板不同（占位符 vs 示例字面）时预览相同但版本必须不同 (N17)。"""
+        from ui.viewmodels.ai_brain_settings_view_model import ROLE_MAIN
+
+        _set_role_config(mock_config_handler)
+        vm = _make_vm(mock_config_handler)
+
+        vm.set_role_append(ROLE_MAIN, "关注 {stock_name}")
+        placeholder = vm.get_role_prompt(ROLE_MAIN)
+        vm.set_role_append(ROLE_MAIN, "关注 Sample Stock")
+        literal = vm.get_role_prompt(ROLE_MAIN)
+
+        assert placeholder is not None and literal is not None
+        assert placeholder.preview == literal.preview  # 示例代入结果相同
+        assert placeholder.draft_version != literal.draft_version
+
+    def test_identical_template_keeps_same_version(self, mock_config_handler):
+        """仅原模板相同才可同版；空白追加归一到默认正文，同样保持同版 (N17)。"""
+        from ui.viewmodels.ai_brain_settings_view_model import ROLE_MAIN
+
+        _set_role_config(mock_config_handler)
+        vm = _make_vm(mock_config_handler)
+        baseline = vm.get_role_prompt(ROLE_MAIN)
+
+        vm.set_role_append(ROLE_MAIN, "关注 {stock_name}")
+        first = vm.get_role_prompt(ROLE_MAIN)
+        vm.set_role_append(ROLE_MAIN, "关注 {stock_name}")
+        second = vm.get_role_prompt(ROLE_MAIN)
+        vm.set_role_append(ROLE_MAIN, "  \n ")
+        blank = vm.get_role_prompt(ROLE_MAIN)
+
+        assert baseline is not None and first is not None and second is not None and blank is not None
+        assert first.draft_version == second.draft_version
+        assert blank.append_value == "  \n "
+        assert blank.draft_version == baseline.draft_version
+
+    @pytest.mark.asyncio
+    async def test_saving_other_template_updates_version_instead_of_reporting_unchanged(
+        self, mock_config_handler, mock_thread_pool
+    ):
+        """先保存含占位符的 A，再保存示例字面的 B：版本必须更新，不再报成同一版本 (N17)。"""
+        from ui.viewmodels.ai_brain_settings_view_model import ROLE_MAIN
+
+        _set_role_config(mock_config_handler)
+        vm = _make_vm(mock_config_handler)
+        with patch("services.ai_service.AIService") as mock_ai_svc:
+            mock_ai_svc.return_value.reload_config = AsyncMock()
+
+            vm.set_role_append(ROLE_MAIN, "关注 {stock_name}")
+            assert await vm.save_ai_settings() is True
+            _, versions_a = mock_config_handler.save_ai_role_prompts.call_args.args
+
+            vm.set_role_append(ROLE_MAIN, "关注 Sample Stock")
+            role_b = vm.get_role_prompt(ROLE_MAIN)
+            assert role_b is not None
+            # 界面不得把 B 报成「未变化」：草稿版本已不同于已保存版本
+            assert role_b.draft_version != role_b.saved_version
+            assert await vm.save_ai_settings() is True
+
+        appends, versions_b = mock_config_handler.save_ai_role_prompts.call_args.args
+        assert appends == {ROLE_MAIN: "关注 Sample Stock"}
+        assert versions_b[ROLE_MAIN] != versions_a[ROLE_MAIN]
+        assert vm.get_role_prompt(ROLE_MAIN).saved_version == versions_b[ROLE_MAIN]
+
+    def test_legacy_preview_digest_version_differs_from_template_digest(self, mock_config_handler):
+        """旧存量版本按预览求摘要：不被误判为当前版本（下次保存自动重签） (N17)。"""
+        import hashlib
+
+        from ui.viewmodels.ai_brain_settings_view_model import ROLE_MAIN, _compose_role_prompt
+        from utils.config_models import ROLE_PROMPT_DEFAULTS
+
+        default_prompt, _ = ROLE_PROMPT_DEFAULTS[ROLE_MAIN]
+        append = "关注 {stock_name}"
+        preview, _ = _compose_role_prompt(default_prompt, append)
+        legacy_version = f"v-{hashlib.sha256(preview.encode('utf-8')).hexdigest()[:12]}"
+        _set_role_config(mock_config_handler, {ROLE_MAIN: append}, {ROLE_MAIN: legacy_version})
+
+        vm = _make_vm(mock_config_handler)
+        role = vm.get_role_prompt(ROLE_MAIN)
+        assert role is not None
+        assert role.saved_version == legacy_version  # 读取路径不改写存量绑定
+        assert role.draft_version != legacy_version
+
     def test_unknown_variable_keeps_draft_and_reports_error(self, mock_config_handler, mock_thread_pool):
         from ui.viewmodels.ai_brain_settings_view_model import ROLE_MAIN, ROLE_VAR_UNKNOWN_KEY
 

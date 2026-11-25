@@ -2995,3 +2995,94 @@ class TestNewsPublishTimeTradeDayChain:
         assert from_utc_to_cst(stored) == datetime.datetime(2026, 10, 12, 0, 30, tzinfo=CST_TZ)
         trade_days = [datetime.date(2026, 10, 9), datetime.date(2026, 10, 12)]
         assert assign_trade_day(stored, trade_days) == datetime.date(2026, 10, 12)
+
+
+class TestNewItemCarriesPersistedNewsId:
+    """N07：NEW_ITEM 必须携带落库后的准确 DB id（原卡才能建研究草稿）。"""
+
+    WATERMARK_T0 = "2024-01-01 09:00:00"
+
+    @staticmethod
+    def _normalize(item, default_source=None):
+        return {**item, "publish_time": item.get("publish_time", item.get("time"))}
+
+    async def _run(self, svc, news_items, id_mock):
+        notify_args: list[tuple] = []
+        queued: list[dict] = []
+
+        async def mock_notify(update_type=None, data=None, **kwargs):
+            notify_args.append((update_type, data))
+
+        async def mock_put(item):
+            queued.append(item)
+
+        svc._last_news_time = self.WATERMARK_T0
+        svc.processing_queue = asyncio.Queue(maxsize=10)
+        with (
+            patch(
+                "data.external.news_fetcher.NewsFetcher.get_latest_global_news",
+                AsyncMock(return_value=news_items),
+            ),
+            patch(
+                "services.news_subscription_service.CacheManager.normalize_news_item",
+                side_effect=self._normalize,
+            ),
+            patch.object(svc.cache.market_dao, "save_market_news", AsyncMock()),
+            patch.object(svc.cache.market_dao, "get_market_news_id", id_mock),
+            patch.object(svc, "_notify_listeners", mock_notify),
+            patch.object(svc, "_safe_queue_put", mock_put),
+            patch("services.news_subscription_service.ConfigHandler.get_config", return_value=True),
+        ):
+            await svc._fetch_and_notify()
+        new_item_calls = [data for ut, data in notify_args if ut == NewsUpdateType.NEW_ITEM]
+        return new_item_calls, queued
+
+    @pytest.mark.asyncio
+    async def test_new_item_event_carries_db_id(self, svc):
+        """落库成功且身份可查 → 事件条目携带准确 id；入队项不被事件身份污染。"""
+        new_item_calls, queued = await self._run(
+            svc,
+            [{"content": "fresh", "time": "2024-01-01 10:00:00"}],
+            AsyncMock(return_value=101),
+        )
+        assert len(new_item_calls) == 1
+        assert [item["id"] for item in new_item_calls[0]] == [101]
+        assert [item["content"] for item in new_item_calls[0]] == ["fresh"]
+        assert all("id" not in item for item in queued)
+
+    @pytest.mark.asyncio
+    async def test_lookup_miss_leaves_identity_unverified(self, svc):
+        """身份未核（无匹配）→ 事件不带 id，卡片保持禁用（不伪造身份）。"""
+        new_item_calls, _ = await self._run(
+            svc,
+            [{"content": "fresh", "time": "2024-01-01 10:00:00"}],
+            AsyncMock(return_value=None),
+        )
+        assert len(new_item_calls) == 1
+        assert "id" not in new_item_calls[0][0]
+
+    @pytest.mark.asyncio
+    async def test_lookup_error_degrades_without_breaking_notify(self, svc):
+        """回查异常 → 降级为身份未核，NEW_ITEM 仍正常下发（不阻断实时插入）。"""
+        new_item_calls, _ = await self._run(
+            svc,
+            [{"content": "fresh", "time": "2024-01-01 10:00:00"}],
+            AsyncMock(side_effect=RuntimeError("db down")),
+        )
+        assert len(new_item_calls) == 1
+        assert "id" not in new_item_calls[0][0]
+
+    @pytest.mark.asyncio
+    async def test_same_content_different_time_ids_not_crossed(self, svc):
+        """同文异时两条：各自携带各自 DB id，不串用。"""
+        new_item_calls, _ = await self._run(
+            svc,
+            [
+                {"content": "same", "time": "2024-01-01 10:05:00"},
+                {"content": "same", "time": "2024-01-01 10:00:00"},
+            ],
+            AsyncMock(side_effect=[11, 12]),
+        )
+        assert len(new_item_calls) == 1
+        pairs = [(item["time"], item.get("id")) for item in new_item_calls[0]]
+        assert pairs == [("2024-01-01 10:00:00", 11), ("2024-01-01 10:05:00", 12)]

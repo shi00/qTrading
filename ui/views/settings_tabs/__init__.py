@@ -2,6 +2,7 @@ from .ai_brain_tab import AIBrainTab
 from .automation_tab import AutomationTab, NotificationsTab
 from .data_source_tab import DataSourceTab
 from .database_tab import DatabaseTab
+from .skills_tab import SkillsTab
 from .system_tab import SystemTab
 
 __all__ = [
@@ -10,5 +11,6 @@ __all__ = [
     "DataSourceTab",
     "DatabaseTab",
     "NotificationsTab",
+    "SkillsTab",
     "SystemTab",
 ]

@@ -70,7 +70,11 @@ _ALL_IDS = (RESEARCH_A_ID, LEAF_C_ID, _QUEUED_ID, _DELAYED_ID)
 
 @dataclass
 class _FakeRegistry:
-    """最小登记面（原生语义实证用）：固定一个已登记 root，记录门闩/回填。"""
+    """最小登记面（原生语义实证用）：登记本业务库的 root/队列/延迟行，记录门闩/回填。
+
+    启动隔离按登记归属解析取消集（N06）：未登记且父级不可证的原生行不清理并阻塞，
+    故本片把原生直接产生的行按当前业务库登记，验证「已归属集合被完整取消」。
+    """
 
     calls: list[str] = field(default_factory=list)
     fence_workflow_ids: tuple[str, ...] = ()
@@ -79,21 +83,22 @@ class _FakeRegistry:
         from core.agent_types import RecoveryExecution
 
         self.calls.append("list")
-        return (
+        return tuple(
             RecoveryExecution(
-                execution_id="exec-a",
+                execution_id=f"exec-{index}",
                 session_id="session-1",
                 execution_kind="root",
                 display_state="running",
                 owner_epoch=1,
                 dispatch_closed=False,
                 ended_at=None,
-                round_id="round-a",
+                round_id=f"round-{index}",
                 round_number=1,
-                workflow_id=RESEARCH_A_ID,
+                workflow_id=workflow_id,
                 run_epoch=1,
                 stop_reason=None,
-            ),
+            )
+            for index, workflow_id in enumerate((RESEARCH_A_ID, LEAF_C_ID, _QUEUED_ID, _DELAYED_ID))
         )
 
     async def mark_dispatch_closed(self, request: Any) -> Any:
@@ -266,7 +271,7 @@ class TestStartupIsolationSpike:
             assert original[_QUEUED_ID] == "ENQUEUED"
             assert original[_DELAYED_ID] == "DELAYED"
             assert registry.calls[:3] == ["list", "save", "fence"]
-            assert registry.fence_workflow_ids == (RESEARCH_A_ID,)
+            assert set(registry.fence_workflow_ids) == {RESEARCH_A_ID, LEAF_C_ID, _QUEUED_ID, _DELAYED_ID}
             assert _statuses(recovery_db_url, _ALL_IDS) == dict.fromkeys(_ALL_IDS, "CANCELLED")
 
             # 隔离通过后才 launch：既有在途行不得被恢复管线重派（marker 不变）

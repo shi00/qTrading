@@ -30,9 +30,14 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class NavBadgeState:
-    """导航栏角标的不可变 state snapshot。"""
+    """导航栏角标的不可变 state snapshot。
+
+    ``running_count`` 为 TaskManager 运行中任务数（业务任务，不冒充待处理决定）；
+    ``pending_decisions`` 为应用级待处理决定数（跨页提醒，非业务任务数）。
+    """
 
     running_count: int = 0
+    pending_decisions: int = 0
 
 
 class NavBadgeViewModel(ObservableViewModelMixin[NavBadgeState]):
@@ -61,6 +66,13 @@ class NavBadgeViewModel(ObservableViewModelMixin[NavBadgeState]):
         self._task_manager.unsubscribe(self._on_tasks_updated)
         # Mixin 统一清理 subscribers / loop / pending handle / deque
         super().dispose()
+
+    def set_pending_decisions(self, count: int) -> None:
+        """同步应用级待处理决定数（跨页提醒角标；仅变化时通知，避免重渲染环）。"""
+
+        value = max(0, int(count))
+        if value != self._state.pending_decisions:
+            self._set_state(pending_decisions=value)
 
     def _on_tasks_updated(self, tasks: list[AppTask]) -> None:
         """TaskManager subscriber (called from TM thread).

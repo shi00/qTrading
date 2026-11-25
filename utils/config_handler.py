@@ -14,6 +14,7 @@ from utils.config_models import (
     ConfigValidationResult,
     DEFAULT_AI_PROMPT,
     DEFAULT_NEWS_PROMPT,
+    PresetDeleteOutcome,
     get_default_config,
 )
 from utils.sanitizers import DataSanitizer
@@ -343,7 +344,7 @@ class ConfigHandler:
         return llm.save_strategy_preset(strategy_key, name, params)
 
     @staticmethod
-    def delete_strategy_preset(strategy_key: str, name: str) -> bool:
+    def delete_strategy_preset(strategy_key: str, name: str) -> PresetDeleteOutcome:
         return llm.delete_strategy_preset(strategy_key, name)
 
     @staticmethod

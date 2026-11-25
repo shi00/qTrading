@@ -12,6 +12,7 @@ import pytest
 from core.agent_types import AgentErrorCode, AgentServiceError, Purpose, ReadState, VerificationState
 from services.agent_service.business_research import (
     BusinessDraftAlreadyPrepared,
+    BusinessDraftCommitUnknown,
     BusinessObjectSnapshot,
     BusinessResearchPreparer,
     BusinessSourceUnavailable,
@@ -21,6 +22,7 @@ from services.agent_service.business_research import (
 )
 from services.agent_service.business_sources import BusinessSnapshotRead, read_backtest_snapshot
 from ui.viewmodels.business_research_view_model import (
+    NOTICE_COMMIT_UNKNOWN,
     NOTICE_DRAFT_EXISTS,
     NOTICE_DRAFT_PREPARED,
     NOTICE_PREPARE_FAILED,
@@ -37,11 +39,21 @@ from ui.viewmodels.business_research_view_model import (
 
 
 class _FakeFacade:
-    def __init__(self, *, existing_revision: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        existing_revision: int | None = None,
+        save_error: Exception | None = None,
+        create_error: Exception | None = None,
+    ) -> None:
         self.calls: list[str] = []
         self.saved_payload = None
+        self.saved_commands: list = []
+        self.session_commands: list = []
         self.registered_items: tuple = ()
         self._existing_revision = existing_revision
+        self._save_error = save_error
+        self._create_error = create_error
 
     async def read_session(self, query, *, user_scope: str):
         self.calls.append("read_session")
@@ -51,6 +63,9 @@ class _FakeFacade:
 
     async def change_session(self, command):
         self.calls.append("change_session")
+        self.session_commands.append(command)
+        if self._create_error is not None:
+            raise self._create_error
         return SimpleNamespace()
 
     async def register_draft_sources(self, *, user_scope, session_id, draft_revision, items):
@@ -60,8 +75,14 @@ class _FakeFacade:
 
     async def save_draft(self, command):
         self.calls.append("save_draft")
+        self.saved_commands.append(command)
+        if self._save_error is not None:
+            raise self._save_error
         self.saved_payload = command.payload
-        return SimpleNamespace(draft_revision=command.expected_draft_revision + 1)
+        return SimpleNamespace(
+            session_id=command.session_id,
+            draft_revision=command.expected_draft_revision + 1,
+        )
 
 
 def _snapshot(**overrides):
@@ -159,6 +180,80 @@ async def test_prepare_keeps_existing_non_empty_draft():
     # 不覆盖既有草稿：只读探测后即停止
     assert "save_draft" not in facade.calls
     assert "register_draft_sources" not in facade.calls
+
+
+@pytest.mark.asyncio
+async def test_prepare_unknown_commit_keeps_original_command_and_replays_same_key():
+    """N12：提交结果未知 → 保原命令，下次按原键/原输入查回，不换键补写。"""
+
+    facade = _FakeFacade(save_error=AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "commit unknown", "u1"))
+    preparer = BusinessResearchPreparer(facade)
+
+    with pytest.raises(BusinessDraftCommitUnknown) as exc:
+        await preparer.prepare_object(_snapshot(), user_scope="local-desktop")
+    assert exc.value.session_id
+    original = facade.saved_commands[0]
+
+    facade._save_error = None
+    receipt = await preparer.prepare_object(_snapshot(), user_scope="local-desktop")
+
+    # 原命令（原键/原输入）查回：不换键、不重写第二份
+    assert facade.saved_commands[1] is original
+    assert receipt.draft_revision == original.expected_draft_revision + 1
+    # 查回路径不再探测会话，也不再登记来源/建会话
+    assert facade.calls.count("read_session") == 1
+    assert facade.calls.count("register_draft_sources") == 1
+    assert facade.calls.count("change_session") == 1
+
+
+@pytest.mark.asyncio
+async def test_prepare_not_committed_failure_is_retryable_with_same_key():
+    """N12：确定未写 → 一般失败（同键重试安全），不进入「结果未知」状态。"""
+
+    facade = _FakeFacade(save_error=AgentServiceError(AgentErrorCode.PERSISTENCE_UNAVAILABLE, "not committed", "u1"))
+    preparer = BusinessResearchPreparer(facade)
+
+    with pytest.raises(AgentServiceError) as exc:
+        await preparer.prepare_object(_snapshot(), user_scope="local-desktop")
+    assert exc.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+
+    facade._save_error = None
+    receipt = await preparer.prepare_object(_snapshot(), user_scope="local-desktop")
+    assert facade.saved_commands[1].command.command_id == facade.saved_commands[0].command.command_id
+    assert receipt.draft_revision == 2
+
+
+@pytest.mark.asyncio
+async def test_prepare_unknown_session_create_is_reported_as_unknown():
+    facade = _FakeFacade(create_error=AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "commit unknown", "u1"))
+    preparer = BusinessResearchPreparer(facade)
+
+    with pytest.raises(BusinessDraftCommitUnknown) as exc:
+        await preparer.prepare_object(_snapshot(), user_scope="local-desktop")
+    assert exc.value.session_id == facade.session_commands[0].session_id
+    assert "save_draft" not in facade.calls
+
+
+@pytest.mark.asyncio
+async def test_replay_pending_definite_failure_keeps_original_command():
+    """N12：查回途中确定未写（存储不可用）仍保原命令，后续继续按原键查回。"""
+
+    facade = _FakeFacade(save_error=AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "commit unknown", "u1"))
+    preparer = BusinessResearchPreparer(facade)
+    with pytest.raises(BusinessDraftCommitUnknown) as exc:
+        await preparer.prepare_object(_snapshot(), user_scope="local-desktop")
+    assert exc.value.session_id == facade.saved_commands[0].session_id
+    original = facade.saved_commands[0]
+
+    facade._save_error = AgentServiceError(AgentErrorCode.PERSISTENCE_UNAVAILABLE, "not committed", "u1")
+    with pytest.raises(AgentServiceError) as exc:
+        await preparer.prepare_object(_snapshot(), user_scope="local-desktop")
+    assert exc.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+
+    facade._save_error = None
+    receipt = await preparer.prepare_object(_snapshot(), user_scope="local-desktop")
+    assert facade.saved_commands[-1] is original
+    assert receipt.draft_revision == original.expected_draft_revision + 1
 
 
 class _FakeReader:
@@ -313,6 +408,39 @@ async def test_view_model_reports_prepared_draft():
         assert vm.state.notice_key == NOTICE_DRAFT_PREPARED
         assert vm.state.last_draft_revision == 2
         assert vm.state.last_error_code is None
+    finally:
+        vm.dispose()
+
+
+@pytest.mark.asyncio
+async def test_view_model_reports_commit_unknown_without_claiming_success_or_failure():
+    """N12：结果未知单独提示（保原键查回），不冒充已准备，也不当一般失败。"""
+
+    facade = _FakeFacade(save_error=AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "commit unknown", "u1"))
+    vm = BusinessResearchViewModel(facade)
+    try:
+        await vm.prepare(_request())
+        assert vm.state.notice_key == NOTICE_COMMIT_UNKNOWN
+        assert vm.state.last_error_code == "OPERATION_UNKNOWN"
+        assert vm.state.last_session_id is not None
+        # 不臆造已提交版本（未知不等于成功）
+        assert vm.state.last_draft_revision is None
+        assert vm.state.preparing is False
+    finally:
+        vm.dispose()
+
+
+@pytest.mark.asyncio
+async def test_view_model_reports_not_committed_failure_as_generic_failure():
+    """N12：确定未写仍按一般失败提示（可同键重试），与「结果未知」区分。"""
+
+    facade = _FakeFacade(save_error=AgentServiceError(AgentErrorCode.PERSISTENCE_UNAVAILABLE, "not committed", "u1"))
+    vm = BusinessResearchViewModel(facade)
+    try:
+        await vm.prepare(_request())
+        assert vm.state.notice_key == NOTICE_PREPARE_FAILED
+        assert vm.state.last_error_code == "PERSISTENCE_UNAVAILABLE"
+        assert vm.state.preparing is False
     finally:
         vm.dispose()
 

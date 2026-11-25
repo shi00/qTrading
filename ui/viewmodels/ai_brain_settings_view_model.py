@@ -131,8 +131,26 @@ def _compose_role_prompt(default_prompt: str, append_value: str) -> tuple[str, s
     return f"{default_preview}\n\n{append_preview}", error_key
 
 
+def _compose_role_template(default_prompt: str, append_value: str) -> str:
+    """原模板（不代入示例变量）：与运行期装配同一拼接规则（默认正文 + 追加）。
+
+    追加仅在去空白后非空时参与拼接，拼接内容为**原样追加**（与
+    ``leaf_agent._read_saved_role_prompt`` 的运行期装配一致），因此版本指纹
+    对应「实际持久化并生效的原文」，而非示例代入后的预览。
+    """
+    append = append_value.strip()
+    if not append:
+        return default_prompt
+    return f"{default_prompt}\n\n{append_value}"
+
+
 def _prompt_version(text: str) -> str:
-    """内容版本：合成内容指纹（短哈希），用于「来源/版本」与旧请求绑定核对。"""
+    """内容版本：原模板内容指纹（短哈希），用于「来源/版本」与旧请求绑定核对。
+
+    必须传入**未代入示例变量**的原模板：若对预览求指纹，
+    ``关注 {stock_name}`` 与 ``关注 Sample Stock`` 会得到同一版本，
+    把两个不同原模板伪装成「未变化」（R21 邻域）。
+    """
     return f"v-{hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]}"
 
 
@@ -165,7 +183,7 @@ def _build_role_prompt_state(role_key: str, append_value: str, saved_version: st
         default_version=default_version,
         append_value=append,
         saved_version=_coerce_str(saved_version),
-        draft_version=_prompt_version(preview),
+        draft_version=_prompt_version(_compose_role_template(default_prompt, append)),
         preview=preview,
         source_key=ROLE_SOURCE_APPEND_KEY if append.strip() else ROLE_SOURCE_DEFAULT_KEY,
         variable_error_key=error_key,

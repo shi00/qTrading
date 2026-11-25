@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -228,3 +229,49 @@ class TestSnapshotCostStateCoverage:
         )
         assert state == COST_STATE_UNKNOWN
         assert "原账本无可计价引用" in limitations[0].message
+
+
+class TestSnapshotCostStateReservationLease:
+    """N25：过期普通预留不计活跃占用；未过期仍计；held_unconfirmed 明示保留。"""
+
+    @staticmethod
+    def _conn(reservation_state: str, lease: datetime) -> _StubConn:
+        return _StubConn(
+            [
+                [SimpleNamespace(invocation_id="inv-1", attempt_refs=["a1"])],
+                [SimpleNamespace(attempt_id="a1", invocation_id="inv-1", cost_cny=Decimal("1.0"))],
+                [
+                    SimpleNamespace(
+                        reservations=[{"state": reservation_state, "amount_cny": "0.5"}],
+                        owner_lease_expires_at=lease,
+                    )
+                ],
+            ]
+        )
+
+    @pytest.mark.asyncio
+    async def test_expired_ordinary_reservation_is_not_active(self) -> None:
+        dao = AgentDao(None)
+        conn = self._conn("reserved", datetime(2020, 1, 1))
+        state, _ = await dao._snapshot_cost_state(
+            conn, user_scope="user-1", execution_id="exec-1", model_attempt_count=1
+        )
+        assert state == COST_STATE_KNOWN
+
+    @pytest.mark.asyncio
+    async def test_unexpired_ordinary_reservation_is_active(self) -> None:
+        dao = AgentDao(None)
+        conn = self._conn("reserved", datetime(2099, 1, 1))
+        state, _ = await dao._snapshot_cost_state(
+            conn, user_scope="user-1", execution_id="exec-1", model_attempt_count=1
+        )
+        assert state == COST_STATE_RESERVED
+
+    @pytest.mark.asyncio
+    async def test_held_unconfirmed_survives_expired_lease(self) -> None:
+        dao = AgentDao(None)
+        conn = self._conn("held_unconfirmed", datetime(2020, 1, 1))
+        state, _ = await dao._snapshot_cost_state(
+            conn, user_scope="user-1", execution_id="exec-1", model_attempt_count=1
+        )
+        assert state == COST_STATE_RESERVED

@@ -312,6 +312,7 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
 
         UIR-F04-004: NEW_ITEM 按稳定身份幂等前插 (id 优先, 推送项无 id 时用
         (publish_time, content) 复合键), 重复推送不产生重复行.
+        N07: 已入库推送项携带准确 DB id 时回填到同身份行, 使研究入口无需手刷即启用.
         """
         from services.news_subscription_service import NewsUpdateType
 
@@ -320,9 +321,14 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
             if new_rows:
                 current_rows = self._state.news_rows
                 fresh_rows = _merge_news_rows(current_rows, new_rows)
+                # N07: 推送项携带准确 DB id 时回填到既有同身份行（重复推送/分页命中的
+                # 无 id 卡），使研究入口无需手刷即可用；同文异时按复合键各归各行。
+                backfilled_rows = _backfill_news_ids(current_rows, new_rows)
                 if fresh_rows:
                     # tuple 拼接 (同步, O(n), n 是当前新闻数量)
-                    self._set_state(news_rows=fresh_rows + current_rows)
+                    self._set_state(news_rows=fresh_rows + backfilled_rows)
+                elif backfilled_rows != current_rows:
+                    self._set_state(news_rows=backfilled_rows)
         elif update_type == NewsUpdateType.TAG_UPDATE and data:
             content = str(data.get("content", "") or "")
             tags = str(data.get("tags", "") or "")
@@ -570,6 +576,8 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
             if batch_cursor is not None:
                 # 有稳定身份 (id) 才按身份幂等合并; 推送项若也落在本页窗口内不重复展示
                 fresh_rows = _merge_news_rows(current_rows, new_rows)
+                # N07: DB 行携带准确 id，回填此前推送的同身份无 id 行（分页去重不丢身份）
+                current_rows = _backfill_news_ids(current_rows, new_rows)
                 # 成功后推进游标到本页最旧 DB 行 (与是否有重复无关, 保证窗口向后)
                 self._news_cursor = batch_cursor
             else:
@@ -728,6 +736,9 @@ def _news_item_to_row(item: Any) -> NewsRow:
         publish_time=str(normalized.get("publish_time", "") or ""),
         is_ai_tagged=_detect_ai_tagged(tags, source),
         sentiment=_coerce_sentiment(item.get("sentiment")),
+        # N07: 服务端落库后随推送携带准确 DB id（normalize 不含该键，故从原始 item 读取）；
+        # 缺失即 None —— 卡片据此禁用研究入口（R21：不伪造对象身份）。
+        news_id=_coerce_news_id(item.get("id")),
     )
 
 
@@ -794,6 +805,30 @@ def _merge_news_rows(existing: tuple[NewsRow, ...], incoming: tuple[NewsRow, ...
         if text_key is not None:
             seen_text.add(text_key)
     return tuple(fresh)
+
+
+def _backfill_news_ids(existing: tuple[NewsRow, ...], incoming: tuple[NewsRow, ...]) -> tuple[NewsRow, ...]:
+    """给既有无 id 行回填上游携带的 ``market_news.id``（N07）。
+
+    身份仅按 ``(publish_time, content)`` 复合键匹配：同正文不同时间是两条合法
+    新闻，绝不互相串用 id（禁止仅按 content 回填）。已持 id 的行不覆盖——
+    数据库身份优先于后续重复推送。
+    """
+    ids_by_key: dict[tuple[str, str], int] = {}
+    for row in incoming:
+        key = _news_text_key(row)
+        if key is not None and row.news_id is not None:
+            ids_by_key[key] = row.news_id
+    if not ids_by_key:
+        return existing
+    updated: list[NewsRow] = []
+    for row in existing:
+        key = _news_text_key(row)
+        if row.news_id is None and key is not None and key in ids_by_key:
+            updated.append(replace(row, news_id=ids_by_key[key]))
+        else:
+            updated.append(row)
+    return tuple(updated)
 
 
 def _news_cursor_from_batch(df: pd.DataFrame | None) -> tuple[datetime, int] | None:

@@ -234,3 +234,50 @@ class TestPreParseInboundLimits:
         await session.aclose()
 
         assert isinstance(session.diagnostics.exit_status, int)
+
+
+_EXITING_SERVER_SOURCE = """
+import os
+import threading
+
+from fastmcp import FastMCP
+
+mcp = FastMCP("exiting")
+
+
+@mcp.tool
+def ping() -> dict:
+    "Ping."
+    return {"ok": True}
+
+
+def _exit_later() -> None:
+    threading.Event().wait(3.0)
+    os._exit(0)
+
+
+if __name__ == "__main__":
+    threading.Thread(target=_exit_later, daemon=True).start()
+    mcp.run()
+"""
+
+
+class TestProcessExitNotification:
+    """N11：子进程自行退出必须通知会话，而不是只结束读循环后维持「已连接」。"""
+
+    async def test_natural_exit_fires_lost_handler_and_blocks_sends(self, tmp_path: Path) -> None:
+        script = tmp_path / "exiting_server.py"
+        script.write_text(textwrap.dedent(_EXITING_SERVER_SOURCE), encoding="utf-8")
+        factory = FastMCPClientFactory()
+        session = await factory.open(_config(script))
+        lost = asyncio.Event()
+        session.set_lost_handler(lost.set)
+        try:
+            async with asyncio.timeout(30):
+                await lost.wait()
+            # 发送门随进程退出立即失效：不再把请求发给已退出的子进程。
+            with pytest.raises(AgentServiceError) as error:
+                await session.call_tool("ping", {}, deadline_s=30)
+            assert error.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+        finally:
+            await session.aclose()

@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 import json
-import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -50,6 +49,7 @@ from core.agent_types import (
     SourceRef,
     SourceVersionRef,
     VerificationState,
+    encode_draft_payload,
     json_doc,
     sha256_hex,
     stable_id,
@@ -113,6 +113,18 @@ class BusinessSourceUnavailable(Exception):
         self.reason = reason
 
 
+class BusinessDraftCommitUnknown(Exception):
+    """草稿写入结果未知（提交已发起但确认中断）：保原键查回，不换键补写（N12）。
+
+    ``session_id`` 为本次写目标：草稿可能已落库，也可能未落库，调用方不得把它当
+    「确定失败」重发新键，也不得先清草稿；下次准备会按原命令（原键/原输入）查回。
+    """
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(session_id)
+        self.session_id = session_id
+
+
 class BusinessDraftAlreadyPrepared(Exception):
     """同一对象已有草稿：保留原稿，不覆盖（重复发起不产生第二份草稿）。"""
 
@@ -157,6 +169,12 @@ class BusinessPreparationReceipt:
 
 def _canonical_json(payload: Mapping[str, Any]) -> str:
     return json.dumps(dict(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _write_command_id(prefix: str, *parts: str) -> str:
+    """确定性写命令键：同一写身份重试同键，未知结果按原键查回、不换键补写（N12）。"""
+
+    return f"{prefix}-{sha256_hex('|'.join(parts))[:32]}"
 
 
 def _today_local() -> str:
@@ -349,6 +367,8 @@ class BusinessResearchPreparer:
 
     def __init__(self, facade: BusinessResearchFacade) -> None:
         self._facade = facade
+        #: 提交结果未知的存稿写（session_id → 原命令）：下次按原键/原输入查回，不换键补写（N12）。
+        self._pending_writes: dict[str, DraftSaveCommand] = {}
 
     async def prepare_object(
         self,
@@ -385,7 +405,13 @@ class BusinessResearchPreparer:
         user_scope: str,
         session_title: str | None = None,
     ) -> BusinessPreparationReceipt:
-        """登记来源（草稿消费者）并保存草稿；零发送、零派发、零费用。"""
+        """登记来源（草稿消费者）并保存草稿；零发送、零派发、零费用。
+
+        写命令键由写身份确定性派生（同一写重试同键，N12）。上次存稿「提交已发起但
+        确认中断」时，本次先按原命令（原键/原输入）查回原回执：查回成功即原结果，
+        查不到（原写未落库且草稿已被推进）按既有草稿保留原稿——不换键补写、不先清
+        草稿；确定未写的失败照常上抛（同一命令键重试安全）。
+        """
 
         context = _canonical_context(preparation.object_context)
         source = preparation.item.source
@@ -394,15 +420,20 @@ class BusinessResearchPreparer:
             [user_scope, source.source_id, source.version],
         )
         title = session_title or f"研究：{preparation.display_name}"
+        payload = _draft_payload(preparation, source, context)
+        pending = self._pending_writes.pop(session_id, None)
+        if pending is not None:
+            return await self._replay_pending(pending, source=source)
         revision = await self._existing_draft_revision(session_id, user_scope=user_scope)
         if revision is None:
-            await self._facade.change_session(
+            await self._create_session(
                 SessionChangeCommand(
                     command=CommandRef(
                         user_scope=user_scope,
                         source_module=str(context["source_module"]),
                         business_request_id=session_id,
-                        command_id=f"ui-{uuid.uuid4().hex}",
+                        # 确定性键：建会话结果未知后重试走同键查回，不建第二份（N12）。
+                        command_id=_write_command_id("ui-session", user_scope, session_id),
                         expected_revision=0,
                     ),
                     action=SessionAction.CREATE,
@@ -422,22 +453,87 @@ class BusinessResearchPreparer:
             draft_revision=revision,
             items=(preparation.item,),
         )
-        receipt = await self._facade.save_draft(
-            DraftSaveCommand(
-                command=CommandRef(
-                    user_scope=user_scope,
-                    source_module=str(context["source_module"]),
-                    business_request_id=session_id,
-                    command_id=f"ui-{uuid.uuid4().hex}",
-                    expected_revision=revision,
+        command = DraftSaveCommand(
+            command=CommandRef(
+                user_scope=user_scope,
+                source_module=str(context["source_module"]),
+                business_request_id=session_id,
+                # 键含草稿版与载荷摘要：同一写重试同键；变输入不冒用旧键（N12）。
+                command_id=_write_command_id(
+                    "ui-draft",
+                    user_scope,
+                    session_id,
+                    str(revision),
+                    sha256_hex(_canonical_json(encode_draft_payload(payload))),
                 ),
-                session_id=session_id,
-                expected_draft_revision=revision,
-                payload=_draft_payload(preparation, source, context),
-            )
+                expected_revision=revision,
+            ),
+            session_id=session_id,
+            expected_draft_revision=revision,
+            payload=payload,
         )
+        receipt = await self._save_draft(command)
         return BusinessPreparationReceipt(
             session_id=session_id,
+            draft_revision=receipt.draft_revision,
+            source=SourceVersionRef(
+                source_kind=source.source_kind,
+                source_id=source.source_id,
+                source_version=source.version,
+                source_digest=source.digest,
+            ),
+            sent=False,
+        )
+
+    async def _create_session(self, command: SessionChangeCommand) -> None:
+        """建会话写：提交结果未知如实转 ``BusinessDraftCommitUnknown``（N12）。"""
+
+        try:
+            await self._facade.change_session(command)
+        except AgentServiceError as exc:
+            if exc.code is AgentErrorCode.OPERATION_UNKNOWN:
+                raise BusinessDraftCommitUnknown(command.session_id) from exc
+            raise
+
+    async def _save_draft(self, command: DraftSaveCommand) -> DraftReceipt:
+        """存稿写：确定未写原样上抛（可同键重试）；结果未知转类型化状态并保原命令（N12）。"""
+
+        try:
+            receipt = await self._facade.save_draft(command)
+        except AgentServiceError as exc:
+            if exc.code is AgentErrorCode.OPERATION_UNKNOWN:
+                self._pending_writes[command.session_id] = command
+                raise BusinessDraftCommitUnknown(command.session_id) from exc
+            raise
+        self._pending_writes.pop(command.session_id, None)
+        return receipt
+
+    async def _replay_pending(self, command: DraftSaveCommand, *, source: SourceRef) -> BusinessPreparationReceipt:
+        """按原命令（原键/原输入）查回上次结果未知的存稿写（N12）。
+
+        查回成功即原结果；``REVISION_CONFLICT`` / ``INPUT_CONFLICT`` 表示原写未落库
+        且草稿已被推进（用户编辑）→ 保留原稿、不覆盖；确定未写（存储不可用）原样
+        上抛并保留原命令待重试。
+        """
+
+        try:
+            receipt = await self._save_draft(command)
+        except BusinessDraftCommitUnknown:
+            raise
+        except AgentServiceError as exc:
+            if exc.code in (AgentErrorCode.REVISION_CONFLICT, AgentErrorCode.INPUT_CONFLICT):
+                revision = await self._existing_draft_revision(
+                    command.session_id, user_scope=command.command.user_scope
+                )
+                if revision is None:
+                    # 目标会话已不存在（清理/fence）：无从保留原稿，按原错误如实上抛。
+                    raise
+                raise BusinessDraftAlreadyPrepared(command.session_id, revision) from exc
+            # 确定未写（存储不可用等）：保留原命令，下次仍按原键查回。
+            self._pending_writes[command.session_id] = command
+            raise
+        return BusinessPreparationReceipt(
+            session_id=receipt.session_id,
             draft_revision=receipt.draft_revision,
             source=SourceVersionRef(
                 source_kind=source.source_kind,

@@ -1481,3 +1481,80 @@ class TestEnsureValidStockCodes:
         await vm.refresh_news()
         assert vm.state.valid_stock_codes == frozenset({"600519"})
         assert vm.state.valid_stock_ts_codes == frozenset({"600519.SH"})
+
+
+class TestNewsRowIdFromRealtimePush:
+    """N07: 已入库实时快讯携带准确 DB id，原卡无需手刷即可准备研究草稿。"""
+
+    @pytest.fixture
+    def vm(self):
+        vm = HomeViewModel()
+        vm.processor = MagicMock()
+        vm.processor.cache = MagicMock()
+        return vm
+
+    def test_news_item_to_row_reads_id(self):
+        from ui.viewmodels.home_view_model import _news_item_to_row
+
+        assert _news_item_to_row({"content": "c", "id": 7}).news_id == 7
+        assert _news_item_to_row({"content": "c"}).news_id is None
+
+    @pytest.mark.asyncio
+    async def test_new_item_push_keeps_db_id(self, vm):
+        from services.news_subscription_service import NewsUpdateType
+
+        await vm._on_news_service_update(
+            NewsUpdateType.NEW_ITEM,
+            [{"content": "已入库快讯", "time": "2026-10-27 10:05:00", "id": 9}],
+        )
+        assert [r.news_id for r in vm.state.news_rows] == [9]
+
+    @pytest.mark.asyncio
+    async def test_duplicate_push_backfills_missing_id_without_duplication(self, vm):
+        from services.news_subscription_service import NewsUpdateType
+
+        item = {"content": "dup", "time": "2026-10-27 10:00:00"}
+        await vm._on_news_service_update(NewsUpdateType.NEW_ITEM, [item])
+        assert vm.state.news_rows[0].news_id is None
+
+        await vm._on_news_service_update(NewsUpdateType.NEW_ITEM, [{**item, "id": 5}])
+        assert len(vm.state.news_rows) == 1
+        assert vm.state.news_rows[0].news_id == 5
+
+    @pytest.mark.asyncio
+    async def test_backfill_does_not_cross_same_content_different_time(self, vm):
+        from services.news_subscription_service import NewsUpdateType
+
+        await vm._on_news_service_update(NewsUpdateType.NEW_ITEM, [{"content": "same", "time": "2026-10-27 10:00:00"}])
+        await vm._on_news_service_update(
+            NewsUpdateType.NEW_ITEM, [{"content": "same", "time": "2026-10-27 10:05:00", "id": 12}]
+        )
+        rows = vm.state.news_rows
+        assert len(rows) == 2
+        assert [r.news_id for r in rows].count(12) == 1
+        assert [r.news_id for r in rows].count(None) == 1
+
+    @pytest.mark.asyncio
+    async def test_pagination_backfills_id_for_previously_pushed_row(self, vm):
+        """分页命中去重时给同身份无 id 推送行补 id（不重复展示）。"""
+        dao = _FakeCursorNewsDao(_news_rows_n(21))
+        vm.processor.cache.market_dao = dao
+        await vm.refresh_news()
+        assert len(vm.state.news_rows) == 20
+
+        from services.news_subscription_service import NewsUpdateType
+
+        await vm._on_news_service_update(
+            NewsUpdateType.NEW_ITEM,
+            [{"content": "news1", "publish_time": datetime(2026, 10, 27, 10, 1)}],
+        )
+        pushed = next(r for r in vm.state.news_rows if r.content == "news1")
+        assert pushed.news_id is None
+
+        await vm.load_next_page()
+
+        rows = vm.state.news_rows
+        assert len(rows) == 21
+        assert next(r for r in rows if r.content == "news1").news_id == 1
+        keys = [(r.publish_time, r.content) for r in rows]
+        assert len(keys) == len(set(keys))

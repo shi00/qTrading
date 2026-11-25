@@ -45,6 +45,7 @@ from core.agent_types import (
     json_doc,
 )
 from data.persistence.daos.agent_dao import AgentDao
+from data.persistence.daos.base_dao import EngineDisposedError
 from services.agent_service.comparison import (
     COMPARISON_COST_FAILED,
     COMPARISON_COST_KNOWN,
@@ -62,6 +63,7 @@ from services.agent_service.comparison import (
     ComparisonSubmissionRequest,
     FrozenComparisonGroup,
     LaneWithdrawal,
+    apply_persisted_lane_notes,
     build_comparison_view,
     build_lane_accept_request,
     comparison_export_rows,
@@ -77,6 +79,7 @@ from services.agent_service.comparison import (
     require_lane_parameters,
     verify_group_manifest_authority,
 )
+from services.agent_service.comparison_notes import AppStateComparisonLaneNotes
 from services.agent_service.dispatch import DispatchOutcome
 from services.agent_service.service import AgentService
 
@@ -284,6 +287,18 @@ class TestRetryAndQueue:
         assert all(decision.decision == "queued" for decision in global_blocked)
         assert all(decision.reason == "d05_total_execution_slots" for decision in global_blocked)
         assert COMPARISON_SESSION_SLOTS == 1
+
+    def test_queue_reason_names_both_limits_when_both_full(self) -> None:
+        group = _group((_selection("conn-a"), _selection("conn-b")))
+        decisions = plan_lane_queue(
+            group,
+            active_total_executions=COMPARISON_TOTAL_SLOTS,
+            active_session_executions=COMPARISON_SESSION_SLOTS,
+        )
+        assert all(decision.decision == "queued" for decision in decisions)
+        assert all(
+            decision.reason == "d05_total_execution_slots+d05_session_single_total_execution" for decision in decisions
+        )
 
     @pytest.mark.asyncio
     async def test_drive_runs_next_lane_only_after_previous_completes(self) -> None:
@@ -851,6 +866,124 @@ class TestLaneReasonProjection:
         assert (view.group_state, view.goal_coverage) == ("partial", "partial")
 
 
+class TestPersistedLaneRefusalNotes:
+    """N29：明确拒绝原因在重读与行导出与即时响应同因，排队/未知不误标。"""
+
+    def test_dispatch_refusal_survives_rebuild_and_export(self) -> None:
+        group = _group()
+        lane_a, lane_b = group.lanes
+        executions = (
+            _row(group, lane_a.lane_ref, "complete", "exec-a"),
+            _row(group, lane_b.lane_ref, "queued", "exec-b"),
+        )
+        observations = observations_from_executions(group, executions)
+        assert all(observation.note is None for observation in observations)
+
+        folded = apply_persisted_lane_notes(
+            group, observations, executions, {lane_b.lane_ref: "dispatch_failed:dispatch_closed"}
+        )
+        view = build_comparison_view(group, folded)
+        by_lane = {lane.lane_ref: lane for lane in view.lanes}
+        assert by_lane[lane_b.lane_ref].reason == "dispatch_failed"
+        assert by_lane[lane_b.lane_ref].display_state == "queued"
+        rows = {row["lane_ref"]: row for row in comparison_export_rows(view)}
+        assert rows[lane_b.lane_ref]["reason"] == "dispatch_failed"
+
+    def test_capacity_queued_lane_is_not_mislabeled_as_refused(self) -> None:
+        group = _group()
+        executions = tuple(_row(group, lane.lane_ref, "queued", f"exec-{lane.lane_ref}") for lane in group.lanes)
+
+        view = build_comparison_view(
+            group, apply_persisted_lane_notes(group, observations_from_executions(group, executions), executions, {})
+        )
+
+        assert {lane.reason for lane in view.lanes} == {"not_started"}
+        assert view.not_started_count == len(group.lanes)
+
+    def test_refusal_note_ignored_once_lane_advanced(self) -> None:
+        group = _group()
+        lane_ref = group.lanes[1].lane_ref
+        executions = (
+            _row(group, group.lanes[0].lane_ref, "complete", "exec-a"),
+            _row(group, lane_ref, "failed", "exec-b", current_round_id="round-1"),
+        )
+
+        folded = apply_persisted_lane_notes(
+            group,
+            observations_from_executions(group, executions),
+            executions,
+            {lane_ref: "dispatch_failed:dispatch_closed"},
+        )
+
+        by_lane = {lane.lane_ref: lane for lane in build_comparison_view(group, folded).lanes}
+        assert by_lane[lane_ref].reason == "failed_no_result"
+
+    def test_stale_note_ignored_after_lane_restarted(self) -> None:
+        group = _group()
+        lane_ref = group.lanes[1].lane_ref
+        executions = (
+            _row(group, group.lanes[0].lane_ref, "complete", "exec-a"),
+            _row(group, lane_ref, "queued", "exec-b", current_round_id="round-2"),
+        )
+
+        folded = apply_persisted_lane_notes(
+            group,
+            observations_from_executions(group, executions),
+            executions,
+            {lane_ref: "dispatch_failed:dispatch_closed"},
+        )
+
+        by_lane = {lane.lane_ref: lane for lane in build_comparison_view(group, folded).lanes}
+        assert by_lane[lane_ref].reason != "dispatch_failed"
+
+    def test_accept_failure_note_applies_only_without_execution_row(self) -> None:
+        group = _group()
+        lane_a, lane_b = group.lanes
+        executions = (_row(group, lane_a.lane_ref, "complete", "exec-a"),)
+
+        folded = apply_persisted_lane_notes(
+            group,
+            observations_from_executions(group, executions),
+            executions,
+            {lane_b.lane_ref: "accept_failed:revision_conflict"},
+        )
+        by_lane = {lane.lane_ref: lane for lane in build_comparison_view(group, folded).lanes}
+        assert by_lane[lane_b.lane_ref].reason == "accept_failed"
+
+        # 该路后来已受理（有执行行）时，旧的受理失败不算数：不误标。
+        restarted = (*executions, _row(group, lane_b.lane_ref, "queued", "exec-b"))
+        folded = apply_persisted_lane_notes(
+            group,
+            observations_from_executions(group, restarted),
+            restarted,
+            {lane_b.lane_ref: "accept_failed:revision_conflict"},
+        )
+        by_lane = {lane.lane_ref: lane for lane in build_comparison_view(group, folded).lanes}
+        assert by_lane[lane_b.lane_ref].reason != "accept_failed"
+
+    @pytest.mark.asyncio
+    async def test_app_state_adapter_roundtrip_and_corrupt_value(self) -> None:
+        stored: dict[str, str] = {}
+
+        async def write(key: str, value: str) -> None:
+            stored[key] = value
+
+        async def scan(prefix: str) -> dict[str, str]:
+            return {key: value for key, value in stored.items() if key.startswith(prefix)}
+
+        notes = AppStateComparisonLaneNotes(write=write, scan=scan)
+        await notes.save("group-1", "lane-a", "dispatch_failed:dispatch_closed")
+
+        assert stored == {"agent.comparison.lane_note.group-1.lane-a": "dispatch_failed:dispatch_closed"}
+        assert await notes.load("group-1") == {"lane-a": "dispatch_failed:dispatch_closed"}
+        assert await notes.load("group-other") == {}
+
+        stored["agent.comparison.lane_note.group-1.lane-b"] = "not_a_refusal"
+        with pytest.raises(AgentServiceError) as excinfo:
+            await notes.load("group-1")
+        assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+
+
 class TestDriveEdgeCases:
     """逐路推进的边界：无容量、空观察、等待检查点、非法观察。"""
 
@@ -1039,12 +1172,15 @@ def _row(
     lane_ref: str,
     state: str,
     execution_id: str,
+    *,
+    current_round_id: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         comparison_group_ref=group.group_ref,
         comparison_lane_ref=lane_ref,
         display_state=state,
         execution_id=execution_id,
+        current_round_id=current_round_id,
     )
 
 
@@ -1062,16 +1198,21 @@ def _submission(group: FrozenComparisonGroup) -> ComparisonSubmissionRequest:
 class _RunDao:
     """比较组读写最小面：manifest/会话/受理/费用引用（只读 + 受理）。"""
 
+    #: 生产 DAO 的引擎引用；替身默认无引擎（不触发 app_state 持久化）。
+    engine: Any = None
+
     def __init__(
         self,
         group: FrozenComparisonGroup,
         executions: list[SimpleNamespace],
         *,
         fail_lanes: frozenset[str] = frozenset(),
+        append_on_accept: bool = False,
     ) -> None:
         self.group = group
         self.executions = executions
         self.fail_lanes = fail_lanes
+        self.append_on_accept = append_on_accept
         self.accept_calls: list[Any] = []
         self.session_reads = 0
         self.cost_refs: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {}
@@ -1089,6 +1230,8 @@ class _RunDao:
         lane_ref = request.comparison_lane_ref
         if lane_ref in self.fail_lanes:
             raise AgentServiceError(AgentErrorCode.REVISION_CONFLICT, "cannot accept lane", "u1/s1")
+        if self.append_on_accept:
+            self.executions.append(_row(self.group, lane_ref, "queued", f"exec-{lane_ref}"))
         return SubmissionReceipt(
             command=CommandRef(
                 user_scope=request.user_scope,
@@ -1136,6 +1279,32 @@ class _RunDispatcher:
         return DispatchOutcome(receipt.execution_id, receipt.workflow_id, True, None, "round-1")
 
 
+class _MemoryLaneNotes:
+    """拒绝原因持久化替身：按组/路记在内存，行为与 app_state 适配器一致。"""
+
+    def __init__(self) -> None:
+        self.notes: dict[tuple[str, str], str] = {}
+
+    async def load(self, group_ref: str) -> dict[str, str]:
+        return {lane_ref: note for (group, lane_ref), note in self.notes.items() if group == group_ref}
+
+    async def save(self, group_ref: str, lane_ref: str, note: str) -> None:
+        self.notes[(group_ref, lane_ref)] = note
+
+
+class _FailingLaneNotes:
+    """读写都失败的持久化替身：验证降级/传播口径。"""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    async def load(self, group_ref: str) -> dict[str, str]:
+        raise self.error
+
+    async def save(self, group_ref: str, lane_ref: str, note: str) -> None:
+        raise self.error
+
+
 class _RunLedger:
     def __init__(self, attempts: dict[str, list[dict[str, Any]]] | None = None) -> None:
         self.attempts = attempts or {}
@@ -1147,8 +1316,13 @@ class _RunLedger:
         return {}
 
 
-def _run_service(dao: Any, dispatcher: Any = None, ledger: Any = None) -> AgentService:
-    return AgentService(cast(AgentDao, dao), cast(Any, ledger), dispatcher=cast(Any, dispatcher))
+def _run_service(dao: Any, dispatcher: Any = None, ledger: Any = None, *, lane_notes: Any = None) -> AgentService:
+    return AgentService(
+        cast(AgentDao, dao),
+        cast(Any, ledger),
+        dispatcher=cast(Any, dispatcher),
+        lane_notes=lane_notes,
+    )
 
 
 class TestLaneStartFailureIsolation:
@@ -1375,6 +1549,88 @@ class TestProductionRunEntry:
         assert not hasattr(receipt, "execution_id")
 
     @pytest.mark.asyncio
+    async def test_global_slots_full_receipt_names_total_slots_and_zero_dispatch(self) -> None:
+        group = _group()
+        dao = _RunDao(group, [_row(group, lane.lane_ref, "queued", f"exec-{lane.lane_ref}") for lane in group.lanes])
+        dispatcher = _RunDispatcher()
+        service = _run_service(dao, dispatcher)
+
+        receipt = await service.run_comparison(_submission(group), active_total_executions=COMPARISON_TOTAL_SLOTS)
+
+        assert dispatcher.calls == []
+        assert receipt.view.ended is False
+        assert {lane.dispatch_reason for lane in receipt.lanes} == {"d05_total_execution_slots"}
+        assert all(lane.dispatch_submitted is False for lane in receipt.lanes)
+        # 幂等重放同一输入仍是零派发且原因不变（不伪造成已派发）。
+        replay = await service.run_comparison(_submission(group), active_total_executions=COMPARISON_TOTAL_SLOTS)
+        assert dispatcher.calls == []
+        assert {lane.dispatch_reason for lane in replay.lanes} == {"d05_total_execution_slots"}
+
+    @pytest.mark.asyncio
+    async def test_session_slots_full_receipt_names_session_limits_and_zero_dispatch(self) -> None:
+        group = _group()
+        dao = _RunDao(group, [_row(group, lane.lane_ref, "queued", f"exec-{lane.lane_ref}") for lane in group.lanes])
+        dispatcher = _RunDispatcher()
+        service = _run_service(dao, dispatcher)
+
+        receipt = await service.run_comparison(_submission(group), active_session_executions=COMPARISON_SESSION_SLOTS)
+
+        assert dispatcher.calls == []
+        assert receipt.view.ended is False
+        assert {lane.dispatch_reason for lane in receipt.lanes} == {"d05_session_single_total_execution"}
+        assert all(lane.dispatch_submitted is False for lane in receipt.lanes)
+
+    @pytest.mark.asyncio
+    async def test_both_slots_full_receipt_names_both_limits_and_zero_dispatch(self) -> None:
+        group = _group()
+        dao = _RunDao(group, [_row(group, lane.lane_ref, "queued", f"exec-{lane.lane_ref}") for lane in group.lanes])
+        dispatcher = _RunDispatcher()
+        service = _run_service(dao, dispatcher)
+
+        receipt = await service.run_comparison(
+            _submission(group),
+            active_total_executions=COMPARISON_TOTAL_SLOTS,
+            active_session_executions=COMPARISON_SESSION_SLOTS,
+        )
+
+        assert dispatcher.calls == []
+        assert {lane.dispatch_reason for lane in receipt.lanes} == {
+            "d05_total_execution_slots+d05_session_single_total_execution"
+        }
+        assert all(lane.dispatch_submitted is False for lane in receipt.lanes)
+
+    @pytest.mark.asyncio
+    async def test_skipped_lane_receipt_names_session_limit_while_first_lane_dispatched(self) -> None:
+        group = _group()
+        lane_a, lane_b = group.lanes
+        dao = _RunDao(group, [_row(group, lane.lane_ref, "queued", f"exec-{lane.lane_ref}") for lane in group.lanes])
+        dispatcher = _RunDispatcher()
+        service = _run_service(dao, dispatcher)
+
+        receipt = await service.run_comparison(_submission(group))
+        by_lane = {lane.lane_ref: lane for lane in receipt.lanes}
+
+        assert dispatcher.calls == [f"exec-{lane_a.lane_ref}"]
+        assert by_lane[lane_a.lane_ref].dispatch_submitted is True
+        assert (
+            by_lane[lane_b.lane_ref].dispatch_submitted,
+            by_lane[lane_b.lane_ref].dispatch_reason,
+        ) == (False, "d05_session_single_total_execution")
+
+    @pytest.mark.asyncio
+    async def test_invalid_capacity_input_is_rejected_before_any_dispatch(self) -> None:
+        group = _group()
+        dao = _RunDao(group, [_row(group, lane.lane_ref, "queued", f"exec-{lane.lane_ref}") for lane in group.lanes])
+        dispatcher = _RunDispatcher()
+        service = _run_service(dao, dispatcher)
+
+        with pytest.raises(AgentValidationError) as exc:
+            await service.run_comparison(_submission(group), active_total_executions=-1)
+
+        assert exc.value.code == "invalid_range"
+        assert dispatcher.calls == []
+
+    @pytest.mark.asyncio
     async def test_run_drives_lanes_in_order_and_resumes_on_next_call(self) -> None:
         group = _group()
         lane_a, lane_b = group.lanes
@@ -1492,6 +1748,127 @@ class TestProductionRunEntry:
         assert excinfo.type is asyncio.CancelledError
         assert dispatcher.calls == [f"exec-{group.lanes[0].lane_ref}"]
 
+    @pytest.mark.asyncio
+    async def test_refused_dispatch_reason_survives_reopen_and_export(self) -> None:
+        group = _group()
+        dao = _RunDao(
+            group,
+            [_row(group, lane.lane_ref, "queued", f"exec-{lane.lane_ref}") for lane in group.lanes],
+        )
+        dispatcher = _RunDispatcher(reject={f"exec-{lane.lane_ref}": "dispatch_closed" for lane in group.lanes})
+        notes = _MemoryLaneNotes()
+        service = _run_service(dao, dispatcher, lane_notes=notes)
+
+        receipt = await service.run_comparison(_submission(group))
+        immediate = {lane.lane_ref: lane.reason for lane in receipt.view.lanes}
+        assert set(immediate.values()) == {"dispatch_failed"}
+        assert notes.notes == {
+            (group.group_ref, lane.lane_ref): "dispatch_failed:dispatch_closed" for lane in group.lanes
+        }
+        dispatch_calls = list(dispatcher.calls)
+
+        query = ComparisonReadQuery(user_scope="u1", session_id="s1", group_ref=group.group_ref)
+        reopened = {lane.lane_ref: lane.reason for lane in (await service.read_comparison(query)).lanes}
+        exported = {row["lane_ref"]: row["reason"] for row in await service.export_comparison(query)}
+
+        assert reopened == immediate
+        assert exported == immediate
+        # 重开与行导出只读：零额外派发。
+        assert dispatcher.calls == dispatch_calls
+
+    @pytest.mark.asyncio
+    async def test_capacity_queued_lane_is_not_persisted_as_refusal(self) -> None:
+        group = _group()
+        dao = _RunDao(
+            group,
+            [_row(group, lane.lane_ref, "queued", f"exec-{lane.lane_ref}") for lane in group.lanes],
+        )
+        notes = _MemoryLaneNotes()
+        service = _run_service(dao, _RunDispatcher(), lane_notes=notes)
+
+        receipt = await service.run_comparison(_submission(group), active_total_executions=COMPARISON_TOTAL_SLOTS)
+        assert notes.notes == {}
+        assert {lane.reason for lane in receipt.view.lanes} == {"not_started"}
+
+        query = ComparisonReadQuery(user_scope="u1", session_id="s1", group_ref=group.group_ref)
+        assert {lane.reason for lane in (await service.read_comparison(query)).lanes} == {"not_started"}
+
+    @pytest.mark.asyncio
+    async def test_accept_refusal_reason_survives_reopen(self) -> None:
+        group = _group()
+        lane_a, lane_b = group.lanes
+        dao = _RunDao(
+            group,
+            [_row(group, lane_a.lane_ref, "complete", f"exec-{lane_a.lane_ref}")],
+            fail_lanes=frozenset({lane_b.lane_ref}),
+        )
+        notes = _MemoryLaneNotes()
+        service = _run_service(dao, _RunDispatcher(), lane_notes=notes)
+
+        receipt = await service.run_comparison(_submission(group))
+        immediate = {lane.lane_ref: lane.reason for lane in receipt.view.lanes}
+        assert immediate[lane_b.lane_ref] == "accept_failed"
+        assert notes.notes[(group.group_ref, lane_b.lane_ref)] == (
+            f"accept_failed:{AgentErrorCode.REVISION_CONFLICT.value}"
+        )
+
+        query = ComparisonReadQuery(user_scope="u1", session_id="s1", group_ref=group.group_ref)
+        reopened = {lane.lane_ref: lane.reason for lane in (await service.read_comparison(query)).lanes}
+        assert reopened == immediate
+
+    def test_lane_note_store_defaults_to_app_state_adapter(self) -> None:
+        group = _group()
+        dao = _RunDao(group, [])
+        dao.engine = object()
+
+        default_store = _run_service(dao)._lane_note_store()  # pyright: ignore[reportPrivateUsage]
+        injected = _MemoryLaneNotes()
+
+        assert isinstance(default_store, AppStateComparisonLaneNotes)
+        assert _run_service(dao, lane_notes=injected)._lane_note_store() is injected  # pyright: ignore[reportPrivateUsage]
+
+    @pytest.mark.asyncio
+    async def test_note_write_failure_does_not_block_immediate_facts(self) -> None:
+        group = _group()
+        dao = _RunDao(
+            group,
+            [_row(group, lane.lane_ref, "queued", f"exec-{lane.lane_ref}") for lane in group.lanes],
+        )
+        dispatcher = _RunDispatcher(reject={f"exec-{lane.lane_ref}": "dispatch_closed" for lane in group.lanes})
+        service = _run_service(dao, dispatcher, lane_notes=_FailingLaneNotes(RuntimeError("boom")))
+
+        receipt = await service.run_comparison(_submission(group))
+
+        assert {lane.reason for lane in receipt.view.lanes} == {"dispatch_failed"}
+
+    @pytest.mark.asyncio
+    async def test_note_read_failure_is_reported_not_disguised(self) -> None:
+        group = _group()
+        dao = _RunDao(
+            group,
+            [_row(group, lane.lane_ref, "queued", f"exec-{lane.lane_ref}") for lane in group.lanes],
+        )
+        service = _run_service(dao, lane_notes=_FailingLaneNotes(RuntimeError("boom")))
+        query = ComparisonReadQuery(user_scope="u1", session_id="s1", group_ref=group.group_ref)
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await service.read_comparison(query)
+        assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+
+    @pytest.mark.asyncio
+    async def test_note_read_engine_disposed_propagates(self) -> None:
+        group = _group()
+        dao = _RunDao(
+            group,
+            [_row(group, lane.lane_ref, "queued", f"exec-{lane.lane_ref}") for lane in group.lanes],
+        )
+        service = _run_service(dao, lane_notes=_FailingLaneNotes(EngineDisposedError("engine disposed")))
+        query = ComparisonReadQuery(user_scope="u1", session_id="s1", group_ref=group.group_ref)
+
+        with pytest.raises(EngineDisposedError) as excinfo:
+            await service.read_comparison(query)
+        assert str(excinfo.value) == "engine disposed"
+
 
 class TestReadCostAndRetry:
     @pytest.mark.asyncio
@@ -1554,6 +1931,30 @@ class TestReadCostAndRetry:
         assert dispatcher.calls == [f"exec-{lane_a.lane_ref}"]
         assert [request.comparison_lane_ref for request in dao.accept_calls] == [lane_a.lane_ref]
         assert dao.accept_calls[0].business_request_id != lane_a.business_request_id
+
+    @pytest.mark.asyncio
+    async def test_retry_refusal_reason_survives_reopen(self) -> None:
+        group = _group()
+        lane_a, lane_b = group.lanes
+        dao = _RunDao(
+            group,
+            [
+                _row(group, lane_a.lane_ref, "failed", "exec-a"),
+                _row(group, lane_b.lane_ref, "complete", "exec-b"),
+            ],
+            append_on_accept=True,
+        )
+        dispatcher = _RunDispatcher(reject={f"exec-{lane_a.lane_ref}": "dispatch_closed"})
+        notes = _MemoryLaneNotes()
+        service = _run_service(dao, dispatcher, lane_notes=notes)
+        query = ComparisonReadQuery(user_scope="u1", session_id="s1", group_ref=group.group_ref)
+
+        outcome = await service.retry_comparison_lane(query, lane_a.lane_ref, expected_revision=0)
+
+        assert outcome.dispatch is not None and outcome.dispatch.submitted is False
+        assert notes.notes[(group.group_ref, lane_a.lane_ref)] == "dispatch_failed:dispatch_closed"
+        reopened = {lane.lane_ref: lane.reason for lane in outcome.view.lanes}
+        assert reopened[lane_a.lane_ref] == "dispatch_failed"
 
     @pytest.mark.asyncio
     async def test_retry_rejects_running_complete_or_unknown_lane(self) -> None:
@@ -1892,3 +2293,43 @@ class TestGroupStopExecution:
         assert by_lane[lane_a.lane_ref].action == "preserve_result"
         assert by_lane[lane_a.lane_ref].verified is True
         assert by_lane[lane_b.lane_ref].verified is False
+
+
+# ---------------------------------------------------------------------------
+# 第四类验收证据：共享 MCP 断线的影响清单（受影响路逐路列出，未受影响路不得被误标）
+# ---------------------------------------------------------------------------
+
+_MCP_DISCONNECT_REASON = "shared_mcp_disconnected"
+
+
+class TestSharedMCPDisconnectImpact:
+    def test_shared_mcp_disconnect_lists_only_affected_lanes(self) -> None:
+        group = _group((_selection("conn-a"), _selection("conn-b"), _selection("conn-c")))
+        lane_done, lane_running, lane_queued = group.lanes
+        plan = plan_group_stop(
+            group,
+            (
+                ComparisonLaneObservation(lane_ref=lane_done.lane_ref, display_state="complete", reliable_result=True),
+                ComparisonLaneObservation(lane_ref=lane_running.lane_ref, display_state="running"),
+                ComparisonLaneObservation(lane_ref=lane_queued.lane_ref, display_state="queued"),
+            ),
+            reason=_MCP_DISCONNECT_REASON,
+        )
+
+        # 影响清单按冻结路序逐路列出（不是只给计数）。
+        assert [decision.lane_ref for decision in plan.decisions] == [lane.lane_ref for lane in group.lanes]
+        assert plan.dispatch_closed is True
+
+        # 受影响路 = 需停新派发/撤回的路；已完成且有可靠成果的路保留原结果。
+        affected = [decision.lane_ref for decision in plan.decisions if decision.action != "preserve_result"]
+        assert affected == [lane_running.lane_ref, lane_queued.lane_ref]
+
+        decisions = {decision.lane_ref: decision for decision in plan.decisions}
+        assert decisions[lane_done.lane_ref].action == "preserve_result"
+        # 未受影响路不得被误标为失败/未知：原因即已完成本身。
+        assert decisions[lane_done.lane_ref].reason == f"{_MCP_DISCONNECT_REASON}:complete"
+        # 受影响路原因可解释：稳定断线原因 + 该路当时状态。
+        assert decisions[lane_running.lane_ref].reason == f"{_MCP_DISCONNECT_REASON}:in_flight"
+        assert decisions[lane_queued.lane_ref].reason == f"{_MCP_DISCONNECT_REASON}:not_dispatched"
+        assert all(decision.reason.startswith(f"{_MCP_DISCONNECT_REASON}:") for decision in plan.decisions)
+        assert not any("failed" in decision.reason or "unknown" in decision.reason for decision in plan.decisions)

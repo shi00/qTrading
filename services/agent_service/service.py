@@ -37,10 +37,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from core.agent_types import (
     NON_RECOVERABLE_DISPLAY_STATES,
@@ -70,6 +71,8 @@ from core.agent_types import (
     DraftTransferReceipt,
     EventPage,
     EventReadQuery,
+    ExecutionControlReceipt,
+    ExecutionControlRequest,
     HistoryPage,
     HistoryQuery,
     MarkAnswerDeliveredRequest,
@@ -82,13 +85,20 @@ from core.agent_types import (
     ReadMarkReceipt,
     ResearchEvent,
     ResearchSnapshot,
+    RetryCommandRecord,
+    RetryExecutionReceipt,
+    RetryExecutionRequest,
     RevisionReceipt,
     ReviseQueuedRequest,
     SaveAnswerRequest,
     SessionRead,
     SessionReadQuery,
+    RoleSkillAssignment,
+    RoleSkillAssignmentReceipt,
     SessionChangeCommand,
+    SkillUninstallReceipt,
     SkillVersionRef,
+    SkillVersionView,
     SourceKind,
     SourceRead,
     SourceReadQuery,
@@ -97,6 +107,9 @@ from core.agent_types import (
     SourceStopReceipt,
     SubmissionReceipt,
     derive_accept_identity,
+    json_doc,
+    plan_spec_digest,
+    sha256_hex,
     stable_id,
     validate_draft_read_query,
     validate_draft_save_command,
@@ -107,8 +120,10 @@ from core.agent_types import (
     decode_json_doc,
     decode_source_version_ref,
 )
+from data.persistence.app_state_service import list_app_state, set_app_state
 from data.persistence.daos.agent_dao import AgentDao
 from data.persistence.daos.ai_usage_dao import AIUsageDao
+from data.persistence.daos.base_dao import EngineDisposedError
 from services.agent_service.comparison import (
     ACCEPT_FAILED_PREFIX,
     DISPATCH_FAILED_PREFIX,
@@ -124,6 +139,7 @@ from services.agent_service.comparison import (
     FrozenComparisonGroup,
     LaneWithdrawal,
     LaneWithdrawer,
+    apply_persisted_lane_notes,
     build_comparison_view,
     build_lane_accept_request,
     comparison_export_rows,
@@ -132,15 +148,31 @@ from services.agent_service.comparison import (
     execute_group_stop,
     freeze_comparison_group,
     observations_from_executions,
+    plan_lane_queue,
     plan_lane_retry,
     require_group_lane_consistency,
     verify_group_manifest_authority,
 )
+from services.agent_service.comparison_notes import AppStateComparisonLaneNotes, ComparisonLaneNotesPort
+from services.agent_service.control import RetryLauncher, plan_retry
 from services.agent_service.dispatch import DispatchOutcome, ResearchDispatcher, ResearchWorkflowResult
-from services.agent_service.skills import SkillAvailabilityReceipt, SkillCatalogService
+from services.agent_service.main_turn import derive_frozen_selection_policy, plan_spec_from_proposal
+from services.agent_service.skills import (
+    SkillAvailabilityReceipt,
+    SkillCatalogService,
+    SkillImportReceipt,
+    SkillPackageImportRequest,
+)
 from services.agent_service.sources import BusinessSourceService
-from utils.error_classifier import classify_error
+from utils.error_classifier import classify_error, classify_severity
 from utils.loop_local import get_loop_local
+from utils.sanitizers import DataSanitizer
+
+logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from core.model_management_types import StockAgentCall
+    from services.ai_service.scenario_dispatch import ScenarioDispatch
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +217,65 @@ class ComparisonLaneRetryOutcome:
     error_code: str | None
     dispatch: DispatchOutcome | None
     view: ComparisonGroupView
+
+
+@dataclass(frozen=True, slots=True)
+class StockAnalysisRequest:
+    """单股股票分析请求（W-11 单入口）：分析输入 + 必填研究请求身份。
+
+    ``agent_call`` 为研究请求身份（会话 + 轮次 + 批次 + 股票），单入口据此单次计费
+    并支持按主会话/轮次/批次关联查回；缺省（``None``）时
+    :meth:`AgentService.analyze_stock` 显式拒绝（``INPUT_INVALID``），不以内部临时
+    身份冒充幂等（R21）。其余字段与 ``AIService.analyze_stock`` 参数一一对应。
+    """
+
+    agent_call: StockAgentCall
+    stock_info: Mapping[str, Any]
+    tech_info: Mapping[str, Any]
+    news_list: Sequence[Any] = ()
+    global_context: str = ""
+    strategy_context: str = ""
+    capital_flow_text: str = ""
+    financials_text: str = ""
+    history_text: str = ""
+    on_chunk: Callable[..., Any] | None = None
+    history_context: str | None = None
+    strategy_key: str | None = None
+    include_global_context: bool = True
+    include_learning_context: bool = True
+    ui_prompt_override: str | None = None
+    is_backtest: bool = False
+    financial_labels: Sequence[str] | None = None
+    capital_labels: Sequence[str] | None = None
+    history_labels: Sequence[str] | None = None
+    learning_strategy_name: str | None = None
+    scenario_dispatch: ScenarioDispatch | None = None
+
+    def as_call_kwargs(self) -> dict[str, Any]:
+        """转下游 ``analyze_stock`` 关键字参数（研究请求身份 ``agent_call`` 单列传递）。"""
+
+        return {
+            "stock_info": dict(self.stock_info),
+            "tech_info": dict(self.tech_info),
+            "news_list": list(self.news_list),
+            "global_context": self.global_context,
+            "strategy_context": self.strategy_context,
+            "capital_flow_text": self.capital_flow_text,
+            "financials_text": self.financials_text,
+            "history_text": self.history_text,
+            "on_chunk": self.on_chunk,
+            "history_context": self.history_context,
+            "strategy_key": self.strategy_key,
+            "include_global_context": self.include_global_context,
+            "include_learning_context": self.include_learning_context,
+            "ui_prompt_override": self.ui_prompt_override,
+            "is_backtest": self.is_backtest,
+            "financial_labels": list(self.financial_labels) if self.financial_labels is not None else None,
+            "capital_labels": list(self.capital_labels) if self.capital_labels is not None else None,
+            "history_labels": list(self.history_labels) if self.history_labels is not None else None,
+            "learning_strategy_name": self.learning_strategy_name,
+            "scenario_dispatch": self.scenario_dispatch,
+        }
 
 
 def _require_positive_seconds(value: object, path: str, identity: str) -> None:
@@ -302,6 +393,48 @@ class AnswerSender(Protocol):
     async def send_answer(self, fact: AnswerCommandFact) -> None: ...
 
 
+class StockAnalysisPort(Protocol):
+    """股票分析执行端口（W-11）：通常为 ``services.ai_service.AIService``。
+
+    端口只负责真实执行，不承担受理/计费身份语义——同一 ``request_id`` 的单飞与
+    去重由下游 ``StockAnalysisService`` 的请求门保证，本入口不重复计费。
+    """
+
+    async def analyze_stock(
+        self,
+        stock_info: dict,
+        tech_info: dict,
+        news_list: list,
+        global_context: str = "",
+        strategy_context: str = "",
+        capital_flow_text: str = "",
+        financials_text: str = "",
+        history_text: str = "",
+        on_chunk: Any = None,
+        history_context: str | None = None,
+        strategy_key: str | None = None,
+        include_global_context: bool = True,
+        include_learning_context: bool = True,
+        ui_prompt_override: str | None = None,
+        is_backtest: bool = False,
+        *,
+        financial_labels: list[str] | None = None,
+        capital_labels: list[str] | None = None,
+        history_labels: list[str] | None = None,
+        learning_strategy_name: str | None = None,
+        scenario_dispatch: Any = None,
+        agent_call: StockAgentCall | None = None,
+    ) -> dict[str, Any] | None: ...
+
+
+def _default_stock_analysis_port() -> StockAnalysisPort:
+    """懒加载共享 ``AIService`` 单例作为默认执行端口（避免导入期拉起 LiteLLM）。"""
+
+    from services.ai_service import AIService
+
+    return AIService()
+
+
 class AgentService:
     """统一受理/查询 facade（DD §4.1）。构造后由应用组合根持有同一实例。"""
 
@@ -314,6 +447,8 @@ class AgentService:
         skills: SkillCatalogService | None = None,
         answer_sender: AnswerSender | None = None,
         lane_withdrawer: LaneWithdrawer | None = None,
+        lane_notes: ComparisonLaneNotesPort | None = None,
+        retry_launcher: RetryLauncher | None = None,
     ) -> None:
         """``usage_dao`` 为共享模型调度账本（同一引擎）；缺省时费用投影如实报读取失败。
 
@@ -325,7 +460,10 @@ class AgentService:
         ``lane_withdrawer`` 为比较组停止的真实撤单端口；未接线时未派发路如实标
         「撤回未确认」，不把停止计划伪装成已撤回。默认（未注入）时直连 DAO
         撤单写接口 ``AgentDao.withdraw_comparison_lane``；DAO 未提供该接口或撤回
-        未确认时逐路如实标未确认。
+        未确认时逐路如实标未确认。``lane_notes`` 为比较路明确拒绝原因的持久化端口
+        （N29）：未注入时复用本 DAO 引擎写 ``app_state``（无引擎则不持久化，读取
+        面退回按执行行重建）。``retry_launcher`` 为单任务重试的原生投递端口
+        （W-01）；未注入时重试只落持久事实并如实标 ``not_wired``，不伪造已重跑。
         """
 
         self._dao = dao
@@ -334,6 +472,8 @@ class AgentService:
         self._skills = skills
         self._answer_sender = answer_sender
         self._lane_withdrawer = lane_withdrawer
+        self._lane_notes = lane_notes
+        self._retry_launcher = retry_launcher
         #: 已停止的比较组（组派发门关闭事实）：在途编排的下一路一律零派发。
         self._stopped_groups: set[str] = set()
         # 进程内交付单飞（同一命令在途时不并发重发；原生发送按命令键幂等）。
@@ -773,14 +913,73 @@ class AgentService:
                 identity,
             ) from exc
 
+    def _lane_note_store(self) -> ComparisonLaneNotesPort | None:
+        """比较路原因存储：显式注入优先；否则复用本 DAO 引擎写 ``app_state``。
+
+        引擎不可得（未接线 / 测试替身）时返回 ``None``：不持久化，读取面按执行行
+        重建（与修复前一致），不伪造已记录原因。
+        """
+
+        if self._lane_notes is not None:
+            return self._lane_notes
+        engine = getattr(self._dao, "engine", None)
+        if engine is None:
+            return None
+        return AppStateComparisonLaneNotes(
+            write=lambda key, value: set_app_state(engine, key, value, strict=True),
+            scan=lambda prefix: list_app_state(engine, prefix),
+        )
+
+    @staticmethod
+    async def _persist_lane_refusal(
+        store: ComparisonLaneNotesPort | None, group_ref: str, lane_ref: str, note: str
+    ) -> None:
+        """持久化明确拒绝原因；排队/已启动不写。
+
+        写失败只告警降级（本批即时回执已如实），不因辅助记事阻断推进；取消照常
+        传播（R2）。
+        """
+
+        if store is None or not note.startswith((DISPATCH_FAILED_PREFIX, ACCEPT_FAILED_PREFIX)):
+            return
+        try:
+            await store.save(group_ref, lane_ref, note)
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            # R5：生命周期错误不得被降级为「记事失败」而静默继续。
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[Comparison] lane refusal note not persisted (group=%s lane=%s): %s",
+                group_ref,
+                lane_ref,
+                DataSanitizer.sanitize_error(exc),
+            )
+
     @staticmethod
     def _lane_receipts(
         accepted: tuple[tuple[str, SubmissionReceipt | None, str | None], ...],
         dispatch_outcomes: Mapping[str, DispatchOutcome] | None = None,
+        capacity_reasons: Mapping[str, str] | None = None,
     ) -> tuple[ComparisonLaneReceipt, ...]:
+        """逐路受理 + 派发事实。
+
+        真实派发结果优先；未被派发的**已受理**路若被限额挡下（本批从未尝试），
+        回执如实记 ``dispatch_submitted=False`` 并带上真实容量原因，不折叠成
+        「未尝试」（``None``）。受理失败的路保持 ``None``（原因在 ``error_code``）。
+        """
+
         receipts: list[ComparisonLaneReceipt] = []
         for lane_ref, receipt, error_code in accepted:
             outcome = dispatch_outcomes.get(lane_ref) if dispatch_outcomes is not None else None
+            capacity_reason = capacity_reasons.get(lane_ref) if capacity_reasons is not None else None
+            if outcome is not None:
+                dispatch_submitted, dispatch_reason = outcome.submitted, outcome.reason
+            elif receipt is not None and capacity_reason is not None:
+                dispatch_submitted, dispatch_reason = False, capacity_reason
+            else:
+                dispatch_submitted, dispatch_reason = None, None
             receipts.append(
                 ComparisonLaneReceipt(
                     lane_ref=lane_ref,
@@ -788,8 +987,8 @@ class AgentService:
                     command_record_id=receipt.command_record_id if receipt is not None else None,
                     commit_state=receipt.commit_state if receipt is not None else None,
                     error_code=error_code,
-                    dispatch_submitted=outcome.submitted if outcome is not None else None,
-                    dispatch_reason=outcome.reason if outcome is not None else None,
+                    dispatch_submitted=dispatch_submitted,
+                    dispatch_reason=dispatch_reason,
                 )
             )
         return tuple(receipts)
@@ -826,7 +1025,10 @@ class AgentService:
         准入失败均沿用原语义；未注入派发器时零派发）。逐路按 D05 总位/会话单总
         执行顺序推进，单路派发失败只标该路 ``dispatch_failed``，不阻断其他路；
         本批只回传终态事实，未完成的路保持未收敛，再次调用同一输入即可接续
-        （受理与派发均幂等，不重复执行/计费）。``CancelledError`` 传播（R2）。
+        （受理与派发均幂等，不重复执行/计费）。明确拒绝原因（零派发/受理失败）
+        另按组/路持久化，使重开与行导出与即时响应同因；排队与未知不写。被限额
+        挡下、本批未尝试派发的已受理路，回执记 ``dispatch_submitted=False`` 并
+        给出真实容量原因（全局总位或本会话单总执行）。``CancelledError`` 传播（R2）。
         """
 
         self._require_open("run_comparison")
@@ -852,8 +1054,11 @@ class AgentService:
             )
 
         dispatch_outcomes: dict[str, DispatchOutcome] = {}
+        attempted: set[str] = set()
+        note_store = self._lane_note_store()
 
         async def start_lane(lane: Any) -> str:
+            attempted.add(lane.lane_ref)
             if group.group_ref in self._stopped_groups:
                 # 组停止已落定：任何在途编排的下一路一律零派发（不再启动新路）。
                 raise _LaneDispatchRefused("group_stopped")
@@ -893,11 +1098,24 @@ class AgentService:
             active_total_executions=active_total_executions,
             active_session_executions=active_session_executions,
             idle_observation_limit=1,
+            record_lane_note=lambda lane_ref, note: self._persist_lane_refusal(
+                note_store, group.group_ref, lane_ref, note
+            ),
         )
+        # 本批被限额挡下、从未尝试派发的路：即时回执给出真实容量原因（总位/会话）。
+        capacity_reasons = {
+            decision.lane_ref: decision.reason
+            for decision in plan_lane_queue(
+                group,
+                active_total_executions=active_total_executions,
+                active_session_executions=active_session_executions,
+            )
+            if decision.decision == "queued" and decision.reason is not None and decision.lane_ref not in attempted
+        }
         return ComparisonRunReceipt(
             group_ref=group.group_ref,
             manifest_digest=group.manifest_digest,
-            lanes=self._lane_receipts(accepted, dispatch_outcomes),
+            lanes=self._lane_receipts(accepted, dispatch_outcomes, capacity_reasons),
             view=view,
             dispatcher_wired=True,
         )
@@ -990,6 +1208,13 @@ class AgentService:
         dispatch: DispatchOutcome | None = None
         if self._dispatcher is not None:
             dispatch = await self._dispatcher.dispatch(receipt, user_scope=query.user_scope, mode=group.shared.mode)
+            if not dispatch.submitted:
+                await self._persist_lane_refusal(
+                    self._lane_note_store(),
+                    group.group_ref,
+                    lane_ref,
+                    f"{DISPATCH_FAILED_PREFIX}{dispatch.reason or 'not_submitted'}",
+                )
         _, latest = await self._load_comparison(query)
         return ComparisonLaneRetryOutcome(
             group_ref=group.group_ref,
@@ -1027,7 +1252,11 @@ class AgentService:
     async def _load_comparison_state(
         self, query: ComparisonReadQuery
     ) -> tuple[FrozenComparisonGroup, tuple[ComparisonLaneObservation, ...], tuple[object, ...]]:
-        """读比较组共同 manifest + 会话内逐路事实（可选逐路费用，零派发）。"""
+        """读比较组共同 manifest + 会话内逐路事实（可选逐路费用，零派发）。
+
+        逐路事实由执行行重建；明确拒绝原因另从持久化记录补回（仅用于从未推进的
+        路），使重开与行导出与即时响应同因（N29）。
+        """
 
         self._require_open("read_comparison")
         identity = f"{query.user_scope}/{query.session_id}/{query.group_ref}"
@@ -1055,6 +1284,23 @@ class AgentService:
             user_scope=query.user_scope,
         )
         observations = observations_from_executions(group, session.executions)
+        note_store = self._lane_note_store()
+        if note_store is not None:
+            try:
+                notes = await note_store.load(group.group_ref)
+            except asyncio.CancelledError:
+                raise
+            except (AgentServiceError, EngineDisposedError):
+                raise
+            except Exception as exc:
+                # 读取失败不得伪装成「没有拒绝原因」（R21）：明确报持久化不可用。
+                error_code = str(classify_error(exc, context="general").get("code", type(exc).__name__))
+                raise AgentServiceError(
+                    AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                    f"comparison lane notes unreadable: {error_code}",
+                    identity,
+                ) from exc
+            observations = apply_persisted_lane_notes(group, observations, session.executions, notes)
         if query.include_cost:
             observations = tuple(
                 [await self._with_lane_cost(observation, user_scope=query.user_scope) for observation in observations]
@@ -1162,10 +1408,25 @@ class AgentService:
         拒绝语义：命令引用与受理输入任一字段不一致 → ``INPUT_INVALID``（不以
         调用方声称的幂等键覆盖真实身份）；受理输入本身不合法 → 由
         ``derive_accept_identity`` 的校验转为 ``INPUT_INVALID``（类型错不吞）。
+
+        受理事务失败分列（N12）：确定未写（事务未提交）→ ``PERSISTENCE_UNAVAILABLE``，
+        可用**同一命令键**重试；提交已发起但确认中断 → ``OPERATION_UNKNOWN``，须按
+        **原身份**（同 user_scope/source_module/business_request_id/命令键）查回，
+        不得换键补写。派发失败只折叠为 ``submitted=False``，不影响本分列。
         """
 
         receipt, _ = await self._accept_and_dispatch(request, command=command)
         return receipt
+
+    async def accept(self, request: AcceptRequest, *, command: CommandRef) -> SubmissionReceipt:
+        """仅受理落定、不自动派发（执行模式首问：先产出计划，再由入口显式派发）。
+
+        与 ``submit`` 共用同一校验/准入/落定路径；区别只在于不调用派发器，因此
+        调用方必须自行对回执做显式派发（或如实记录零派发），不得把「已受理」
+        当成「已启动」。``CancelledError`` 照常传播（R2）。
+        """
+
+        return await self._accept_request(request, command=command)
 
     async def _accept_and_dispatch(
         self, request: AcceptRequest, *, command: CommandRef
@@ -1175,6 +1436,20 @@ class AgentService:
         dispatch 的失败已在派发器内折叠为 ``submitted=False`` + 原因（不抛出），
         故受理成功语义不受派发结果影响；``CancelledError`` 照常传播（R2）。
         """
+
+        receipt = await self._accept_request(request, command=command)
+        dispatcher = self._dispatcher
+        if dispatcher is None:
+            return receipt, None
+        # 派发使用受理时权威模式（P1-03）：重放查回的是原受理回执，不能拿本次请求
+        # 的模式覆盖。历史回执无 mode 字段时，受理事务已按冻结 manifest 证明请求
+        # 模式与受理时一致（DAO ``_legacy_intent_replays``），故回退到请求值仍等价。
+        dispatch_mode = receipt.mode if receipt.mode is not None else request.mode
+        outcome = await dispatcher.dispatch(receipt, user_scope=request.user_scope, mode=dispatch_mode)
+        return receipt, outcome
+
+    async def _accept_request(self, request: AcceptRequest, *, command: CommandRef) -> SubmissionReceipt:
+        """校验命令引用与准入 → 受理事务落定 → 登记来源（不派发）。"""
 
         self._require_open("submit")
         identity = f"{request.user_scope}/{request.session_id}"
@@ -1206,15 +1481,7 @@ class AgentService:
         receipt = await self._dao.accept_request(request)
         # 准入通过后才登记已核来源（同一判据重放），consumer 绑定本次执行身份。
         await self._register_source_admission(admission, receipt)
-        dispatcher = self._dispatcher
-        if dispatcher is None:
-            return receipt, None
-        # 派发使用受理时权威模式（P1-03）：重放查回的是原受理回执，不能拿本次请求
-        # 的模式覆盖。历史回执无 mode 字段时，受理事务已按冻结 manifest 证明请求
-        # 模式与受理时一致（DAO ``_legacy_intent_replays``），故回退到请求值仍等价。
-        dispatch_mode = receipt.mode if receipt.mode is not None else request.mode
-        outcome = await dispatcher.dispatch(receipt, user_scope=request.user_scope, mode=dispatch_mode)
-        return receipt, outcome
+        return receipt
 
     async def _admit_business_sources(self, request: AcceptRequest, receipt: SubmissionReceipt) -> None:
         """受理期业务来源 PIT 准入（I63）：先预检再登记（保留的兼容入口）。
@@ -1328,21 +1595,128 @@ class AgentService:
             )
         return await dispatcher.read_result(workflow_id)
 
-    async def control(self, request: ReviseQueuedRequest) -> RevisionReceipt:
-        """控制入口（§4.1 ``control``）：只按既有类型能力暴露「排队期修订」。
+    async def control(
+        self, request: ReviseQueuedRequest | ExecutionControlRequest
+    ) -> RevisionReceipt | ExecutionControlReceipt:
+        """控制入口（§4.1 ``control``）：按**显式命令类型**分派，不用模糊参数。
 
-        当前落库的控制命令族仅有 ``revise_queued``（SQ-07），故本入口只转交该
-        类型，不臆造取消/暂停等未落库命令。同一入口兼「投递 + 查回」：同命令键
-        同完整输入（正文/manifest/期望版/node 摘要相等）时由 DAO 事务查回**原
-        回执**（零新行、不重发）；同键异输入 → ``INPUT_CONFLICT``；已派发或非
-        ``queued`` → ``REVISION_CONFLICT``，均不以当前状态重推。
+        - ``ReviseQueuedRequest``：排队期修订（SQ-07，既有能力原样保留）；
+        - ``ExecutionControlRequest``：暂停 / 继续 / 终止 / 未知结案 / 排队撤回
+          （W-01）。暂停只关**目标执行**的派发门、不连带其它执行；继续从持久
+          状态重开派发门；终止与未知结案分列（``ended`` vs ``closed_unknown``，
+          未知不伪装为完成，R21）；已获准入的资源票据按事实处理，**未核实退出
+          一律不释放名额**。
+
+        两类请求都走「同命令键同输入查回原回执、异输入冲突」的幂等契约；暂停/
+        继续等应用事实由 DAO 事务落库，原生控制面（DBOS 取消/复接）未接线时
+        回执如实标 ``native_control_state=not_wired``，不冒充已生效于原生。
 
         原生投递接续归 Runtime（submit 回执 ``workflow_id`` 后的 launch，E-04/Q5）；
         本入口不派发、不越权推进。
         """
 
         self._require_open("control")
-        return await self._dao.revise_queued(request)
+        if isinstance(request, ReviseQueuedRequest):
+            return await self._dao.revise_queued(request)
+        if isinstance(request, ExecutionControlRequest):
+            return await self._dao.apply_execution_control(request)
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "unsupported control request type", "control")
+
+    async def retry_execution(self, request: RetryExecutionRequest) -> RetryExecutionReceipt:
+        """单任务重试（W-01）：按持久计划与被观察叶状态重算**精确范围**后落事实。
+
+        - 计划来源：权威 manifest → 冻结角色/能力策略 → 当前计划提案 →
+          ``PlanSpecProposal``（与派发面同源，不另造计划）；
+        - 范围：``compute_retry_scope`` + ``build_retry_payload``，只重做目标叶及
+          传递下游，范围外已完成前置原样保留；未知/完成/进行中叶拒绝重试；
+        - 落库：``record_retry_command`` 以 CAS + 命令键幂等记录重试事实（置
+          ``planned``，旧轮成果不改写）；
+        - 派发：仅当组合根注入 ``retry_launcher`` 时才投递原生载荷；未接线时
+          回执如实标 ``dispatch_state=not_wired``，不伪造已重跑。
+        """
+
+        self._require_open("retry_execution")
+        identity = f"{request.user_scope}/{request.execution_id}"
+        manifest = await self._dao.read_authoritative_manifest(
+            user_scope=request.user_scope, execution_id=request.execution_id
+        )
+        if manifest is None:
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "authoritative manifest unavailable", identity)
+        try:
+            policy = derive_frozen_selection_policy(manifest)
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+        if policy is None:
+            raise AgentServiceError(
+                AgentErrorCode.CONFIG_UNAVAILABLE, "frozen role/capability selection unavailable", identity
+            )
+        proposal = await self._dao.read_current_plan_proposal(
+            user_scope=request.user_scope, execution_id=request.execution_id
+        )
+        if proposal is None:
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "plan proposal unavailable", identity)
+        try:
+            plan = plan_spec_from_proposal(proposal, policy)
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+        session = await self._dao.get_session_read(
+            SessionReadQuery(session_id=request.session_id, limit=1), user_scope=request.user_scope
+        )
+        node_states = {
+            execution.node_id: execution.display_state
+            for execution in session.executions
+            if execution.parent_execution_id == request.execution_id
+        }
+        new_round_id = stable_id("round", [request.user_scope, request.execution_id, request.client_command_id])
+        digest = plan_spec_digest(plan)
+        retry_plan = plan_retry(
+            plan,
+            targets=request.targets,
+            node_states=node_states,
+            execution_id=request.execution_id,
+            new_round_id=new_round_id,
+            plan_digest=digest,
+        )
+        dao_request = RetryCommandRecord(
+            user_scope=request.user_scope,
+            session_id=request.session_id,
+            execution_id=request.execution_id,
+            client_command_id=request.client_command_id,
+            expected_execution_revision=request.expected_execution_revision,
+            round_id=request.round_id,
+            targets=request.targets,
+            new_round_id=new_round_id,
+            redo=retry_plan.scope.redo,
+            preserved=retry_plan.scope.preserved,
+            plan_digest=digest,
+            payload_digest=sha256_hex(json_doc(retry_plan.payload)),
+        )
+        receipt = await self._dao.record_retry_command(dao_request)
+        launcher = self._retry_launcher
+        if launcher is None:
+            return receipt
+        try:
+            submitted, reason = await launcher.launch(
+                retry_plan.payload,
+                user_scope=request.user_scope,
+                execution_id=request.execution_id,
+                round_id=new_round_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            classification = classify_error(exc, context="retry_launch")
+            severity = classify_severity(exc, context="retry_launch")
+            return replace(
+                receipt,
+                dispatch_state="failed",
+                dispatch_reason=f"{severity}:{classification.get('code', type(exc).__name__)}",
+            )
+        return replace(
+            receipt,
+            dispatch_state="submitted" if submitted else "not_wired",
+            dispatch_reason=reason,
+        )
 
     async def answer(self, request: SaveAnswerRequest) -> AnswerReceipt:
         """答复入口（§4.1 ``answer``）：委托答复线性化事务，回执三态分列。
@@ -1473,6 +1847,111 @@ class AgentService:
             )
         return await skills.set_skill_enabled(ref, user_scope=user_scope, enabled=enabled)
 
+    async def preview_skill_package(self, request: SkillPackageImportRequest) -> SkillImportReceipt:
+        """导入预检（发布前预览清单/权限/文件摘要）；未接线时如实报未接线。"""
+
+        self._require_open("preview_skill_package")
+        skills = self._skills
+        if skills is None:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "skill catalog is not wired",
+                "agent_service",
+            )
+        return await skills.preview_package(request)
+
+    async def import_skill_package(self, request: SkillPackageImportRequest) -> SkillImportReceipt:
+        """导入/更新 Skill 包（发布 + 登记）；未接线时如实报未接线。"""
+
+        self._require_open("import_skill_package")
+        skills = self._skills
+        if skills is None:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "skill catalog is not wired",
+                "agent_service",
+            )
+        return await skills.import_package(request)
+
+    async def list_skills(self, *, user_scope: str) -> tuple[SkillVersionView, ...]:
+        """用户域已登记 Skill 版本只读列表（设置页 Skills 管理）。"""
+
+        self._require_open("list_skills")
+        skills = self._skills
+        if skills is None:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "skill catalog is not wired",
+                "agent_service",
+            )
+        return await skills.list_skills(user_scope=user_scope)
+
+    async def uninstall_skill(self, ref: SkillVersionRef, *, user_scope: str) -> SkillUninstallReceipt:
+        """卸载 Skill 版本（被角色/会话引用时阻删并指出引用方）。"""
+
+        self._require_open("uninstall_skill")
+        skills = self._skills
+        if skills is None:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "skill catalog is not wired",
+                "agent_service",
+            )
+        return await skills.uninstall_version(ref, user_scope=user_scope)
+
+    async def assign_role_skills(
+        self,
+        assignment: RoleSkillAssignment,
+        *,
+        user_scope: str,
+        display_name: str,
+    ) -> RoleSkillAssignmentReceipt:
+        """保存角色版本对 Skill 版本的启用/默认引用（默认⊆启用由合同校验）。"""
+
+        self._require_open("assign_role_skills")
+        skills = self._skills
+        if skills is None:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "skill catalog is not wired",
+                "agent_service",
+            )
+        return await skills.assign_role_skills(assignment, user_scope=user_scope, display_name=display_name)
+
+    async def read_role_skill_assignment(
+        self, *, user_scope: str, role_id: str, role_version: str
+    ) -> RoleSkillAssignment | None:
+        """读回角色版本的 Skill 启用/默认集合；未配置返回 ``None``。"""
+
+        self._require_open("read_role_skill_assignment")
+        skills = self._skills
+        if skills is None:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "skill catalog is not wired",
+                "agent_service",
+            )
+        return await skills.read_role_skill_assignment(
+            user_scope=user_scope,
+            role_id=role_id,
+            role_version=role_version,
+        )
+
+    async def validate_role_skill_assignment(
+        self, assignment: RoleSkillAssignment, *, user_scope: str
+    ) -> tuple[SkillVersionRef, ...]:
+        """保存前一致性校验：引用已安装/可用、默认⊆启用、无版本冲突。"""
+
+        self._require_open("validate_role_skill_assignment")
+        skills = self._skills
+        if skills is None:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "skill catalog is not wired",
+                "agent_service",
+            )
+        return await skills.validate_role_skill_assignment(assignment, user_scope=user_scope)
+
     async def resolve_role_skill_selection(
         self,
         *,
@@ -1530,6 +2009,10 @@ class AgentService:
         命令在边界处整份校验（全键/标签/集合/基线摘要/禁凭据），失败为
         ``INPUT_INVALID``，不触达 DAO；CAS 冲突、同键异输入与重放语义由 DAO
         事务裁决（``REVISION_CONFLICT`` / ``INPUT_CONFLICT`` / 查回原回执）。
+
+        写事务失败分列（N12）：确定未写（事务未提交）→ ``PERSISTENCE_UNAVAILABLE``，
+        同一命令键重试安全；提交已发起但确认中断 → ``OPERATION_UNKNOWN``，须按原
+        身份查回，不得换键补写、不得先清草稿。
         """
 
         self._require_open("save_draft")
@@ -1636,6 +2119,42 @@ class AgentService:
                 f"{user_scope}/{query.session_id}",
             ) from exc
         return await self._dao.read_draft(query, user_scope=user_scope)
+
+    # ------------------------------------------------------------------
+    # 股票/批量分析单入口（W-11）
+    # ------------------------------------------------------------------
+
+    async def analyze_stock(
+        self,
+        request: StockAnalysisRequest,
+        *,
+        port: StockAnalysisPort | None = None,
+    ) -> dict[str, Any] | None:
+        """股票分析唯一公开入口（W-11）：一次受理、单次计费、身份可查回。
+
+        ``request.agent_call`` 为必填研究请求身份（会话 + 轮次 + 批次 + 股票）；
+        缺省即 ``INPUT_INVALID``，不以内部临时身份冒充幂等（R21）。真实执行委托
+        ``port``（缺省懒加载共享 ``AIService`` 单例）；同一 ``request_id`` 的单飞/
+        去重由下游 ``StockAnalysisService`` 请求门保证，本入口不重复计费。
+
+        结果 dict 恒携带 ``stock_agent_call`` 身份投影（下游未写时在此补齐，失败/
+        不支持路径同样保留，R21）；撤权/准入阻断由下游以 ``LegacyDispatchBlockedError``
+        明确抛出，本入口不改换模型重试（NFR-R08）。
+        """
+
+        self._require_open("analyze_stock")
+        agent_call = request.agent_call
+        if agent_call is None:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                "agent_call is required for stock analysis single entry",
+                "agent_service/stock_analysis",
+            )
+        executor = port if port is not None else _default_stock_analysis_port()
+        result = await executor.analyze_stock(**request.as_call_kwargs(), agent_call=agent_call)
+        if isinstance(result, dict) and "stock_agent_call" not in result:
+            result["stock_agent_call"] = agent_call.as_metadata()
+        return result
 
     # ------------------------------------------------------------------
     # 生命周期

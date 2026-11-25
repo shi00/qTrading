@@ -49,7 +49,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from importlib.metadata import version
-from typing import Any, Final, cast
+from typing import Any, Final, Literal, cast
 
 from dbos import WorkflowStatusString
 
@@ -144,6 +144,12 @@ AGENT_CLOSE_PRELUDE_TIMEOUT_S: Final[float] = 15.0
 #: 已 launch 宿主的 workflow 终态核对预算（关闭前置与持久化事实各一次，有界）。
 AGENT_LAUNCHED_WORKFLOW_VERIFY_TIMEOUT_S: Final[float] = 5.0
 
+#: 未收口宿主关闭预算（本步先于 watchdog 执行，须有界：延迟的工作流执行不得拖死退出路径）。
+AGENT_UNCLOSED_HANDLE_CLOSE_TIMEOUT_S: Final[float] = 10.0
+
+#: 未收口宿主关闭的最大投递次数（一次关闭只投递一次；失效后如实报告，不作无界重投）。
+AGENT_UNCLOSED_HANDLE_MAX_ATTEMPTS: Final[int] = 1
+
 #: 原生终态（核到即视为该 workflow 已收敛；在途状态见 ``STARTUP_ACTIVE_STATUSES``）。
 _LAUNCHED_WORKFLOW_TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
     {
@@ -186,6 +192,21 @@ class AgentCleanupWiring:
     execution: CleanupExecutionService
 
 
+@dataclass(frozen=True)
+class ClosePreludeReport:
+    """未收口宿主关闭的可报告结果（不把在途/失效伪装成已关闭）。
+
+    - ``idle``：无未收口宿主（启动阶段已收口或从未组装）；
+    - ``pending``：隔离失败保留了句柄，尚未投递关闭；
+    - ``in_flight``：本次关闭投递在途（其余入口共享该次结果，不重复投递）；
+    - ``closed``：句柄已确认关闭并释放唯一执行锁；
+    - ``failed``：本次投递失效（超时/异常/投递次数用尽），句柄保留、关闭门保持未就绪。
+    """
+
+    state: Literal["idle", "pending", "in_flight", "closed", "failed"]
+    detail: str | None = None
+
+
 @dataclass
 class AgentWiring:
     """本会话的 Agent 接线（facade + 共享桥 + 宿主 + 关闭前置）。
@@ -220,6 +241,12 @@ class AgentWiring:
     _receipt: CloseReadinessReceipt | None = None
     #: MCP 关停未核事实（连接未确认断开）：进入关闭回执阻塞项，不得报「已安全关闭」。
     _mcp_close_blockers: tuple[str, ...] = ()
+    #: 关闭前置单飞任务：多入口（窗口/断连/升级退出/切库）并发共享同一条关闭链。
+    _prelude_task: asyncio.Task[CloseReadinessReceipt | None] | None = None
+    #: 未收口宿主关闭的单次投递任务（单飞 + 有界；一次关闭只投递一次）。
+    _unclosed_close_task: asyncio.Task[None] | None = None
+    _unclosed_close_attempts: int = 0
+    _unclosed_close_failure: str | None = None
 
     @property
     def ready(self) -> bool:
@@ -247,8 +274,39 @@ class AgentWiring:
             return self._receipt is not None and self._receipt.ready
         return self.unclosed_handle is None
 
+    @property
+    def close_report(self) -> ClosePreludeReport:
+        """未收口宿主的关闭可报告结果（在途/失效/已关闭，不隐藏失败）。"""
+
+        task = self._unclosed_close_task
+        if task is not None and not task.done():
+            return ClosePreludeReport(state="in_flight")
+        if self.unclosed_handle is None:
+            return ClosePreludeReport(state="closed" if self._unclosed_close_attempts else "idle")
+        if self._unclosed_close_failure is not None:
+            return ClosePreludeReport(state="failed", detail=self._unclosed_close_failure)
+        return ClosePreludeReport(state="pending")
+
     async def prepare_close(self) -> CloseReadinessReceipt | None:
-        """关闭前置：先收敛/释放 Agent 宿主，再由调用方释放共享引擎。
+        """关闭前置（单次投递）：并发入口共享同一条关闭链，不重复投递。
+
+        窗口关闭/断连/升级退出/配置切换可能同时在途调用本方法：同一时刻至多
+        一条关闭链在投递中，其余入口复用其结果（``asyncio.shield`` 只撤等待者、
+        不撤共享链），因此一次关闭只投递一次；关闭链结束后（就绪/未就绪）后续
+        调用可重试。未收口宿主的关闭另受 :attr:`close_report` 的有界投递约束。
+
+        其余语义（关闭顺序、未就绪不关 facade、取消传播）见
+        :meth:`_run_close_prelude`。
+        """
+
+        task = self._prelude_task
+        if task is None or task.done():
+            task = asyncio.create_task(self._run_close_prelude())
+            self._prelude_task = task
+        return await asyncio.shield(task)
+
+    async def _run_close_prelude(self) -> CloseReadinessReceipt | None:
+        """关闭前置主体：先收敛/释放 Agent 宿主，再由调用方释放共享引擎。
 
         顺序：已 launch 宿主先按原生 workflow 终态核对收敛事实 → ``AgentRuntime.
         prepare_close``（既有关闭链，探针据同一份事实判定）→ facade ``aclose``。
@@ -300,8 +358,14 @@ class AgentWiring:
                     ",".join(receipt.blocking_reasons),
                 )
         elif receipt is None and self.unclosed_handle is not None:
-            # 隔离/launch 失败时未收口的宿主：此处重试关闭并释放唯一执行锁。
+            # 隔离/launch 失败时未收口的宿主：单次有界投递关闭并释放唯一执行锁。
             await self._close_unclosed_handle()
+            report = self.close_report
+            if report.state == "failed":
+                logger.error(
+                    "[AgentWiring] unclosed host close failed (%s); close gate stays blocked",
+                    report.detail,
+                )
         if mcp_blockers and receipt is not None:
             # 未确认断开的 MCP 连接是关闭回执的未核事实：阻止「已安全关闭」结论
             # （含未 launch 的宿主），由调用方保留依赖并在重试成功后放行。
@@ -361,28 +425,70 @@ class AgentWiring:
         return tuple(blockers)
 
     async def _close_unclosed_handle(self) -> None:
-        """重试关闭未收口宿主（``AgentRuntimeHandle.close`` 按资源粒度幂等）。"""
+        """投递一次有界关闭（单飞 + 有界重试），不阻断关闭链。
+
+        - **单飞**：并发入口共享同一条关闭任务，一次关闭只投递一次（不再各关一次）；
+        - **有界**：单次关闭受 ``AGENT_UNCLOSED_HANDLE_CLOSE_TIMEOUT_S`` 限制，延迟的
+          工作流执行不得拖死退出路径（本步先于 watchdog 执行）；
+        - **有界重试**：同一句柄至多投递 ``AGENT_UNCLOSED_HANDLE_MAX_ATTEMPTS`` 次，
+          超限后如实报告失效（:attr:`close_report`），不作无界重投。
+        """
 
         handle = self.unclosed_handle
         if handle is None:
             return
+        task = self._unclosed_close_task
+        if task is not None and not task.done():
+            # 已有投递在途：共享该次结果（取消只撤等待者；CancelledError 原样传播，R2）
+            await asyncio.shield(task)
+            return
+        if self._unclosed_close_attempts >= AGENT_UNCLOSED_HANDLE_MAX_ATTEMPTS:
+            if self._unclosed_close_failure is None:
+                self._unclosed_close_failure = "close_attempts_exhausted"
+            logger.error(
+                "[AgentWiring] unclosed agent runtime handle close not retried: attempts exhausted (%d)",
+                self._unclosed_close_attempts,
+            )
+            return
+        self._unclosed_close_attempts += 1
+        task = asyncio.create_task(self._close_unclosed_handle_once(handle))
+        self._unclosed_close_task = task
+        await asyncio.shield(task)
+
+    async def _close_unclosed_handle_once(self, handle: AgentRuntimeHandle) -> None:
+        """执行一次有界关闭：成功即清句柄/释放唯一执行锁，超时或异常如实记为失效。"""
+
         from utils.thread_pool import TaskType, ThreadPoolManager
 
         try:
-            await ThreadPoolManager().run_async(TaskType.IO, handle.close)
+            await asyncio.wait_for(
+                ThreadPoolManager().run_async(TaskType.IO, handle.close),
+                timeout=AGENT_UNCLOSED_HANDLE_CLOSE_TIMEOUT_S,
+            )
         except asyncio.CancelledError:
             raise
+        except TimeoutError:
+            self._unclosed_close_failure = "close_timeout"
+            logger.error(
+                "[AgentWiring] unclosed agent runtime handle close timed out after %.1fs; "
+                "host stays unclosed (close gate stays blocked)",
+                AGENT_UNCLOSED_HANDLE_CLOSE_TIMEOUT_S,
+            )
+            return
         except Exception as e:
+            self._unclosed_close_failure = type(e).__name__
             logger.error(
                 "[AgentWiring] retry closing unclosed agent runtime handle failed: %s",
                 type(e).__name__,
                 exc_info=True,
             )
             return
+        self._unclosed_close_failure = None
         self.unclosed_handle = None
         if self.instance_guard is not None:
             self.instance_guard.release()
             self.instance_guard = None
+        logger.info("[AgentWiring] unclosed agent runtime handle closed; instance guard released")
 
 
 class _ProcessDispatchGate:
@@ -1098,7 +1204,14 @@ async def wire_agent_runtime(
         ),
         turn_factory=turn_factory,
     )
-    intake = MainTurnIntake(facade, manifest_reader=dao, user_scope=user_scope, main_turn=main_turn)
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=dao,
+        user_scope=user_scope,
+        main_turn=main_turn,
+        # 执行模式首问：受理后先产出计划，再由入口显式派发（同一门闩/计划准入）。
+        dispatcher=dispatcher,
+    )
     return AgentWiring(
         service=facade,
         bridge=bridge,
