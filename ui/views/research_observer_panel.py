@@ -25,6 +25,7 @@ from ui.views.research_observer_artifacts import build_artifacts_section
 from ui.views.research_observer_composer import build_answer_preview, build_composer, build_plan_preview
 from ui.views.research_observer_controls import build_control_section
 from ui.views.research_observer_conversation import (
+    MessageActionHandlers,
     build_execution_section,
     build_messages_section,
     build_session_draft_card,
@@ -114,6 +115,7 @@ def _build_body(
     on_request_export: Callable[[], Awaitable[None]] | None = None,
     on_confirm_export: Callable[[], Awaitable[None]] | None = None,
     on_cancel_export: Callable[[], None] | None = None,
+    message_handlers: MessageActionHandlers | None = None,
 ) -> ft.Control:
     """面板主体：会话列表 / 首问 / 计划预览 / 主会话 / 子任务树 / 成果 / 待处理决定。"""
 
@@ -190,7 +192,7 @@ def _build_body(
         return ft.Column(rows, spacing=AppStyles.SPACING_SM)
     if state.session_draft_revision > 0:
         rows.append(build_session_draft_card(state, session_id=session_id, on_load_draft=on_load_draft))
-    rows.extend(build_messages_section(state))
+    rows.extend(build_messages_section(state, handlers=message_handlers))
     rows.extend(
         build_execution_section(
             state,
@@ -300,6 +302,7 @@ def ResearchObserverPanel(
     on_request_export: Callable[[], Awaitable[None]] | None = None,
     on_confirm_export: Callable[[], Awaitable[None]] | None = None,
     on_cancel_export: Callable[[], None] | None = None,
+    message_handlers: MessageActionHandlers | None = None,
 ) -> ft.Container:
     """非模态研究观察层（右侧公共区；收起只隐藏，不卸载业务页、不清草稿）。"""
 
@@ -413,6 +416,7 @@ def ResearchObserverPanel(
             on_request_export=on_request_export,
             on_confirm_export=on_confirm_export,
             on_cancel_export=on_cancel_export,
+            message_handlers=message_handlers,
         )
     )
     return ft.Container(

@@ -789,6 +789,40 @@ async def test_intake_first_question_creates_session_and_submits_frozen_manifest
 
 
 @pytest.mark.asyncio
+async def test_intake_start_question_threads_revision_declaration_into_request() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    intake = MainTurnIntake(facade, manifest_reader=_ManifestDao(None), user_scope="u1")
+
+    await intake.start_question(
+        "修订后的问题",
+        mode=Mode.DISCUSS,
+        revise_source_message_id="m-2",
+        revise_causal_cutoff_message_id="m-1",
+    )
+
+    request = facade.requests[0]
+    assert request.revise_source_message_id == "m-2"
+    assert request.revise_causal_cutoff_message_id == "m-1"
+
+
+@pytest.mark.asyncio
+async def test_intake_execute_question_threads_revision_declaration_into_accept() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    intake = MainTurnIntake(facade, manifest_reader=_ManifestDao(None), user_scope="u1")
+
+    await intake.start_question(
+        "执行模式修订",
+        mode=Mode.EXECUTE,
+        revise_source_message_id="m-5",
+        revise_causal_cutoff_message_id=None,
+    )
+
+    request = facade.accepts[0]
+    assert request.revise_source_message_id == "m-5"
+    assert request.revise_causal_cutoff_message_id is None
+
+
+@pytest.mark.asyncio
 async def test_intake_start_plan_preserves_frozen_input_and_adds_reference() -> None:
     source = _manifest(plan_ref=None)
     facade = _IntakeFacade(_intake_receipt())

@@ -9,6 +9,14 @@ import pytest
 from core.agent_types import DraftPayload, DraftRead, MCPServiceIdentity, Mode, Purpose, SessionAction
 from ui.viewmodels.research_observer_view_model import (
     CATCH_UP_INCOMPLETE,
+    MESSAGE_BRANCH_UNAVAILABLE_KEY,
+    MESSAGE_COPY_DONE_KEY,
+    MESSAGE_COPY_EMPTY_KEY,
+    MESSAGE_COPY_FAILED_KEY,
+    MESSAGE_COPY_SUMMARY_LIMIT,
+    MESSAGE_EDIT_NOT_USER_KEY,
+    MESSAGE_EDIT_UNAVAILABLE_KEY,
+    MESSAGE_TOOLS_UNAVAILABLE_KEY,
     PROGRESS_DOING_RUNNING,
     PROGRESS_DOING_STREAMING,
     PROGRESS_NEXT_ANSWER,
@@ -74,6 +82,8 @@ def _message(
     role: str | None = "assistant",
     text: str | None = "研究结论：候选 A",
     execution_id: str | None = "e-1",
+    session_seq: int = 1,
+    subject_revision: int = 1,
 ) -> Any:
     return SimpleNamespace(
         message_id=message_id,
@@ -82,6 +92,8 @@ def _message(
         body_ref=None if text is not None else "chunk-ref",
         execution_id=execution_id,
         occurred_at="2026-11-17T01:30:00.000000Z",
+        session_seq=session_seq,
+        subject_revision=subject_revision,
     )
 
 
@@ -1327,6 +1339,7 @@ class _FakeIntake:
         self.error = error
         self.question_calls: list[tuple[str, Any, str | None, int | None, tuple[Any, ...]]] = []
         self.plan_calls: list[tuple[Any, str, int]] = []
+        self.revise_calls: list[tuple[str | None, str | None]] = []
 
     async def start_question(
         self,
@@ -1339,8 +1352,11 @@ class _FakeIntake:
         role_prompt_refs: Any = (),
         skill_refs: Any = (),
         mcp_selection: tuple[Any, ...] = (),
+        revise_source_message_id: str | None = None,
+        revise_causal_cutoff_message_id: str | None = None,
     ) -> Any:
         self.question_calls.append((text, mode, session_id, expected_revision, mcp_selection))
+        self.revise_calls.append((revise_source_message_id, revise_causal_cutoff_message_id))
         if self.error is not None:
             raise self.error
         return SimpleNamespace(receipt=object(), dispatch=self.dispatch, plan_reference=None)
@@ -2086,3 +2102,440 @@ class TestSubSessionReturn:
         assert vm.state.selected_execution_id is None
         assert vm.state.restored_scroll_anchor is None
         assert vm.state.stream_fragments == ()
+
+
+class _CodedError(Exception):
+    """带类型化 code 的 facade 错误替身（VM 必须原样透出错误码）。"""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+def _w15_read(*messages: Any, title: str = "研究 A") -> Any:
+    return _session_read(title=title, messages=tuple(messages))
+
+
+class TestMessageTools:
+    """消息修订重发、前缀分支、局部复制工具栏。"""
+
+    def _vm(self, *, messages: tuple[Any, ...], intake: _FakeIntake | None = None, **service_kwargs: Any) -> Any:
+        service = _FakeService(
+            hits=(_hit("s-1"),),
+            session_reads={"s-1": _w15_read(*messages)},
+            **service_kwargs,
+        )
+        vm = ResearchObserverViewModel(service, intake=intake or _FakeIntake())
+        return vm, service
+
+    @pytest.mark.asyncio
+    async def test_begin_edit_only_accepts_user_message_with_version(self) -> None:
+        vm, _ = self._vm(
+            messages=(
+                _message("m-user", role="user", text="原提问", session_seq=1, subject_revision=2),
+                _message("m-assistant", role="assistant", text="原结论", session_seq=2),
+            )
+        )
+        await vm.refresh()
+
+        vm.begin_edit_message("m-assistant")
+        assert vm.state.edit_message_id is None
+        assert vm.state.edit_error_key == MESSAGE_EDIT_NOT_USER_KEY
+
+        vm.begin_edit_message("m-user")
+        assert vm.state.edit_message_id == "m-user"
+        assert vm.state.edit_text == "原提问"
+        assert vm.state.edit_error_key is None
+
+    @pytest.mark.asyncio
+    async def test_submit_edit_revises_then_resends_with_prefix_cutoff(self) -> None:
+        intake = _FakeIntake()
+        vm, service = self._vm(
+            messages=(
+                _message("m-0", role="user", text="第一条", session_seq=1, subject_revision=1),
+                _message("m-1", role="assistant", text="答复", session_seq=2, subject_revision=1),
+                _message("m-2", role="user", text="原提问", session_seq=3, subject_revision=4),
+                _message("m-3", role="assistant", text="末条答复", session_seq=4, subject_revision=1),
+            ),
+            intake=intake,
+        )
+        await vm.refresh()
+        vm.begin_edit_message("m-2")
+        vm.set_edit_text("修订后的提问")
+        expected_mode = Mode(vm.state.composer_mode)
+        expected_draft_revision = vm.state.session_draft_revision
+
+        await vm.submit_edit_message()
+
+        assert len(service.change_calls) == 1
+        command = service.change_calls[0]
+        assert command.action is SessionAction.REVISE
+        assert command.source_message_id == "m-2"
+        assert command.source_message_revision == 4
+        assert command.causal_cutoff_message_id == "m-1", "因果截点必须是源消息之前最近一条"
+        assert command.expected_session_revision == vm.state.session_revision
+        assert intake.question_calls == [("修订后的提问", expected_mode, "s-1", expected_draft_revision, ())]
+        assert intake.revise_calls == [("m-2", "m-1")], "重发必须携带修订声明"
+        assert vm.state.edit_message_id is None
+        assert vm.state.edit_error_code is None
+        # 原消息历史未被覆盖：投影仍是四条
+        assert len(vm.state.messages) == 4
+
+    @pytest.mark.asyncio
+    async def test_submit_edit_reports_service_error_code_and_keeps_edit_state(self) -> None:
+        vm, _ = self._vm(
+            messages=(_message("m-1", role="user", text="原提问", session_seq=1, subject_revision=3),),
+            change_error=_CodedError("REVISION_CONFLICT"),
+        )
+        await vm.refresh()
+        vm.begin_edit_message("m-1")
+        vm.set_edit_text("新表述")
+
+        await vm.submit_edit_message()
+
+        assert vm.state.edit_error_code == "REVISION_CONFLICT"
+        assert vm.state.edit_pending is False
+        assert vm.state.edit_message_id == "m-1", "失败不得丢弃编辑态"
+
+    @pytest.mark.asyncio
+    async def test_submit_edit_rejects_blank_text(self) -> None:
+        intake = _FakeIntake()
+        vm, service = self._vm(
+            messages=(_message("m-1", role="user", text="原提问", session_seq=1),),
+            intake=intake,
+        )
+        await vm.refresh()
+        vm.begin_edit_message("m-1")
+        vm.set_edit_text("   ")
+
+        await vm.submit_edit_message()
+
+        assert vm.state.edit_error_key == "agent_research_empty_draft"
+        assert service.change_calls == []
+        assert intake.question_calls == []
+
+    @pytest.mark.asyncio
+    async def test_branch_creates_session_and_opens_branch_view(self) -> None:
+        service = _FakeService(
+            hits=(_hit("s-1"),),
+            session_reads={
+                "s-1": _w15_read(
+                    _message("m-0", role="user", text="第一问", session_seq=1),
+                    _message("m-1", role="assistant", text="第一答", session_seq=2),
+                ),
+            },
+        )
+        branch_id = ""
+        vm = ResearchObserverViewModel(service, intake=_FakeIntake())
+        await vm.refresh()
+
+        original_message_ids = tuple(message.message_id for message in vm.state.messages)
+        await vm.branch_from_message("m-1")
+
+        assert len(service.change_calls) == 1
+        command = service.change_calls[0]
+        assert command.action is SessionAction.BRANCH
+        assert command.source_message_id == "m-1"
+        assert command.source_message_revision == 1
+        assert command.causal_cutoff_message_id == "m-0"
+        assert command.expected_session_revision == 0
+        branch_id = command.session_id
+        assert branch_id.startswith("session-branch-")
+        assert vm.state.session_id == branch_id, "成功后必须就位新分支会话"
+        assert original_message_ids == ("m-0", "m-1"), "分支不得改动父会话消息"
+
+    @pytest.mark.asyncio
+    async def test_branch_projects_parent_and_source_for_traceability(self) -> None:
+        summary = SimpleNamespace(
+            title="研究 B",
+            updated_at="2026-11-17T02:00:00.000000Z",
+            draft_revision=0,
+            cleaned_at=None,
+            revision=1,
+            pinned=False,
+            archived=False,
+            parent_session_id="s-1",
+            branch_metadata='{"source_message_id": "m-9", "causal_cutoff_message_id": "m-8"}',
+        )
+        read = SimpleNamespace(
+            summary=summary,
+            executions=(),
+            messages=SimpleNamespace(items=(), has_more=False, next_cursor=None),
+            artifacts=SimpleNamespace(items=(), has_more=False, next_cursor=None),
+            decisions=(),
+        )
+        service = _FakeService(
+            hits=(_hit("s-1"),),
+            session_reads={"s-1": _w15_read(), "session-branch-x": read},
+        )
+        vm = ResearchObserverViewModel(service, intake=_FakeIntake())
+        await vm.refresh()
+        vm._preferred_session_id = "session-branch-x"
+        await vm.refresh("session-branch-x")
+
+        assert vm.state.session_parent_id == "s-1"
+        assert vm.state.session_branch_source_message_id == "m-9"
+
+    @pytest.mark.asyncio
+    async def test_branch_unavailable_reports_reason_code_without_calling(self) -> None:
+        class _NoChangeService(_FakeService):
+            def __getattribute__(self, name: str) -> Any:
+                # 模拟「未接线 facade」：change_session 存在性探测必须得到 None。
+                if name == "change_session":
+                    return None
+                return super().__getattribute__(name)
+
+        service = _NoChangeService(
+            hits=(_hit("s-1"),),
+            session_reads={"s-1": _w15_read(_message("m-1", role="user", text="问", session_seq=1))},
+        )
+        vm = ResearchObserverViewModel(service, intake=_FakeIntake())
+        await vm.refresh()
+        assert vm.state.message_branch_available is False
+        assert vm.state.message_edit_available is False
+
+        await vm.branch_from_message("m-1")
+        assert vm.state.branch_error_key == MESSAGE_BRANCH_UNAVAILABLE_KEY
+        assert vm.state.branch_error_code == MESSAGE_TOOLS_UNAVAILABLE_KEY
+
+    @pytest.mark.asyncio
+    async def test_empty_selection_disables_copy_with_reason(self) -> None:
+        vm, _ = self._vm(messages=(_message("m-1", role="assistant", text="正文"),))
+        await vm.refresh()
+
+        vm.set_copy_toolbar("m-1", "   ")
+
+        assert vm.state.copy_selection_available() is False
+        assert vm.copy_toolbar_text() is None
+        assert vm.state.copy_error_key == MESSAGE_COPY_EMPTY_KEY
+        assert vm.state.copy_error_code == "selection_empty"
+        assert vm.state.copy_notice_key is None
+
+    @pytest.mark.asyncio
+    async def test_copy_summary_truncates_with_explicit_ellipsis(self) -> None:
+        vm, _ = self._vm(messages=(_message("m-1", role="assistant", text="正文"),))
+        await vm.refresh()
+        vm.set_copy_toolbar("m-1", "词 " * 200)
+
+        summary = vm.copy_toolbar_summary()
+
+        assert summary is not None
+        assert summary.endswith("…")
+        assert len(summary) == MESSAGE_COPY_SUMMARY_LIMIT + 1
+        assert "  " not in summary, "摘要必须折叠空白"
+
+    @pytest.mark.asyncio
+    async def test_copy_results_are_reported_honestly(self) -> None:
+        vm, _ = self._vm(messages=(_message("m-1", role="assistant", text="正文"),))
+        await vm.refresh()
+        vm.set_copy_toolbar("m-1", "选中文本")
+
+        vm.note_message_copy_done()
+        assert vm.state.copy_notice_key == MESSAGE_COPY_DONE_KEY
+        assert vm.state.copy_error_key is None
+
+        vm.note_message_copy_failed()
+        assert vm.state.copy_notice_key is None, "失败不得保留已复制提示"
+        assert vm.state.copy_error_key == MESSAGE_COPY_FAILED_KEY
+        assert vm.state.copy_error_code == "clipboard_write_failed"
+
+    @pytest.mark.asyncio
+    async def test_begin_edit_rejects_unavailable_missing_and_unversioned_targets(self) -> None:
+        no_change_vm = ResearchObserverViewModel(_no_change_service(_w15_read()), intake=_FakeIntake())
+        await no_change_vm.refresh()
+        no_change_vm.begin_edit_message("m-1")
+        assert no_change_vm.state.edit_error_key == MESSAGE_EDIT_UNAVAILABLE_KEY
+        assert no_change_vm.state.edit_error_code == MESSAGE_TOOLS_UNAVAILABLE_KEY
+
+        vm, _ = self._vm(
+            messages=(
+                _message("m-unloaded", role="user", text=None, session_seq=1, subject_revision=1),
+                _message("m-norv", role="user", text="无版本", session_seq=2, subject_revision=0),
+            )
+        )
+        await vm.refresh()
+
+        vm.begin_edit_message("m-missing")
+        assert vm.state.edit_error_key == "agent_research_decision_stale"
+
+        vm.begin_edit_message("m-unloaded")
+        assert vm.state.edit_error_key == "agent_research_message_edit_body_unavailable"
+
+        vm.begin_edit_message("m-norv")
+        assert vm.state.edit_error_key == "agent_research_message_edit_body_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_cancel_edit_clears_edit_state_only(self) -> None:
+        vm, _ = self._vm(messages=(_message("m-1", role="user", text="原提问", session_seq=1, subject_revision=2),))
+        await vm.refresh()
+        vm.begin_edit_message("m-1")
+
+        vm.cancel_edit_message()
+
+        assert vm.state.edit_message_id is None
+        assert vm.state.edit_text == ""
+        assert vm.state.edit_pending is False
+        assert vm.state.messages[0].body_text == "原提问", "取消编辑不得改动既有消息"
+
+    @pytest.mark.asyncio
+    async def test_submit_edit_guards_pending_missing_target_and_missing_session(self) -> None:
+        intake = _FakeIntake()
+        vm, service = self._vm(
+            messages=(_message("m-1", role="user", text="原提问", session_seq=1, subject_revision=2),),
+            intake=intake,
+        )
+        await vm.refresh()
+
+        vm._set_state(edit_pending=True)
+        await vm.submit_edit_message()
+        assert service.change_calls == [], "在途时不得重复提交"
+
+        vm._set_state(edit_pending=False, edit_message_id=None)
+        await vm.submit_edit_message()
+        assert service.change_calls == []
+
+        vm._set_state(edit_message_id="m-1", edit_text="新表述", session_id=None)
+        await vm.submit_edit_message()
+        assert vm.state.edit_error_key == MESSAGE_EDIT_UNAVAILABLE_KEY
+        assert service.change_calls == []
+
+    @pytest.mark.asyncio
+    async def test_submit_edit_rejects_non_user_stale_and_unversioned_source(self) -> None:
+        intake = _FakeIntake()
+        vm, service = self._vm(
+            messages=(
+                _message("m-assistant", role="assistant", text="答复", session_seq=1),
+                _message("m-norv", role="user", text="无版本", session_seq=2, subject_revision=0),
+            ),
+            intake=intake,
+        )
+        await vm.refresh()
+
+        vm._set_state(edit_message_id="m-assistant", edit_text="改")
+        await vm.submit_edit_message()
+        assert vm.state.edit_error_key == MESSAGE_EDIT_NOT_USER_KEY
+        assert service.change_calls == []
+
+        vm._set_state(edit_message_id="m-ghost", edit_text="改")
+        await vm.submit_edit_message()
+        assert vm.state.edit_error_key == MESSAGE_EDIT_NOT_USER_KEY
+
+        vm._set_state(edit_message_id="m-norv", edit_text="改")
+        await vm.submit_edit_message()
+        assert vm.state.edit_error_key == "agent_research_message_edit_body_unavailable"
+        assert intake.question_calls == []
+
+    @pytest.mark.asyncio
+    async def test_submit_edit_rejects_unknown_role_selection_and_invalid_mode(self) -> None:
+        intake = _FakeIntake()
+        vm, _ = self._vm(
+            messages=(_message("m-1", role="user", text="原提问", session_seq=1, subject_revision=2),),
+            intake=intake,
+        )
+        await vm.refresh()
+
+        vm._set_state(role_selection="ghost-role")
+        vm.begin_edit_message("m-1")
+        await vm.submit_edit_message()
+        assert vm.state.edit_error_key == "agent_research_role_selection_unknown"
+
+        vm._set_state(role_selection=None, role_selection_frozen=None, composer_mode="bogus")
+        vm.begin_edit_message("m-1")
+        await vm.submit_edit_message()
+        assert vm.state.edit_error_key == "agent_research_message_mode_invalid"
+
+    @pytest.mark.asyncio
+    async def test_branch_guards_and_reports_service_error_code(self) -> None:
+        vm, service = self._vm(
+            messages=(
+                _message("m-1", role="user", text="第一问", session_seq=1, subject_revision=1),
+                _message("m-2", role="user", text="无版本", session_seq=2, subject_revision=0),
+            )
+        )
+        await vm.refresh()
+
+        await vm.branch_from_message("m-missing")
+        assert vm.state.branch_error_key == "agent_research_decision_stale"
+
+        await vm.branch_from_message("m-2")
+        assert vm.state.branch_error_key == MESSAGE_BRANCH_UNAVAILABLE_KEY
+        assert vm.state.branch_error_code == "source_revision_unavailable"
+        assert service.change_calls == []
+
+        vm._set_state(branch_pending_message_id="m-1")
+        await vm.branch_from_message("m-1")
+        assert service.change_calls == [], "在途分支未完成前不得重复创建"
+        vm._set_state(branch_pending_message_id=None)
+
+        failing, _ = self._vm(
+            messages=(_message("m-1", role="user", text="第一问", session_seq=1, subject_revision=1),),
+            change_error=_CodedError("BRANCH_CONFLICT"),
+        )
+        await failing.refresh()
+        await failing.branch_from_message("m-1")
+        assert failing.state.branch_error_code == "BRANCH_CONFLICT"
+        assert failing.state.branch_pending_message_id is None
+
+    @pytest.mark.asyncio
+    async def test_branch_unavailable_without_service_reports_missing_capability(self) -> None:
+        vm = ResearchObserverViewModel(None)
+        assert vm.state.message_branch_available is False
+
+        await vm.branch_from_message("m-1")
+        assert vm.state.branch_error_key == MESSAGE_BRANCH_UNAVAILABLE_KEY
+        assert vm.state.branch_error_code == vm.state.unavailable_reason_key
+
+    @pytest.mark.asyncio
+    async def test_copy_toolbar_dismiss_and_message_lookup(self) -> None:
+        vm, _ = self._vm(messages=(_message("m-1", role="assistant", text="正文"),))
+        await vm.refresh()
+        vm.set_copy_toolbar("m-1", "选中")
+
+        assert vm.state.message_by_id("m-1") is not None
+        assert vm.state.message_by_id("m-ghost") is None
+        assert vm.state.message_by_id(None) is None
+
+        vm.dismiss_copy_toolbar()
+        assert vm.state.copy_toolbar_message_id is None
+        assert vm.state.copy_selection_text == ""
+        assert vm.state.copy_notice_key is None
+        assert vm.state.copy_error_key is None
+
+    @pytest.mark.asyncio
+    async def test_branch_metadata_bad_payload_is_ignored(self) -> None:
+        for payload in ("not-json", "[]", '{"source_message_id": ""}'):
+            summary = SimpleNamespace(
+                title="研究 B",
+                updated_at="2026-11-17T02:00:00.000000Z",
+                draft_revision=0,
+                cleaned_at=None,
+                revision=1,
+                pinned=False,
+                archived=False,
+                parent_session_id="s-1",
+                branch_metadata=payload,
+            )
+            read = SimpleNamespace(
+                summary=summary,
+                executions=(),
+                messages=SimpleNamespace(items=(), has_more=False, next_cursor=None),
+                artifacts=SimpleNamespace(items=(), has_more=False, next_cursor=None),
+                decisions=(),
+            )
+            service = _FakeService(hits=(_hit("s-1"),), session_reads={"s-bad": read})
+            vm = ResearchObserverViewModel(service, intake=_FakeIntake())
+            await vm.refresh("s-bad")
+            assert vm.state.session_parent_id == "s-1"
+            assert vm.state.session_branch_source_message_id is None
+
+
+def _no_change_service(read: Any) -> Any:
+    """模拟未接线 facade（change_session 探测必须得到 None）。"""
+
+    class _NoChange(_FakeService):
+        def __getattribute__(self, name: str) -> Any:
+            if name == "change_session":
+                return None
+            return super().__getattribute__(name)
+
+    return _NoChange(hits=(_hit("s-1"),), session_reads={"s-1": read})

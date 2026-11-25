@@ -5,13 +5,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import flet as ft
 
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.research_observer_view_model import (
+    MESSAGE_COPY_EMPTY_KEY,
+    MESSAGE_TOOLS_UNAVAILABLE_KEY,
     ExecutionNodeView,
     ResearchObserverState,
     SessionDraftView,
@@ -27,6 +31,38 @@ _ROLE_KEYS = {
 }
 
 
+def _get_page() -> ft.Page | None:
+    """安全获取 ``ft.context.page``；未在渲染上下文（单元测试）时返回 None。"""
+
+    try:
+        return ft.context.page
+    except RuntimeError:
+        return None
+
+
+def _selection_text(event: ft.Event[ft.SelectionArea]) -> str:
+    """``SelectionArea.on_change`` 载荷为选中文本（null/非字符串视为空选择）。"""
+
+    data = getattr(event, "data", None)
+    return data if isinstance(data, str) else ""
+
+
+@dataclass(frozen=True)
+class MessageActionHandlers:
+    """消息修订/分支/局部复制的视图回调（VM 命令经组合根注入，视图不 import VM 命令）。"""
+
+    on_begin_edit: Callable[[str], None]
+    on_edit_text: Callable[[str], None]
+    on_submit_edit: Callable[[], None]
+    on_cancel_edit: Callable[[], None]
+    on_branch: Callable[[str], None]
+    on_selection: Callable[[str, str], None]
+    on_copy: Callable[[], str | None]
+    on_copy_summary: Callable[[], str | None]
+    on_copy_done: Callable[[], None]
+    on_copy_failed: Callable[[], None]
+
+
 def _role_label(role: str | None) -> str:
     """消息角色文案（未知角色显示原值，不伪造成用户/助手）。"""
 
@@ -36,29 +72,115 @@ def _role_label(role: str | None) -> str:
     return I18n.get(key) if key is not None else role
 
 
-def build_message_row(message: SessionMessageView, *, anchor: bool = False) -> ft.Control:
+def build_message_row(
+    message: SessionMessageView,
+    *,
+    anchor: bool = False,
+    state: ResearchObserverState | None = None,
+    handlers: MessageActionHandlers | None = None,
+) -> ft.Control:
     """单条主会话消息（正文未随首屏返回时如实标注，不显示空正文）。
 
     ``anchor`` 为返回现场时的滚动锚点目标（以控件 key 标识该消息，供视图恢复定位）。
+    ``state`` / ``handlers`` 提供消息修订、前缀分支与局部复制工具栏；二者缺省时
+    只渲染只读正文（兼容既有调用方）。空选择复制按钮禁用并显示原因，剪贴板失败
+    如实报错，不伪装成功。
     """
 
-    rows: list[ft.Control] = [
-        ft.Row(
-            [
-                ft.Text(_role_label(message.role), size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_HINT),
-                ft.Text(message.occurred_at, size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_HINT),
-            ],
-            spacing=AppStyles.SPACING_SM,
-        )
+    header_children: list[ft.Control] = [
+        ft.Text(_role_label(message.role), size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_HINT),
+        ft.Text(message.occurred_at, size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_HINT),
     ]
-    if message.body_available:
-        rows.append(
-            ft.Text(
-                message.body_text or "",
-                size=AppStyles.FONT_SIZE_BODY_SM,
-                color=AppColors.TEXT_PRIMARY,
+    rows: list[ft.Control] = []
+    if state is not None and handlers is not None:
+        unavailable_key = state.message_tools_unavailable_reason_key or MESSAGE_TOOLS_UNAVAILABLE_KEY
+        if message.role == "user":
+            header_children.append(
+                ft.IconButton(
+                    icon=ft.Icons.EDIT,
+                    icon_size=AppStyles.FONT_SIZE_TITLE,
+                    tooltip=I18n.get(
+                        "agent_research_message_edit" if state.message_edit_available else unavailable_key
+                    ),
+                    disabled=not state.message_edit_available,
+                    on_click=lambda _e, mid=message.message_id: handlers.on_begin_edit(mid),
+                )
+            )
+        header_children.append(
+            ft.IconButton(
+                icon=ft.Icons.CALL_SPLIT,
+                icon_size=AppStyles.FONT_SIZE_TITLE,
+                tooltip=I18n.get(
+                    "agent_research_message_branch" if state.message_branch_available else unavailable_key
+                ),
+                disabled=not state.message_branch_available,
+                on_click=lambda _e, mid=message.message_id: handlers.on_branch(mid),
             )
         )
+    rows.append(ft.Row(header_children, spacing=AppStyles.SPACING_SM))
+    if state is not None and state.branch_pending_message_id == message.message_id:
+        rows.append(ft.ProgressRing(width=16, height=16, stroke_width=2))
+
+    if state is not None and handlers is not None and state.edit_message_id == message.message_id:
+        edit_error_rows: list[ft.Control] = []
+        if state.edit_error_key:
+            edit_error_rows.append(error_text(I18n.get(state.edit_error_key)))
+        if state.edit_error_code:
+            edit_error_rows.append(error_text(I18n.get("agent_research_error_fmt").format(code=state.edit_error_code)))
+        rows.append(
+            ft.Column(
+                [
+                    ft.TextField(
+                        value=state.edit_text,
+                        tooltip=I18n.get("agent_research_message_edit"),
+                        multiline=True,
+                        min_lines=2,
+                        max_lines=6,
+                        text_size=AppStyles.FONT_SIZE_BODY_SM,
+                        disabled=state.edit_pending,
+                        on_change=lambda e: handlers.on_edit_text(e.control.value or ""),
+                    ),
+                    ft.Row(
+                        [
+                            ft.TextButton(
+                                content=ft.Text(
+                                    I18n.get("agent_research_message_edit_submit"),
+                                    size=AppStyles.FONT_SIZE_CAPTION,
+                                ),
+                                icon=ft.Icons.SEND,
+                                disabled=state.edit_pending,
+                                on_click=lambda _e: handlers.on_submit_edit(),
+                            ),
+                            ft.TextButton(
+                                content=ft.Text(
+                                    I18n.get("agent_research_message_edit_cancel"),
+                                    size=AppStyles.FONT_SIZE_CAPTION,
+                                ),
+                                disabled=state.edit_pending,
+                                on_click=lambda _e: handlers.on_cancel_edit(),
+                            ),
+                        ],
+                        spacing=AppStyles.SPACING_XS,
+                    ),
+                    *edit_error_rows,
+                ],
+                spacing=AppStyles.SPACING_XS,
+            )
+        )
+    elif message.body_available:
+        body: ft.Control = ft.Text(
+            message.body_text or "",
+            size=AppStyles.FONT_SIZE_BODY_SM,
+            color=AppColors.TEXT_PRIMARY,
+        )
+        if state is not None and handlers is not None:
+            bound_handlers = handlers
+
+            def _on_selection(event: ft.Event[ft.SelectionArea], *, mid: str = message.message_id) -> None:
+                bound_handlers.on_selection(mid, _selection_text(event))
+
+            body = ft.SelectionArea(content=body, on_change=_on_selection)
+        rows.append(body)
     else:
         rows.append(
             ft.Text(
@@ -67,11 +189,92 @@ def build_message_row(message: SessionMessageView, *, anchor: bool = False) -> f
                 color=AppColors.TEXT_HINT,
             )
         )
+
+    if state is not None and handlers is not None and state.copy_toolbar_message_id == message.message_id:
+        rows.extend(_copy_toolbar_rows(state, handlers))
+
     return ft.Container(
         key=f"agent_research_anchor_{message.message_id}" if anchor else None,
         content=ft.Column(rows, spacing=AppStyles.SPACING_XS),
         padding=ft.Padding.symmetric(vertical=AppStyles.SPACING_XS),
     )
+
+
+async def _write_clipboard(text: str) -> bool:
+    """写入系统剪贴板；无渲染上下文或写入异常返回 ``False``（不伪装成功）。"""
+
+    page = _get_page()
+    if page is None:
+        return False
+    clipboard = ft.Clipboard()
+    page.services.append(clipboard)
+    try:
+        await clipboard.set(text)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return False
+    finally:
+        try:
+            page.services.remove(clipboard)
+        except ValueError:
+            pass
+    return True
+
+
+def _copy_toolbar_rows(state: ResearchObserverState, handlers: MessageActionHandlers) -> list[ft.Control]:
+    """局部复制工具栏：复制/复制摘要；空选择禁用并显示原因，结果如实分列。"""
+
+    selected = state.copy_selection_available()
+
+    async def _copy(_e: ft.ControlEvent | None = None) -> None:
+        text = handlers.on_copy()
+        if text is None:
+            return  # VM 已给出拒绝原因（空选择）
+        if await _write_clipboard(text):
+            handlers.on_copy_done()
+        else:
+            handlers.on_copy_failed()
+
+    async def _copy_summary(_e: ft.ControlEvent | None = None) -> None:
+        text = handlers.on_copy_summary()
+        if text is None:
+            return
+        if await _write_clipboard(text):
+            handlers.on_copy_done()
+        else:
+            handlers.on_copy_failed()
+
+    toolbar: list[ft.Control] = [
+        ft.TextButton(
+            content=ft.Text(I18n.get("agent_research_message_copy"), size=AppStyles.FONT_SIZE_CAPTION),
+            icon=ft.Icons.CONTENT_COPY,
+            disabled=not selected,
+            on_click=_copy,
+        ),
+        ft.TextButton(
+            content=ft.Text(I18n.get("agent_research_message_copy_summary"), size=AppStyles.FONT_SIZE_CAPTION),
+            icon=ft.Icons.SHORT_TEXT,
+            disabled=not selected,
+            on_click=_copy_summary,
+        ),
+    ]
+    rows: list[ft.Control] = [ft.Row(toolbar, spacing=AppStyles.SPACING_XS)]
+    if not selected:
+        rows.append(hint_text(MESSAGE_COPY_EMPTY_KEY))
+    if state.copy_notice_key:
+        rows.append(
+            ft.Text(
+                I18n.get(state.copy_notice_key),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.PRIMARY,
+            )
+        )
+    if state.copy_error_key:
+        rows.append(error_text(I18n.get(state.copy_error_key)))
+        if state.copy_error_code:
+            rows.append(error_text(I18n.get("agent_research_error_fmt").format(code=state.copy_error_code)))
+    return rows
 
 
 def build_progress_section(state: ResearchObserverState) -> list[ft.Control]:
@@ -135,19 +338,46 @@ def build_stream_section(state: ResearchObserverState) -> list[ft.Control]:
     return rows
 
 
-def build_messages_section(state: ResearchObserverState) -> list[ft.Control]:
+def build_messages_section(
+    state: ResearchObserverState,
+    *,
+    handlers: MessageActionHandlers | None = None,
+) -> list[ft.Control]:
     """主会话消息区（只读；正文未载入如实标注）。
 
     进度四问与增量流式块随消息区一并渲染（同一分区，避免调用方多处分发）。
+    ``handlers`` 提供消息修订/分支/局部复制回调；缺省时保持纯只读。
     """
 
     rows: list[ft.Control] = [*build_progress_section(state), *build_stream_section(state)]
     rows.append(section_title("agent_research_messages"))
+    if state.session_parent_id is not None:
+        rows.append(
+            ft.Text(
+                I18n.get("agent_research_branch_origin_fmt").format(
+                    parent=state.session_parent_id,
+                    message=state.session_branch_source_message_id or "-",
+                ),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.TEXT_HINT,
+            )
+        )
+    if state.branch_error_key:
+        rows.append(error_text(I18n.get(state.branch_error_key)))
+    if state.branch_error_code:
+        rows.append(error_text(I18n.get("agent_research_error_fmt").format(code=state.branch_error_code)))
     if not state.messages:
         rows.append(hint_text("agent_research_no_messages"))
     anchor = state.restored_scroll_anchor
     for message in state.messages:
-        rows.append(build_message_row(message, anchor=anchor is not None and message.message_id == anchor))
+        rows.append(
+            build_message_row(
+                message,
+                anchor=anchor is not None and message.message_id == anchor,
+                state=state,
+                handlers=handlers,
+            )
+        )
     if state.messages_has_more:
         rows.append(hint_text("agent_research_more_items"))
     return rows
