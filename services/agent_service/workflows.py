@@ -2522,6 +2522,267 @@ def build_retry_payload(
     return payload, scope
 
 
+# ---------------------------------------------------------------------------
+# 多标的对比（J05：一次研究覆盖多个标的，逐标的结论单列）
+# ---------------------------------------------------------------------------
+#
+# 语义边界：
+#
+# - 一次「多标的研究」= 一个对照批次，逐标的各自一行；任何一家缺结果都必须显式
+#   记为 ``missing`` 并列入 ``missing_objects``，批次状态降级为 ``partial``——
+#   绝不把「只回来一家」静默呈现为单对象完整结论（R21）；
+# - 去重按 ``object_kind:object_id`` 稳定身份（同一标的重复选择只保留首个），
+#   超过上限的标的不丢弃而是记作缺失（用户能看到自己选了哪几家、哪家没纳入）；
+# - 结果状态沿用完成核定的词汇（``complete`` / ``partial`` / ``unknown``），另加
+#   ``pending``（已发起、尚无结论）与 ``missing``（无结果/未纳入）；``pending``
+#   不得携带结论，``complete`` 必须有结论，避免用空结论冒充完成（R21）。
+
+#: 单次多标的研究的标的数量上限（UI 多选与对比共用同一上限）。
+MULTI_SUBJECT_LIMIT: Final[int] = 10
+
+#: 逐标的行状态。
+SUBJECT_STATE_COMPLETE: Final[str] = "complete"
+SUBJECT_STATE_PARTIAL: Final[str] = "partial"
+SUBJECT_STATE_UNKNOWN: Final[str] = "unknown"
+SUBJECT_STATE_PENDING: Final[str] = "pending"
+SUBJECT_STATE_MISSING: Final[str] = "missing"
+SUBJECT_ROW_STATES: Final[frozenset[str]] = frozenset(
+    {
+        SUBJECT_STATE_COMPLETE,
+        SUBJECT_STATE_PARTIAL,
+        SUBJECT_STATE_UNKNOWN,
+        SUBJECT_STATE_PENDING,
+        SUBJECT_STATE_MISSING,
+    }
+)
+
+#: 批次状态（完整 / 部分完成）；不存在「静默单对象完整」第三态。
+COMPARISON_STATUS_COMPLETE: Final[str] = "complete"
+COMPARISON_STATUS_PARTIAL: Final[str] = "partial"
+
+#: 缺失原因（稳定标识，供 UI 映射 i18n；不写人类文案）。
+MISSING_REASON_IDENTITY: Final[str] = "missing_identity"
+MISSING_REASON_OVER_LIMIT: Final[str] = "over_limit"
+MISSING_REASON_NO_RESULT: Final[str] = "no_result"
+
+
+@dataclass(frozen=True, slots=True)
+class ComparisonSubject:
+    """多标的研究中的一个标的（稳定身份 + 用户可见名称）。"""
+
+    object_kind: str
+    object_id: str
+    display_name: str
+
+    def __post_init__(self) -> None:
+        _require_str(self.object_kind, "$.object_kind")
+        _require_str(self.object_id, "$.object_id")
+        _require_str(self.display_name, "$.display_name")
+
+    @property
+    def key(self) -> str:
+        return f"{self.object_kind}:{self.object_id}"
+
+
+@dataclass(frozen=True, slots=True)
+class MissingSubject:
+    """请求了但未纳入对比的标的（缺稳定标识 / 超上限）：显式列出，不静默丢弃。"""
+
+    display_name: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        _require_str(self.display_name, "$.missing_subject.display_name")
+        if self.reason not in {MISSING_REASON_IDENTITY, MISSING_REASON_OVER_LIMIT}:
+            _fail("invalid_missing_reason", "$.missing_subject.reason")
+
+
+@dataclass(frozen=True, slots=True)
+class SubjectSelection:
+    """归一后的多标的选择：``subjects`` 已去重兼截断，``missing`` 为显式缺失项。"""
+
+    subjects: tuple[ComparisonSubject, ...]
+    missing: tuple[MissingSubject, ...] = ()
+    duplicate_count: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.subjects, tuple) or any(
+            not isinstance(subject, ComparisonSubject) for subject in self.subjects
+        ):
+            _fail("invalid_type", "$.subjects")
+        if not isinstance(self.missing, tuple) or any(not isinstance(item, MissingSubject) for item in self.missing):
+            _fail("invalid_type", "$.missing")
+        if isinstance(self.duplicate_count, bool) or not isinstance(self.duplicate_count, int):
+            _fail("invalid_type", "$.duplicate_count")
+        if self.duplicate_count < 0:
+            _fail("invalid_value", "$.duplicate_count")
+        keys = [subject.key for subject in self.subjects]
+        if len(set(keys)) != len(keys):
+            _fail("duplicate_subject", "$.subjects")
+
+
+def normalize_subjects(
+    subjects: tuple[ComparisonSubject, ...] | list[ComparisonSubject],
+    *,
+    limit: int = MULTI_SUBJECT_LIMIT,
+    missing: tuple[MissingSubject, ...] = (),
+) -> SubjectSelection:
+    """归一多标的选择：按稳定身份去重、超上限转缺失、保留调用方显式缺失项。
+
+    去重保留首次出现顺序（用户看到的选择顺序）；超上限的标的**不丢弃**，而是转成
+    ``MissingSubject(reason=over_limit)``，使「选了 11 家只研究 10 家」在对比结果里
+    显式可见（R21）。
+    """
+
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        _fail("invalid_limit", "$.limit")
+    if not isinstance(missing, tuple) or any(not isinstance(item, MissingSubject) for item in missing):
+        _fail("invalid_type", "$.missing")
+
+    normalized: list[ComparisonSubject] = []
+    seen: set[str] = set()
+    duplicate_count = 0
+    over_limit: list[MissingSubject] = []
+    for subject in subjects:
+        if not isinstance(subject, ComparisonSubject):
+            _fail("invalid_type", "$.subjects[]")
+        if subject.key in seen:
+            duplicate_count += 1
+            continue
+        seen.add(subject.key)
+        if len(normalized) >= limit:
+            over_limit.append(MissingSubject(subject.display_name, MISSING_REASON_OVER_LIMIT))
+            continue
+        normalized.append(subject)
+    return SubjectSelection(
+        subjects=tuple(normalized),
+        missing=(*missing, *over_limit),
+        duplicate_count=duplicate_count,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SubjectResearchResult:
+    """单个标的的研究结果投影（只读；``pending`` 不携带结论，``complete`` 必须有）。"""
+
+    state: str
+    conclusion: str | None = None
+    gaps: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.state not in SUBJECT_ROW_STATES:
+            _fail("invalid_subject_state", "$.state")
+        if self.conclusion is not None and not isinstance(self.conclusion, str):
+            _fail("invalid_type", "$.conclusion")
+        if self.conclusion is not None and not self.conclusion:
+            _fail("invalid_value", "$.conclusion")
+        if not isinstance(self.gaps, tuple) or any(not isinstance(gap, str) or not gap for gap in self.gaps):
+            _fail("invalid_type", "$.gaps")
+        if self.state == SUBJECT_STATE_COMPLETE and self.conclusion is None:
+            _fail("complete_without_conclusion", "$.conclusion")
+        if self.state == SUBJECT_STATE_PENDING and self.conclusion is not None:
+            _fail("pending_with_conclusion", "$.conclusion")
+
+
+@dataclass(frozen=True, slots=True)
+class SubjectComparisonRow:
+    """逐标的结论行（缺失标的同样成行，结论为 ``None``）。"""
+
+    subject_key: str
+    display_name: str
+    state: str
+    conclusion: str | None
+    gaps: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SubjectComparison:
+    """多标的对照结果：``missing_objects`` 非空即 ``partial``（不静默降级）。"""
+
+    rows: tuple[SubjectComparisonRow, ...]
+    status: str
+    missing_objects: tuple[str, ...]
+
+
+def build_subject_comparison(
+    selection: SubjectSelection,
+    results: Mapping[str, SubjectResearchResult | None],
+) -> SubjectComparison:
+    """把逐标的检验结果汇总为一份对照：缺失逐项列出，任一家缺失即 ``partial``。
+
+    ``results`` 以 ``object_kind:object_id`` 为键；缺键或值为 ``None`` 视为无结果
+    （``missing``），不按「其余都成功」推断该家已完成。``results`` 含未知键时显式
+    拒绝（防止把别的批次结果混入本批次）。空选择同样拒绝：没有标的就没有对照。
+    """
+
+    if not isinstance(selection, SubjectSelection):
+        _fail("invalid_type", "$.selection")
+    if not isinstance(results, Mapping):
+        _fail("invalid_type", "$.results")
+    requested_keys = {subject.key for subject in selection.subjects}
+    unknown_keys = sorted(set(results) - requested_keys)
+    if unknown_keys:
+        _fail("unknown_subject_result", f"$.results[{unknown_keys[0]}]")
+    if not selection.subjects and not selection.missing:
+        _fail("empty_subjects", "$.subjects")
+
+    rows: list[SubjectComparisonRow] = []
+    missing_objects: list[str] = []
+    for subject in selection.subjects:
+        result = results.get(subject.key)
+        if result is None:
+            rows.append(
+                SubjectComparisonRow(
+                    subject_key=subject.key,
+                    display_name=subject.display_name,
+                    state=SUBJECT_STATE_MISSING,
+                    conclusion=None,
+                    gaps=(MISSING_REASON_NO_RESULT,),
+                )
+            )
+            missing_objects.append(subject.display_name)
+            continue
+        if not isinstance(result, SubjectResearchResult):
+            _fail("invalid_type", f"$.results[{subject.key}]")
+        rows.append(
+            SubjectComparisonRow(
+                subject_key=subject.key,
+                display_name=subject.display_name,
+                state=result.state,
+                conclusion=result.conclusion,
+                gaps=result.gaps,
+            )
+        )
+        if result.state == SUBJECT_STATE_MISSING:
+            missing_objects.append(subject.display_name)
+    for item in selection.missing:
+        rows.append(
+            SubjectComparisonRow(
+                subject_key=f"missing:{item.display_name}",
+                display_name=item.display_name,
+                state=SUBJECT_STATE_MISSING,
+                conclusion=None,
+                gaps=(item.reason,),
+            )
+        )
+        missing_objects.append(item.display_name)
+
+    complete = not missing_objects and all(row.state == SUBJECT_STATE_COMPLETE for row in rows)
+    status = COMPARISON_STATUS_COMPLETE if complete else COMPARISON_STATUS_PARTIAL
+    return SubjectComparison(
+        rows=tuple(rows),
+        status=status,
+        missing_objects=tuple(missing_objects),
+    )
+
+
+def build_pending_subject_comparison(selection: SubjectSelection) -> SubjectComparison:
+    """发起多标的研究时的对照骨架：逐标的 ``pending``，缺失项立即显式（R21）。"""
+
+    results = {subject.key: SubjectResearchResult(state=SUBJECT_STATE_PENDING) for subject in selection.subjects}
+    return build_subject_comparison(selection, results)
+
+
 __all__ = [
     "ACTUAL_INPUT_BIND_STEP_NAME",
     "IDLE_WAIT_INTERVAL_SEC",
@@ -2530,6 +2791,7 @@ __all__ = [
     "LEAF_TICKET_CLAIM_STEP_NAME",
     "LEAF_TICKET_RELEASE_STEP_NAME",
     "LEAF_WORKFLOW_NAME",
+    "MULTI_SUBJECT_LIMIT",
     "PAYLOAD_VERSION",
     "PLAN_ADMIT_STEP_NAME",
     "RESEARCH_TERMINAL_STEP_NAME",
@@ -2538,6 +2800,7 @@ __all__ = [
     "ActualInputBinderRegistry",
     "ActualInputBinding",
     "ActualInputManifest",
+    "ComparisonSubject",
     "LeafDagScheduler",
     "LeafExecutionContext",
     "LeafIdentity",
@@ -2551,6 +2814,7 @@ __all__ = [
     "LeafTicketLease",
     "LeafTicketRelease",
     "LeafWaitCheckpoint",
+    "MissingSubject",
     "NodeInputRecord",
     "NodeOutcome",
     "ParentBindIdentity",
@@ -2558,12 +2822,18 @@ __all__ = [
     "PlanRunSummary",
     "ResearchPayload",
     "RetryScope",
+    "SubjectComparison",
+    "SubjectComparisonRow",
+    "SubjectResearchResult",
+    "SubjectSelection",
     "TerminalStateDaoRegistry",
     "admit_research_plan",
     "build_leaf_payload",
     "build_parent_bind_request",
+    "build_pending_subject_comparison",
     "build_research_payload",
     "build_retry_payload",
+    "build_subject_comparison",
     "claim_leaf_ticket",
     "compute_actual_input_manifest",
     "compute_retry_scope",
@@ -2579,6 +2849,7 @@ __all__ = [
     "install_terminal_state_dao",
     "leaf_ticket_slot_id",
     "leaf_workflow_id",
+    "normalize_subjects",
     "observe_leaf_children",
     "record_actual_input_binding",
     "record_plan_admission",

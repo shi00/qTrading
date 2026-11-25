@@ -24,9 +24,18 @@ from collections.abc import Callable
 import flet as ft
 
 from ui.components.flet_type_helpers import safe_on_click
+from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
+from ui.viewmodels.business_research_view_model import OBJECT_KIND_NEWS
 from ui.viewmodels.home_view_model import NewsRow
+from ui.viewmodels.multi_subject_research_view_model import (
+    MISSING_REASON_IDENTITY,
+    MultiSubjectResearchState,
+    MultiSubjectResearchViewModel,
+    SubjectCandidate,
+)
+from ui.components.multi_subject_research_panel import MultiSubjectResearchPanel
 from utils.time_utils import from_utc_to_cst, get_now
 
 # 情感着色数据源：入库 ``market_news.sentiment``（见 ``NewsRow.sentiment``），
@@ -93,6 +102,84 @@ def _translate_title_code(code: str) -> str:
     if i18n_key is None:
         return ""
     return I18n.get(i18n_key)
+
+
+def _news_display_name(row: NewsRow) -> str:
+    """资讯在多选列表中的展示名（截断正文；无正文时用稳定 id，不伪造标题）。"""
+
+    content = row.content or ""
+    display = content if len(content) <= 40 else f"{content[:40]}…"
+    if display:
+        return display
+    return f"news {row.news_id}" if row.news_id is not None else ""
+
+
+def _build_multi_subject_candidates(news_rows: tuple[NewsRow, ...]) -> tuple[SubjectCandidate, ...]:
+    """把资讯行冻结为多选候选（纯函数）：同一 news_id 去重，无稳定 id 的行不可选。"""
+
+    candidates: list[SubjectCandidate] = []
+    seen: set[str] = set()
+    for row in news_rows:
+        display = _news_display_name(row)
+        if row.news_id is None:
+            if display:
+                candidates.append(
+                    SubjectCandidate(
+                        object_kind=OBJECT_KIND_NEWS,
+                        object_id="",
+                        display_name=display,
+                        missing_reason=MISSING_REASON_IDENTITY,
+                    )
+                )
+            continue
+        news_id = str(row.news_id)
+        key = f"{OBJECT_KIND_NEWS}:{news_id}"
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(
+            SubjectCandidate(object_kind=OBJECT_KIND_NEWS, object_id=news_id, display_name=display or news_id)
+        )
+    return tuple(candidates)
+
+
+def _build_news_multi_research_controls(
+    state: MultiSubjectResearchState,
+    *,
+    on_open: Callable[[], None],
+    on_toggle: Callable[[str], None],
+    on_select_all: Callable[[], None],
+    on_clear: Callable[[], None],
+    on_submit: Callable[[], None],
+    on_close: Callable[[], None],
+) -> list[ft.Control]:
+    """资讯多选入口按钮 + 对照面板（未接线研究入口时由调用方跳过）。"""
+
+    controls: list[ft.Control] = [
+        ft.Row(
+            [
+                ft.OutlinedButton(
+                    content=ft.Text(I18n.get("agent_multi_subject_open"), size=AppStyles.FONT_SIZE_BODY_SM),
+                    icon=ft.Icons.CHECKLIST,
+                    on_click=safe_on_click(on_open),
+                )
+            ],
+            alignment=ft.MainAxisAlignment.END,
+        )
+    ]
+    if state.open:
+        controls.insert(
+            0,
+            MultiSubjectResearchPanel(
+                state=state,
+                on_toggle=on_toggle,
+                on_select_all=on_select_all,
+                on_clear=on_clear,
+                on_submit=on_submit,
+                on_close=on_close,
+            ),
+        )
+    return controls
 
 
 def _extract_stock_codes(
@@ -451,6 +538,26 @@ def NewsFeed(
     # Subscribe to i18n + theme changes (triggers auto-rerender)
     ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
+    # 资讯多选 → 多标的研究（去重/上限/逐标的对照，见 VM 文档）。
+    multi_state, multi_vm = use_viewmodel(factory=lambda: MultiSubjectResearchViewModel())
+
+    def _open_multi_research(_e: ft.ControlEvent | None = None) -> None:
+        multi_vm.open_candidates(_build_multi_subject_candidates(news_rows))
+
+    def _prepare_news_subject(key: str) -> bool:
+        """把选中的资讯交给既有单对象入口；找不到准确对象时如实返回 False。"""
+
+        if on_start_research is None:
+            return False
+        prefix = f"{OBJECT_KIND_NEWS}:"
+        if not key.startswith(prefix):
+            return False
+        news_id = key[len(prefix) :]
+        row = next((item for item in news_rows if str(item.news_id) == news_id), None)
+        if row is None:
+            return False
+        on_start_research(row)
+        return True
 
     style = AppStyles.card()
 
@@ -492,6 +599,17 @@ def NewsFeed(
         valid_stock_ts_codes=valid_stock_ts_codes,
         on_start_research=on_start_research,
     )
+    # 资讯多选入口 + 对照面板（只在已接线研究入口时出现）。
+    if on_start_research is not None:
+        controls[0:0] = _build_news_multi_research_controls(
+            multi_state,
+            on_open=_open_multi_research,
+            on_toggle=multi_vm.toggle,
+            on_select_all=multi_vm.select_all,
+            on_clear=multi_vm.clear,
+            on_submit=lambda: multi_vm.submit(_prepare_news_subject),
+            on_close=multi_vm.close,
+        )
 
     # --- Load more button (is_loading_more 时置灰 + 加载中文案, 提供忙碌反馈) ---
     if has_more:
