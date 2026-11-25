@@ -40,7 +40,7 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from core.agent_types import (
     NON_RECOVERABLE_DISPLAY_STATES,
@@ -151,6 +151,10 @@ from services.agent_service.sources import BusinessSourceService
 from utils.error_classifier import classify_error
 from utils.loop_local import get_loop_local
 
+if TYPE_CHECKING:
+    from core.model_management_types import StockAgentCall
+    from services.ai_service.scenario_dispatch import ScenarioDispatch
+
 
 @dataclass(frozen=True, slots=True)
 class WaitResult:
@@ -194,6 +198,65 @@ class ComparisonLaneRetryOutcome:
     error_code: str | None
     dispatch: DispatchOutcome | None
     view: ComparisonGroupView
+
+
+@dataclass(frozen=True, slots=True)
+class StockAnalysisRequest:
+    """单股股票分析请求（W-11 单入口）：分析输入 + 必填研究请求身份。
+
+    ``agent_call`` 为研究请求身份（会话 + 轮次 + 批次 + 股票），单入口据此单次计费
+    并支持按主会话/轮次/批次关联查回；缺省（``None``）时
+    :meth:`AgentService.analyze_stock` 显式拒绝（``INPUT_INVALID``），不以内部临时
+    身份冒充幂等（R21）。其余字段与 ``AIService.analyze_stock`` 参数一一对应。
+    """
+
+    agent_call: StockAgentCall
+    stock_info: Mapping[str, Any]
+    tech_info: Mapping[str, Any]
+    news_list: Sequence[Any] = ()
+    global_context: str = ""
+    strategy_context: str = ""
+    capital_flow_text: str = ""
+    financials_text: str = ""
+    history_text: str = ""
+    on_chunk: Callable[..., Any] | None = None
+    history_context: str | None = None
+    strategy_key: str | None = None
+    include_global_context: bool = True
+    include_learning_context: bool = True
+    ui_prompt_override: str | None = None
+    is_backtest: bool = False
+    financial_labels: Sequence[str] | None = None
+    capital_labels: Sequence[str] | None = None
+    history_labels: Sequence[str] | None = None
+    learning_strategy_name: str | None = None
+    scenario_dispatch: ScenarioDispatch | None = None
+
+    def as_call_kwargs(self) -> dict[str, Any]:
+        """转下游 ``analyze_stock`` 关键字参数（研究请求身份 ``agent_call`` 单列传递）。"""
+
+        return {
+            "stock_info": dict(self.stock_info),
+            "tech_info": dict(self.tech_info),
+            "news_list": list(self.news_list),
+            "global_context": self.global_context,
+            "strategy_context": self.strategy_context,
+            "capital_flow_text": self.capital_flow_text,
+            "financials_text": self.financials_text,
+            "history_text": self.history_text,
+            "on_chunk": self.on_chunk,
+            "history_context": self.history_context,
+            "strategy_key": self.strategy_key,
+            "include_global_context": self.include_global_context,
+            "include_learning_context": self.include_learning_context,
+            "ui_prompt_override": self.ui_prompt_override,
+            "is_backtest": self.is_backtest,
+            "financial_labels": list(self.financial_labels) if self.financial_labels is not None else None,
+            "capital_labels": list(self.capital_labels) if self.capital_labels is not None else None,
+            "history_labels": list(self.history_labels) if self.history_labels is not None else None,
+            "learning_strategy_name": self.learning_strategy_name,
+            "scenario_dispatch": self.scenario_dispatch,
+        }
 
 
 def _require_positive_seconds(value: object, path: str, identity: str) -> None:
@@ -309,6 +372,48 @@ class AnswerSender(Protocol):
     """
 
     async def send_answer(self, fact: AnswerCommandFact) -> None: ...
+
+
+class StockAnalysisPort(Protocol):
+    """股票分析执行端口（W-11）：通常为 ``services.ai_service.AIService``。
+
+    端口只负责真实执行，不承担受理/计费身份语义——同一 ``request_id`` 的单飞与
+    去重由下游 ``StockAnalysisService`` 的请求门保证，本入口不重复计费。
+    """
+
+    async def analyze_stock(
+        self,
+        stock_info: dict,
+        tech_info: dict,
+        news_list: list,
+        global_context: str = "",
+        strategy_context: str = "",
+        capital_flow_text: str = "",
+        financials_text: str = "",
+        history_text: str = "",
+        on_chunk: Any = None,
+        history_context: str | None = None,
+        strategy_key: str | None = None,
+        include_global_context: bool = True,
+        include_learning_context: bool = True,
+        ui_prompt_override: str | None = None,
+        is_backtest: bool = False,
+        *,
+        financial_labels: list[str] | None = None,
+        capital_labels: list[str] | None = None,
+        history_labels: list[str] | None = None,
+        learning_strategy_name: str | None = None,
+        scenario_dispatch: Any = None,
+        agent_call: StockAgentCall | None = None,
+    ) -> dict[str, Any] | None: ...
+
+
+def _default_stock_analysis_port() -> StockAnalysisPort:
+    """懒加载共享 ``AIService`` 单例作为默认执行端口（避免导入期拉起 LiteLLM）。"""
+
+    from services.ai_service import AIService
+
+    return AIService()
 
 
 class AgentService:
@@ -1766,6 +1871,42 @@ class AgentService:
                 f"{user_scope}/{query.session_id}",
             ) from exc
         return await self._dao.read_draft(query, user_scope=user_scope)
+
+    # ------------------------------------------------------------------
+    # 股票/批量分析单入口（W-11）
+    # ------------------------------------------------------------------
+
+    async def analyze_stock(
+        self,
+        request: StockAnalysisRequest,
+        *,
+        port: StockAnalysisPort | None = None,
+    ) -> dict[str, Any] | None:
+        """股票分析唯一公开入口（W-11）：一次受理、单次计费、身份可查回。
+
+        ``request.agent_call`` 为必填研究请求身份（会话 + 轮次 + 批次 + 股票）；
+        缺省即 ``INPUT_INVALID``，不以内部临时身份冒充幂等（R21）。真实执行委托
+        ``port``（缺省懒加载共享 ``AIService`` 单例）；同一 ``request_id`` 的单飞/
+        去重由下游 ``StockAnalysisService`` 请求门保证，本入口不重复计费。
+
+        结果 dict 恒携带 ``stock_agent_call`` 身份投影（下游未写时在此补齐，失败/
+        不支持路径同样保留，R21）；撤权/准入阻断由下游以 ``LegacyDispatchBlockedError``
+        明确抛出，本入口不改换模型重试（NFR-R08）。
+        """
+
+        self._require_open("analyze_stock")
+        agent_call = request.agent_call
+        if agent_call is None:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                "agent_call is required for stock analysis single entry",
+                "agent_service/stock_analysis",
+            )
+        executor = port if port is not None else _default_stock_analysis_port()
+        result = await executor.analyze_stock(**request.as_call_kwargs(), agent_call=agent_call)
+        if isinstance(result, dict) and "stock_agent_call" not in result:
+            result["stock_agent_call"] = agent_call.as_metadata()
+        return result
 
     # ------------------------------------------------------------------
     # 生命周期
