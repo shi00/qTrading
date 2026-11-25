@@ -1935,8 +1935,9 @@ class AgentDecision(Base):
     decision_id = Column(Text, primary_key=True)
     session_id = Column(Text, nullable=False)
     execution_id = Column(Text, nullable=False)
-    round_id = Column(Text, nullable=False)
-    node_id = Column(Text, nullable=False)
+    # 派发前的澄清决定（decision_kind=user_choice）尚无轮次；其余种类仍必须带轮/节点。
+    round_id = Column(Text)
+    node_id = Column(Text)
     decision_kind = Column(Text, nullable=False)
     tool_call_id = Column(Text)
     question_payload = Column(JSONB(none_as_null=True))
@@ -1988,6 +1989,10 @@ class AgentDecision(Base):
             name="fk_agent_decision_dispatch_operation",
         ),
         *_agent_common_checks(),
+        CheckConstraint(
+            "decision_kind = 'user_choice' OR (round_id IS NOT NULL AND node_id IS NOT NULL)",
+            name="clarification_round_required",
+        ),
         Index("idx_agent_decision_execution", "execution_id"),
         Index("idx_agent_decision_round", "round_id"),
         Index("idx_agent_decision_grant", "grant_id"),

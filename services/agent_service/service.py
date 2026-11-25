@@ -57,6 +57,8 @@ from core.agent_types import (
     ArtifactReadQuery,
     BusinessSourceItem,
     BusinessSourceRegistrationReceipt,
+    ClarificationAnswerFact,
+    ClarificationFact,
     CommandReceipt,
     CommandRef,
     CommitState,
@@ -91,6 +93,7 @@ from core.agent_types import (
     RevisionReceipt,
     ReviseQueuedRequest,
     SaveAnswerRequest,
+    SaveClarificationDecisionRequest,
     SessionRead,
     SessionReadQuery,
     RoleSkillAssignment,
@@ -1736,6 +1739,18 @@ class AgentService:
 
         self._require_open("read_pending_answers")
         return await self._dao.read_pending_answers(user_scope=user_scope, limit=limit)
+
+    async def save_clarification_decision(self, request: SaveClarificationDecisionRequest) -> ClarificationFact:
+        """派发前提问的澄清决定（§4.1 facade）：幂等落决定，重放查回原事实。"""
+
+        self._require_open("save_clarification_decision")
+        return await self._dao.save_clarification_decision(request)
+
+    async def consume_clarification(self, *, user_scope: str, session_id: str) -> tuple[ClarificationAnswerFact, ...]:
+        """取走本会话未消费的澄清问答（下一轮只注入一次，只消费真实答复）。"""
+
+        self._require_open("consume_clarification")
+        return await self._dao.consume_clarification(user_scope=user_scope, session_id=session_id)
 
     async def deliver_answer(self, request: AnswerDeliveryRequest) -> AnswerDeliveryOutcome:
         """答复交付（P1-05）：保存与投递分离，成功后才按原命令核定 delivered。

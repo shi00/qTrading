@@ -60,6 +60,9 @@ from core.agent_types import (
     BusinessSourceRegistrationRequest,
     CleanupNativeFacts,
     CanonicalJson,
+    ClarificationAnswerFact,
+    ClarificationFact,
+    CLARIFICATION_ANSWER_SCHEMA,
     CommandReceipt,
     CommandRef,
     CommitState,
@@ -171,6 +174,7 @@ from core.agent_types import (
     SOURCE_COVERAGES,
     SOURCE_REGISTRATION_CONSUMER_KINDS,
     SaveAnswerRequest,
+    SaveClarificationDecisionRequest,
     SaveToolDecisionRequest,
     SaveToolResultRequest,
     Selection,
@@ -205,6 +209,7 @@ from core.agent_types import (
     SubmissionReceipt,
     ToolGrantFact,
     ToolGrantState,
+    USER_CHOICE_DECISION_KIND,
     OperationGrantScope,
     UsageAdmissionFact,
     UsageAdmissionRequest,
@@ -769,6 +774,28 @@ def _parse_answer_payload(answer_payload: CanonicalJson, identity: str) -> dict[
     if not isinstance(payload, dict):
         raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "answer payload must be a JSON object", identity)
     return payload
+
+
+def _clarification_question_text(question_payload: Any) -> str | None:
+    """澄清问题载荷 → 可读问题文本（不可解释/空即 ``None``，不猜测）。"""
+
+    if not isinstance(question_payload, dict):
+        return None
+    text = question_payload.get("question")
+    if isinstance(text, str) and text.strip():
+        return text
+    return None
+
+
+def _clarification_answer_text(request_payload: Any) -> str | None:
+    """澄清答复载荷 → 可读答复文本（不可解释/空即 ``None``，不伪造）。"""
+
+    if not isinstance(request_payload, dict):
+        return None
+    text = request_payload.get("text")
+    if isinstance(text, str) and text.strip():
+        return text
+    return None
 
 
 #: 跨会话待处理聚合的单类上限（P1-05）：达到上限标记截断，不冒充完整集合。
@@ -3710,11 +3737,11 @@ class AgentDao(BaseDao):
         *,
         user_scope: str,
         execution_id: str,
-        round_id: str,
+        round_id: str | None,
         expires_at: datetime | None,
         identity: str,
         action: str,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int | None]:
         """首生效前新鲜核原问题（检视 D06）：过期/终止/旧轮一律拒绝，零新事实。
 
         只做普通读，不新增行锁边（沿用 decision → command 锁序）：过期按
@@ -3723,8 +3750,12 @@ class AgentDao(BaseDao):
         ``round.active_round``。执行/轮事实缺失 → ``OPERATION_UNKNOWN``（不冒充
         可答复）。
 
-        返回权威 ``(execution.owner_epoch, round.run_epoch)``，供派发认领核
-        旧代次（检视 D07）复用同一读取，不重复查执行/轮。
+        ``round_id`` 为空（派发前的澄清决定）时只核执行存在、未终止且
+        ``current_round_id IS NULL``：执行一旦绑定轮次，派发前提问已失去「下一轮
+        之前作答」的时点，不再可答（``POLICY_DENIED``）。
+
+        返回权威 ``(execution.owner_epoch, round.run_epoch)``（无轮时为 ``None``），
+        供派发认领核旧代次（检视 D07）复用同一读取，不重复查执行/轮。
         """
 
         occurred = datetime.now(UTC)
@@ -3748,6 +3779,14 @@ class AgentDao(BaseDao):
             raise AgentServiceError(
                 AgentErrorCode.POLICY_DENIED, f"{action} rejected: execution is terminated", identity
             )
+        if round_id is None:
+            if exec_row.current_round_id is not None:
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    f"{action} rejected: pre-dispatch question is no longer answerable",
+                    identity,
+                )
+            return exec_row.owner_epoch, None
         if exec_row.current_round_id != round_id:
             raise AgentServiceError(
                 AgentErrorCode.POLICY_DENIED, f"{action} rejected: question belongs to a superseded round", identity
@@ -3794,7 +3833,8 @@ class AgentDao(BaseDao):
         _require_text_field(request.client_command_id, "client_command_id", identity)
         _require_int_field(request.expected_decision_revision, "expected_decision_revision", identity, 1)
         _require_text_field(request.expected_execution_id, "expected_execution_id", identity)
-        _require_text_field(request.expected_round_id, "expected_round_id", identity)
+        if request.expected_round_id is not None:
+            _require_text_field(request.expected_round_id, "expected_round_id", identity)
         _require_text_field(request.answer_payload, "answer_payload", identity)
         answer_digest = sha256_hex(request.answer_payload)
         command_record_id = stable_id("command", [request.user_scope, request.decision_id, request.client_command_id])
@@ -4016,6 +4056,236 @@ class AgentDao(BaseDao):
             answer_digest=answer_digest,
             verified_at=_wire_time(verified_at),
         )
+
+    async def save_clarification_decision(self, request: SaveClarificationDecisionRequest) -> ClarificationFact:
+        """派发前提问的澄清决定（``decision_kind=user_choice``）幂等保存。
+
+        单事务写 ``agent_decision``：``round_id`` 为空（执行尚未绑定轮次，
+        问题只在「下一轮之前」可答）、``node_id`` 记提问节点；``question_payload``
+        为 ``{question, options, impact}``，``answer_schema`` 与 UI 文本答复
+        ``{"text": ...}`` 对齐；``presentation_batch_seq`` 取该执行 max+1。
+
+        ``decision_id`` 由 ``(user_scope, execution_id, node_id, question digest)``
+        稳定派生：同问题重放查回原事实、零新行；同身份异归属/异问题 →
+        ``INPUT_CONFLICT``（不覆盖原事实，R21）。``expires_at`` 必须有界：
+        ``None`` 等同「永久可答」，以 ``INPUT_INVALID`` 拒绝。执行不存在/已终止/
+        已绑定轮次 → 复用 ``_assert_question_answerable`` 的新鲜核（零新决定）。
+        """
+
+        self._check_engine("clarification decision")
+        identity = f"{request.user_scope}/{request.execution_id}"
+        _require_text_field(request.user_scope, "user_scope", identity)
+        _require_text_field(request.session_id, "session_id", identity)
+        _require_text_field(request.execution_id, "execution_id", identity)
+        _require_text_field(request.node_id, "node_id", identity)
+        _require_text_field(request.question_text, "question_text", identity)
+        if not isinstance(request.options, tuple) or any(
+            not isinstance(option, str) or not option.strip() for option in request.options
+        ):
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "invalid clarification options", identity)
+        if not isinstance(request.impact, str):
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "invalid clarification impact", identity)
+        _require_text_field(request.expires_at, "expires_at", identity)
+        expires_at = _wire_to_dt(request.expires_at)
+        if expires_at is None:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                "clarification decision requires a bounded validity window (expires_at)",
+                identity,
+            )
+        question_payload = {
+            "question": request.question_text,
+            "options": list(request.options),
+            "impact": request.impact,
+        }
+        question_digest = sha256_hex(json_doc(question_payload))
+        decision_id = stable_id(
+            "decision",
+            [request.user_scope, request.execution_id, request.node_id, question_digest],
+        )
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            existing = (
+                await conn.execute(
+                    sa.select(
+                        AgentDecision.decision_kind,
+                        AgentDecision.execution_id,
+                        AgentDecision.node_id,
+                        AgentDecision.question_payload,
+                        AgentDecision.revision,
+                        AgentDecision.presentation_batch_seq,
+                        AgentDecision.expires_at,
+                    ).where(
+                        AgentDecision.user_scope == request.user_scope,
+                        AgentDecision.decision_id == decision_id,
+                    )
+                )
+            ).first()
+            if existing is not None:
+                stored_digest = (
+                    sha256_hex(json_doc(existing.question_payload))
+                    if isinstance(existing.question_payload, dict)
+                    else None
+                )
+                if (
+                    existing.decision_kind != USER_CHOICE_DECISION_KIND
+                    or existing.execution_id != request.execution_id
+                    or existing.node_id != request.node_id
+                    or stored_digest != question_digest
+                ):
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_CONFLICT,
+                        "clarification decision already bound to another ownership/question",
+                        identity,
+                    )
+                if existing.expires_at is None:
+                    raise AgentServiceError(
+                        AgentErrorCode.OPERATION_UNKNOWN,
+                        "existing clarification decision has no validity window",
+                        identity,
+                    )
+                return ClarificationFact(
+                    decision_id=decision_id,
+                    revision=int(existing.revision),
+                    presentation_batch_seq=int(existing.presentation_batch_seq),
+                    expires_at=_wire_time(existing.expires_at),
+                )
+            await self._assert_question_answerable(
+                conn,
+                user_scope=request.user_scope,
+                execution_id=request.execution_id,
+                round_id=None,
+                expires_at=expires_at,
+                identity=identity,
+                action="clarification decision",
+            )
+            presentation_batch_seq = (
+                await conn.execute(
+                    sa.select(sa.func.coalesce(sa.func.max(AgentDecision.presentation_batch_seq), 0)).where(
+                        AgentDecision.user_scope == request.user_scope,
+                        AgentDecision.execution_id == request.execution_id,
+                    )
+                )
+            ).scalar_one() + 1
+            occurred = datetime.now(UTC)
+            try:
+                await conn.execute(
+                    sa.insert(AgentDecision).values(
+                        user_scope=request.user_scope,
+                        decision_id=decision_id,
+                        session_id=request.session_id,
+                        execution_id=request.execution_id,
+                        round_id=None,
+                        node_id=request.node_id,
+                        decision_kind=USER_CHOICE_DECISION_KIND,
+                        question_payload=question_payload,
+                        answer_schema=json.loads(CLARIFICATION_ANSWER_SCHEMA),
+                        expires_at=expires_at,
+                        presentation_batch_seq=presentation_batch_seq,
+                        updated_at=occurred,
+                    )
+                )
+            except IntegrityError as exc:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_CONFLICT,
+                    "clarification decision created concurrently",
+                    identity,
+                ) from exc
+            return ClarificationFact(
+                decision_id=decision_id,
+                revision=1,
+                presentation_batch_seq=presentation_batch_seq,
+                expires_at=_wire_time(expires_at),
+            )
+
+    async def consume_clarification(self, *, user_scope: str, session_id: str) -> tuple[ClarificationAnswerFact, ...]:
+        """取走本轮可注入的澄清问答（只消费一次，不伪造已答）。
+
+        只选「已真实答复（``answer_command_id`` 非空）且未消费」的
+        ``user_choice`` 决定，且原问题未过期；同一决定用
+        ``answer_consumed_at IS NULL`` CAS 单胜者，命令态同转 ``consumed``。
+        载荷不可解释（缺问题文本或答复文本）的行不消费、不编造内容（R21），
+        保持其原状态。已消费决定不再返回（``answer_consumed_at`` 只落一次）。
+        """
+
+        self._check_engine("clarification consume")
+        identity = f"{user_scope}/{session_id}"
+        _require_text_field(user_scope, "user_scope", identity)
+        _require_text_field(session_id, "session_id", identity)
+        occurred = datetime.now(UTC)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        facts: list[ClarificationAnswerFact] = []
+        async with engine.begin() as conn:
+            rows = (
+                await conn.execute(
+                    sa.select(
+                        AgentDecision.decision_id,
+                        AgentDecision.question_payload,
+                        AgentCommand.command_record_id,
+                        AgentCommand.request_payload,
+                    )
+                    .select_from(AgentDecision)
+                    .join(
+                        AgentCommand,
+                        sa.and_(
+                            AgentCommand.user_scope == AgentDecision.user_scope,
+                            AgentCommand.command_record_id == AgentDecision.answer_command_id,
+                        ),
+                    )
+                    .where(
+                        AgentDecision.user_scope == user_scope,
+                        AgentDecision.session_id == session_id,
+                        AgentDecision.decision_kind == USER_CHOICE_DECISION_KIND,
+                        AgentDecision.answer_command_id.is_not(None),
+                        AgentDecision.answer_consumed_at.is_(None),
+                        sa.or_(AgentDecision.expires_at.is_(None), AgentDecision.expires_at > occurred),
+                        AgentCommand.command_kind == "answer",
+                    )
+                    .order_by(AgentDecision.created_at.asc(), AgentDecision.decision_id.asc())
+                    .with_for_update()
+                )
+            ).all()
+            for row in rows:
+                question_text = _clarification_question_text(row.question_payload)
+                answer_text = _clarification_answer_text(row.request_payload)
+                if question_text is None or answer_text is None:
+                    continue
+                consumed = await conn.execute(
+                    sa.update(AgentDecision)
+                    .where(
+                        AgentDecision.user_scope == user_scope,
+                        AgentDecision.decision_id == row.decision_id,
+                        AgentDecision.answer_consumed_at.is_(None),
+                    )
+                    .values(answer_consumed_at=occurred, updated_at=occurred)
+                )
+                if consumed.rowcount != 1:
+                    continue
+                await conn.execute(
+                    sa.update(AgentCommand)
+                    .where(
+                        AgentCommand.user_scope == user_scope,
+                        AgentCommand.command_record_id == row.command_record_id,
+                        AgentCommand.consumption_state == ConsumptionState.NOT_CONSUMED.value,
+                    )
+                    .values(
+                        consumption_state=ConsumptionState.CONSUMED.value,
+                        consumed_at=occurred,
+                        revision=AgentCommand.revision + 1,
+                        updated_at=occurred,
+                    )
+                )
+                facts.append(
+                    ClarificationAnswerFact(
+                        decision_id=row.decision_id,
+                        question_text=question_text,
+                        answer_text=answer_text,
+                        consumed_at=_wire_time(occurred),
+                    )
+                )
+        return tuple(facts)
 
     async def mark_answer_delivered(self, request: MarkAnswerDeliveredRequest) -> DeliveryFact:
         """投递核定（SQ-03「同 command_id 幂等原生 send」）：delivery_state
@@ -4318,7 +4588,7 @@ class AgentDao(BaseDao):
                     AgentExecution.execution_id == AgentDecision.execution_id,
                 ),
             )
-            .join(
+            .outerjoin(
                 AgentRound,
                 sa.and_(
                     AgentRound.user_scope == AgentDecision.user_scope,
@@ -4329,9 +4599,20 @@ class AgentDao(BaseDao):
                 AgentDecision.user_scope == user_scope,
                 AgentDecision.answer_command_id.is_(None),
                 sa.or_(AgentDecision.expires_at.is_(None), AgentDecision.expires_at > occurred),
-                AgentRound.active_round.is_(True),
-                AgentRound.stop_reason.is_(None),
-                AgentExecution.current_round_id == AgentDecision.round_id,
+                # 有轮：轮仍活动、未停轮且仍为执行当前轮；无轮（派发前澄清）：
+                # 执行尚未绑定轮次，问题在「下一轮之前」仍可答。
+                sa.or_(
+                    sa.and_(
+                        AgentDecision.round_id.is_not(None),
+                        AgentRound.active_round.is_(True),
+                        AgentRound.stop_reason.is_(None),
+                        AgentExecution.current_round_id == AgentDecision.round_id,
+                    ),
+                    sa.and_(
+                        AgentDecision.round_id.is_(None),
+                        AgentExecution.current_round_id.is_(None),
+                    ),
+                ),
                 AgentExecution.display_state.not_in(sorted(NON_RECOVERABLE_DISPLAY_STATES)),
                 AgentSession.cleaned_at.is_(None),
                 # 归档会话拒绝新答复（POLICY_DENIED）：不作为「待答复」冒领用户操作。
@@ -4366,6 +4647,9 @@ class AgentDao(BaseDao):
             .where(
                 AgentDecision.user_scope == user_scope,
                 AgentDecision.answer_command_id.is_not(None),
+                # 无轮（派发前澄清）答复不在命令队列投递/消费：其消费在下一轮
+                # 受理时由 ``consume_clarification`` 完成，避免永久「待交付」假象。
+                AgentDecision.round_id.is_not(None),
                 AgentCommand.command_kind == "answer",
             )
         )
@@ -5176,6 +5460,13 @@ class AgentDao(BaseDao):
                     identity=identity,
                     action="tool dispatch claim",
                 )
+                if run_epoch is None:
+                    # 工具许可决定必带轮（表级 CHECK），无轮只可能是澄清决定。
+                    raise AgentServiceError(
+                        AgentErrorCode.OPERATION_UNKNOWN,
+                        "tool decision has no answerable round",
+                        identity,
+                    )
                 operation_row = (
                     await conn.execute(
                         sa.select(

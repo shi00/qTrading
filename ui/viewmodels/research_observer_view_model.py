@@ -600,7 +600,7 @@ class PendingDecision:
 
     decision_id: str
     execution_id: str
-    round_id: str
+    round_id: str | None
     decision_kind: str
     revision: int
     created_at: str
@@ -626,7 +626,7 @@ class PendingAnswerView:
     session_title: str | None
     decision_id: str
     execution_id: str
-    round_id: str
+    round_id: str | None
     decision_kind: str
     revision: int
     stage: str
@@ -977,6 +977,8 @@ class ResearchObserverState:
     last_answer_delivery_state: str | None = None
     #: 最近一次交付失败原因码（未交付才能重试；None 表示无失败或已交付）。
     last_answer_delivery_reason: str | None = None
+    #: 无轮澄清答复的提示 key（答复将在下一次提问时带上；不冒充已投递）。
+    answer_notice_key: str | None = None
     #: 交付在途的原答复命令（同命令不并发重发；None 表示无在途交付）。
     answer_delivery_pending_command: str | None = None
     #: 跨会话待处理（P1-05）：三态分列 + 截断事实 + 徽标范围（R21）。
@@ -5513,7 +5515,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         drafts = tuple((key, value) for key, value in self._state.answer_drafts if key != decision_id)
         self._set_state(answer_drafts=(*drafts, (decision_id, text)))
 
-    async def submit_answer(self, decision_id: str, *, execution_id: str, round_id: str) -> None:
+    async def submit_answer(self, decision_id: str, *, execution_id: str, round_id: str | None) -> None:
         """提交答复：唯一写入口经 facade ``answer``（统一决定，不直连 DAO）。
 
         命令键按决定身份派生（P1-05）：重传/重启后命中同一答复命令，不为同一
@@ -5584,7 +5586,23 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             self._set_state(submitting=False, last_error_code=self._error_code(e))
             return
 
-        self._set_state(submitting=False, last_answer_delivery_state=_tag_text(receipt.delivery_state))
+        if round_id is None:
+            # 派发前的澄清答复没有可投递的原生轮次：保存即完成，跳过投递，
+            # 明确提示答复会在下一次提问时带上（不形成永久「待交付」假象）。
+            self._set_state(
+                submitting=False,
+                answer_drafts=tuple((key, value) for key, value in self._state.answer_drafts if key != decision_id),
+                answer_notice_key="agent_research_clarification_next_turn",
+                last_answer_delivery_state=None,
+                last_answer_delivery_reason=None,
+            )
+            await self.refresh()
+            return
+        self._set_state(
+            submitting=False,
+            last_answer_delivery_state=_tag_text(receipt.delivery_state),
+            answer_notice_key=None,
+        )
         command_record_id = getattr(receipt, "command_record_id", None)
         if not (isinstance(command_record_id, str) and command_record_id):
             # 保存回执未带原命令身份：不能假装已交付，保留草稿等重试入口（R21）。

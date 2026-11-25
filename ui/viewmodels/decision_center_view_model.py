@@ -52,6 +52,8 @@ AUTHORIZATION_DECISION_KINDS: Final[frozenset[str]] = frozenset({"tool_permissio
 AUTHORIZATION_ACTIONABLE_KINDS: Final[frozenset[str]] = frozenset({"tool_permission"})
 #: 可在本界面直接文本答复的澄清类决定。
 CLARIFICATION_DECISION_KINDS: Final[frozenset[str]] = frozenset({"user_choice"})
+#: 无轮澄清答复的提示 key：答复将在下一次提问时带上（不冒充已投递）。
+CLARIFICATION_NEXT_TURN_KEY: Final[str] = "agent_research_clarification_next_turn"
 #: 问题正文提取候选键（其余结构化参数不展开，避免把授权参数当普通文本展示）。
 _QUESTION_KEYS: Final[tuple[str, ...]] = ("question", "prompt", "text", "title", "label", "description")
 #: 答复命令键前缀：与观察层保持一致，同一决定跨入口命中同一命令（AC28）。
@@ -112,7 +114,7 @@ class DecisionItemView:
     session_id: str
     session_title: str | None
     execution_id: str
-    round_id: str
+    round_id: str | None
     decision_kind: str
     revision: int
     stage: str
@@ -620,7 +622,8 @@ class DecisionCenterViewModel(ObservableViewModelMixin[DecisionCenterState]):
             )
             return
         command_record_id = getattr(receipt, "command_record_id", None)
-        if isinstance(command_record_id, str) and command_record_id:
+        if item.round_id is not None and isinstance(command_record_id, str) and command_record_id:
+            # 有轮答复才走原生投递；无轮澄清答复在下一轮受理时消费。
             await self._attempt_delivery(command_record_id)
         if action == ACTION_ANSWER:
             self._set_state(
@@ -629,7 +632,7 @@ class DecisionCenterViewModel(ObservableViewModelMixin[DecisionCenterState]):
         self._set_state(
             submitting_decision_id=None,
             submitting_action=None,
-            notice_key=NOTICE_SAVED,
+            notice_key=NOTICE_SAVED if item.round_id is not None else CLARIFICATION_NEXT_TURN_KEY,
             notice_params=(),
         )
         await self.refresh()

@@ -11,6 +11,7 @@ import pytest
 from core.agent_types import (
     AgentErrorCode,
     AgentServiceError,
+    ClarificationAnswerFact,
     Mode,
     SourceKind,
     SourceVersionRef,
@@ -21,10 +22,13 @@ from services.agent_service.main_turn import MainTurnRequest
 from services.agent_service.main_turn_model import (
     MAIN_TURN_AGENT_NAME,
     _AnswerDraft,
+    _ClarificationDraft,
     _PlanDraft,
     _PlanStepDraft,
+    _TurnEnvelope,
     _answer_decision,
     _default_model_factory,
+    _envelope_decision,
     _invoke_agent,
     _plan_decision,
     _resolve_route,
@@ -78,7 +82,7 @@ class _ModelFactory:
 @pytest.mark.asyncio
 async def test_discuss_turn_answers_through_governed_route() -> None:
     route = _RouteRecorder(SimpleNamespace(executor=object(), snapshot=object()))
-    invoker = _Invoker(_AnswerDraft(answer="银行股要看息差与资产质量"))
+    invoker = _Invoker(_TurnEnvelope(answer=_AnswerDraft(answer="银行股要看息差与资产质量")))
     models = _ModelFactory()
     request = MainTurnRequest(identity=_IDENTITY, mode=Mode.DISCUSS, prompt_text="银行股怎么看")
 
@@ -100,7 +104,7 @@ async def test_discuss_turn_answers_through_governed_route() -> None:
     assert args[1] == {"scenario_id": "agent_research", "task_id": "root"}
     assert "require_data_consent" not in args[1]
     assert len(invoker.calls) == 1
-    assert invoker.calls[0]["output_type"] is _AnswerDraft
+    assert invoker.calls[0]["output_type"] is _TurnEnvelope
     assert invoker.calls[0]["prompt"] == "银行股怎么看"
 
 
@@ -108,12 +112,14 @@ async def test_discuss_turn_answers_through_governed_route() -> None:
 async def test_plan_turn_returns_readable_plan_and_structured_steps() -> None:
     route = _RouteRecorder(SimpleNamespace(executor=object(), snapshot=object()))
     invoker = _Invoker(
-        _PlanDraft(
-            summary="先看行业再看个股",
-            steps=[
-                _PlanStepDraft(id="s1", content="梳理行业景气"),
-                _PlanStepDraft(id="s2", content="对比龙头估值", depends_on=["s1"]),
-            ],
+        _TurnEnvelope(
+            plan=_PlanDraft(
+                summary="先看行业再看个股",
+                steps=[
+                    _PlanStepDraft(id="s1", content="梳理行业景气"),
+                    _PlanStepDraft(id="s2", content="对比龙头估值", depends_on=["s1"]),
+                ],
+            )
         )
     )
     request = MainTurnRequest(identity=_IDENTITY, mode=Mode.PLAN, prompt_text="研究银行股")
@@ -134,13 +140,13 @@ async def test_plan_turn_returns_readable_plan_and_structured_steps() -> None:
     steps = decoded["steps"]
     assert [step["id"] for step in steps] == ["s1", "s2"]
     assert steps[1]["depends_on"] == ["s1"]
-    assert invoker.calls[0]["output_type"] is _PlanDraft
+    assert invoker.calls[0]["output_type"] is _TurnEnvelope
 
 
 @pytest.mark.asyncio
 async def test_missing_route_fails_closed_before_any_model_call() -> None:
     route = _RouteRecorder(None)
-    invoker = _Invoker(_AnswerDraft(answer="x"))
+    invoker = _Invoker(_TurnEnvelope(answer=_AnswerDraft(answer="x")))
     models = _ModelFactory()
     request = MainTurnRequest(identity=_IDENTITY, mode=Mode.DISCUSS, prompt_text="问题")
 
@@ -161,7 +167,7 @@ async def test_missing_route_fails_closed_before_any_model_call() -> None:
 @pytest.mark.asyncio
 async def test_attached_sources_fail_closed_without_consent_channel() -> None:
     route = _RouteRecorder(SimpleNamespace(executor=object(), snapshot=object()))
-    invoker = _Invoker(_AnswerDraft(answer="x"))
+    invoker = _Invoker(_TurnEnvelope(answer=_AnswerDraft(answer="x")))
     request = MainTurnRequest(
         identity=_IDENTITY,
         mode=Mode.DISCUSS,
@@ -193,7 +199,7 @@ async def test_attached_sources_fail_closed_without_consent_channel() -> None:
 @pytest.mark.asyncio
 async def test_factory_binds_request_text_and_returns_agent_turn() -> None:
     route = _RouteRecorder(SimpleNamespace(executor=object(), snapshot=object()))
-    invoker = _Invoker(_AnswerDraft(answer="答"))
+    invoker = _Invoker(_TurnEnvelope(answer=_AnswerDraft(answer="答")))
     factory = build_governed_turn_factory(
         resolve_route=route,
         build_model=_ModelFactory(),
@@ -235,7 +241,7 @@ class _RecordingAgent:
 
 @pytest.mark.asyncio
 async def test_execute_mode_answers_directly_with_discuss_instructions() -> None:
-    invoker = _Invoker(_AnswerDraft(answer="直答"))
+    invoker = _Invoker(_TurnEnvelope(answer=_AnswerDraft(answer="直答")))
     request = MainTurnRequest(identity=_IDENTITY, mode=Mode.EXECUTE, prompt_text="直接回答")
 
     decision = await run_governed_turn(
@@ -248,7 +254,7 @@ async def test_execute_mode_answers_directly_with_discuss_instructions() -> None
 
     assert decision.action is LoopAction.ANSWER
     assert decision.text == "直答"
-    assert invoker.calls[0]["output_type"] is _AnswerDraft
+    assert invoker.calls[0]["output_type"] is _TurnEnvelope
     # 执行模式的直答仍是「只回答、不行动」指令（执行动作由派发链负责）。
     assert "不取数" in invoker.calls[0]["instructions"]
     assert "不调用任何外部服务" in invoker.calls[0]["instructions"]
@@ -256,7 +262,7 @@ async def test_execute_mode_answers_directly_with_discuss_instructions() -> None
 
 @pytest.mark.asyncio
 async def test_observations_are_inlined_into_prompt_without_granting_actions() -> None:
-    invoker = _Invoker(_AnswerDraft(answer="答"))
+    invoker = _Invoker(_TurnEnvelope(answer=_AnswerDraft(answer="答")))
     context = TurnContext(
         mode=Mode.DISCUSS,
         turn=2,
@@ -276,12 +282,12 @@ async def test_observations_are_inlined_into_prompt_without_granting_actions() -
     )
 
     assert invoker.calls[0]["prompt"] == "原始问题\n\n已获资料观测：\n已读公告A"
-    assert invoker.calls[0]["output_type"] is _AnswerDraft
+    assert invoker.calls[0]["output_type"] is _TurnEnvelope
 
 
 @pytest.mark.asyncio
 async def test_blank_observations_do_not_alter_prompt() -> None:
-    invoker = _Invoker(_AnswerDraft(answer="答"))
+    invoker = _Invoker(_TurnEnvelope(answer=_AnswerDraft(answer="答")))
     context = TurnContext(
         mode=Mode.DISCUSS,
         turn=2,
@@ -297,6 +303,87 @@ async def test_blank_observations_do_not_alter_prompt() -> None:
     )
 
     assert invoker.calls[0]["prompt"] == "原始问题"
+
+
+def test_clarification_envelope_yields_clarify_decision() -> None:
+    output = _TurnEnvelope(
+        clarification=_ClarificationDraft(
+            question="你关注行业还是个股？",
+            options=["行业", "个股"],
+            impact="决定分析口径",
+        )
+    )
+
+    decision = _envelope_decision(_IDENTITY, output, Mode.DISCUSS)
+
+    assert decision.action is LoopAction.CLARIFY
+    assert decision.text == "你关注行业还是个股？"
+    assert decode_json_doc(decision.structured_fields or "{}") == {
+        "question": "你关注行业还是个股？",
+        "options": ["行业", "个股"],
+        "impact": "决定分析口径",
+    }
+
+
+def test_plan_mode_clarification_is_allowed_with_empty_option_defaults() -> None:
+    decision = _envelope_decision(
+        _IDENTITY,
+        _TurnEnvelope(clarification=_ClarificationDraft(question="研究哪段时间范围？")),
+        Mode.PLAN,
+    )
+
+    assert decision.action is LoopAction.CLARIFY
+    decoded = decode_json_doc(decision.structured_fields or "{}")
+    assert isinstance(decoded, dict)
+    assert decoded["options"] == []
+    assert decoded["impact"] == ""
+
+
+def test_plan_mode_answer_payload_is_rejected_not_fabricated() -> None:
+    with pytest.raises(AgentServiceError) as excinfo:
+        _envelope_decision(_IDENTITY, _TurnEnvelope(answer=_AnswerDraft(answer="直接结论")), Mode.PLAN)
+
+    assert excinfo.value.code is AgentErrorCode.OPERATION_UNKNOWN
+
+
+def test_envelope_with_multiple_payloads_is_rejected() -> None:
+    output = _TurnEnvelope(
+        answer=_AnswerDraft(answer="答"),
+        clarification=_ClarificationDraft(question="问"),
+    )
+
+    with pytest.raises(AgentServiceError) as excinfo:
+        _envelope_decision(_IDENTITY, output, Mode.DISCUSS)
+
+    assert excinfo.value.code is AgentErrorCode.OPERATION_UNKNOWN
+
+
+def test_empty_envelope_is_rejected() -> None:
+    with pytest.raises(AgentServiceError) as excinfo:
+        _envelope_decision(_IDENTITY, _TurnEnvelope(), Mode.DISCUSS)
+
+    assert excinfo.value.code is AgentErrorCode.OPERATION_UNKNOWN
+
+
+def test_turn_prompt_injects_consumed_clarification_answers_once() -> None:
+    request = MainTurnRequest(
+        identity=_IDENTITY,
+        mode=Mode.DISCUSS,
+        prompt_text="按刚才的答复继续",
+        clarification_answers=(
+            ClarificationAnswerFact(
+                decision_id="decision-1",
+                question_text="关注行业还是个股？",
+                answer_text="行业景气",
+                consumed_at="2026-01-01T00:00:00.000000Z",
+            ),
+        ),
+    )
+
+    prompt = _turn_prompt(request)
+
+    assert prompt.prompt == "按刚才的答复继续\n\n已澄清信息（以此为准）：\n用户已澄清：关注行业还是个股？ → 行业景气"
+    assert prompt.output is _TurnEnvelope
 
 
 @pytest.mark.asyncio
@@ -367,7 +454,7 @@ async def test_turn_without_injected_model_uses_gateway_and_binds_only_scenario(
             created.append((args, kwargs))
 
     monkeypatch.setattr("services.agent_service.model.GatewayModel", _FakeGateway)
-    invoker = _Invoker(_AnswerDraft(answer="答"))
+    invoker = _Invoker(_TurnEnvelope(answer=_AnswerDraft(answer="答")))
 
     decision = await run_governed_turn(
         MainTurnRequest(identity=_IDENTITY, mode=Mode.DISCUSS, prompt_text="问题"),

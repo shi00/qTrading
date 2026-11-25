@@ -34,7 +34,7 @@ def build_decision_card(
     draft: str,
     submitting: bool,
     on_draft_change: Callable[[str, str], None],
-    on_submit: Callable[[str, str, str], None],
+    on_submit: Callable[[str, str, str | None], None],
 ) -> ft.Control:
     """单个必要决定的阅读卡（授权类只读，不给提交入口）。"""
 
@@ -210,7 +210,7 @@ def build_decisions_section(
     state: ResearchObserverState,
     *,
     on_draft_change: Callable[[str, str], None],
-    on_submit: Callable[[str, str, str], None],
+    on_submit: Callable[[str, str, str | None], None],
 ) -> list[ft.Control]:
     """待处理事项（必要决定逐卡）+ 最近一次答复交付状态。"""
 
@@ -225,6 +225,14 @@ def build_decisions_section(
                 submitting=state.submitting,
                 on_draft_change=on_draft_change,
                 on_submit=on_submit,
+            )
+        )
+    if state.answer_notice_key:
+        rows.append(
+            ft.Text(
+                I18n.get(state.answer_notice_key),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.TEXT_HINT,
             )
         )
     if state.last_answer_delivery_state:

@@ -68,13 +68,14 @@ def _fact(
     delivery_state: Any = None,
     consumption_state: Any = None,
     question_payload: str | None = '{"question": "选哪个？"}',
+    round_id: str | None = "r-1",
 ) -> SimpleNamespace:
     return SimpleNamespace(
         session_id=session_id,
         session_title=session_title,
         decision_id=decision_id,
         execution_id="e-1",
-        round_id="r-1",
+        round_id=round_id,
         decision_kind=decision_kind,
         revision=2,
         created_at="2026-11-24T01:00:00.000000Z",
@@ -219,6 +220,16 @@ class TestDecisionActions:
         _run(vm.submit_answer("d-text"))
         assert json.loads(service.answer_calls[0].answer_payload) == {"text": "选 A"}
         assert vm.state.draft_for("d-text") == ""
+
+    def test_clarification_answer_without_round_skips_delivery_and_notes_next_turn(self) -> None:
+        vm, service = _vm(facts=(_fact("d-text", round_id=None),))
+        _run(vm.refresh())
+        vm.set_answer_draft("d-text", "选 A")
+        _run(vm.submit_answer("d-text"))
+        assert len(service.answer_calls) == 1
+        assert service.answer_calls[0].expected_round_id is None
+        assert service.delivery_calls == []
+        assert vm.state.notice_key == "agent_research_clarification_next_turn"
 
     def test_empty_clarification_is_not_submitted(self) -> None:
         vm, service = _vm(facts=(_fact("d-text"),))

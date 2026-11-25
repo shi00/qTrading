@@ -62,7 +62,7 @@ def _decision(
     answered: bool = False,
     question_payload: str | None = '{"question": "选哪个候选？"}',
     execution_id: str = "e-1",
-    round_id: str = "r-1",
+    round_id: str | None = "r-1",
     expires_at: str | None = None,
 ) -> Any:
     return SimpleNamespace(
@@ -614,6 +614,25 @@ class TestDraftAndSubmit:
         assert len(service.search_calls) == 1
         assert len(service.read_calls) == 2
         assert vm.state.draft_for("d-1") == ""
+
+    @pytest.mark.asyncio
+    async def test_submit_without_round_skips_delivery_and_hints_next_turn(self) -> None:
+        """派发前澄清答复没有可投递轮次：保存即完成，明确提示下一轮带上。"""
+
+        service = _FakeService(read=_session_read(decisions=(_decision("d-1", round_id=None),)))
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+        vm.set_answer_draft("d-1", "选择第一家")
+
+        await vm.submit_answer("d-1", execution_id="e-1", round_id=None)
+
+        assert len(service.answer_calls) == 1
+        assert service.answer_calls[0].expected_round_id is None
+        assert service.deliver_calls == []
+        assert vm.state.answer_notice_key == "agent_research_clarification_next_turn"
+        assert vm.state.last_answer_delivery_state is None
+        assert vm.state.draft_for("d-1") == ""
+        assert vm.state.submitting is False
 
     @pytest.mark.asyncio
     async def test_submit_failure_keeps_draft_and_reports_code(self) -> None:

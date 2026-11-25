@@ -81,6 +81,7 @@ class LoopAction(Enum):
     RESULT = "result"
     TOOL_CALL = "tool_call"
     DELEGATE = "delegate"
+    CLARIFY = "clarify"
 
 
 class LoopRunState(Enum):
@@ -89,6 +90,7 @@ class LoopRunState(Enum):
     ANSWERED = "answered"
     PLANNED = "planned"
     RESEARCHED = "researched"
+    CLARIFIED = "clarified"
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,20 +182,22 @@ def mode_policy(
     if mode is Mode.DISCUSS:
         return ModePolicy(
             mode=mode,
-            actions=frozenset({LoopAction.ANSWER, LoopAction.TOOL_CALL}),
+            actions=frozenset({LoopAction.ANSWER, LoopAction.CLARIFY, LoopAction.TOOL_CALL}),
             tool_names=read_tool_names,
             allow_delegation=False,
         )
     if mode is Mode.PLAN:
         return ModePolicy(
             mode=mode,
-            actions=frozenset({LoopAction.PLAN, LoopAction.TOOL_CALL}),
+            actions=frozenset({LoopAction.PLAN, LoopAction.CLARIFY, LoopAction.TOOL_CALL}),
             tool_names=plan_tool_names,
             allow_delegation=False,
         )
     return ModePolicy(
         mode=mode,
-        actions=frozenset({LoopAction.ANSWER, LoopAction.RESULT, LoopAction.TOOL_CALL, LoopAction.DELEGATE}),
+        actions=frozenset(
+            {LoopAction.ANSWER, LoopAction.CLARIFY, LoopAction.RESULT, LoopAction.TOOL_CALL, LoopAction.DELEGATE}
+        ),
         tool_names=None,
         allow_delegation=True,
     )
@@ -311,6 +315,12 @@ class TurnDecision:
         if self.action in (LoopAction.ANSWER, LoopAction.PLAN):
             if not isinstance(self.text, str) or not self.text:
                 raise ValueError(f"{self.action.value} requires non-empty text")
+        if self.action is LoopAction.CLARIFY:
+            # 澄清必须携带可读问题与结构化载荷（选项/影响），不冒充直答。
+            if not isinstance(self.text, str) or not self.text:
+                raise ValueError("CLARIFY requires non-empty question text")
+            if self.structured_fields is None:
+                raise ValueError("CLARIFY requires structured fields")
         if self.action is LoopAction.PLAN and self.result_kind not in (None, PLAN_RESULT_KIND):
             raise ValueError("PLAN result_kind must be 'plan'")
         if self.action is LoopAction.RESULT:
@@ -351,14 +361,19 @@ class ResearchResultStore(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class LoopRunOutcome:
-    """循环成功终态（保存失败会抛错，不构造本对象）。"""
+    """循环成功终态（保存失败会抛错，不构造本对象）。
+
+    ``CLARIFIED`` 终态不产出成果（``result`` 为 ``None``），只携带澄清提案
+    ``clarification``；其余终态必须有已保存成果（``result`` 非空）。
+    """
 
     state: LoopRunState
-    result: ResearchResult
+    result: ResearchResult | None
     turns: int
     tool_calls: int
     delegations: int
     observations: tuple[LoopObservation, ...]
+    clarification: TurnDecision | None = None
 
 
 LoopPolicy = ModePolicy
@@ -490,7 +505,7 @@ class ExecutionLoop:
                 decision = await self._turn(
                     TurnContext(mode=self._mode, turn=turn_number, observations=tuple(observations))
                 )
-                if decision.action in (LoopAction.ANSWER, LoopAction.PLAN, LoopAction.RESULT):
+                if decision.action in (LoopAction.ANSWER, LoopAction.PLAN, LoopAction.RESULT, LoopAction.CLARIFY):
                     return await self._finish(
                         decision,
                         turns=turn_number,
@@ -566,6 +581,17 @@ class ExecutionLoop:
         observations: list[LoopObservation],
     ) -> LoopRunOutcome:
         self._require_action(decision.action)
+        if decision.action is LoopAction.CLARIFY:
+            # 澄清不是研究成果：不调用成果保存，也不伪造已保存结论。
+            return LoopRunOutcome(
+                state=LoopRunState.CLARIFIED,
+                result=None,
+                turns=turns,
+                tool_calls=tool_calls,
+                delegations=delegations,
+                observations=tuple(observations),
+                clarification=decision,
+            )
         if decision.action is LoopAction.PLAN:
             result_kind = PLAN_RESULT_KIND
             state = LoopRunState.PLANNED
