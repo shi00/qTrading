@@ -51,6 +51,7 @@ from ui.pubsub_topics import TOPIC_NAVIGATE
 from ui.theme import AppColors, AppStyles
 from ui.testing.anchor import anchored
 from ui.testing.e2e_ids import EIDS
+from ui.components.multi_subject_research_panel import MultiSubjectResearchPanel
 from ui.viewmodels import Message
 from ui.viewmodels.screener_view_model import (
     _MAX_LOG_CARDS,
@@ -67,6 +68,11 @@ from ui.viewmodels.business_research_view_model import (
     OBJECT_KIND_CANDIDATE,
     OBJECT_KIND_STOCK,
     BusinessResearchRequest,
+)
+from ui.viewmodels.multi_subject_research_view_model import (
+    MISSING_REASON_IDENTITY,
+    MultiSubjectResearchViewModel,
+    SubjectCandidate,
 )
 from ui.viewmodels.news_insight_view_model import NewsInsightViewModel
 from ui.viewmodels.sentiment_index_view_model import SentimentIndexViewModel
@@ -309,6 +315,93 @@ def _format_rows(
         fmt["_raw"] = raw  # #423: 携带原始行引用, 供 _on_row_click 反查 (替代 ts_code 字典反查, 避免同名多行覆盖)
         formatted.append(fmt)
     return formatted
+
+
+def _build_multi_research_candidates(rows: list[dict]) -> tuple[SubjectCandidate, ...]:
+    """把当前页结果行冻结为多选候选（纯函数）。
+
+    同一 ``ts_code`` 只保留首次出现（去重）；无稳定标识的行仍作为候选呈现但不可选，
+    提交时显式计入缺失（R21）。
+    """
+
+    candidates: list[SubjectCandidate] = []
+    seen: set[str] = set()
+    for item in rows:
+        raw = item.get("_raw") if isinstance(item, Mapping) else None
+        source = raw if isinstance(raw, Mapping) else item
+        ts_code = source.get("ts_code")
+        name = source.get("name")
+        if isinstance(ts_code, str) and ts_code:
+            key = f"{OBJECT_KIND_CANDIDATE}:{ts_code}"
+            if key in seen:
+                continue
+            seen.add(key)
+            display = f"{name} ({ts_code})" if isinstance(name, str) and name else ts_code
+            candidates.append(
+                SubjectCandidate(
+                    object_kind=OBJECT_KIND_CANDIDATE,
+                    object_id=ts_code,
+                    display_name=display,
+                )
+            )
+            continue
+        display = str(name) if isinstance(name, str) and name else str(item.get("name") or "")
+        if not display:
+            continue
+        candidates.append(
+            SubjectCandidate(
+                object_kind=OBJECT_KIND_CANDIDATE,
+                object_id="",
+                display_name=display,
+                missing_reason=MISSING_REASON_IDENTITY,
+            )
+        )
+    return tuple(candidates)
+
+
+def _collect_multi_research_rows(formatted_rows: list[dict], section_formatted: Mapping[str, list[dict]]) -> list[dict]:
+    """当前页可参与多选研究的行（主表 + 当前三分区）。"""
+
+    rows: list[dict] = list(formatted_rows)
+    for group in section_formatted.values():
+        rows.extend(group)
+    return rows
+
+
+def _find_research_raw_row(rows: list[dict], ts_code: str) -> Mapping[str, typing.Any] | None:
+    """按 ts_code 找回源行（``_raw``）；找不到时返回 None（不伪造对象）。"""
+
+    for item in rows:
+        raw = item.get("_raw") if isinstance(item, Mapping) else None
+        if isinstance(raw, Mapping) and raw.get("ts_code") == ts_code:
+            return raw
+    return None
+
+
+def _build_multi_research_controls(
+    *,
+    on_open: typing.Callable[[ft.ControlEvent], None] | None,
+    panel: ft.Control | None,
+) -> list[ft.Control]:
+    """多选入口按钮 + 对照面板（未接线研究入口时不渲染按钮）。"""
+
+    controls: list[ft.Control] = []
+    if on_open is not None:
+        controls.append(
+            ft.Row(
+                [
+                    ft.OutlinedButton(
+                        content=ft.Text(I18n.get("agent_multi_subject_open"), size=AppStyles.FONT_SIZE_BODY_SM),
+                        icon=ft.Icons.CHECKLIST,
+                        on_click=safe_on_click(on_open),
+                    )
+                ],
+                alignment=ft.MainAxisAlignment.END,
+            )
+        )
+    if panel is not None:
+        controls.append(panel)
+    return controls
 
 
 def _get_page() -> ft.Page | None:
@@ -2183,6 +2276,8 @@ def _build_screener_table_card(
     is_realtime: bool,
     interaction_disabled: bool = False,
     on_row_research: typing.Callable[[dict], None] | None = None,
+    on_open_multi_research: typing.Callable[[ft.ControlEvent], None] | None = None,
+    multi_research_panel: ft.Control | None = None,
 ) -> ft.Container:
     """构建表格卡片区 (D7-3: AI 三分区 + 统一分页栏/空态).
 
@@ -2196,6 +2291,8 @@ def _build_screener_table_card(
     row_click = None if interaction_disabled else on_row_click
     page_no = state.page_no
     total_pages = state.total_pages
+
+    multi_controls = _build_multi_research_controls(on_open=on_open_multi_research, panel=multi_research_panel)
 
     pagination_row = ft.Row(
         safe_controls(
@@ -2248,6 +2345,7 @@ def _build_screener_table_card(
             [
                 # UX-09 / MAJOR-01: 选股结果区顶部固定风险提示（含空态）。
                 build_risk_disclaimer(compact=True),
+                *multi_controls,
                 ft.Container(
                     content=EmptyState(
                         icon=ft.Icons.INBOX,
@@ -2317,6 +2415,7 @@ def _build_screener_table_card(
             # UX-09 / MAJOR-01: 选股结果区顶部固定风险提示。
             [
                 build_risk_disclaimer(compact=True),
+                *multi_controls,
                 *body_rows,
                 ft.Divider(height=1, color=AppColors.DIVIDER),
                 pagination_row,
@@ -2574,6 +2673,8 @@ def ScreenerView(
     _wl_state, wl_vm = use_viewmodel(factory=lambda: WatchlistViewModel())
     nis_state, news_vm = use_viewmodel(factory=lambda: NewsInsightViewModel())
     sent_state, sent_vm = use_viewmodel(factory=lambda: SentimentIndexViewModel())
+    # 候选多选 → 多标的研究（选择/去重/上限/逐标的对照，见 VM 文档）。
+    multi_state, multi_vm = use_viewmodel(factory=lambda: MultiSubjectResearchViewModel())
 
     ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
@@ -3154,6 +3255,42 @@ def ScreenerView(
         ],
     )
 
+    def _collect_research_rows() -> list[dict]:
+        return _collect_multi_research_rows(formatted_rows, section_formatted)
+
+    def _multi_candidates() -> tuple[SubjectCandidate, ...]:
+        """把当前页行冻结为多选候选：同一 ts_code 去重，缺身份的行显式不可选。"""
+
+        return _build_multi_research_candidates(_collect_research_rows())
+
+    def _open_multi_research(_e: ft.ControlEvent | None = None) -> None:
+        """打开多选研究面板：候选取自当前页（只读，不重跑选股）。"""
+
+        multi_vm.open_candidates(_multi_candidates())
+
+    def _prepare_multi_subject(key: str) -> bool:
+        """把某个选中候选交给既有单对象草稿路径；无法准备时如实返回 False。"""
+
+        if on_start_research is None:
+            return False
+        prefix = f"{OBJECT_KIND_CANDIDATE}:"
+        if not key.startswith(prefix):
+            return False
+        ts_code = key[len(prefix) :]
+        raw = _find_research_raw_row(_collect_research_rows(), ts_code)
+        if raw is None:
+            return False
+        extra: list[tuple[str, str]] = []
+        if state.selected_strategy:
+            extra.append(("strategy", str(state.selected_strategy)))
+        if state.mode:
+            extra.append(("screener_mode", str(state.mode)))
+        request = _make_research_request(raw, object_kind=OBJECT_KIND_CANDIDATE, extra_summary=tuple(extra))
+        if request is None:
+            return False
+        on_start_research(request)
+        return True
+
     progress_visible = state.loading
     run_disabled = state.loading or state.is_retrying or not state.selected_strategy
     # UX-09 MINOR-07: 数值参数越界/非法时禁用「运行选股」; 校验在渲染期派生 (不持有状态),
@@ -3230,6 +3367,19 @@ def ScreenerView(
         # ADD-UI-002: HISTORY 加载中仅锁定表格/分页交互, 仍展示上一次完整结果 (身份不预提交)。
         interaction_disabled=state.mode == "HISTORY" and state.loading,
         on_row_research=_on_row_research if on_start_research is not None else None,
+        on_open_multi_research=_open_multi_research if on_start_research is not None else None,
+        multi_research_panel=(
+            MultiSubjectResearchPanel(
+                state=multi_state,
+                on_toggle=multi_vm.toggle,
+                on_select_all=multi_vm.select_all,
+                on_clear=multi_vm.clear,
+                on_submit=lambda: multi_vm.submit(_prepare_multi_subject),
+                on_close=multi_vm.close,
+            )
+            if multi_state.open
+            else None
+        ),
     )
 
     log_card = _build_screener_log_card(
