@@ -5,8 +5,9 @@
 - **共享实例**：观察层是壳层公共区的一层，不是某个业务页的私有状态；
   同一会话内经 ``shared_research_observer`` 复用同一 VM，展开/收起不换实例、
   不丢快照（收起只是 View 的可见性变化）。
-- **观察不控制**：只调用 facade 的只读查询入口（``search`` / ``read_session``）
-  与答复入口 ``answer``；不停止、不取消、不推进任何执行。
+- **观察为主、控制受限**：默认只调用 facade 的只读查询与答复入口；W-01 起新增
+  显式控制命令族（暂停/继续/终止/未知结案/重试/排队撤回）经同一 facade
+  ``control`` / ``retry_execution`` 提交，不解锁其它写路径。
 - **统一决定**：所有答复提交经 ``AgentService.answer``（P01 组合根 facade），
   不在 UI 直连 DAO，也不分散调用各合同方法。
 - **如实不可用**：未接线 / 运行时就绪门闩未通过时 ``available=False`` 并给出
@@ -20,6 +21,7 @@ VM 禁止 import flet / 持有控件 / 调 ``page.update()`` / 感知 locale（C
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -37,19 +39,31 @@ from core.agent_types import (
     DraftRead,
     DraftReadQuery,
     EventReadQuery,
+    ExecutionControlKind,
+    ExecutionControlReceipt,
+    ExecutionControlRequest,
     HistoryPage,
     HistoryQuery,
     HistoryRoundSelection,
     MCPServiceIdentity,
     MessageRole,
     Mode,
+    NON_RECOVERABLE_DISPLAY_STATES,
+    PAUSABLE_DISPLAY_STATES,
     PendingAnswerFact,
     PendingAnswerPage,
+    RESUMABLE_DISPLAY_STATES,
+    RETRYABLE_EXECUTION_DISPLAY_STATES,
+    RETRYABLE_LEAF_DISPLAY_STATES,
+    RetryExecutionReceipt,
+    RetryExecutionRequest,
+    RevisionReceipt,
     SaveAnswerRequest,
     SessionAction,
     SessionChangeCommand,
     SessionRead,
     SessionReadQuery,
+    WITHDRAWABLE_DISPLAY_STATES,
     json_doc,
 )
 from ui.viewmodels.ai_brain_settings_view_model import ROLE_PROMPT_NAME_KEYS
@@ -238,6 +252,10 @@ class AgentResearchService(Protocol):
 
     async def read_draft(self, query: DraftReadQuery, *, user_scope: str) -> DraftRead: ...
 
+    async def control(self, request: ExecutionControlRequest) -> RevisionReceipt | ExecutionControlReceipt: ...
+
+    async def retry_execution(self, request: RetryExecutionRequest) -> RetryExecutionReceipt: ...
+
 
 @dataclass(frozen=True)
 class SessionMessageView:
@@ -253,7 +271,12 @@ class SessionMessageView:
 
 @dataclass(frozen=True)
 class ExecutionNodeView:
-    """子任务树的只读节点（``depth`` 由父子关系展开计算，展开态由 VM 持久化）。"""
+    """子任务树的只读节点（``depth`` 由父子关系展开计算，展开态由 VM 持久化）。
+
+    ``node_id`` / ``execution_kind`` / ``current_round_id`` / ``revision`` /
+    ``dispatch_closed`` 为 W-01 控制动作所需的权威身份与 CAS 预期版；缺失时
+    对应动作一律禁用并给出原因，不按猜测值提交。
+    """
 
     execution_id: str
     parent_execution_id: str | None
@@ -264,6 +287,38 @@ class ExecutionNodeView:
     active_ms: int
     depth: int
     has_children: bool
+    node_id: str = ""
+    execution_kind: str = ""
+    current_round_id: str | None = None
+    revision: int = 0
+    dispatch_closed: bool = False
+
+
+@dataclass(frozen=True)
+class ControlActionView:
+    """单个可用/不可用控制动作（不可用时给出原因 key，不静默隐藏）。"""
+
+    kind: str
+    label_key: str
+    enabled: bool
+    disabled_reason_key: str | None = None
+    requires_reason: bool = False
+
+
+@dataclass(frozen=True)
+class ControlResultView:
+    """控制动作结果（成功/冲突/未知如实分列；未知不读成成功，R21）。"""
+
+    execution_id: str
+    kind: str
+    display_state: str
+    applied: bool
+    replayed: bool
+    reason: str | None
+    error_code: str | None
+    released_slot_count: int
+    open_slot_count: int
+    native_control_state: str
 
 
 @dataclass(frozen=True)
@@ -686,6 +741,16 @@ class ResearchObserverState:
                 return option
         return None
 
+    #: W-01 执行控制：在途目标（非空时该行动作禁用，防并发重复提交）。
+    control_pending_execution_id: str | None = None
+    #: 最近一次控制动作结果（成功/冲突/未知如实分列；切会话时清空）。
+    control_result: ControlResultView | None = None
+    #: 终止/未知结案的原因输入态（原因必填，未填不发命令）。
+    control_reason_execution_id: str | None = None
+    control_reason_kind: str | None = None
+    control_reason_text: str = ""
+    control_reason_error_key: str | None = None
+
     def draft_for(self, decision_id: str) -> str:
         """读取某决定的答复草稿（收起/重渲染后仍在）。"""
 
@@ -928,6 +993,11 @@ def _flatten_executions(
                 active_ms=execution.active_ms,
                 depth=depth,
                 has_children=bool(visible_children),
+                node_id=str(getattr(execution, "node_id", "") or ""),
+                execution_kind=str(getattr(execution, "execution_kind", "") or ""),
+                current_round_id=getattr(execution, "current_round_id", None),
+                revision=int(getattr(execution, "revision", 0) or 0),
+                dispatch_closed=bool(getattr(execution, "dispatch_closed", False)),
             )
         )
         if execution.execution_id in collapsed:
@@ -1471,8 +1541,121 @@ def _progress_summary(
     return ProgressSummaryView(doing_key=doing, waiting_key=waiting, saved_key=saved, next_key=next_key)
 
 
+#: 控制动作文案 key（显式命令族；不按模糊参数切换动作）。
+CONTROL_LABEL_KEYS: Final[dict[str, str]] = {
+    "pause": "agent_research_control_pause",
+    "resume": "agent_research_control_resume",
+    "terminate": "agent_research_control_terminate",
+    "close_unknown": "agent_research_control_close_unknown",
+    "withdraw_queued": "agent_research_control_withdraw",
+    "retry": "agent_research_control_retry",
+}
+
+#: 不可用原因 key（不可用动作一律显式禁用并给原因，不静默隐藏）。
+CONTROL_DISABLED_TERMINAL: Final[str] = "agent_research_control_disabled_terminal"
+CONTROL_DISABLED_NOT_PAUSABLE: Final[str] = "agent_research_control_disabled_not_pausable"
+CONTROL_DISABLED_NO_ROUND: Final[str] = "agent_research_control_disabled_no_round"
+CONTROL_DISABLED_NOT_RESUMABLE: Final[str] = "agent_research_control_disabled_not_resumable"
+CONTROL_DISABLED_DISPATCHED: Final[str] = "agent_research_control_disabled_dispatched"
+CONTROL_DISABLED_RETRY_STATE: Final[str] = "agent_research_control_disabled_retry_state"
+CONTROL_DISABLED_RETRY_ROOT: Final[str] = "agent_research_control_disabled_retry_root"
+CONTROL_UNAVAILABLE_KEY: Final[str] = "agent_research_control_unavailable"
+
+#: 控制命令键前缀（按执行身份 + 版 + 原因派生稳定键，双击/重传命中同一命令）。
+_CONTROL_COMMAND_KEY_PREFIX = "ui-control:"
+
+
+def _control_action(
+    kind: str,
+    *,
+    enabled: bool,
+    disabled_reason_key: str | None = None,
+    requires_reason: bool = False,
+) -> ControlActionView:
+    return ControlActionView(
+        kind=kind,
+        label_key=CONTROL_LABEL_KEYS[kind],
+        enabled=enabled,
+        disabled_reason_key=None if enabled else disabled_reason_key,
+        requires_reason=requires_reason,
+    )
+
+
+def control_actions_for(node: ExecutionNodeView, *, root: ExecutionNodeView | None) -> tuple[ControlActionView, ...]:
+    """按节点/根事实给出控制动作表（纯函数；不可用给原因，不猜可提交）。
+
+    - 暂停/继续/终止/未知结案：任一非终态节点可用；暂停要求有效轮；
+    - 撤回：仅未派发排队项（无有效轮、门闩未关）可用；
+    - 重试：仅非根的可重试叶（``failed`` / ``ended``）且根处于可重试状态时可用。
+    """
+
+    terminal = node.display_state in NON_RECOVERABLE_DISPLAY_STATES
+    has_round = node.current_round_id is not None
+    actions: list[ControlActionView] = []
+
+    if node.display_state in PAUSABLE_DISPLAY_STATES:
+        actions.append(_control_action("pause", enabled=has_round, disabled_reason_key=CONTROL_DISABLED_NO_ROUND))
+    elif node.display_state in RESUMABLE_DISPLAY_STATES:
+        actions.append(_control_action("pause", enabled=False, disabled_reason_key=CONTROL_DISABLED_NOT_PAUSABLE))
+    else:
+        actions.append(
+            _control_action(
+                "pause",
+                enabled=False,
+                disabled_reason_key=CONTROL_DISABLED_TERMINAL if terminal else CONTROL_DISABLED_NOT_PAUSABLE,
+            )
+        )
+
+    actions.append(
+        _control_action(
+            "resume",
+            enabled=node.display_state in RESUMABLE_DISPLAY_STATES,
+            disabled_reason_key=CONTROL_DISABLED_TERMINAL if terminal else CONTROL_DISABLED_NOT_RESUMABLE,
+        )
+    )
+    actions.append(
+        _control_action(
+            "terminate",
+            enabled=not terminal,
+            disabled_reason_key=CONTROL_DISABLED_TERMINAL,
+            requires_reason=True,
+        )
+    )
+    actions.append(
+        _control_action(
+            "close_unknown",
+            enabled=not terminal,
+            disabled_reason_key=CONTROL_DISABLED_TERMINAL,
+            requires_reason=True,
+        )
+    )
+    withdrawable = node.display_state in WITHDRAWABLE_DISPLAY_STATES and not has_round and not node.dispatch_closed
+    actions.append(
+        _control_action(
+            "withdraw_queued",
+            enabled=withdrawable,
+            disabled_reason_key=CONTROL_DISABLED_TERMINAL if terminal else CONTROL_DISABLED_DISPATCHED,
+        )
+    )
+    if node.parent_execution_id is not None:
+        retryable_leaf = node.display_state in RETRYABLE_LEAF_DISPLAY_STATES
+        root_retryable = (
+            root is not None
+            and root.display_state in RETRYABLE_EXECUTION_DISPLAY_STATES
+            and root.current_round_id is not None
+        )
+        actions.append(
+            _control_action(
+                "retry",
+                enabled=retryable_leaf and root_retryable,
+                disabled_reason_key=CONTROL_DISABLED_RETRY_ROOT if retryable_leaf else CONTROL_DISABLED_RETRY_STATE,
+            )
+        )
+    return tuple(actions)
+
+
 class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState]):
-    """壳层公共研究观察层 VM（共享实例；观察不控制执行）。"""
+    """壳层公共研究观察层 VM（共享实例；观察 + W-01 显式控制命令族）。"""
 
     def __init__(
         self,
@@ -1583,6 +1766,254 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         if not target:
             return
         await self.refresh(target)
+
+    # ------------------------------------------------------------------
+    # W-01 执行控制（显式命令族；只作用于目标执行，不连带其它执行）
+    # ------------------------------------------------------------------
+
+    def execution_node(self, execution_id: str) -> ExecutionNodeView | None:
+        """按执行身份取当前投影节点（未知返回 ``None``，不按猜测提交）。"""
+
+        for node in self._state.execution_nodes:
+            if node.execution_id == execution_id:
+                return node
+        return None
+
+    def control_actions(self, execution_id: str) -> tuple[ControlActionView, ...]:
+        """取某执行节点的控制动作表（不可用动作给原因 key）。"""
+
+        node = self.execution_node(execution_id)
+        if node is None:
+            return ()
+        return control_actions_for(node, root=self._root_for(node))
+
+    async def pause_execution(self, execution_id: str) -> None:
+        """暂停目标执行（关该执行的派发门，不连带其它执行/轮次）。"""
+
+        await self._submit_control(ExecutionControlKind.PAUSE, execution_id)
+
+    async def resume_execution(self, execution_id: str) -> None:
+        """继续暂停中的目标执行（从持久状态重开派发门）。"""
+
+        await self._submit_control(ExecutionControlKind.RESUME, execution_id)
+
+    async def terminate_execution(self, execution_id: str, *, reason: str) -> None:
+        """终止目标执行（必填终止原因；不释放未核实名额）。"""
+
+        await self._submit_control(ExecutionControlKind.TERMINATE, execution_id, reason=reason)
+
+    async def close_unknown_execution(self, execution_id: str, *, reason: str) -> None:
+        """未知结案（必填证据原因；落 ``closed_unknown``，不伪装完成，R21）。"""
+
+        await self._submit_control(ExecutionControlKind.CLOSE_UNKNOWN, execution_id, reason=reason)
+
+    async def withdraw_execution(self, execution_id: str) -> None:
+        """撤回排队项（仅未派发排队项；已派发一律拒绝，不按撤回处理）。"""
+
+        await self._submit_control(ExecutionControlKind.WITHDRAW_QUEUED, execution_id)
+
+    def prompt_control_reason(self, execution_id: str, kind: str) -> None:
+        """进入终止/未知结案的原因输入态（原因必填，UI 不预设默认原因）。"""
+
+        if kind not in (ExecutionControlKind.TERMINATE.value, ExecutionControlKind.CLOSE_UNKNOWN.value):
+            return
+        self._set_state(
+            control_reason_execution_id=execution_id,
+            control_reason_kind=kind,
+            control_reason_text="",
+            control_reason_error_key=None,
+        )
+
+    def cancel_control_reason(self) -> None:
+        """取消原因输入（不发命令）。"""
+
+        self._set_state(
+            control_reason_execution_id=None,
+            control_reason_kind=None,
+            control_reason_text="",
+            control_reason_error_key=None,
+        )
+
+    def update_control_reason(self, text: str) -> None:
+        """更新原因输入（仅本地展示态，不触达执行）。"""
+
+        self._set_state(control_reason_text=text, control_reason_error_key=None)
+
+    async def submit_control_reason(self) -> None:
+        """提交带原因的终止/未知结案（空原因不发命令，如实标必填）。"""
+
+        execution_id = self._state.control_reason_execution_id
+        kind = self._state.control_reason_kind
+        reason = self._state.control_reason_text.strip()
+        if execution_id is None or kind is None:
+            return
+        if not reason:
+            self._set_state(control_reason_error_key="agent_research_control_reason_required")
+            return
+        self._set_state(control_reason_execution_id=None, control_reason_kind=None, control_reason_text="")
+        if kind == ExecutionControlKind.TERMINATE.value:
+            await self.terminate_execution(execution_id, reason=reason)
+        elif kind == ExecutionControlKind.CLOSE_UNKNOWN.value:
+            await self.close_unknown_execution(execution_id, reason=reason)
+
+    async def retry_execution(self, execution_id: str, target_node_id: str) -> None:
+        """重试某单任务（``execution_id`` 为根执行，``target_node_id`` 为失败叶）。
+
+        范围由服务按持久计划精确重算；UI 只提交目标身份与根执行预期版。
+        """
+
+        if self._service is None or not self._state.available:
+            self._set_state(last_error_code="CONTROL_UNAVAILABLE")
+            return
+        node = self.execution_node(execution_id)
+        target = self.execution_node(target_node_id)
+        if node is None or target is None or node.current_round_id is None or not target.node_id:
+            self._set_control_error(execution_id, "retry", "CONTROL_TARGET_UNAVAILABLE")
+            return
+        if self._state.control_pending_execution_id is not None:
+            return
+        session_id = self._state.session_id
+        if session_id is None:
+            self._set_control_error(execution_id, "retry", "CONTROL_SESSION_UNAVAILABLE")
+            return
+        command_id = self._control_command_id("retry", execution_id, node.revision, target.node_id)
+        request = RetryExecutionRequest(
+            user_scope=self._user_scope,
+            session_id=session_id,
+            execution_id=execution_id,
+            client_command_id=command_id,
+            expected_execution_revision=node.revision,
+            round_id=node.current_round_id,
+            targets=(target.node_id,),
+        )
+        self._set_state(control_pending_execution_id=execution_id, last_error_code=None)
+        try:
+            receipt = await self._service.retry_execution(request)
+        except asyncio.CancelledError:
+            self._set_state(control_pending_execution_id=None)
+            raise
+        except Exception as error:  # facade 已脱敏；如实报码，不伪装成功
+            self._set_control_error(execution_id, "retry", self._error_code(error))
+            return
+        self._set_state(
+            control_pending_execution_id=None,
+            control_result=ControlResultView(
+                execution_id=execution_id,
+                kind="retry",
+                display_state="planned" if receipt.applied else node.display_state,
+                applied=receipt.applied,
+                replayed=receipt.replayed,
+                reason=receipt.dispatch_reason or receipt.reason,
+                error_code=None,
+                released_slot_count=0,
+                open_slot_count=0,
+                native_control_state=receipt.dispatch_state,
+            ),
+        )
+        await self.refresh(self._state.session_id)
+
+    async def _submit_control(
+        self,
+        kind: ExecutionControlKind,
+        execution_id: str,
+        *,
+        reason: str | None = None,
+    ) -> None:
+        """提交单条控制命令：CAS 预期版取当前投影，成功/冲突/未知如实落状态。"""
+
+        if self._service is None or not self._state.available:
+            self._set_state(last_error_code="CONTROL_UNAVAILABLE")
+            return
+        node = self.execution_node(execution_id)
+        if node is None:
+            self._set_control_error(execution_id, kind.value, "CONTROL_TARGET_UNAVAILABLE")
+            return
+        if kind in (ExecutionControlKind.TERMINATE, ExecutionControlKind.CLOSE_UNKNOWN):
+            cleaned = (reason or "").strip()
+            if not cleaned:
+                self._set_control_error(execution_id, kind.value, "CONTROL_REASON_REQUIRED")
+                return
+            reason = cleaned
+        if self._state.control_pending_execution_id is not None:
+            return
+        session_id = self._state.session_id
+        if session_id is None:
+            self._set_control_error(execution_id, kind.value, "CONTROL_SESSION_UNAVAILABLE")
+            return
+        request = ExecutionControlRequest(
+            user_scope=self._user_scope,
+            session_id=session_id,
+            execution_id=execution_id,
+            client_command_id=self._control_command_id(kind.value, execution_id, node.revision, reason),
+            expected_execution_revision=node.revision,
+            kind=kind,
+            round_id=node.current_round_id,
+            reason=reason,
+        )
+        self._set_state(control_pending_execution_id=execution_id, last_error_code=None)
+        try:
+            receipt = await self._service.control(request)
+        except asyncio.CancelledError:
+            # R2：取消必须传播；先释放在途标记，避免存续期间永久禁用控制。
+            self._set_state(control_pending_execution_id=None)
+            raise
+        except Exception as error:  # facade 已脱敏；如实报码，不伪装已生效
+            self._set_control_error(execution_id, kind.value, self._error_code(error))
+            return
+        if not isinstance(receipt, ExecutionControlReceipt):
+            # 契约收窄：非控制回执不得读成控制成功（R21）。
+            self._set_control_error(execution_id, kind.value, "CONTROL_UNTYPED_RECEIPT")
+            return
+        self._set_state(
+            control_pending_execution_id=None,
+            control_result=ControlResultView(
+                execution_id=execution_id,
+                kind=kind.value,
+                display_state=receipt.display_state,
+                applied=receipt.applied,
+                replayed=receipt.replayed,
+                reason=receipt.reason,
+                error_code=None,
+                released_slot_count=len(receipt.released_slot_ids),
+                open_slot_count=len(receipt.open_slot_ids),
+                native_control_state=receipt.native_control_state,
+            ),
+        )
+        await self.refresh(self._state.session_id)
+
+    def _set_control_error(self, execution_id: str, kind: str, error_code: str) -> None:
+        node = self.execution_node(execution_id)
+        self._set_state(
+            control_pending_execution_id=None,
+            control_result=ControlResultView(
+                execution_id=execution_id,
+                kind=kind,
+                display_state=node.display_state if node is not None else "",
+                applied=False,
+                replayed=False,
+                reason=None,
+                error_code=error_code,
+                released_slot_count=0,
+                open_slot_count=0,
+                native_control_state="unknown",
+            ),
+        )
+
+    def _root_for(self, node: ExecutionNodeView) -> ExecutionNodeView | None:
+        current = node
+        for _ in range(32):  # 防御异常深链；仍找不到即未知（不猜根）
+            if current.parent_execution_id is None:
+                return current
+            parent = self.execution_node(current.parent_execution_id)
+            if parent is None:
+                return None
+            current = parent
+        return None
+
+    @staticmethod
+    def _control_command_id(kind: str, execution_id: str, revision: int, extra: str | None) -> str:
+        suffix = hashlib.sha256((extra or "").encode("utf-8")).hexdigest()[:12]
+        return f"{_CONTROL_COMMAND_KEY_PREFIX}{kind}:{execution_id}:{revision}:{suffix}"
 
     # ------------------------------------------------------------------
     # 会话列表与元数据（W-14；只读列表 + 元数据 CAS 动作，不派发研究）
@@ -2033,6 +2464,12 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
                 "plan_steps": (),
                 "plan_reference": None,
                 "plan_error_key": None,
+                "control_result": None,
+                "control_pending_execution_id": None,
+                "control_reason_execution_id": None,
+                "control_reason_kind": None,
+                "control_reason_text": "",
+                "control_reason_error_key": None,
             }
             if session_changed
             else {}

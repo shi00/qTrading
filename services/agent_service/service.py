@@ -70,6 +70,8 @@ from core.agent_types import (
     DraftTransferReceipt,
     EventPage,
     EventReadQuery,
+    ExecutionControlReceipt,
+    ExecutionControlRequest,
     HistoryPage,
     HistoryQuery,
     MarkAnswerDeliveredRequest,
@@ -82,6 +84,9 @@ from core.agent_types import (
     ReadMarkReceipt,
     ResearchEvent,
     ResearchSnapshot,
+    RetryCommandRecord,
+    RetryExecutionReceipt,
+    RetryExecutionRequest,
     RevisionReceipt,
     ReviseQueuedRequest,
     SaveAnswerRequest,
@@ -101,6 +106,9 @@ from core.agent_types import (
     SourceStopReceipt,
     SubmissionReceipt,
     derive_accept_identity,
+    json_doc,
+    plan_spec_digest,
+    sha256_hex,
     stable_id,
     validate_draft_read_query,
     validate_draft_save_command,
@@ -141,7 +149,9 @@ from services.agent_service.comparison import (
     require_group_lane_consistency,
     verify_group_manifest_authority,
 )
+from services.agent_service.control import RetryLauncher, plan_retry
 from services.agent_service.dispatch import DispatchOutcome, ResearchDispatcher, ResearchWorkflowResult
+from services.agent_service.main_turn import derive_frozen_selection_policy, plan_spec_from_proposal
 from services.agent_service.skills import (
     SkillAvailabilityReceipt,
     SkillCatalogService,
@@ -149,7 +159,7 @@ from services.agent_service.skills import (
     SkillPackageImportRequest,
 )
 from services.agent_service.sources import BusinessSourceService
-from utils.error_classifier import classify_error
+from utils.error_classifier import classify_error, classify_severity
 from utils.loop_local import get_loop_local
 
 if TYPE_CHECKING:
@@ -429,6 +439,7 @@ class AgentService:
         skills: SkillCatalogService | None = None,
         answer_sender: AnswerSender | None = None,
         lane_withdrawer: LaneWithdrawer | None = None,
+        retry_launcher: RetryLauncher | None = None,
     ) -> None:
         """``usage_dao`` 为共享模型调度账本（同一引擎）；缺省时费用投影如实报读取失败。
 
@@ -440,7 +451,8 @@ class AgentService:
         ``lane_withdrawer`` 为比较组停止的真实撤单端口；未接线时未派发路如实标
         「撤回未确认」，不把停止计划伪装成已撤回。默认（未注入）时直连 DAO
         撤单写接口 ``AgentDao.withdraw_comparison_lane``；DAO 未提供该接口或撤回
-        未确认时逐路如实标未确认。
+        未确认时逐路如实标未确认。``retry_launcher`` 为单任务重试的原生投递端口
+        （W-01）；未注入时重试只落持久事实并如实标 ``not_wired``，不伪造已重跑。
         """
 
         self._dao = dao
@@ -449,6 +461,7 @@ class AgentService:
         self._skills = skills
         self._answer_sender = answer_sender
         self._lane_withdrawer = lane_withdrawer
+        self._retry_launcher = retry_launcher
         #: 已停止的比较组（组派发门关闭事实）：在途编排的下一路一律零派发。
         self._stopped_groups: set[str] = set()
         # 进程内交付单飞（同一命令在途时不并发重发；原生发送按命令键幂等）。
@@ -1493,21 +1506,128 @@ class AgentService:
             )
         return await dispatcher.read_result(workflow_id)
 
-    async def control(self, request: ReviseQueuedRequest) -> RevisionReceipt:
-        """控制入口（§4.1 ``control``）：只按既有类型能力暴露「排队期修订」。
+    async def control(
+        self, request: ReviseQueuedRequest | ExecutionControlRequest
+    ) -> RevisionReceipt | ExecutionControlReceipt:
+        """控制入口（§4.1 ``control``）：按**显式命令类型**分派，不用模糊参数。
 
-        当前落库的控制命令族仅有 ``revise_queued``（SQ-07），故本入口只转交该
-        类型，不臆造取消/暂停等未落库命令。同一入口兼「投递 + 查回」：同命令键
-        同完整输入（正文/manifest/期望版/node 摘要相等）时由 DAO 事务查回**原
-        回执**（零新行、不重发）；同键异输入 → ``INPUT_CONFLICT``；已派发或非
-        ``queued`` → ``REVISION_CONFLICT``，均不以当前状态重推。
+        - ``ReviseQueuedRequest``：排队期修订（SQ-07，既有能力原样保留）；
+        - ``ExecutionControlRequest``：暂停 / 继续 / 终止 / 未知结案 / 排队撤回
+          （W-01）。暂停只关**目标执行**的派发门、不连带其它执行；继续从持久
+          状态重开派发门；终止与未知结案分列（``ended`` vs ``closed_unknown``，
+          未知不伪装为完成，R21）；已获准入的资源票据按事实处理，**未核实退出
+          一律不释放名额**。
+
+        两类请求都走「同命令键同输入查回原回执、异输入冲突」的幂等契约；暂停/
+        继续等应用事实由 DAO 事务落库，原生控制面（DBOS 取消/复接）未接线时
+        回执如实标 ``native_control_state=not_wired``，不冒充已生效于原生。
 
         原生投递接续归 Runtime（submit 回执 ``workflow_id`` 后的 launch，E-04/Q5）；
         本入口不派发、不越权推进。
         """
 
         self._require_open("control")
-        return await self._dao.revise_queued(request)
+        if isinstance(request, ReviseQueuedRequest):
+            return await self._dao.revise_queued(request)
+        if isinstance(request, ExecutionControlRequest):
+            return await self._dao.apply_execution_control(request)
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "unsupported control request type", "control")
+
+    async def retry_execution(self, request: RetryExecutionRequest) -> RetryExecutionReceipt:
+        """单任务重试（W-01）：按持久计划与被观察叶状态重算**精确范围**后落事实。
+
+        - 计划来源：权威 manifest → 冻结角色/能力策略 → 当前计划提案 →
+          ``PlanSpecProposal``（与派发面同源，不另造计划）；
+        - 范围：``compute_retry_scope`` + ``build_retry_payload``，只重做目标叶及
+          传递下游，范围外已完成前置原样保留；未知/完成/进行中叶拒绝重试；
+        - 落库：``record_retry_command`` 以 CAS + 命令键幂等记录重试事实（置
+          ``planned``，旧轮成果不改写）；
+        - 派发：仅当组合根注入 ``retry_launcher`` 时才投递原生载荷；未接线时
+          回执如实标 ``dispatch_state=not_wired``，不伪造已重跑。
+        """
+
+        self._require_open("retry_execution")
+        identity = f"{request.user_scope}/{request.execution_id}"
+        manifest = await self._dao.read_authoritative_manifest(
+            user_scope=request.user_scope, execution_id=request.execution_id
+        )
+        if manifest is None:
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "authoritative manifest unavailable", identity)
+        try:
+            policy = derive_frozen_selection_policy(manifest)
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+        if policy is None:
+            raise AgentServiceError(
+                AgentErrorCode.CONFIG_UNAVAILABLE, "frozen role/capability selection unavailable", identity
+            )
+        proposal = await self._dao.read_current_plan_proposal(
+            user_scope=request.user_scope, execution_id=request.execution_id
+        )
+        if proposal is None:
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "plan proposal unavailable", identity)
+        try:
+            plan = plan_spec_from_proposal(proposal, policy)
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+        session = await self._dao.get_session_read(
+            SessionReadQuery(session_id=request.session_id, limit=1), user_scope=request.user_scope
+        )
+        node_states = {
+            execution.node_id: execution.display_state
+            for execution in session.executions
+            if execution.parent_execution_id == request.execution_id
+        }
+        new_round_id = stable_id("round", [request.user_scope, request.execution_id, request.client_command_id])
+        digest = plan_spec_digest(plan)
+        retry_plan = plan_retry(
+            plan,
+            targets=request.targets,
+            node_states=node_states,
+            execution_id=request.execution_id,
+            new_round_id=new_round_id,
+            plan_digest=digest,
+        )
+        dao_request = RetryCommandRecord(
+            user_scope=request.user_scope,
+            session_id=request.session_id,
+            execution_id=request.execution_id,
+            client_command_id=request.client_command_id,
+            expected_execution_revision=request.expected_execution_revision,
+            round_id=request.round_id,
+            targets=request.targets,
+            new_round_id=new_round_id,
+            redo=retry_plan.scope.redo,
+            preserved=retry_plan.scope.preserved,
+            plan_digest=digest,
+            payload_digest=sha256_hex(json_doc(retry_plan.payload)),
+        )
+        receipt = await self._dao.record_retry_command(dao_request)
+        launcher = self._retry_launcher
+        if launcher is None:
+            return receipt
+        try:
+            submitted, reason = await launcher.launch(
+                retry_plan.payload,
+                user_scope=request.user_scope,
+                execution_id=request.execution_id,
+                round_id=new_round_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            classification = classify_error(exc, context="retry_launch")
+            severity = classify_severity(exc, context="retry_launch")
+            return replace(
+                receipt,
+                dispatch_state="failed",
+                dispatch_reason=f"{severity}:{classification.get('code', type(exc).__name__)}",
+            )
+        return replace(
+            receipt,
+            dispatch_state="submitted" if submitted else "not_wired",
+            dispatch_reason=reason,
+        )
 
     async def answer(self, request: SaveAnswerRequest) -> AnswerReceipt:
         """答复入口（§4.1 ``answer``）：委托答复线性化事务，回执三态分列。

@@ -31,7 +31,7 @@ from dataclasses import field as dataclass_field
 from datetime import datetime as dt
 from datetime import UTC
 from decimal import Decimal, InvalidOperation
-from enum import Enum
+from enum import Enum, StrEnum
 from pathlib import PureWindowsPath
 from typing import Any, Final, NoReturn, cast
 
@@ -6450,6 +6450,325 @@ OPEN_OPERATION_PHASES: Final[frozenset[str]] = frozenset({"prepared", "dispatch_
 #: unknown/ending 可能仍有写者；paused/pausing 须走「总继续/单叶继续」语义，
 #: 直接 resume 会绕过暂停原因清理）。
 RECOVERY_UNVERIFIED_DISPLAY_STATES: Final[frozenset[str]] = frozenset({"unknown", "ending", "paused", "pausing"})
+
+
+# ---------------------------------------------------------------------------
+# W-01：执行控制命令族（暂停/继续/终止/未知结案；排队撤回）
+# ---------------------------------------------------------------------------
+
+#: 可暂停的推进态（排队项应走撤回，不按暂停处理）。
+PAUSABLE_DISPLAY_STATES: Final[frozenset[str]] = frozenset({"running", "waiting_dependency", "waiting_user"})
+#: 可继续的暂停态（``pausing`` 为暂停请求已落、原生退出未核定）。
+RESUMABLE_DISPLAY_STATES: Final[frozenset[str]] = frozenset({"paused", "pausing"})
+#: 可撤回的排队态（与 ``agent_dao.WITHDRAWABLE_LANE_STATES`` 同口径）。
+WITHDRAWABLE_DISPLAY_STATES: Final[frozenset[str]] = frozenset(
+    {"queued", "planned", "waiting_dependency", "waiting_user"}
+)
+#: 可作为重试目标的叶状态：只接受「可靠无成果」，未知/完成/进行中一律拒绝。
+RETRYABLE_LEAF_DISPLAY_STATES: Final[frozenset[str]] = frozenset({"failed", "ended"})
+#: 可发起重试的执行状态：可靠失败类终态；完成/撤回/未知结案不得重试（R21）。
+RETRYABLE_EXECUTION_DISPLAY_STATES: Final[frozenset[str]] = frozenset({"failed", "ended", "partial"})
+#: 未知结案原因码（写入轮次 stop_reason，供恢复面区分「用户终止」与「未知结案」）。
+ROUND_STOP_REASON_CLOSED_UNKNOWN: Final[str] = "closed_unknown"
+
+#: 控制命令的原生面标注（**设计取向，非缺失接线**）：应用层暂停/终止只关闭自身
+#: 派发门并落应用事实，**不调用 DBOS cancel/resume**——DBOS 的 cancel 会把非
+#: SUCCESS/ERROR 行统一改写成 CANCELLED（见 ``services/agent_service/recovery.py``
+#: 启动隔离注释），而 resume 必须经 ``grant_recovery_epoch`` + 叶终态核对才可靠；
+#: 由 UI 直接 cancel/resume 会绕过恢复 epoch 语义并把在途调用伪造成已中止。
+#: 因此暂停/终止**不影响在途调用**：在途步继续执行并按其原身份保存成果。
+NATIVE_CONTROL_NOT_WIRED: Final[str] = "not_wired"
+
+#: 控制回执原因码（明细由命令载荷落库，UI 只按码映射文案）。
+REASON_ALREADY_PAUSED: Final[str] = "already_paused"
+REASON_ALREADY_RUNNING: Final[str] = "already_running"
+REASON_ALREADY_TERMINATED: Final[str] = "already_terminated"
+REASON_ALREADY_CLOSED_UNKNOWN: Final[str] = "already_closed_unknown"
+REASON_ALREADY_WITHDRAWN: Final[str] = "already_withdrawn"
+REASON_NOT_PAUSABLE: Final[str] = "not_pausable"
+REASON_NOT_RESUMABLE: Final[str] = "not_resumable"
+REASON_ALREADY_DISPATCHED: Final[str] = "already_dispatched"
+REASON_TERMINAL_STATE: Final[str] = "terminal_state"
+REASON_NO_ACTIVE_ROUND: Final[str] = "no_active_round"
+REASON_RETRY_NOT_RETRYABLE: Final[str] = "retry_target_not_retryable"
+
+
+class ExecutionControlKind(StrEnum):
+    """控制命令种类（wire 拼写固定，不复用模糊参数）。"""
+
+    PAUSE = "pause"
+    RESUME = "resume"
+    TERMINATE = "terminate"
+    CLOSE_UNKNOWN = "close_unknown"
+    WITHDRAW_QUEUED = "withdraw_queued"
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionControlRequest:
+    """单执行/单轮控制请求：显式种类 + 期望版（CAS）+ 可选轮次身份。
+
+    ``round_id`` 给出时必须等于执行当前有效轮（防跨轮误停）；``reason`` 在
+    ``terminate`` / ``close_unknown`` 时必填（终止原因/未知原因不得缺省）。
+    """
+
+    user_scope: str
+    session_id: str
+    execution_id: str
+    client_command_id: str
+    expected_execution_revision: int
+    kind: ExecutionControlKind
+    round_id: str | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionControlReceipt:
+    """控制事实：前后状态、是否实际写入、名额处理与原生控制面如实标注。
+
+    ``released_slot_ids`` 只含「确证未启动」而释放的票据；``open_slot_ids`` 为
+    仍未释放的在途票据（终止/暂停不动它们，容量保持占用）。
+    """
+
+    execution_id: str
+    command_record_id: str
+    kind: str
+    previous_display_state: str
+    display_state: str
+    execution_revision: int
+    applied: bool
+    replayed: bool
+    reason: str | None
+    released_slot_ids: tuple[str, ...] = ()
+    open_slot_ids: tuple[str, ...] = ()
+    native_control_state: str = NATIVE_CONTROL_NOT_WIRED
+
+
+@dataclass(frozen=True, slots=True)
+class ControlDecision:
+    """纯状态机判定结果（不含数据库事实）。"""
+
+    applied: bool
+    next_state: str
+    dispatch_closed: bool
+    ends: bool
+    round_stop_reason: str | None
+    reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RetryExecutionRequest:
+    """单任务重试请求（调用方只给目标叶身份；范围/载荷由服务按持久计划重算）。"""
+
+    user_scope: str
+    session_id: str
+    execution_id: str
+    client_command_id: str
+    expected_execution_revision: int
+    round_id: str
+    targets: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RetryCommandRecord:
+    """服务→DAO 的重试事实（已算好精确范围与载荷摘要；DAO 不判断范围）。
+
+    ``new_round_id`` 为本次重试的新轮身份（服务层按命令键派生，幂等可重放）；
+    ``payload_digest`` 为父载荷摘要（不含正文，供核对与重放）。
+    """
+
+    user_scope: str
+    session_id: str
+    execution_id: str
+    client_command_id: str
+    expected_execution_revision: int
+    round_id: str
+    targets: tuple[str, ...]
+    new_round_id: str
+    redo: tuple[str, ...]
+    preserved: tuple[str, ...]
+    plan_digest: str
+    payload_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class RetryExecutionReceipt:
+    """重试事实：精确范围（redo/preserved）+ 命令身份 + 派发如实标注。"""
+
+    execution_id: str
+    command_record_id: str
+    round_id: str
+    new_round_id: str
+    redo: tuple[str, ...]
+    preserved: tuple[str, ...]
+    plan_digest: str
+    payload_digest: str
+    applied: bool
+    replayed: bool
+    reason: str | None
+    dispatch_state: str = NATIVE_CONTROL_NOT_WIRED
+    dispatch_reason: str | None = None
+
+
+def plan_control_transition(
+    kind: ExecutionControlKind,
+    display_state: str,
+    *,
+    current_round_id: str | None,
+    dispatch_closed: bool,
+    round_stop_reason: str | None,
+    identity: str,
+) -> ControlDecision:
+    """判定控制命令的合法迁移；非法迁移抛 ``REVISION_CONFLICT``（显式拒绝）。
+
+    ``applied=False`` 且 ``reason`` 非空表示「可核定的幂等重放」（已是目标态），
+    由 DAO 落命令事实但不改状态；非法迁移不落任何事实。
+    """
+
+    def fail(reason: str) -> NoReturn:
+        raise AgentServiceError(AgentErrorCode.REVISION_CONFLICT, reason, identity)
+
+    if kind is ExecutionControlKind.PAUSE:
+        if display_state in NON_RECOVERABLE_DISPLAY_STATES:
+            fail(REASON_TERMINAL_STATE)
+        if display_state in RESUMABLE_DISPLAY_STATES:
+            return ControlDecision(
+                applied=False,
+                next_state=display_state,
+                dispatch_closed=True,
+                ends=False,
+                round_stop_reason=None,
+                reason=REASON_ALREADY_PAUSED,
+            )
+        if display_state not in PAUSABLE_DISPLAY_STATES:
+            fail(REASON_NOT_PAUSABLE)
+        if current_round_id is None:
+            fail(REASON_NO_ACTIVE_ROUND)
+        return ControlDecision(
+            applied=True,
+            next_state="paused",
+            dispatch_closed=True,
+            ends=False,
+            round_stop_reason=None,
+            reason=None,
+        )
+
+    if kind is ExecutionControlKind.RESUME:
+        if display_state in NON_RECOVERABLE_DISPLAY_STATES:
+            fail(REASON_TERMINAL_STATE)
+        if display_state in PAUSABLE_DISPLAY_STATES:
+            # 继续一个未暂停的执行是幂等成功（不新建轮、不重放历史步）。
+            return ControlDecision(
+                applied=False,
+                next_state=display_state,
+                dispatch_closed=dispatch_closed,
+                ends=False,
+                round_stop_reason=None,
+                reason=REASON_ALREADY_RUNNING,
+            )
+        if display_state not in RESUMABLE_DISPLAY_STATES:
+            # unknown/ending/queued 等：未知不可续跑（须先未知结案），排队项走撤回。
+            fail(REASON_NOT_RESUMABLE)
+        return ControlDecision(
+            applied=True,
+            next_state="running" if current_round_id is not None else "queued",
+            dispatch_closed=False,
+            ends=False,
+            round_stop_reason=None,
+            reason=None,
+        )
+
+    if kind is ExecutionControlKind.TERMINATE:
+        if display_state in NON_RECOVERABLE_DISPLAY_STATES:
+            if display_state == "ended" and round_stop_reason == ROUND_STOP_REASON_USER_TERMINATION:
+                return ControlDecision(
+                    applied=False,
+                    next_state=display_state,
+                    dispatch_closed=True,
+                    ends=True,
+                    round_stop_reason=ROUND_STOP_REASON_USER_TERMINATION,
+                    reason=REASON_ALREADY_TERMINATED,
+                )
+            fail(REASON_TERMINAL_STATE)
+        return ControlDecision(
+            applied=True,
+            next_state="ended",
+            dispatch_closed=True,
+            ends=True,
+            round_stop_reason=ROUND_STOP_REASON_USER_TERMINATION,
+            reason=None,
+        )
+
+    if kind is ExecutionControlKind.CLOSE_UNKNOWN:
+        if display_state in NON_RECOVERABLE_DISPLAY_STATES:
+            if display_state == "closed_unknown":
+                return ControlDecision(
+                    applied=False,
+                    next_state=display_state,
+                    dispatch_closed=True,
+                    ends=True,
+                    round_stop_reason=ROUND_STOP_REASON_CLOSED_UNKNOWN,
+                    reason=REASON_ALREADY_CLOSED_UNKNOWN,
+                )
+            # 已定终态不得改写成「未知」（R21：已知结果不降级为未知）。
+            fail(REASON_TERMINAL_STATE)
+        return ControlDecision(
+            applied=True,
+            next_state="closed_unknown",
+            dispatch_closed=True,
+            ends=True,
+            round_stop_reason=ROUND_STOP_REASON_CLOSED_UNKNOWN,
+            reason=None,
+        )
+
+    if kind is ExecutionControlKind.WITHDRAW_QUEUED:
+        if display_state == "withdrawn":
+            return ControlDecision(
+                applied=False,
+                next_state=display_state,
+                dispatch_closed=True,
+                ends=True,
+                round_stop_reason=None,
+                reason=REASON_ALREADY_WITHDRAWN,
+            )
+        if current_round_id is not None or dispatch_closed or display_state not in WITHDRAWABLE_DISPLAY_STATES:
+            # 已派发/已有轮次/门闩已关：保留原事实，不按撤回处理。
+            fail(REASON_ALREADY_DISPATCHED)
+        return ControlDecision(
+            applied=True,
+            next_state="withdrawn",
+            dispatch_closed=True,
+            ends=True,
+            round_stop_reason=None,
+            reason=None,
+        )
+
+    raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "unknown control kind", identity)
+
+
+def validate_control_request(request: ExecutionControlRequest) -> None:
+    """入参边界校验（类型/空值/原因必填），非法一律 ``INPUT_INVALID``。"""
+
+    identity = f"{request.user_scope}/{request.execution_id}"
+    for name in ("user_scope", "session_id", "execution_id", "client_command_id"):
+        value = getattr(request, name)
+        if not isinstance(value, str) or value == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{name} must be non-empty text", identity)
+    revision = request.expected_execution_revision
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        raise AgentServiceError(
+            AgentErrorCode.INPUT_INVALID, "expected_execution_revision must be an int >= 1", identity
+        )
+    if not isinstance(request.kind, ExecutionControlKind):
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "kind must be ExecutionControlKind", identity)
+    if request.round_id is not None and (not isinstance(request.round_id, str) or request.round_id == ""):
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "round_id must be non-empty text", identity)
+    if request.reason is not None and (not isinstance(request.reason, str) or request.reason == ""):
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "reason must be non-empty text", identity)
+    if request.kind in (ExecutionControlKind.TERMINATE, ExecutionControlKind.CLOSE_UNKNOWN):
+        if request.reason is None:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID, "reason is required for terminate/close_unknown", identity
+            )
 
 
 # ---------------------------------------------------------------------------

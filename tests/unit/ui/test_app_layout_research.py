@@ -14,7 +14,7 @@ import time
 from collections.abc import Iterator
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import flet as ft
@@ -1677,3 +1677,247 @@ class TestShellLifecycleSafety:
         assert env["page"].run_task.call_args_list == []
 
         run_unmount_effects(env["component"])  # 清理阶段无 page / 无退订句柄：安全空转
+
+
+def _open_panel_with_session(env: dict) -> Any:
+    """展开观察层并驱动首轮只读刷新（会话/执行节点进入 state）。"""
+
+    _open_panel(env)
+    _drive_last_run_task(env)
+    _rerender(env)
+    panel = _observation_control(env)
+    assert panel is not None
+    return panel
+
+
+class TestShellCallbackWiring:
+    """壳层语义入口接线（W-01 执行控制 / 只读读取 / 对比面板 / 业务准备）。
+
+    这些回调都是壳层闭包：验证它们只调度共享 VM 的精确命令（不直连服务）、
+    未知输入不猜命令、失败/无提示时不伪装成功。
+    """
+
+    def test_control_callbacks_route_to_vm_commands(self, layout_env) -> None:
+        panel = _open_panel_with_session(layout_env)
+        vm = _shared_vm()
+        page = layout_env["page"]
+
+        for kind, command in (
+            ("pause", vm.pause_execution),
+            ("resume", vm.resume_execution),
+            ("withdraw_queued", vm.withdraw_execution),
+        ):
+            page.run_task.reset_mock()
+            panel.kwargs["on_control_execution"](kind, "e-1")
+            assert list(page.run_task.call_args.args) == [command, "e-1"]
+
+        page.run_task.reset_mock()
+        panel.kwargs["on_control_execution"]("unknown_kind", "e-1")
+        assert page.run_task.call_args_list == [], "未知控制类型不派发（不猜命令）"
+
+        page.run_task.reset_mock()
+        panel.kwargs["on_retry_execution"]("e-1", "n-1")
+        assert list(page.run_task.call_args.args) == [vm.retry_execution, "e-1", "n-1"]
+
+        panel.kwargs["on_prompt_control_reason"]("e-1", "terminate")
+        assert vm.state.control_reason_execution_id == "e-1"
+        assert vm.state.control_reason_kind == "terminate"
+
+        panel.kwargs["on_control_reason_change"]("用户终止：不再需要该路径")
+        assert vm.state.control_reason_text == "用户终止：不再需要该路径"
+
+        page.run_task.reset_mock()
+        panel.kwargs["on_control_reason_submit"]()
+        assert page.run_task.call_args.args[0] == vm.submit_control_reason
+
+        panel.kwargs["on_control_reason_cancel"]()
+        assert vm.state.control_reason_execution_id is None
+
+    def test_control_commands_without_page_context_are_noop(self, layout_env) -> None:
+        from flet.controls.context import _context_page
+
+        panel = _open_panel_with_session(layout_env)
+        page = layout_env["page"]
+        page.run_task.reset_mock()
+
+        token = _context_page.set(cast(Any, None))
+        try:
+            assert panel.kwargs["on_control_execution"]("pause", "e-1") is None
+            assert panel.kwargs["on_retry_execution"]("e-1", "n-1") is None
+        finally:
+            _context_page.reset(token)
+
+        assert page.run_task.call_args_list == [], "无 page 上下文时不得调度命令"
+
+    def test_read_only_entry_points_schedule_vm_commands(self, layout_env) -> None:
+        panel = _open_panel_with_session(layout_env)
+        vm = _shared_vm()
+        page = layout_env["page"]
+        assert vm.state.session_id is not None
+
+        page.run_task.reset_mock()
+        panel.kwargs["on_load_mcp_scope"]()
+        assert list(page.run_task.call_args.args) == [vm.load_mcp_scope]
+
+        page.run_task.reset_mock()
+        panel.kwargs["on_load_draft"]()
+        assert list(page.run_task.call_args.args) == [vm.load_draft, vm.state.session_id, None]
+
+        page.run_task.reset_mock()
+        panel.kwargs["on_retry_delivery"]("d-1")
+        assert list(page.run_task.call_args.args) == [vm.retry_delivery, "d-1"]
+
+    def test_composer_callbacks_schedule_with_intake(self, mock_i18n_state, mock_app_colors_state, monkeypatch) -> None:
+        service = _FakeService()
+        intake = SimpleNamespace(start_question=MagicMock(), start_plan=MagicMock())
+        env = _mount(
+            SimpleNamespace(service=service, ready=True, intake=intake),
+            service=service,
+            mock_i18n_state=mock_i18n_state,
+            mock_app_colors_state=mock_app_colors_state,
+            monkeypatch=monkeypatch,
+        )
+        panel = _open_panel_with_session(env)
+        vm = _shared_vm()
+        page = env["page"]
+        assert vm.state.composer_available is True
+
+        page.run_task.reset_mock()
+        panel.kwargs["on_send"]()
+        assert page.run_task.call_args.args[0] == vm.send_first_question
+
+        page.run_task.reset_mock()
+        panel.kwargs["on_start_plan"]()
+        assert page.run_task.call_args.args[0] == vm.start_confirmed_plan
+
+    def test_submit_decision_runs_arbitrated_answer(self, layout_env) -> None:
+        panel = _open_panel_with_session(layout_env)
+        vm = _shared_vm()
+        service = layout_env["service"]
+        vm.set_answer_draft("d-1", "选择第一家")
+
+        panel.kwargs["on_submit"]("d-1", "e-1", "r-1")
+        _drive_last_run_task(layout_env)
+
+        assert [request.decision_id for request in service.answer_calls] == ["d-1"]
+        assert vm.state.submitting is False
+        # 回执未带命令身份：如实标未交付（R21），不伪装已投递
+        assert vm.state.last_answer_delivery_state == "not_delivered"
+        assert vm.state.last_answer_delivery_reason == "delivery_command_missing"
+
+    def test_comparison_toggle_opens_panel_and_schedules_reads(self, layout_env) -> None:
+        from ui.viewmodels.research_comparison_view_model import ResearchComparisonViewModel
+
+        env = layout_env
+        page = env["page"]
+        toggle = _comparison_button(env)
+
+        _invoke(toggle.on_click, MagicMock())
+        _rerender(env)
+        panel = cast(Any, _body_row(env).controls[-1])
+        assert type(panel).__name__ == "Component", "展开后应挂对比面板"
+
+        scheduled = page.run_task.call_args.args[0]
+        assert isinstance(scheduled.__self__, ResearchComparisonViewModel)
+        assert scheduled.__name__ == "load_connections"
+
+        page.run_task.reset_mock()
+        panel.kwargs["on_submit"]()
+        scheduled = page.run_task.call_args.args[0]
+        assert isinstance(scheduled.__self__, ResearchComparisonViewModel)
+        assert scheduled.__name__ == "submit"
+
+        _invoke(_comparison_button(env).on_click, MagicMock())
+        _rerender(env)
+        assert _body_row(env).controls[-1] is not panel, "再次点击应收起对比面板"
+
+    def test_start_research_without_notice_keeps_panel_closed(
+        self, mock_i18n_state, mock_app_colors_state, monkeypatch
+    ) -> None:
+        from ui import app_layout as mod
+
+        prepared: list[tuple[Any, Any]] = []
+
+        class _BusinessVm:
+            state = SimpleNamespace(notice_key=None, last_session_id=None)
+
+            def subscribe(self, _listener: Any) -> Any:
+                return lambda: None
+
+            def dispose(self) -> None:
+                return None
+
+            async def prepare(self, request: Any, *, backtest_reader: Any = None) -> None:
+                prepared.append((request, backtest_reader))
+
+        business_vm = _BusinessVm()
+        monkeypatch.setattr(mod, "shared_business_research", lambda *a, **kw: business_vm)
+        captured: dict[str, Any] = {}
+
+        def _capture_pages(_tab, _settings, _screener, _backtest, start_research, *_rest):
+            captured["start_research"] = start_research
+            return ft.Row([])
+
+        monkeypatch.setattr(mod, "_build_pages_stack", _capture_pages)
+        service = _FakeService()
+        env = _mount(
+            SimpleNamespace(service=service, ready=True),
+            service=service,
+            mock_i18n_state=mock_i18n_state,
+            mock_app_colors_state=mock_app_colors_state,
+            monkeypatch=monkeypatch,
+        )
+
+        request = cast(Any, SimpleNamespace(kind="business"))
+        captured["start_research"](request, None)
+        call = env["page"].run_task.call_args
+        asyncio.run(call.args[0](*call.args[1:]))
+
+        assert prepared == [(request, None)]
+        _rerender(env)
+        assert _observation_control(env) is None, "无提示不自动展开观察层"
+
+    def test_start_research_prepared_notice_opens_receipt_session(
+        self, mock_i18n_state, mock_app_colors_state, monkeypatch
+    ) -> None:
+        from ui import app_layout as mod
+        from ui.viewmodels.business_research_view_model import NOTICE_DRAFT_PREPARED
+
+        class _BusinessVm:
+            state = SimpleNamespace(notice_key=NOTICE_DRAFT_PREPARED, last_session_id="s-1")
+
+            def subscribe(self, _listener: Any) -> Any:
+                return lambda: None
+
+            def dispose(self) -> None:
+                return None
+
+            async def prepare(self, request: Any, *, backtest_reader: Any = None) -> None:
+                return None
+
+        business_vm = _BusinessVm()
+        monkeypatch.setattr(mod, "shared_business_research", lambda *a, **kw: business_vm)
+        captured: dict[str, Any] = {}
+
+        def _capture_pages(_tab, _settings, _screener, _backtest, start_research, *_rest):
+            captured["start_research"] = start_research
+            return ft.Row([])
+
+        monkeypatch.setattr(mod, "_build_pages_stack", _capture_pages)
+        service = _FakeService()
+        env = _mount(
+            SimpleNamespace(service=service, ready=True),
+            service=service,
+            mock_i18n_state=mock_i18n_state,
+            mock_app_colors_state=mock_app_colors_state,
+            monkeypatch=monkeypatch,
+        )
+
+        request = cast(Any, SimpleNamespace(kind="business"))
+        captured["start_research"](request, None)
+        call = env["page"].run_task.call_args
+        asyncio.run(call.args[0](*call.args[1:]))
+        _rerender(env)
+
+        assert type(_observation_control(env)).__name__ == "Component", "草稿已准备时展开观察层"
+        assert service.read_calls[-1][0].session_id == "s-1", "按回执会话精确导航，不取历史首条"
