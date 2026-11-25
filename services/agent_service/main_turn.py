@@ -32,6 +32,7 @@ import logging
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Protocol, cast
 
 from core.agent_types import (
@@ -40,6 +41,8 @@ from core.agent_types import (
     AgentServiceError,
     AgentValidationError,
     CanonicalJson,
+    ClarificationAnswerFact,
+    ClarificationFact,
     CommandReceipt,
     CommandRef,
     Mode,
@@ -48,6 +51,7 @@ from core.agent_types import (
     PlanProposal,
     PlanSpecProposal,
     Purpose,
+    SaveClarificationDecisionRequest,
     SessionAction,
     SessionChangeCommand,
     SourceVersionRef,
@@ -80,8 +84,10 @@ from services.agent_service.loop import (
     LoopIdentity,
     LoopLimits,
     LoopRunOutcome,
+    LoopRunState,
     ResearchResultProducer,
     ToolExecutor,
+    TurnDecision,
 )
 from utils.sanitizers import DataSanitizer
 
@@ -106,6 +112,13 @@ logger = logging.getLogger(__name__)
 #: 路由级模型引用（真实模型名由执行器落账；回合身份只需稳定、可追溯的引用）。
 MAIN_TURN_MODEL_REF: Final[str] = "agent_research:governed"
 
+#: 澄清问题的可答窗口：超期即不再注入下一轮，不把过期问答冒充已澄清。
+CLARIFICATION_VALIDITY: Final[timedelta] = timedelta(days=7)
+
+#: 澄清结构化载荷键（问题文本另由 ``TurnDecision.text`` 承载）。
+CLARIFICATION_OPTIONS_KEY: Final[str] = "options"
+CLARIFICATION_IMPACT_KEY: Final[str] = "impact"
+
 #: 结构化计划步骤在回合 ``structured_fields`` 中的顶层键。
 PLAN_STEPS_KEY: Final[str] = "steps"
 #: 计划引用在冻结 manifest 中的顶层键（「开始这份计划」新意图据此定位已审版本）。
@@ -117,6 +130,12 @@ PLAN_SOURCE_AUTO: Final[str] = "auto"
 
 _PLAN_STEP_KEYS: Final[frozenset[str]] = frozenset({"id", "content", "depends_on"})
 _PLAN_REFERENCE_KEYS: Final[frozenset[str]] = frozenset({"execution_id", "plan_revision"})
+
+
+def _clarification_expiry() -> str:
+    """澄清问题的有界人答窗口（UTC 微秒 Z 文本，与 DAO wire 时点一致）。"""
+
+    return (datetime.now(UTC) + CLARIFICATION_VALIDITY).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _fail(code: str, path: str) -> AgentValidationError:
@@ -420,6 +439,8 @@ class MainTurnRequest:
     source_refs: tuple[SourceVersionRef, ...] = ()
     read_tool_names: frozenset[str] = frozenset()
     plan_tool_names: frozenset[str] = DEFAULT_PLAN_TOOLS
+    #: 本轮之前已答复且尚未消费的澄清问答（由受理入口取一次，只注入不重取）。
+    clarification_answers: tuple[ClarificationAnswerFact, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.identity, LoopIdentity):
@@ -432,14 +453,22 @@ class MainTurnRequest:
             value = getattr(self, name)
             if not isinstance(value, frozenset) or any(not isinstance(item, str) or not item for item in value):
                 raise ValueError(f"main turn {name} must be a frozenset of non-empty text")
+        if not isinstance(self.clarification_answers, tuple) or any(
+            not isinstance(item, ClarificationAnswerFact) for item in self.clarification_answers
+        ):
+            raise ValueError("main turn clarification_answers must be a tuple of ClarificationAnswerFact")
 
 
 @dataclass(frozen=True, slots=True)
 class MainTurnOutcome:
-    """主回合结果：循环终态 + 计划模式保存的计划引用（未保存为 ``None``）。"""
+    """主回合结果：循环终态 + 计划模式保存的计划引用（未保存为 ``None``）。
+
+    ``clarification`` 为澄清终态携带的提案（``CLARIFIED`` 时非空且无成果）。
+    """
 
     outcome: LoopRunOutcome
     plan_reference: PlanReference | None = None
+    clarification: TurnDecision | None = None
 
 
 #: 主回合回合端口工厂：按请求（含提示/模式）产出该次回合的模型调用。
@@ -499,6 +528,9 @@ class MainTurnRunner:
             depth=0,
         )
         outcome = await loop.run()
+        if outcome.state is LoopRunState.CLARIFIED:
+            # 澄清终态无成果，也不存在可保存的计划版（不伪造计划/直答）。
+            return MainTurnOutcome(outcome=outcome, clarification=outcome.clarification)
         if mode is not Mode.PLAN:
             return MainTurnOutcome(outcome=outcome)
         return MainTurnOutcome(outcome=outcome, plan_reference=await self._save_plan(request, outcome))
@@ -514,6 +546,9 @@ class MainTurnRunner:
         factory = self._plan_store_factory
         if factory is None:
             logger.info("[MainTurn] plan store not wired; readable plan saved without executable reference")
+            return None
+        if outcome.result is None:
+            # 澄清终态无成果：不保存计划版（也不伪造空计划）。
             return None
         steps = plan_steps_from_structured_fields(outcome.result.structured_fields)
         if not steps:
@@ -578,6 +613,16 @@ class AgentIntakeFacade(Protocol):
 
     async def submit_and_dispatch(self, request: AcceptRequest, *, command: CommandRef) -> Any: ...
 
+    async def save_clarification_decision(self, request: SaveClarificationDecisionRequest) -> ClarificationFact: ...
+
+    async def consume_clarification(
+        self, *, user_scope: str, session_id: str
+    ) -> tuple[ClarificationAnswerFact, ...]: ...
+
+    async def restore_clarification_consumption(
+        self, *, user_scope: str, session_id: str, decision_ids: tuple[str, ...]
+    ) -> int: ...
+
 
 @dataclass(frozen=True, slots=True)
 class MainTurnIntakeResult:
@@ -589,6 +634,8 @@ class MainTurnIntakeResult:
     plan_reference: PlanReference | None = None
     #: 讨论/计划模式的主回合终态（执行模式由持久 workflow 承接，此处为 None）。
     main_turn: MainTurnOutcome | None = None
+    #: 本次主回合产出的澄清决定身份（未澄清为 ``None``）。
+    clarification_decision_id: str | None = None
 
 
 class MainTurnIntake:
@@ -698,11 +745,32 @@ class MainTurnIntake:
             return result
         # 讨论/计划：受理后由生产主回合产出直答/可读计划；零研究动作由回合端口保证。
         identity = self._main_turn_identity(target_session, result.receipt, revision=revision, manifest=manifest)
-        turn_outcome = await self._main_turn.run(MainTurnRequest(identity=identity, mode=mode, prompt_text=question))
+        clarification_answers = await self._consume_clarification(target_session)
+        try:
+            turn_outcome = await self._main_turn.run(
+                MainTurnRequest(
+                    identity=identity,
+                    mode=mode,
+                    prompt_text=question,
+                    clarification_answers=clarification_answers,
+                )
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # 回合失败时答复未进入任何 prompt：补偿还原，避免静默丢失（原异常照抛）。
+            await self._restore_clarification(target_session, clarification_answers)
+            raise
+        clarification_decision_id = await self._save_clarification(
+            session_id=target_session,
+            identity=identity,
+            outcome=turn_outcome,
+        )
         return replace(
             result,
             main_turn=turn_outcome,
             plan_reference=turn_outcome.plan_reference or result.plan_reference,
+            clarification_decision_id=clarification_decision_id,
         )
 
     async def _start_execute_question(
@@ -736,17 +804,35 @@ class MainTurnIntake:
             # 未手选角色/Skills/MCP：无派发准入判据，先如实零派发（不耗模型、不猜授权）。
             return replace(result, dispatch=self._plan_unavailable(result, cause="role_policy_missing"))
         identity = self._main_turn_identity(session_id, result.receipt, revision=expected_revision, manifest=manifest)
+        clarification_answers: tuple[ClarificationAnswerFact, ...] = ()
         try:
-            turn_outcome = await runner.run(MainTurnRequest(identity=identity, mode=Mode.PLAN, prompt_text=question))
+            clarification_answers = await self._consume_clarification(session_id)
+            turn_outcome = await runner.run(
+                MainTurnRequest(
+                    identity=identity,
+                    mode=Mode.PLAN,
+                    prompt_text=question,
+                    clarification_answers=clarification_answers,
+                )
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # 模型/计划端口失败：如实零派发，不伪造已启动
+            await self._restore_clarification(session_id, clarification_answers)
             logger.warning(
                 "[MainTurn] execute first-question plan generation failed, zero dispatch (execution=%s): %s",
                 result.receipt.execution_id,
                 DataSanitizer.sanitize_error(exc),
             )
             return replace(result, dispatch=self._plan_unavailable(result, cause=_plan_failure_cause(exc)))
+        if getattr(turn_outcome, "clarification", None) is not None:
+            # 澄清：用户答复前零派发；不把「等待澄清」判成计划失败。
+            decision_id = await self._save_clarification(
+                session_id=session_id,
+                identity=identity,
+                outcome=turn_outcome,
+            )
+            return replace(result, main_turn=turn_outcome, clarification_decision_id=decision_id)
         reference = turn_outcome.plan_reference
         if reference is None:
             return replace(result, dispatch=self._plan_unavailable(result, cause="plan_not_produced"))
@@ -765,6 +851,100 @@ class MainTurnIntake:
             PLAN_UNAVAILABLE,
             params=(("cause", cause),),
         )
+
+    async def _consume_clarification(self, session_id: str) -> tuple[ClarificationAnswerFact, ...]:
+        """取走本会话未消费的澄清问答（只注入一次；读取失败不阻断新问题）。
+
+        未接线消费端口或无已答项即空集；读取失败只记录脱敏原因并照常受理新
+        问题（不伪造「已澄清」，也不因此拒绝新问题）。
+        """
+
+        consume = getattr(self._facade, "consume_clarification", None)
+        if not callable(consume):
+            return ()
+        typed_consume = cast(Callable[..., Any], consume)
+        try:
+            return tuple(await typed_consume(user_scope=self._user_scope, session_id=session_id))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[MainTurn] clarification answers unavailable; continuing without them (session=%s): %s",
+                session_id,
+                DataSanitizer.sanitize_error(exc),
+            )
+            return ()
+
+    async def _restore_clarification(self, session_id: str, facts: tuple[ClarificationAnswerFact, ...]) -> None:
+        """补偿还原本轮已消费的澄清答复（仅非空时；失败只记录脱敏原因）。
+
+        还原失败不掩盖原始异常（调用方仍按原异常/零派发处理），也不伪造
+        「已还原」；``CancelledError`` 依 R2 原样上抛。
+        """
+
+        if not facts:
+            return
+        restore = getattr(self._facade, "restore_clarification_consumption", None)
+        if not callable(restore):
+            logger.warning(
+                "[MainTurn] clarification restore port not wired; answers stay consumed (session=%s)", session_id
+            )
+            return
+        typed_restore = cast(Callable[..., Any], restore)
+        try:
+            await typed_restore(
+                user_scope=self._user_scope,
+                session_id=session_id,
+                decision_ids=tuple(fact.decision_id for fact in facts),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[MainTurn] clarification restore failed; answers stay consumed (session=%s): %s",
+                session_id,
+                DataSanitizer.sanitize_error(exc),
+            )
+
+    async def _save_clarification(
+        self, *, session_id: str, identity: LoopIdentity, outcome: MainTurnOutcome
+    ) -> str | None:
+        """把澄清提案落成待答复决定；返回决定身份（未澄清/未接线为 ``None``）。"""
+
+        decision = getattr(outcome, "clarification", None)
+        if decision is None:
+            return None
+        saver = getattr(self._facade, "save_clarification_decision", None)
+        if not callable(saver):
+            logger.warning("[MainTurn] clarification decision port not wired; decision not persisted")
+            return None
+        question_text = decision.text
+        if not isinstance(question_text, str) or not question_text:
+            return None
+        payload = decode_json_doc(decision.structured_fields or "{}")
+        section = payload if isinstance(payload, dict) else {}
+        raw_options = section.get(CLARIFICATION_OPTIONS_KEY)
+        options = (
+            tuple(item for item in raw_options if isinstance(item, str) and item.strip())
+            if isinstance(raw_options, list)
+            else ()
+        )
+        raw_impact = section.get(CLARIFICATION_IMPACT_KEY)
+        impact = raw_impact if isinstance(raw_impact, str) else ""
+        typed_saver = cast(Callable[..., Any], saver)
+        fact = await typed_saver(
+            SaveClarificationDecisionRequest(
+                user_scope=self._user_scope,
+                session_id=session_id,
+                execution_id=identity.execution_id,
+                node_id=identity.node_id,
+                question_text=question_text,
+                options=options,
+                impact=impact,
+                expires_at=_clarification_expiry(),
+            )
+        )
+        return fact.decision_id
 
     def _main_turn_identity(
         self,

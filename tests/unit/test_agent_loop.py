@@ -131,18 +131,18 @@ def _delegate_decision() -> TurnDecision:
 
 def test_mode_policy_binds_modes_to_loop_capabilities() -> None:
     discuss = mode_policy(Mode.DISCUSS, read_tool_names=frozenset({"read_source"}))
-    assert discuss.actions == frozenset({LoopAction.ANSWER, LoopAction.TOOL_CALL})
+    assert discuss.actions == frozenset({LoopAction.ANSWER, LoopAction.CLARIFY, LoopAction.TOOL_CALL})
     assert discuss.tool_names == frozenset({"read_source"})
     assert discuss.allow_delegation is False
 
     plan = mode_policy(Mode.PLAN)
-    assert plan.actions == frozenset({LoopAction.PLAN, LoopAction.TOOL_CALL})
+    assert plan.actions == frozenset({LoopAction.PLAN, LoopAction.CLARIFY, LoopAction.TOOL_CALL})
     assert plan.tool_names == frozenset({"write_plan", "read_plan"})
     assert plan.allow_delegation is False
 
     execute = mode_policy(Mode.EXECUTE)
     assert execute.actions == frozenset(
-        {LoopAction.ANSWER, LoopAction.RESULT, LoopAction.TOOL_CALL, LoopAction.DELEGATE}
+        {LoopAction.ANSWER, LoopAction.CLARIFY, LoopAction.RESULT, LoopAction.TOOL_CALL, LoopAction.DELEGATE}
     )
     assert execute.tool_names is None
     assert execute.allow_delegation is True
@@ -233,6 +233,67 @@ def test_plan_mode_rejects_answer_instead_of_plan() -> None:
 
     assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
     assert store.drafts == []
+
+
+def test_discuss_mode_clarify_returns_clarified_state_without_saving_result() -> None:
+    store = _Store()
+    turn = _ScriptedTurn(
+        [
+            TurnDecision(
+                action=LoopAction.CLARIFY,
+                text="你关注的是行业景气还是个股估值？",
+                structured_fields=json_doc(
+                    {
+                        "question": "你关注的是行业景气还是个股估值？",
+                        "options": ["行业", "个股"],
+                        "impact": "决定后续分析口径",
+                    }
+                ),
+            )
+        ]
+    )
+
+    outcome = asyncio.run(_loop(mode=Mode.DISCUSS, turn=turn, store=store).run())
+
+    assert outcome.state is LoopRunState.CLARIFIED
+    assert outcome.result is None
+    assert store.drafts == []
+    assert outcome.clarification is not None
+    assert outcome.clarification.action is LoopAction.CLARIFY
+    assert outcome.clarification.text == "你关注的是行业景气还是个股估值？"
+
+
+def test_plan_mode_clarify_does_not_produce_plan_result() -> None:
+    store = _Store()
+    turn = _ScriptedTurn(
+        [
+            TurnDecision(
+                action=LoopAction.CLARIFY,
+                text="研究哪段时间范围？",
+                structured_fields=json_doc({"question": "研究哪段时间范围？", "options": [], "impact": ""}),
+            )
+        ]
+    )
+
+    outcome = asyncio.run(_loop(mode=Mode.PLAN, turn=turn, store=store).run())
+
+    assert outcome.state is LoopRunState.CLARIFIED
+    assert outcome.result is None
+    assert store.drafts == []
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"text": "", "structured_fields": json_doc({"question": "q"})},
+        {"text": "问题", "structured_fields": None},
+    ],
+)
+def test_clarify_requires_question_text_and_structured_fields(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ValueError) as excinfo:
+        TurnDecision(action=LoopAction.CLARIFY, **kwargs)  # type: ignore[arg-type]  # 参数化验证构造校验
+
+    assert "CLARIFY" in str(excinfo.value)
 
 
 # --- 执行 / 一层委派 ---------------------------------------------------------

@@ -2578,6 +2578,60 @@ class BindActualInputReceipt:
     session_seq: int
 
 
+#: 澄清类决定（派发前提问）：主回合判定问题不明确时产出，UI 以文本答复。
+USER_CHOICE_DECISION_KIND: Final[str] = "user_choice"
+
+#: 澄清答复 schema：与 UI 文本答复载荷 ``{"text": ...}`` 对齐，空文本不允许。
+CLARIFICATION_ANSWER_SCHEMA: Final[CanonicalJson] = json_doc(
+    {
+        "type": "object",
+        "required": ["text"],
+        "properties": {"text": {"type": "string", "minLength": 1}},
+        "additionalProperties": False,
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SaveClarificationDecisionRequest:
+    """澄清决定保存输入（派发前提问；``round_id`` 尚无）。
+
+    ``question_text`` / ``options`` / ``impact`` 组成用户可读问题载荷（选项可为
+    空集，不伪造候选）；``expires_at`` 必须给出有界人答窗口（``None`` 等同
+    「永久可答」，DAO 以 ``INPUT_INVALID`` 拒绝）。决定身份由 DAO 按
+    ``(user_scope, execution_id, node_id, question digest)`` 稳定派生。
+    """
+
+    user_scope: str
+    session_id: str
+    execution_id: str
+    node_id: str
+    question_text: str
+    options: tuple[str, ...]
+    impact: str
+    expires_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class ClarificationFact:
+    """澄清决定保存事实（身份 + 版本 + 展示批次 + 有效期）。"""
+
+    decision_id: str
+    revision: int
+    presentation_batch_seq: int
+    expires_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class ClarificationAnswerFact:
+    """已答复且本轮被消费的澄清问答（下一轮 prompt 注入用，只产一次）。"""
+
+    decision_id: str
+    question_text: str
+    answer_text: str
+    consumed_at: str
+
+
 @dataclass(frozen=True)
 class SaveAnswerRequest:
     """答复保存输入（SQ-03「answer(original command)」；§5.3 答复线性化点）。
@@ -2588,7 +2642,8 @@ class SaveAnswerRequest:
 
     ``expected_execution_id`` / ``expected_round_id``（R2-I04）为调用方作答时
     看到的执行/轮次归属：DAO 在决定行锁内与权威行比对，不等即拒绝，证明提交的
-    是「哪一轮研究提出的哪个决定」，而非仅按 decision_id 猜归属。
+    是「哪一轮研究提出的哪个决定」，而非仅按 decision_id 猜归属。派发前的澄清
+    决定尚无轮次，``expected_round_id`` 为 ``None``（按 ``None == None`` 比对）。
     """
 
     user_scope: str
@@ -2596,7 +2651,7 @@ class SaveAnswerRequest:
     client_command_id: str
     expected_decision_revision: int
     expected_execution_id: str
-    expected_round_id: str
+    expected_round_id: str | None
     answer_payload: CanonicalJson
 
 
@@ -2632,7 +2687,7 @@ class PendingAnswerFact:
     session_title: str | None
     decision_id: str
     execution_id: str
-    round_id: str
+    round_id: str | None
     decision_kind: str
     revision: int
     created_at: str

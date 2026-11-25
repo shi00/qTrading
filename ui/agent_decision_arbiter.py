@@ -82,7 +82,7 @@ class DecisionArbiter:
         decision_id: str,
         *,
         execution_id: str,
-        round_id: str,
+        round_id: str | None,
         has_open_modal_dialog: bool,
     ) -> str | None:
         """登记研究决定提交意向；成功返回 ``None``，拒绝返回原因 i18n key。
@@ -164,7 +164,7 @@ def submit_arbitrated_action(
     owner: str,
     decision_id: str,
     execution_id: str,
-    round_id: str,
+    round_id: str | None,
     action: Callable[[], Awaitable[None]],
 ) -> str | None:
     """通用人工许可动作管线：同一唯一槽位仲裁 → 事件循环任务内执行一次。
@@ -203,7 +203,7 @@ def submit_decision(
     owner: str,
     decision_id: str,
     execution_id: str,
-    round_id: str,
+    round_id: str | None,
 ) -> str | None:
     """统一决定提交管线（唯一入口）：仲裁 → 经 ``page.run_task`` 调度 VM 写调用。
 

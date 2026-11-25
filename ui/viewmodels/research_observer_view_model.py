@@ -600,12 +600,16 @@ class PendingDecision:
 
     decision_id: str
     execution_id: str
-    round_id: str
+    round_id: str | None
     decision_kind: str
     revision: int
     created_at: str
     expires_at: str | None
     question_text: str | None
+    #: 澄清类决定的可选候选（空集表示未提供，不伪造候选）。
+    options: tuple[str, ...] = ()
+    #: 澄清类决定的影响说明（``None`` 表示未提供，不伪造说明）。
+    impact: str | None = None
 
     @property
     def answerable(self) -> bool:
@@ -626,7 +630,7 @@ class PendingAnswerView:
     session_title: str | None
     decision_id: str
     execution_id: str
-    round_id: str
+    round_id: str | None
     decision_kind: str
     revision: int
     stage: str
@@ -977,6 +981,8 @@ class ResearchObserverState:
     last_answer_delivery_state: str | None = None
     #: 最近一次交付失败原因码（未交付才能重试；None 表示无失败或已交付）。
     last_answer_delivery_reason: str | None = None
+    #: 无轮澄清答复的提示 key（答复将在下一次提问时带上；不冒充已投递）。
+    answer_notice_key: str | None = None
     #: 交付在途的原答复命令（同命令不并发重发；None 表示无在途交付）。
     answer_delivery_pending_command: str | None = None
     #: 跨会话待处理（P1-05）：三态分列 + 截断事实 + 徽标范围（R21）。
@@ -1261,8 +1267,8 @@ class ResearchObserverState:
         return bool(self.copy_selection_text.strip())
 
 
-def _extract_question_text(question_payload: str | None) -> str | None:
-    """从 CanonicalJson 载荷提取可读问题文本（不可解释则 None，不猜）。"""
+def _decode_question_payload(question_payload: str | None) -> dict[str, object] | None:
+    """CanonicalJson 载荷 → 字典（不可解释即 ``None``，不猜）。"""
 
     if not question_payload:
         return None
@@ -1270,12 +1276,43 @@ def _extract_question_text(question_payload: str | None) -> str | None:
         decoded = json.loads(question_payload)
     except (TypeError, ValueError):
         return None
-    if not isinstance(decoded, dict):
+    return decoded if isinstance(decoded, dict) else None
+
+
+def _extract_question_text(question_payload: str | None) -> str | None:
+    """从 CanonicalJson 载荷提取可读问题文本（不可解释则 None，不猜）。"""
+
+    decoded = _decode_question_payload(question_payload)
+    if decoded is None:
         return None
     for key in _QUESTION_KEYS:
         value = decoded.get(key)
         if isinstance(value, str) and value.strip():
             return value
+    return None
+
+
+def _extract_question_options(question_payload: str | None) -> tuple[str, ...]:
+    """提取澄清候选（仅非空文本；缺失/非法即空集，不补默认候选）。"""
+
+    decoded = _decode_question_payload(question_payload)
+    if decoded is None:
+        return ()
+    raw = decoded.get("options")
+    if not isinstance(raw, list):
+        return ()
+    return tuple(item.strip() for item in raw if isinstance(item, str) and item.strip())
+
+
+def _extract_question_impact(question_payload: str | None) -> str | None:
+    """提取澄清影响说明（缺失/空白即 ``None``，不渲染空占位）。"""
+
+    decoded = _decode_question_payload(question_payload)
+    if decoded is None:
+        return None
+    raw = decoded.get("impact")
+    if isinstance(raw, str) and raw.strip():
+        return raw
     return None
 
 
@@ -1296,6 +1333,8 @@ def _pending_decisions(read: SessionRead) -> tuple[PendingDecision, ...]:
                 created_at=decision.created_at,
                 expires_at=decision.expires_at,
                 question_text=_extract_question_text(decision.question_payload),
+                options=_extract_question_options(decision.question_payload),
+                impact=_extract_question_impact(decision.question_payload),
             )
         )
     return tuple(pending)
@@ -5513,7 +5552,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         drafts = tuple((key, value) for key, value in self._state.answer_drafts if key != decision_id)
         self._set_state(answer_drafts=(*drafts, (decision_id, text)))
 
-    async def submit_answer(self, decision_id: str, *, execution_id: str, round_id: str) -> None:
+    async def submit_answer(self, decision_id: str, *, execution_id: str, round_id: str | None) -> None:
         """提交答复：唯一写入口经 facade ``answer``（统一决定，不直连 DAO）。
 
         命令键按决定身份派生（P1-05）：重传/重启后命中同一答复命令，不为同一
@@ -5584,7 +5623,23 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             self._set_state(submitting=False, last_error_code=self._error_code(e))
             return
 
-        self._set_state(submitting=False, last_answer_delivery_state=_tag_text(receipt.delivery_state))
+        if round_id is None:
+            # 派发前的澄清答复没有可投递的原生轮次：保存即完成，跳过投递，
+            # 明确提示答复会在下一次提问时带上（不形成永久「待交付」假象）。
+            self._set_state(
+                submitting=False,
+                answer_drafts=tuple((key, value) for key, value in self._state.answer_drafts if key != decision_id),
+                answer_notice_key="agent_research_clarification_next_turn",
+                last_answer_delivery_state=None,
+                last_answer_delivery_reason=None,
+            )
+            await self.refresh()
+            return
+        self._set_state(
+            submitting=False,
+            last_answer_delivery_state=_tag_text(receipt.delivery_state),
+            answer_notice_key=None,
+        )
         command_record_id = getattr(receipt, "command_record_id", None)
         if not (isinstance(command_record_id, str) and command_record_id):
             # 保存回执未带原命令身份：不能假装已交付，保留草稿等重试入口（R21）。

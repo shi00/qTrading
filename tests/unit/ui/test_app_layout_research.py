@@ -134,9 +134,9 @@ class _FakeDecisionVm:
     """决定管线单测用的最小 VM：只记录 submit_answer 调用（含归属）。"""
 
     def __init__(self) -> None:
-        self.submitted: list[tuple[str, str, str]] = []
+        self.submitted: list[tuple[str, str, str | None]] = []
 
-    async def submit_answer(self, decision_id: str, *, execution_id: str, round_id: str) -> None:
+    async def submit_answer(self, decision_id: str, *, execution_id: str, round_id: str | None) -> None:
         self.submitted.append((decision_id, execution_id, round_id))
 
 

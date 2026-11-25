@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -13,6 +15,7 @@ from core.agent_types import (
     AgentErrorCode,
     AgentServiceError,
     AgentValidationError,
+    ClarificationAnswerFact,
     CommandRef,
     CommitState,
     MCPServiceIdentity,
@@ -717,6 +720,11 @@ class _IntakeFacade:
         self.sessions: list[Any] = []
         self.requests: list[Any] = []
         self.accepts: list[Any] = []
+        self.consumed: list[tuple[str, str]] = []
+        self.restored: list[tuple[str, str, tuple[str, ...]]] = []
+        self.clarification_requests: list[Any] = []
+        self.clarification_facts: tuple[Any, ...] = ()
+        self.saved_clarification_id = "decision-clarify-1"
         self._receipt = receipt
 
     async def change_session(self, command: Any) -> Any:
@@ -730,6 +738,20 @@ class _IntakeFacade:
     async def submit_and_dispatch(self, request: Any, *, command: Any) -> Any:
         self.requests.append(request)
         return SimpleNamespace(receipt=self._receipt, dispatch=None)
+
+    async def consume_clarification(self, *, user_scope: str, session_id: str) -> tuple[Any, ...]:
+        self.consumed.append((user_scope, session_id))
+        return self.clarification_facts
+
+    async def restore_clarification_consumption(
+        self, *, user_scope: str, session_id: str, decision_ids: tuple[str, ...]
+    ) -> int:
+        self.restored.append((user_scope, session_id, decision_ids))
+        return len(decision_ids)
+
+    async def save_clarification_decision(self, request: Any) -> Any:
+        self.clarification_requests.append(request)
+        return SimpleNamespace(decision_id=self.saved_clarification_id)
 
 
 class _SwitchGate:
@@ -856,15 +878,17 @@ async def test_intake_start_plan_refuses_without_source_manifest() -> None:
 
 
 class _MainTurnRunnerStub:
-    def __init__(self, plan_reference: PlanReference | None = None) -> None:
+    def __init__(self, plan_reference: PlanReference | None = None, *, clarification: Any = None) -> None:
         self.requests: list[MainTurnRequest] = []
         self._plan_reference = plan_reference
+        self._clarification = clarification
 
     async def run(self, request: MainTurnRequest, *, turn: Any = None) -> Any:
         self.requests.append(request)
         return SimpleNamespace(
             outcome=SimpleNamespace(result=SimpleNamespace(body_text="主回合回答")),
             plan_reference=self._plan_reference,
+            clarification=self._clarification,
         )
 
 
@@ -907,6 +931,182 @@ async def test_intake_discuss_runs_main_turn_and_returns_answer() -> None:
     assert runner.requests[0].mode is Mode.DISCUSS
     assert result.main_turn is not None
     assert result.main_turn.outcome.result.body_text == "主回合回答"
+
+
+@pytest.mark.asyncio
+async def test_intake_discuss_clarification_is_persisted_and_reported() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    decision = TurnDecision(
+        action=LoopAction.CLARIFY,
+        text="关注行业还是个股？",
+        structured_fields=json_doc(
+            {"question": "关注行业还是个股？", "options": ["行业", "个股"], "impact": "决定分析口径"}
+        ),
+    )
+    runner = _MainTurnRunnerStub(clarification=decision)
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+    )
+
+    result = await intake.start_question("怎么看", mode=Mode.DISCUSS)
+
+    assert result.clarification_decision_id == "decision-clarify-1"
+    request = facade.clarification_requests[0]
+    assert request.question_text == "关注行业还是个股？"
+    assert request.options == ("行业", "个股")
+    assert request.impact == "决定分析口径"
+    assert request.execution_id == result.receipt.execution_id
+    expires_at = datetime.strptime(request.expires_at, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+    assert expires_at > datetime.now(UTC)
+
+
+@pytest.mark.asyncio
+async def test_intake_injects_consumed_clarification_answers_into_main_turn() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    fact = ClarificationAnswerFact(
+        decision_id="decision-prev",
+        question_text="关注行业还是个股？",
+        answer_text="行业景气",
+        consumed_at="2026-01-01T00:00:00.000000Z",
+    )
+    facade.clarification_facts = (fact,)
+    runner = _MainTurnRunnerStub()
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+    )
+
+    result = await intake.start_question("继续分析", mode=Mode.DISCUSS)
+
+    assert facade.consumed == [("u1", result.session_id)]
+    assert runner.requests[0].clarification_answers == (fact,)
+    assert result.clarification_decision_id is None
+
+
+def _consumed_answer_fact() -> ClarificationAnswerFact:
+    return ClarificationAnswerFact(
+        decision_id="decision-prev",
+        question_text="关注行业还是个股？",
+        answer_text="行业景气",
+        consumed_at="2026-01-01T00:00:00.000000Z",
+    )
+
+
+class _FailingRunner:
+    def __init__(self, exception: BaseException) -> None:
+        self._exception = exception
+
+    async def run(self, request: MainTurnRequest, *, turn: Any = None) -> Any:
+        raise self._exception
+
+
+@pytest.mark.asyncio
+async def test_intake_discuss_failure_restores_consumed_clarification_before_raising() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    fact = _consumed_answer_fact()
+    facade.clarification_facts = (fact,)
+    runner = _FailingRunner(RuntimeError("model unavailable"))
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await intake.start_question("继续分析", mode=Mode.DISCUSS)
+
+    assert str(excinfo.value) == "model unavailable"
+    assert len(facade.restored) == 1
+    user_scope, session_id, decision_ids = facade.restored[0]
+    assert user_scope == "u1"
+    assert session_id == facade.consumed[0][1]
+    assert decision_ids == (fact.decision_id,)
+
+
+@pytest.mark.asyncio
+async def test_intake_discuss_cancellation_propagates_without_restore() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    facade.clarification_facts = (_consumed_answer_fact(),)
+    runner = _FailingRunner(asyncio.CancelledError())
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+    )
+
+    with pytest.raises(asyncio.CancelledError) as excinfo:
+        await intake.start_question("继续分析", mode=Mode.DISCUSS)
+
+    assert isinstance(excinfo.value, asyncio.CancelledError)
+    assert facade.restored == []
+
+
+@pytest.mark.asyncio
+async def test_intake_execute_failure_restores_consumed_clarification() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    fact = _consumed_answer_fact()
+    facade.clarification_facts = (fact,)
+    runner = _FailingRunner(RuntimeError("planner unavailable"))
+    dispatcher, submitted = _recording_dispatcher(closed=False)
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+        dispatcher=dispatcher,
+    )
+
+    result = await intake.start_question(
+        "执行研究",
+        mode=Mode.EXECUTE,
+        role_prompt_refs=(("researcher", "v1"),),
+        skill_refs=(("skill-a", "2"),),
+    )
+
+    assert submitted == []
+    assert result.dispatch is not None
+    assert result.dispatch.reason_code == PLAN_UNAVAILABLE
+    assert len(facade.restored) == 1
+    assert facade.restored[0] == ("u1", result.session_id, (fact.decision_id,))
+
+
+@pytest.mark.asyncio
+async def test_intake_execute_clarification_zero_dispatch_without_plan_failure() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    decision = TurnDecision(
+        action=LoopAction.CLARIFY,
+        text="研究哪段时间范围？",
+        structured_fields=json_doc({"question": "研究哪段时间范围？", "options": [], "impact": ""}),
+    )
+    runner = _MainTurnRunnerStub(clarification=decision)
+    dispatcher, submitted = _recording_dispatcher(closed=False)
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+        dispatcher=dispatcher,
+    )
+
+    result = await intake.start_question(
+        "执行研究",
+        mode=Mode.EXECUTE,
+        role_prompt_refs=(("researcher", "v1"),),
+        skill_refs=(("skill-a", "2"),),
+    )
+
+    assert submitted == []
+    assert result.dispatch is None
+    assert result.clarification_decision_id == "decision-clarify-1"
+    assert result.main_turn is not None
+    assert result.main_turn.clarification is decision
 
 
 @pytest.mark.asyncio
