@@ -23,7 +23,7 @@ from typing import Any, cast
 
 import flet as ft
 
-from ui.agent_decision_arbiter import submit_decision
+from ui.agent_decision_arbiter import submit_arbitrated_action, submit_decision
 from ui.components.flet_type_helpers import (
     get_control_attr,
     safe_controls,
@@ -44,6 +44,11 @@ from ui.viewmodels.business_research_view_model import (
     resolve_business_research_service,
     shared_business_research,
 )
+from ui.viewmodels.decision_center_view_model import (
+    DecisionCenterService,
+    resolve_tool_grant_revoker,
+    shared_decision_center,
+)
 from ui.viewmodels.nav_badge_view_model import NavBadgeViewModel
 from ui.viewmodels.research_observer_view_model import (
     LOCAL_DESKTOP_USER_SCOPE,
@@ -53,6 +58,7 @@ from ui.viewmodels.research_observer_view_model import (
 )
 from ui.views.backtest_view import BacktestView
 from ui.views.data_view import DataExplorerView
+from ui.views.decision_center_panel import build_decision_center_panel
 from ui.views.home_view import HomeView
 from ui.viewmodels.research_comparison_view_model import ComparisonServicePort, ResearchComparisonViewModel
 from ui.views.research_comparison_panel import ResearchComparisonPanel
@@ -68,6 +74,8 @@ logger = logging.getLogger(__name__)
 
 # Tab 切换防抖 (ms) — 快速连续点击导航时, 最后一次点击生效
 DEBOUNCE_MS = 50
+# 应用级待处理提醒轮询间隔（只读聚合查询，不触碰执行；跨页提醒的兜底刷新）
+DECISION_CENTER_POLL_SECONDS = 30.0
 
 
 class NavTabs(IntEnum):
@@ -425,7 +433,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
     egress_status_state, _ = ft.use_state(get_egress_status_state)
 
     # --- Phase 6.1 FR-UX-006: nav_tasks 运行中任务数角标 (TaskManager.subscribe 驱动) ---
-    nav_badge_state, _ = use_viewmodel(factory=NavBadgeViewModel)
+    nav_badge_state, nav_badge_vm = use_viewmodel(factory=NavBadgeViewModel)
 
     # --- P02: 壳层公共研究观察层（跨页共享 VM；观察不控制执行） ---
     research_service, research_unavailable_key = resolve_agent_research_service(agent_wiring)
@@ -449,6 +457,19 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         )
     )
     comparison_open, set_comparison_open = ft.use_state(False)
+    # W-07: 应用级统一决定/授权界面（跨页可达；与观察层共用同一 facade）
+    decision_state, decision_vm = use_viewmodel(
+        factory=lambda: shared_decision_center(
+            cast(DecisionCenterService | None, research_service),
+            user_scope=str(getattr(agent_wiring, "user_scope", LOCAL_DESKTOP_USER_SCOPE)),
+            unavailable_reason_key=research_unavailable_key,
+            revoker=resolve_tool_grant_revoker(agent_wiring),
+        )
+    )
+    decision_open, set_decision_open = ft.use_state(False)
+    # 事件/效果闭包读取最新可见性（避免 stale 快照）
+    decision_open_ref: Any = ft.use_ref(None)
+    decision_open_ref.current = decision_open
     decision_notice: str | None = None
     decision_notice, set_decision_notice = ft.use_state(lambda: decision_notice)
     # R2-I06: 业务对象 → 研究草稿准备（只准备不发送；与观察层共用同一 facade）
@@ -680,6 +701,82 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         page = _get_page()
         if page is not None and research_vm.state.available:
             page.run_task(research_vm.retry_delivery, decision_id)
+
+    # --- W-07: 统一决定界面命令（全部经仲裁层；不排队、不抢焦点） ---
+    def _refresh_decisions() -> None:
+        """只读刷新跨会话待处理（不触碰执行状态）。"""
+
+        page = _get_page()
+        if page is not None and decision_vm.state.available:
+            page.run_task(decision_vm.refresh)
+
+    def _toggle_decision_center(_e: ft.ControlEvent | None = None) -> None:
+        """打开/关闭统一决定面板（用户显式点击；新事项不自动弹出）。"""
+
+        opening = not bool(decision_open_ref.current)
+        decision_open_ref.current = opening
+        set_decision_open(opening)
+        if opening:
+            _refresh_decisions()
+
+    def _submit_center_action(decision_id: str, action: Any) -> None:
+        """统一决定界面的写入动作：单槽仲裁 → 事件循环任务内执行一次。"""
+
+        page = _get_page()
+        if page is None:
+            return
+        item = decision_vm.state.item_by_id(decision_id)
+        if item is None:
+            page.run_task(action)
+            return
+        refusal = submit_arbitrated_action(
+            page=page,
+            owner="decision_center",
+            decision_id=decision_id,
+            execution_id=item.execution_id,
+            round_id=item.round_id,
+            action=action,
+        )
+        if refusal is not None:
+            decision_vm.report_refusal(refusal)
+
+    def _allow_decision(decision_id: str) -> None:
+        _submit_center_action(decision_id, lambda: decision_vm.allow(decision_id))
+
+    def _deny_decision(decision_id: str) -> None:
+        _submit_center_action(decision_id, lambda: decision_vm.deny(decision_id))
+
+    def _answer_decision(decision_id: str) -> None:
+        _submit_center_action(decision_id, lambda: decision_vm.submit_answer(decision_id))
+
+    def _defer_decision(decision_id: str) -> None:
+        """「稍后」只降噪，不写服务、不移出待处理（期限不变）。"""
+
+        decision_vm.defer(decision_id)
+
+    def _retry_center_delivery(decision_id: str) -> None:
+        _submit_center_action(decision_id, lambda: decision_vm.retry_delivery(decision_id))
+
+    def _load_authorization_scope(decision_id: str) -> None:
+        """按需只读加载授权范围（许可状态/版本；不触碰执行）。"""
+
+        page = _get_page()
+        if page is not None:
+            page.run_task(decision_vm.load_authorization_detail, decision_id)
+
+    def _revoke_authorization(decision_id: str) -> None:
+        _submit_center_action(decision_id, lambda: decision_vm.revoke(decision_id))
+
+    def _locate_source_session(session_id: str) -> None:
+        """提醒定位：切到源会话（用户显式点击；不自动跳转、不抢焦点）。"""
+
+        if not session_id:
+            return
+        decision_open_ref.current = False
+        set_decision_open(False)
+        set_research_open(True)
+        research_open_ref.current = True
+        _open_session(session_id)
 
     # --- Pure UI state ---
 
@@ -936,6 +1033,62 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
 
     ft.use_effect(_setup_egress_listener, dependencies=[], cleanup=_cleanup_egress_listener)
 
+    # --- W-07: 统一决定界面的跨页提醒（只读轮询 + 非抢焦点读屏公告） ---
+    decision_poll_holder: Any = ft.use_ref(None)
+    decision_announce_service: Any = ft.use_ref(None)
+
+    def _setup_decision_poll() -> None:
+        """挂载即只读刷新；运行期低频轮询让其他页也能收到新待处理（不抢焦点）。"""
+
+        _refresh_decisions()
+        if not decision_vm.state.available:
+            return
+        page = _get_page()
+        if page is None:
+            return
+
+        async def _tick() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(DECISION_CENTER_POLL_SECONDS)
+                    await decision_vm.refresh()
+            except asyncio.CancelledError:
+                raise  # R2: 取消必须传播
+
+        decision_poll_holder.current = page.run_task(_tick)
+
+    def _cleanup_decision_poll() -> None:
+        task = decision_poll_holder.current
+        decision_poll_holder.current = None
+        cancel = getattr(task, "cancel", None)
+        if callable(cancel):
+            cancel()
+
+    def _sync_decision_badge() -> None:
+        """待处理决定数同步到导航角标（与业务任务运行数分列，不混淆）。"""
+
+        nav_badge_vm.set_pending_decisions(decision_vm.state.pending_count)
+
+    def _announce_decision_change() -> None:
+        """新增/解除阻塞时经平台语义服务礼仪式播报（不抢焦点、不弹窗）。"""
+
+        announcement = decision_vm.state.announcement
+        if announcement is None:
+            return
+        page = _get_page()
+        if page is None:
+            return
+        service = decision_announce_service.current
+        if service is None:
+            service = ft.SemanticsService()
+            decision_announce_service.current = service
+        text = I18n.get(announcement.key).format(**dict(announcement.params))
+        page.run_task(service.announce_message, text)
+
+    ft.use_effect(_setup_decision_poll, dependencies=[decision_state.available], cleanup=_cleanup_decision_poll)
+    ft.use_effect(_sync_decision_badge, dependencies=[decision_state.pending_count])
+    ft.use_effect(_announce_decision_change, dependencies=[decision_state.announcement_seq])
+
     # --- 渲染 ---
     collapse_btn = ft.IconButton(
         icon=ft.Icons.MENU_OPEN,
@@ -965,6 +1118,15 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         tooltip=I18n.get("agent_comparison_toggle"),
         on_click=safe_on_click(_toggle_comparison),
     )
+    # W-07: 任意页可达的统一决定/授权入口（非第八业务导航；角标=待处理决定数）
+    decision_toggle = ft.IconButton(
+        icon=ft.Icons.PENDING_ACTIONS,
+        selected=decision_open,
+        icon_size=AppStyles.FONT_SIZE_HEADLINE,
+        tooltip=I18n.get("agent_decision_center_open"),
+        badge=ft.Badge(label=str(nav_badge_state.pending_decisions)) if nav_badge_state.pending_decisions > 0 else None,
+        on_click=safe_on_click(_toggle_decision_center),
+    )
     brand_text = ft.Text(
         I18n.get("app_brand"),
         size=AppStyles.FONT_SIZE_LG,
@@ -986,6 +1148,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
                 # P02: 公共区研究入口（不新增第八业务导航；展开非模态观察层）
                 research_toggle,
                 comparison_toggle,
+                decision_toggle,
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             spacing=5,
@@ -1077,6 +1240,26 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         if comparison_open
         else None
     )
+    # W-07: 统一决定/授权面板（非模态；源会话/影响范围/三动作/授权范围与撤销）
+    decision_panel = (
+        build_decision_center_panel(
+            decision_state,
+            on_close=lambda: _toggle_decision_center(None),
+            on_refresh=_refresh_decisions,
+            on_allow=_allow_decision,
+            on_deny=_deny_decision,
+            on_defer=_defer_decision,
+            on_submit_answer=_answer_decision,
+            on_draft_change=decision_vm.set_answer_draft,
+            on_retry_delivery=_retry_center_delivery,
+            on_load_detail=_load_authorization_scope,
+            on_revoke=_revoke_authorization,
+            on_locate=_locate_source_session,
+            on_dismiss_reminder=decision_vm.dismiss_reminder,
+        )
+        if decision_open
+        else None
+    )
 
     # --- SEC-03 状态栏指示器: 底部轻量「本会话外发 N 次」---
     # 数据源 egress_status_state.count（内存读, 无阻塞, R16）; 会话计数进程内单调、重启归零。
@@ -1092,8 +1275,9 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             color=AppColors.TEXT_HINT,
         ),
     ]
-    if research_state.pending_count > 0:
-        # P02/F31: 持续待处理指示（非抢焦点；显式点击打开观察层）
+    # W-07/F31: 持续待处理指示（任意页可见；非抢焦点，显式点击打开统一决定界面）
+    pending_badge_count = research_state.pending_count
+    if pending_badge_count > 0:
         status_bar_items.append(ft.Container(expand=True))
         status_bar_items.append(
             ft.TextButton(
@@ -1105,15 +1289,15 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
                             color=AppColors.ERROR,
                         ),
                         ft.Text(
-                            I18n.get("agent_research_pending_fmt").format(count=research_state.pending_count),
+                            I18n.get("agent_research_pending_fmt").format(count=pending_badge_count),
                             size=AppStyles.FONT_SIZE_CAPTION,
                             color=AppColors.ERROR,
                         ),
                     ],
                     spacing=AppStyles.SPACING_XS,
                 ),
-                tooltip=I18n.get("agent_research_toggle"),
-                on_click=safe_on_click(_toggle_research),
+                tooltip=I18n.get("agent_decision_center_open"),
+                on_click=safe_on_click(_toggle_decision_center),
             )
         )
     status_bar_egress = ft.Container(
@@ -1128,6 +1312,8 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         body_controls.append(research_panel)
     if comparison_panel is not None:
         body_controls.append(comparison_panel)
+    if decision_panel is not None:
+        body_controls.append(decision_panel)
     body_region = ft.Container(
         content=ft.Row(safe_controls(body_controls), expand=True),
         expand=True,
