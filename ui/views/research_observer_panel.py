@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 import flet as ft
 
@@ -92,6 +92,18 @@ def _build_body(
     on_control_reason_change: Callable[[str], None] = _ignore_text,
     on_control_reason_submit: Callable[[], None] = _ignore_click,
     on_control_reason_cancel: Callable[[], None] = _ignore_click,
+    on_toggle_artifact_selection: Callable[[str], None] | None = None,
+    on_select_all_artifacts: Callable[[], None] | None = None,
+    on_clear_artifact_selection: Callable[[], None] | None = None,
+    on_artifact_format_change: Callable[[str], None] | None = None,
+    on_artifact_target_path_change: Callable[[str], None] | None = None,
+    on_preview_artifact: Callable[[], Awaitable[None]] | None = None,
+    on_copy_artifacts: Callable[[], str | None] | None = None,
+    on_artifact_copy_done: Callable[[], None] | None = None,
+    on_artifact_copy_failed: Callable[[], None] | None = None,
+    on_request_export: Callable[[], Awaitable[None]] | None = None,
+    on_confirm_export: Callable[[], Awaitable[None]] | None = None,
+    on_cancel_export: Callable[[], None] | None = None,
 ) -> ft.Control:
     """面板主体：会话列表 / 首问 / 计划预览 / 主会话 / 子任务树 / 成果 / 待处理决定。"""
 
@@ -179,7 +191,24 @@ def _build_body(
             on_reason_cancel=on_control_reason_cancel,
         )
     )
-    rows.extend(build_artifacts_section(state, on_load_artifact=on_load_artifact))
+    rows.extend(
+        build_artifacts_section(
+            state,
+            on_load_artifact=on_load_artifact,
+            on_toggle_artifact_selection=on_toggle_artifact_selection,
+            on_select_all_artifacts=on_select_all_artifacts,
+            on_clear_artifact_selection=on_clear_artifact_selection,
+            on_artifact_format_change=on_artifact_format_change,
+            on_artifact_target_path_change=on_artifact_target_path_change,
+            on_preview_artifact=on_preview_artifact,
+            on_copy_artifacts=on_copy_artifacts,
+            on_artifact_copy_done=on_artifact_copy_done,
+            on_artifact_copy_failed=on_artifact_copy_failed,
+            on_request_export=on_request_export,
+            on_confirm_export=on_confirm_export,
+            on_cancel_export=on_cancel_export,
+        )
+    )
     rows.extend(build_decisions_section(state, on_draft_change=on_draft_change, on_submit=on_submit))
     # --- 跨会话待处理（P1-05）：记录/交付/消费分列，不只取首条会话 ---
     rows.append(build_pending_overview(state, on_retry_delivery=on_retry_delivery))
@@ -235,6 +264,18 @@ def ResearchObserverPanel(
     on_control_reason_change: Callable[[str], None] = _ignore_text,
     on_control_reason_submit: Callable[[], None] = _ignore_click,
     on_control_reason_cancel: Callable[[], None] = _ignore_click,
+    on_toggle_artifact_selection: Callable[[str], None] | None = None,
+    on_select_all_artifacts: Callable[[], None] | None = None,
+    on_clear_artifact_selection: Callable[[], None] | None = None,
+    on_artifact_format_change: Callable[[str], None] | None = None,
+    on_artifact_target_path_change: Callable[[str], None] | None = None,
+    on_preview_artifact: Callable[[], Awaitable[None]] | None = None,
+    on_copy_artifacts: Callable[[], str | None] | None = None,
+    on_artifact_copy_done: Callable[[], None] | None = None,
+    on_artifact_copy_failed: Callable[[], None] | None = None,
+    on_request_export: Callable[[], Awaitable[None]] | None = None,
+    on_confirm_export: Callable[[], Awaitable[None]] | None = None,
+    on_cancel_export: Callable[[], None] | None = None,
 ) -> ft.Container:
     """非模态研究观察层（右侧公共区；收起只隐藏，不卸载业务页、不清草稿）。"""
 
@@ -331,6 +372,18 @@ def ResearchObserverPanel(
             on_control_reason_change=on_control_reason_change,
             on_control_reason_submit=on_control_reason_submit,
             on_control_reason_cancel=on_control_reason_cancel,
+            on_toggle_artifact_selection=on_toggle_artifact_selection,
+            on_select_all_artifacts=on_select_all_artifacts,
+            on_clear_artifact_selection=on_clear_artifact_selection,
+            on_artifact_format_change=on_artifact_format_change,
+            on_artifact_target_path_change=on_artifact_target_path_change,
+            on_preview_artifact=on_preview_artifact,
+            on_copy_artifacts=on_copy_artifacts,
+            on_artifact_copy_done=on_artifact_copy_done,
+            on_artifact_copy_failed=on_artifact_copy_failed,
+            on_request_export=on_request_export,
+            on_confirm_export=on_confirm_export,
+            on_cancel_export=on_cancel_export,
         )
     )
     return ft.Container(

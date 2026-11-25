@@ -257,6 +257,106 @@ class AgentResearchService(Protocol):
     async def retry_execution(self, request: RetryExecutionRequest) -> RetryExecutionReceipt: ...
 
 
+class ArtifactDeliveryPort(Protocol):
+    """成果预览/目标探测/导出端口（P01 组合根注入；UI 不直连 DAO/文件系统）。
+
+    返回值按结构化属性读取：``preview`` 给预览文本与摘要，``inspect_target`` 给
+    覆盖确认所需的目标事实，``export`` 给交付回执（``unknown`` 原样返回，不按
+    成功转换）。
+    """
+
+    async def preview(
+        self,
+        *,
+        artifact_id: str,
+        artifact_version: int,
+        execution_id: str,
+        round_id: str,
+        format_name: str,
+    ) -> Any: ...
+
+    async def inspect_target(self, *, target_path: str) -> Any: ...
+
+    async def export(
+        self,
+        *,
+        artifact_id: str,
+        artifact_version: int,
+        execution_id: str,
+        round_id: str,
+        format_name: str,
+        target_path: str,
+        expected_existing: bool,
+        expected_digest: str | None,
+        expected_volume_serial: int | None,
+        expected_file_id: int | None,
+    ) -> Any: ...
+
+
+#: 成果导出格式（与服务端 ``DELIVERY_FORMATS`` 同词表；默认 Markdown）。
+ARTIFACT_EXPORT_FORMATS: Final[tuple[str, ...]] = ("md", "csv", "xlsx")
+DEFAULT_ARTIFACT_EXPORT_FORMAT: Final[str] = "md"
+
+#: 成果卡交付动作的 i18n 原因键（VM 只产出键，View 按 locale 渲染）。
+ARTIFACT_SELECTION_EMPTY_KEY: Final[str] = "agent_research_artifact_selection_empty"
+ARTIFACT_SELECT_ONE_KEY: Final[str] = "agent_research_artifact_select_one"
+ARTIFACT_DELIVERY_UNAVAILABLE_KEY: Final[str] = "agent_research_artifact_delivery_unavailable"
+ARTIFACT_NOT_FOUND_KEY: Final[str] = "agent_research_artifact_not_found"
+ARTIFACT_COPY_NOT_LOADED_KEY: Final[str] = "agent_research_artifact_copy_not_loaded"
+ARTIFACT_COPY_INCOMPLETE_KEY: Final[str] = "agent_research_artifact_copy_incomplete"
+ARTIFACT_COPY_TRUNCATED_KEY: Final[str] = "agent_research_artifact_copy_truncated"
+ARTIFACT_COPY_DONE_KEY: Final[str] = "agent_research_artifact_copy_done"
+ARTIFACT_COPY_CLIPBOARD_FAILED_KEY: Final[str] = "agent_research_artifact_copy_clipboard_failed"
+ARTIFACT_TARGET_PATH_EMPTY_KEY: Final[str] = "agent_research_artifact_export_target_required"
+ARTIFACT_TARGET_REPARSE_KEY: Final[str] = "agent_research_artifact_export_target_reparse"
+ARTIFACT_TARGET_UNREADABLE_KEY: Final[str] = "agent_research_artifact_export_target_unreadable"
+ARTIFACT_EXPORT_UNKNOWN_NOTICE_KEY: Final[str] = "agent_research_artifact_export_unknown"
+ARTIFACT_EXPORT_UNKNOWN_BLOCKED_KEY: Final[str] = "agent_research_artifact_export_unknown_blocked"
+
+
+@dataclass(frozen=True)
+class ArtifactPreviewView:
+    """成果预览（``text`` 可能被 UI 上限截断，``note_key`` 如实说明口径）。"""
+
+    artifact_id: str
+    artifact_version: int
+    format: str
+    text: str
+    digest: str
+    byte_count: int
+    field_count: int
+    note_key: str | None
+
+
+@dataclass(frozen=True)
+class ArtifactExportTargetView:
+    """覆盖确认绑定的一次目标事实（确认时按此身份/摘要写入，目标变化即失败）。"""
+
+    artifact_key: str
+    format: str
+    target_path: str
+    size: int | None
+    digest: str
+    volume_serial: int | None
+    file_id: int | None
+
+
+@dataclass(frozen=True)
+class ArtifactDeliveryReceiptView:
+    """交付回执投影（``unknown`` 为未知态，禁止按成功呈现）。"""
+
+    delivery_id: str
+    phase: str
+    publish_effect: str
+    cancel_effect: str
+    error_code: str | None
+    next_action: str | None
+    output_digest: str | None
+    verified_at: str
+    target_path: str
+    staged_cleaned: bool
+
+
 @dataclass(frozen=True)
 class SessionMessageView:
     """主会话消息的只读投影（``body_ref`` 未载入正文时如实标记不可读）。"""
@@ -705,6 +805,26 @@ class ResearchObserverState:
     return_to_execution_id: str | None = None
     restored_scroll_anchor: str | None = None
     restored_child_selection: str | None = None
+    #: 成果预览/复制/导出（W-03）：选择与格式为 UI 纯状态；交付端口不可用时如实为 False。
+    artifact_delivery_available: bool = False
+    artifact_selected_keys: tuple[str, ...] = ()
+    artifact_export_format: str = DEFAULT_ARTIFACT_EXPORT_FORMAT
+    artifact_export_target_path: str = ""
+    artifact_preview: ArtifactPreviewView | None = None
+    artifact_preview_pending: bool = False
+    artifact_preview_error_key: str | None = None
+    artifact_preview_error_code: str | None = None
+    artifact_copy_notice_key: str | None = None
+    artifact_copy_error_key: str | None = None
+    artifact_export_pending: bool = False
+    artifact_export_confirmation: ArtifactExportTargetView | None = None
+    artifact_export_receipt: ArtifactDeliveryReceiptView | None = None
+    artifact_export_notice_key: str | None = None
+    artifact_export_error_key: str | None = None
+    artifact_export_error_code: str | None = None
+    #: 未知回执的（成果, 格式, 目标）键：确认原交付前禁止再导出同一目标（§10.5）；
+    #: 锁按会话 VM 存活期生效，跨重启由上层的覆盖确认（目标身份+摘要）兜底。
+    artifact_export_blocked_keys: tuple[str, ...] = ()
 
     # --- W-12 研究侧模型/角色选择、费用透明与耗时分段 ---
     model_selection_available: bool = False
@@ -849,6 +969,24 @@ def _answer_command_key(decision_id: str) -> str:
     """答复命令键：按决定身份派生（同一决定的每次提交命中同一命令）。"""
 
     return f"{_ANSWER_COMMAND_KEY_PREFIX}{decision_id}"
+
+
+def _artifact_key(artifact_id: str, artifact_version: int) -> str:
+    """成果选择键（与 ``LoadedArtifactBody.key`` 同构）。"""
+
+    return f"{artifact_id}:{artifact_version}"
+
+
+def _artifact_export_block_key(artifact_key: str, format_name: str, target_path: str) -> str:
+    """未知回执的封锁键：同一成果+格式+目标在核对前不得再次导出（§10.5）。"""
+
+    return f"{artifact_key}|{format_name}|{target_path}"
+
+
+def _artifact_export_extension(format_name: str) -> str:
+    """默认导出文件名后缀（格式词表已冻结，未知格式回落为 ``md``）。"""
+
+    return format_name if format_name in ARTIFACT_EXPORT_FORMATS else DEFAULT_ARTIFACT_EXPORT_FORMAT
 
 
 def _unknown_session_item(session_id: str) -> SessionListItemView:
@@ -1668,6 +1806,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         model_catalog: ModelCatalogPort | None = None,
         token_counter: Callable[[str, str | None], tuple[int, bool]] | None = None,
         view_store: ObservationViewStateStore | None = None,
+        delivery: ArtifactDeliveryPort | None = None,
     ) -> None:
         self._service = service
         self._user_scope = user_scope
@@ -1683,6 +1822,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         self._view_store: ObservationViewStateStore = (
             view_store if view_store is not None else InMemoryObservationViewStateStore()
         )
+        self._delivery = delivery
         #: 目录身份映射（identity_key → 服务身份）；范围选择提交时据此还原强类型身份。
         self._mcp_identities: dict[str, MCPServiceIdentity] = {}
         self._session_key: int | None = id(service) if service is not None else None
@@ -1703,6 +1843,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             composer_available=service is not None and intake is not None,
             mcp_scope_available=mcp_catalog is not None,
             model_selection_available=self._model_catalog is not None,
+            artifact_delivery_available=delivery is not None,
         )
         self._init_mixin_fields()
 
@@ -2361,6 +2502,21 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             return_to_execution_id=None,
             restored_scroll_anchor=None,
             restored_child_selection=None,
+            # 成果交付动作属会话内上下文：预览/覆盖确认/回执随会话切换作废；未知封锁保留。
+            artifact_selected_keys=(),
+            artifact_export_target_path="",
+            artifact_preview=None,
+            artifact_preview_pending=False,
+            artifact_preview_error_key=None,
+            artifact_preview_error_code=None,
+            artifact_copy_notice_key=None,
+            artifact_copy_error_key=None,
+            artifact_export_pending=False,
+            artifact_export_confirmation=None,
+            artifact_export_receipt=None,
+            artifact_export_notice_key=None,
+            artifact_export_error_key=None,
+            artifact_export_error_code=None,
         )
 
     async def _read_pending_overview(self) -> tuple[PendingAnswerPage | None, str | None]:
@@ -2470,9 +2626,28 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
                 "control_reason_kind": None,
                 "control_reason_text": "",
                 "control_reason_error_key": None,
+                "artifact_selected_keys": (),
+                "artifact_export_target_path": "",
+                "artifact_preview": None,
+                "artifact_preview_pending": False,
+                "artifact_preview_error_key": None,
+                "artifact_preview_error_code": None,
+                "artifact_copy_notice_key": None,
+                "artifact_copy_error_key": None,
+                "artifact_export_pending": False,
+                "artifact_export_confirmation": None,
+                "artifact_export_receipt": None,
+                "artifact_export_notice_key": None,
+                "artifact_export_error_key": None,
+                "artifact_export_error_code": None,
             }
             if session_changed
-            else {}
+            else {
+                # 同会话刷新：选择只保留仍存在的成果版本，避免对已移除版本的幽灵操作。
+                "artifact_selected_keys": tuple(
+                    key for key in self._state.artifact_selected_keys if key in artifact_keys
+                )
+            }
         )
         self._set_state(
             loading=False,
@@ -2837,6 +3012,374 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
                 pending for pending in self._state.artifact_body_pending_keys if pending != key
             ),
         )
+
+    # ------------------------------------------------------------------
+    # 成果预览/复制/导出（W-03；交付端口由组合根注入，UI 不直连 DAO/文件系统）
+    # ------------------------------------------------------------------
+
+    def set_artifact_export_format(self, format_name: str) -> None:
+        """切换导出/预览格式（未知格式忽略，保持上次已知值）。"""
+
+        if format_name not in ARTIFACT_EXPORT_FORMATS:
+            return
+        self._set_state(
+            artifact_export_format=format_name,
+            artifact_preview=None,
+            artifact_preview_error_key=None,
+            artifact_preview_error_code=None,
+        )
+
+    def set_artifact_export_target_path(self, path: str) -> None:
+        """记录用户输入的目标路径（导出前据此探测是否已存在）。"""
+
+        self._set_state(artifact_export_target_path=(path or "").strip())
+
+    def toggle_artifact_selection(self, key: str) -> None:
+        """勾选/取消勾选当前会话中的成果（未知键忽略，不造幽灵选择）。"""
+
+        if self._selected_artifact(key) is None:
+            return
+        selected = self._state.artifact_selected_keys
+        if key in selected:
+            self._set_state(artifact_selected_keys=tuple(item for item in selected if item != key))
+            return
+        self._set_state(artifact_selected_keys=(*selected, key))
+
+    def select_all_artifacts(self) -> None:
+        """全选当前会话成果（空会话即空选择，按钮由 View 按原因禁用）。"""
+
+        self._set_state(
+            artifact_selected_keys=tuple(
+                _artifact_key(artifact.artifact_id, artifact.artifact_version) for artifact in self._state.artifacts
+            )
+        )
+
+    def clear_artifact_selection(self) -> None:
+        """清空成果选择。"""
+
+        self._set_state(artifact_selected_keys=())
+
+    def copy_selected_artifacts(self) -> str | None:
+        """精确复制所选成果正文；不可精确复制时拒绝并给出原因（不复制预览/摘要）。
+
+        正文必须已完整载入：未载入、已清理、分批未读完都如实拒绝，避免把截断
+        正文当成完整内容复制（R21）。多项按选择顺序以空行分隔，保持正文原样。
+        """
+
+        selected = self._state.artifact_selected_keys
+        if not selected:
+            self._set_state(artifact_copy_notice_key=None, artifact_copy_error_key=ARTIFACT_SELECTION_EMPTY_KEY)
+            return None
+        bodies: list[str] = []
+        for key in selected:
+            artifact = self._selected_artifact(key)
+            if artifact is None:
+                self._set_state(artifact_copy_notice_key=None, artifact_copy_error_key=ARTIFACT_NOT_FOUND_KEY)
+                return None
+            if self._session_cleaned or self._artifact_is_cleaned(key):
+                self._set_state(artifact_copy_notice_key=None, artifact_copy_error_key=ARTIFACT_COPY_INCOMPLETE_KEY)
+                return None
+            body = self._state.artifact_body_for(artifact.artifact_id, artifact.artifact_version)
+            if body is None:
+                self._set_state(artifact_copy_notice_key=None, artifact_copy_error_key=ARTIFACT_COPY_NOT_LOADED_KEY)
+                return None
+            if not body.body_available or body.body_text is None:
+                self._set_state(artifact_copy_notice_key=None, artifact_copy_error_key=ARTIFACT_COPY_INCOMPLETE_KEY)
+                return None
+            if body.truncated:
+                self._set_state(artifact_copy_notice_key=None, artifact_copy_error_key=ARTIFACT_COPY_TRUNCATED_KEY)
+                return None
+            bodies.append(body.body_text)
+        self._set_state(artifact_copy_error_key=None, artifact_copy_notice_key=None)
+        return "\n\n".join(bodies)
+
+    def confirm_artifact_copy(self) -> None:
+        """剪贴板写入成功后标记「已复制」（由 View 在真实写入后回调）。"""
+
+        self._set_state(artifact_copy_error_key=None, artifact_copy_notice_key=ARTIFACT_COPY_DONE_KEY)
+
+    def note_artifact_copy_failed(self) -> None:
+        """剪贴板写入失败：不标记成功，给出可重试原因。"""
+
+        self._set_state(
+            artifact_copy_notice_key=None,
+            artifact_copy_error_key=ARTIFACT_COPY_CLIPBOARD_FAILED_KEY,
+        )
+
+    async def preview_selected_artifact(self) -> None:
+        """预览所选单个成果（只读渲染，不落库、不写文件；XLSX 以字段表预览）。"""
+
+        delivery = self._delivery
+        if delivery is None:
+            self._set_state(
+                artifact_preview_error_key=ARTIFACT_DELIVERY_UNAVAILABLE_KEY,
+                artifact_preview_error_code=None,
+            )
+            return
+        if self._state.artifact_preview_pending:
+            return
+        artifact, error_key = self._single_selected_artifact()
+        if artifact is None:
+            self._set_state(artifact_preview_error_key=error_key, artifact_preview_error_code=None)
+            return
+        key = _artifact_key(artifact.artifact_id, artifact.artifact_version)
+        if self._session_cleaned or self._artifact_is_cleaned(key):
+            self._set_state(artifact_preview_error_key=ARTIFACT_COPY_INCOMPLETE_KEY, artifact_preview_error_code=None)
+            return
+        format_name = self._state.artifact_export_format
+        self._track_inflight_cancellable()
+        self._set_state(
+            artifact_preview_pending=True,
+            artifact_preview=None,
+            artifact_preview_error_key=None,
+            artifact_preview_error_code=None,
+        )
+        try:
+            result = await delivery.preview(
+                artifact_id=artifact.artifact_id,
+                artifact_version=artifact.artifact_version,
+                execution_id=artifact.execution_id,
+                round_id=artifact.round_id,
+                format_name=format_name,
+            )
+        except asyncio.CancelledError:
+            # R2：取消必须传播；先释放在途标记，避免预览入口永久禁用。
+            self._set_state(artifact_preview_pending=False)
+            raise
+        except Exception as e:
+            self._set_state(artifact_preview_pending=False, artifact_preview_error_code=self._error_code(e))
+            return
+        if self._session_cleaned or self._artifact_is_cleaned(key):
+            self._set_state(artifact_preview_pending=False)
+            return
+        self._set_state(
+            artifact_preview_pending=False,
+            artifact_preview=ArtifactPreviewView(
+                artifact_id=artifact.artifact_id,
+                artifact_version=artifact.artifact_version,
+                format=result.format,
+                text=result.text,
+                digest=result.digest,
+                byte_count=result.byte_count,
+                field_count=result.field_count,
+                note_key=result.note_key,
+            ),
+        )
+
+    async def request_selected_export(self, target_path: str | None = None) -> None:
+        """发起所选单个成果导出；目标已存在时先进入覆盖确认，不直接写入。"""
+
+        delivery = self._delivery
+        if delivery is None:
+            self._set_state(
+                artifact_export_error_key=ARTIFACT_DELIVERY_UNAVAILABLE_KEY,
+                artifact_export_error_code=None,
+            )
+            return
+        if self._state.artifact_export_pending:
+            return
+        artifact, error_key = self._single_selected_artifact()
+        if artifact is None:
+            self._set_state(artifact_export_error_key=error_key, artifact_export_error_code=None)
+            return
+        path = (target_path if target_path is not None else self._state.artifact_export_target_path).strip()
+        if not path:
+            self._set_state(
+                artifact_export_target_path="",
+                artifact_export_error_key=ARTIFACT_TARGET_PATH_EMPTY_KEY,
+                artifact_export_error_code=None,
+            )
+            return
+        format_name = self._state.artifact_export_format
+        key = _artifact_key(artifact.artifact_id, artifact.artifact_version)
+        block_key = _artifact_export_block_key(key, format_name, path)
+        if block_key in self._state.artifact_export_blocked_keys:
+            self._set_state(
+                artifact_export_target_path=path,
+                artifact_export_error_key=ARTIFACT_EXPORT_UNKNOWN_BLOCKED_KEY,
+                artifact_export_error_code=None,
+            )
+            return
+        if self._session_cleaned or self._artifact_is_cleaned(key):
+            self._set_state(
+                artifact_export_target_path=path,
+                artifact_export_error_key=ARTIFACT_COPY_INCOMPLETE_KEY,
+                artifact_export_error_code=None,
+            )
+            return
+        self._track_inflight_cancellable()
+        self._set_state(
+            artifact_export_target_path=path,
+            artifact_export_pending=True,
+            artifact_export_confirmation=None,
+            artifact_export_receipt=None,
+            artifact_export_notice_key=None,
+            artifact_export_error_key=None,
+            artifact_export_error_code=None,
+        )
+        try:
+            probe = await delivery.inspect_target(target_path=path)
+        except asyncio.CancelledError:
+            self._set_state(artifact_export_pending=False)
+            raise
+        except Exception as e:
+            self._set_state(artifact_export_pending=False, artifact_export_error_code=self._error_code(e))
+            return
+        if not bool(probe.exists):
+            await self._execute_artifact_export(
+                artifact,
+                format_name,
+                path,
+                expected_existing=False,
+                digest=None,
+                volume_serial=None,
+                file_id=None,
+            )
+            return
+        if bool(probe.is_reparse_point):
+            self._set_state(artifact_export_pending=False, artifact_export_error_key=ARTIFACT_TARGET_REPARSE_KEY)
+            return
+        digest = probe.digest
+        volume_serial = probe.volume_serial
+        file_id = probe.file_id
+        if digest is None or volume_serial is None or file_id is None:
+            self._set_state(artifact_export_pending=False, artifact_export_error_key=ARTIFACT_TARGET_UNREADABLE_KEY)
+            return
+        self._set_state(
+            artifact_export_pending=False,
+            artifact_export_confirmation=ArtifactExportTargetView(
+                artifact_key=key,
+                format=format_name,
+                target_path=path,
+                size=probe.size,
+                digest=str(digest),
+                volume_serial=int(volume_serial),
+                file_id=int(file_id),
+            ),
+        )
+
+    async def confirm_selected_export(self) -> None:
+        """按覆盖确认绑定的目标事实执行导出（目标若已变化由交付层拒绝）。"""
+
+        confirmation = self._state.artifact_export_confirmation
+        if confirmation is None or self._state.artifact_export_pending:
+            return
+        artifact = self._selected_artifact(confirmation.artifact_key)
+        if artifact is None:
+            self._set_state(
+                artifact_export_confirmation=None,
+                artifact_export_error_key=ARTIFACT_NOT_FOUND_KEY,
+                artifact_export_error_code=None,
+            )
+            return
+        await self._execute_artifact_export(
+            artifact,
+            confirmation.format,
+            confirmation.target_path,
+            expected_existing=True,
+            digest=confirmation.digest,
+            volume_serial=confirmation.volume_serial,
+            file_id=confirmation.file_id,
+        )
+
+    def cancel_selected_export(self) -> None:
+        """取消覆盖确认（不写任何文件）。"""
+
+        if self._state.artifact_export_pending:
+            return
+        self._set_state(artifact_export_confirmation=None)
+
+    async def _execute_artifact_export(
+        self,
+        artifact: SessionArtifactView,
+        format_name: str,
+        target_path: str,
+        *,
+        expected_existing: bool,
+        digest: str | None,
+        volume_serial: int | None,
+        file_id: int | None,
+    ) -> None:
+        """执行交付并把回执落 state；``unknown`` 原样呈现并锁定该目标（§10.5）。"""
+
+        delivery = self._delivery
+        if delivery is None:
+            return
+        key = _artifact_key(artifact.artifact_id, artifact.artifact_version)
+        self._set_state(
+            artifact_export_pending=True,
+            artifact_export_confirmation=None,
+            artifact_export_receipt=None,
+            artifact_export_notice_key=None,
+            artifact_export_error_key=None,
+            artifact_export_error_code=None,
+        )
+        try:
+            result = await delivery.export(
+                artifact_id=artifact.artifact_id,
+                artifact_version=artifact.artifact_version,
+                execution_id=artifact.execution_id,
+                round_id=artifact.round_id,
+                format_name=format_name,
+                target_path=target_path,
+                expected_existing=expected_existing,
+                expected_digest=digest,
+                expected_volume_serial=volume_serial,
+                expected_file_id=file_id,
+            )
+        except asyncio.CancelledError:
+            self._set_state(artifact_export_pending=False)
+            raise
+        except Exception as e:
+            self._set_state(artifact_export_pending=False, artifact_export_error_code=self._error_code(e))
+            return
+        receipt = result.receipt
+        blocked = self._state.artifact_export_blocked_keys
+        notice_key: str | None = None
+        if receipt.phase == "unknown":
+            # 未知即未知：不按成功渲染；同一目标在核对原交付前禁止再次导出。
+            notice_key = ARTIFACT_EXPORT_UNKNOWN_NOTICE_KEY
+            block_key = _artifact_export_block_key(key, format_name, target_path)
+            if block_key not in blocked:
+                blocked = (*blocked, block_key)
+        self._set_state(
+            artifact_export_pending=False,
+            artifact_export_receipt=ArtifactDeliveryReceiptView(
+                delivery_id=receipt.delivery_id,
+                phase=receipt.phase,
+                publish_effect=receipt.publish_effect,
+                cancel_effect=receipt.cancel_effect,
+                error_code=receipt.error_code,
+                next_action=receipt.next_action,
+                output_digest=receipt.output_digest,
+                verified_at=receipt.verified_at,
+                target_path=target_path,
+                staged_cleaned=bool(result.staged_cleaned),
+            ),
+            artifact_export_notice_key=notice_key,
+            artifact_export_blocked_keys=blocked,
+        )
+
+    def _selected_artifact(self, key: str) -> SessionArtifactView | None:
+        """按选择键找当前会话成果；不在当前快照即视为未知（不跨会话复用）。"""
+
+        for artifact in self._state.artifacts:
+            if _artifact_key(artifact.artifact_id, artifact.artifact_version) == key:
+                return artifact
+        return None
+
+    def _single_selected_artifact(self) -> tuple[SessionArtifactView | None, str | None]:
+        """预览/导出只接受单个成果版本（多版本并列由用户显式选择其一）。"""
+
+        selected = self._state.artifact_selected_keys
+        if not selected:
+            return None, ARTIFACT_SELECTION_EMPTY_KEY
+        if len(selected) != 1:
+            return None, ARTIFACT_SELECT_ONE_KEY
+        artifact = self._selected_artifact(selected[0])
+        if artifact is None:
+            return None, ARTIFACT_NOT_FOUND_KEY
+        return artifact, None
 
     async def load_draft(self, session_id: str, draft_revision: int | None) -> None:
         """按会话/稿版读回草稿正文与选择（只读；不发送、不创建研究）。
@@ -3587,12 +4130,14 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
 
     @staticmethod
     def _error_code(error: Exception) -> str:
-        """错误码文本：类型化 facade 错误取 ``code.value``，其余如实给出类名。"""
+        """错误码文本：类型化 facade 错误取 ``code.value``，字符串码原样，其余给类名。"""
 
         code = getattr(error, "code", None)
         value = getattr(code, "value", None)
         if isinstance(value, str) and value:
             return value
+        if isinstance(code, str) and code:
+            return code
         return type(error).__name__
 
 
@@ -3607,6 +4152,7 @@ def shared_research_observer(
     intake: MainTurnIntakePort | None = None,
     mcp_catalog: MCPScopeCatalogPort | None = None,
     model_catalog: ModelCatalogPort | None = None,
+    delivery: ArtifactDeliveryPort | None = None,
 ) -> ResearchObserverViewModel:
     """取本会话共享的观察层 VM（同一 facade/受理端口复用；变化或已销毁则重建）。"""
 
@@ -3620,6 +4166,7 @@ def shared_research_observer(
         or _shared_vm._mcp_catalog is not mcp_catalog
         # 未显式注入目录时由 VM 自建只读目录实例，重复调用不得因 None 反复重建。
         or (model_catalog is not None and _shared_vm._model_catalog is not model_catalog)
+        or _shared_vm._delivery is not delivery
     ):
         stale = _shared_vm
         _shared_vm = ResearchObserverViewModel(
@@ -3629,6 +4176,7 @@ def shared_research_observer(
             intake=intake,
             mcp_catalog=mcp_catalog,
             model_catalog=model_catalog,
+            delivery=delivery,
         )
         if stale is not None and not stale.disposed:
             stale.dispose()
@@ -3675,3 +4223,17 @@ def resolve_main_turn_intake(agent_wiring: Any | None) -> MainTurnIntakePort | N
     if not callable(start_question) or not callable(start_plan):
         return None
     return cast(MainTurnIntakePort, intake)
+
+
+def resolve_artifact_delivery(agent_wiring: Any | None) -> ArtifactDeliveryPort | None:
+    """从组合根解析成果预览/导出端口；未就绪/未接线返回 ``None``（UI 如实禁用）。"""
+
+    if agent_wiring is None or not bool(getattr(agent_wiring, "ready", False)):
+        return None
+    delivery = getattr(agent_wiring, "delivery", None)
+    if delivery is None:
+        return None
+    for name in ("preview", "inspect_target", "export"):
+        if not callable(getattr(delivery, name, None)):
+            return None
+    return cast(ArtifactDeliveryPort, delivery)

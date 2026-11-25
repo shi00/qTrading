@@ -53,6 +53,7 @@ from ui.viewmodels.nav_badge_view_model import NavBadgeViewModel
 from ui.viewmodels.research_observer_view_model import (
     LOCAL_DESKTOP_USER_SCOPE,
     resolve_agent_research_service,
+    resolve_artifact_delivery,
     resolve_main_turn_intake,
     shared_research_observer,
 )
@@ -445,6 +446,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             unavailable_reason_key=research_unavailable_key,
             intake=main_turn_intake,
             mcp_catalog=getattr(agent_wiring, "mcp_lifecycle", None),
+            delivery=resolve_artifact_delivery(agent_wiring),
         )
     )
     research_open, set_research_open = ft.use_state(False)
@@ -1252,6 +1254,18 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             on_select_execution=_select_execution,
             on_load_artifact=_load_artifact,
             on_load_draft=_load_draft,
+            on_toggle_artifact_selection=research_vm.toggle_artifact_selection,
+            on_select_all_artifacts=research_vm.select_all_artifacts,
+            on_clear_artifact_selection=research_vm.clear_artifact_selection,
+            on_artifact_format_change=research_vm.set_artifact_export_format,
+            on_artifact_target_path_change=research_vm.set_artifact_export_target_path,
+            on_preview_artifact=research_vm.preview_selected_artifact,
+            on_copy_artifacts=research_vm.copy_selected_artifacts,
+            on_artifact_copy_done=research_vm.confirm_artifact_copy,
+            on_artifact_copy_failed=research_vm.note_artifact_copy_failed,
+            on_request_export=research_vm.request_selected_export,
+            on_confirm_export=research_vm.confirm_selected_export,
+            on_cancel_export=research_vm.cancel_selected_export,
             on_composer_text=research_vm.set_composer_text,
             on_composer_mode=research_vm.set_composer_mode,
             on_send=_send_first_question,

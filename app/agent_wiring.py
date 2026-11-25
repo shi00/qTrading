@@ -49,6 +49,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from importlib.metadata import version
+from pathlib import Path
 from typing import Any, Final, Literal, cast
 
 from dbos import WorkflowStatusString
@@ -59,10 +60,23 @@ from core.agent_types import (
     AgentServiceError,
     AgentValidationError,
     AnswerCommandFact,
+    ArtifactDeliveryCommand,
+    ArtifactReadQuery,
+    CommandRef,
     ConsumeAnswerRequest,
     ConsumptionFact,
+    DELIVERY_FORMAT_RULE_VERSION,
+    DELIVERY_RENDER_COLUMNS,
+    DeliveryField,
+    DeliveryReceipt,
+    DeliveryTarget,
     DispatchCloseRequest,
+    aggregate_delivery_source_state,
+    build_delivery_fields,
+    canonical_delivery_source_state,
+    derive_delivery_id,
     stable_id,
+    validate_delivery_target_path,
 )
 from services.agent_service import (
     AgentRuntime,
@@ -83,6 +97,9 @@ from services.agent_service.cleanup import CleanupService, DaoCleanupJobStore
 from services.agent_service.cleanup_execution import CleanupExecutionService
 from services.agent_service.cleanup_native import NativeCleanupExecutor
 from services.agent_service.cleanup_ports import DaoCleanupAdmissionFacts, DaoNativeVerification, DbosDeletionClient
+from services.agent_service.delivery import WindowsManagedFileStore, _snapshot
+from services.agent_service.delivery_render import render_delivery
+from services.agent_service.delivery_service import DeliveryCommandService, DeliveryContext
 from services.agent_service.dispatch import (
     PlanSpecProvider,
     RootWorkflowResultReader,
@@ -237,6 +254,8 @@ class AgentWiring:
     launched_ledger: _LaunchedWorkflowLedger | None = None
     unclosed_handle: AgentRuntimeHandle | None = None
     instance_guard: Any | None = None
+    #: 成果预览/导出端口（W-03；构造失败为 ``None``，UI 如实显示未接线）。
+    delivery: AgentArtifactDelivery | None = None
     _close_command: CloseCommandIdentity | None = None
     _receipt: CloseReadinessReceipt | None = None
     #: MCP 关停未核事实（连接未确认断开）：进入关闭回执阻塞项，不得报「已安全关闭」。
@@ -1228,4 +1247,341 @@ async def wire_agent_runtime(
         user_scope=user_scope,
         launched_ledger=ledger,
         instance_guard=outcome.instance_guard,
+        delivery=_build_artifact_delivery(dao=dao, user_scope=user_scope),
     )
+
+
+# ----------------------------------------------------------------------
+# 成果预览/导出装配（W-03；组合根注入 UI，服务层交付管线不在此重写）
+# ----------------------------------------------------------------------
+
+#: 预览文本上限（字符）：仅限制 UI 显示，导出文件始终为完整内容（如实标注截断）。
+_ARTIFACT_PREVIEW_CHAR_LIMIT: Final[int] = 20_000
+#: 预览口径说明键（XLSX 字段表 / 截断；组合场景单独成键，不相互掩盖）。
+_ARTIFACT_PREVIEW_FIELD_VIEW_KEY: Final[str] = "agent_research_artifact_preview_field_view"
+_ARTIFACT_PREVIEW_TRUNCATED_KEY: Final[str] = "agent_research_artifact_preview_truncated"
+_ARTIFACT_PREVIEW_FIELD_VIEW_TRUNCATED_KEY: Final[str] = "agent_research_artifact_preview_field_view_truncated"
+#: 成果导出命令的来源模块（回执可溯源到 UI 入口）。
+_ARTIFACT_DELIVERY_SOURCE_MODULE: Final[str] = "ui.research_observer"
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactPreviewResult:
+    """预览结果：文本 + 完整输出摘要/字节数（预览不落库、不写文件）。"""
+
+    format: str
+    text: str
+    digest: str
+    byte_count: int
+    field_count: int
+    note_key: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryTargetProbe:
+    """覆盖确认所需的目标事实（存在性 + 身份 + 摘要；重解析点单独标注）。"""
+
+    target_path: str
+    exists: bool
+    size: int | None
+    digest: str | None
+    volume_serial: int | None
+    file_id: int | None
+    is_reparse_point: bool
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryExportResult:
+    """一次导出的回执与本交付暂存清理事实（``unknown`` 原样透传，不转成功）。"""
+
+    receipt: DeliveryReceipt
+    staged_cleaned: bool
+    target_path: str
+
+
+def _xlsx_field_preview(fields: tuple[DeliveryField, ...]) -> str:
+    """XLSX 预览以交付字段表呈现（导出文件仍是工作簿；预览不冒充二进制内容）。"""
+
+    lines = ["\t".join(DELIVERY_RENDER_COLUMNS)]
+    lines.extend(
+        "\t".join(
+            (
+                field.path,
+                field.value_type,
+                str(field.chunk_index),
+                str(field.chunk_count),
+                field.value_text,
+            )
+        )
+        for field in fields
+    )
+    return "\n".join(lines)
+
+
+class AgentArtifactDelivery:
+    """成果预览/目标探测/导出适配（W-03）。
+
+    交付顺序、覆盖绑定与 ``unknown`` 语义全部由 ``DeliveryCommandService`` 冻结；
+    本类只补两个 UI 缺口：① 预览（只读渲染，不落库、不写文件）；② 目标事实探测
+    （覆盖确认摘要）。预览要求正文跨游标取全（截断只影响 UI 显示并如实标注）。
+    """
+
+    def __init__(
+        self,
+        *,
+        dao: Any,
+        user_scope: str,
+        store: Any | None = None,
+    ) -> None:
+        self._dao = dao
+        self._user_scope = user_scope
+        self._store = store if store is not None else WindowsManagedFileStore()
+        self._service = DeliveryCommandService(artifacts=dao, dao=dao, store=self._store)
+
+    async def preview(
+        self,
+        *,
+        artifact_id: str,
+        artifact_version: int,
+        execution_id: str,
+        round_id: str,
+        format_name: str,
+    ) -> ArtifactPreviewResult:
+        """按服务端交付字段渲染预览（内容与导出同源；不产生任何持久事实）。"""
+
+        read, body_text = await self._read_complete(
+            artifact_id=artifact_id,
+            artifact_version=artifact_version,
+            execution_id=execution_id,
+            round_id=round_id,
+        )
+        fresh = await self._dao.read_artifact(
+            ArtifactReadQuery(
+                artifact_id=artifact_id,
+                artifact_version=artifact_version,
+                execution_id=execution_id,
+                round_id=round_id,
+                limit=1,
+            ),
+            user_scope=self._user_scope,
+        )
+        states = tuple(fresh.source_ref_states)
+        if states:
+            aggregate = aggregate_delivery_source_state(states)
+        else:
+            # 旧成果无逐项来源引用：保存时的 available 不能证明本次可交付（R21）。
+            saved_state = canonical_delivery_source_state(fresh.source_available_state)
+            aggregate = "unknown" if saved_state == "available" else saved_state
+        fields = await self._run_blocking(
+            build_delivery_fields,
+            read,
+            body_text=body_text,
+            current_source_state=aggregate,
+            current_source_states=states,
+        )
+        rendered = await self._run_blocking(render_delivery, fields, format_name)
+        if format_name == "xlsx":
+            text = _xlsx_field_preview(fields)
+            note_key: str | None = _ARTIFACT_PREVIEW_FIELD_VIEW_KEY
+        else:
+            text = rendered.content.decode("utf-8", errors="replace")
+            if format_name == "csv":
+                text = text.lstrip("\ufeff")
+            note_key = None
+        if len(text) > _ARTIFACT_PREVIEW_CHAR_LIMIT:
+            text = text[:_ARTIFACT_PREVIEW_CHAR_LIMIT]
+            note_key = (
+                _ARTIFACT_PREVIEW_FIELD_VIEW_TRUNCATED_KEY if note_key is not None else _ARTIFACT_PREVIEW_TRUNCATED_KEY
+            )
+        return ArtifactPreviewResult(
+            format=format_name,
+            text=text,
+            digest=rendered.digest,
+            byte_count=len(rendered.content),
+            field_count=len(fields),
+            note_key=note_key,
+        )
+
+    async def inspect_target(self, *, target_path: str) -> DeliveryTargetProbe:
+        """探测目标事实（stat + 摘要，提交线程池，不堵 UI；不创建/截断目标）。"""
+
+        path = Path(validate_delivery_target_path(target_path))
+        try:
+            snapshot = await self._run_blocking(_snapshot, path)
+        except asyncio.CancelledError:
+            raise
+        except OSError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                "delivery target is not readable",
+                "artifact-delivery-target",
+            ) from exc
+        return DeliveryTargetProbe(
+            target_path=str(path),
+            exists=snapshot.exists,
+            size=snapshot.size,
+            digest=snapshot.digest,
+            volume_serial=snapshot.volume_serial,
+            file_id=snapshot.file_id,
+            is_reparse_point=snapshot.is_reparse_point,
+        )
+
+    async def export(
+        self,
+        *,
+        artifact_id: str,
+        artifact_version: int,
+        execution_id: str,
+        round_id: str,
+        format_name: str,
+        target_path: str,
+        expected_existing: bool,
+        expected_digest: str | None,
+        expected_volume_serial: int | None,
+        expected_file_id: int | None,
+    ) -> DeliveryExportResult:
+        """按冻结顺序导出（覆盖确认事实随命令下发；目标已变化即由交付层拒绝）。"""
+
+        path_text = validate_delivery_target_path(target_path)
+        # 每次用户导出是独立命令：命令键含随机盐，避免与历史交付共用同一个
+        # operation（已完成/unknown 的 operation 不接受新阶段）。崩溃后重试需重新
+        # 走覆盖确认，不会静默覆盖。
+        command_id = stable_id(
+            "ui-export",
+            [
+                self._user_scope,
+                artifact_id,
+                str(artifact_version),
+                format_name,
+                path_text,
+                uuid.uuid4().hex,
+            ],
+        )
+        operation_id = stable_id("delivery-operation", [self._user_scope, command_id])
+        node_id = stable_id("delivery-node", [self._user_scope, artifact_id, str(artifact_version)])
+        await self._dao.ensure_model_operation(
+            user_scope=self._user_scope,
+            operation_id=operation_id,
+            execution_id=execution_id,
+            round_id=round_id,
+            node_id=node_id,
+        )
+        draft = ArtifactDeliveryCommand(
+            command=CommandRef(
+                user_scope=self._user_scope,
+                source_module=_ARTIFACT_DELIVERY_SOURCE_MODULE,
+                business_request_id=operation_id,
+                command_id=command_id,
+                expected_revision=0,
+            ),
+            artifact_id=artifact_id,
+            artifact_version=artifact_version,
+            format=format_name,
+            format_rule_version=DELIVERY_FORMAT_RULE_VERSION,
+            delivery_id="",
+            target=DeliveryTarget(
+                target_path=path_text,
+                expected_existing=expected_existing,
+                expected_existing_digest=expected_digest,
+                overwrite_confirmed=expected_existing,
+                expected_volume_serial=expected_volume_serial,
+                expected_file_id=expected_file_id,
+            ),
+            expected_delivery_revision=0,
+        )
+        command = replace(draft, delivery_id=derive_delivery_id(draft))
+        outcome = await self._service.deliver(
+            command,
+            DeliveryContext(
+                operation_id=operation_id,
+                command_record_id=operation_id,
+                execution_id=execution_id,
+                round_id=round_id,
+            ),
+        )
+        return DeliveryExportResult(
+            receipt=outcome.receipt,
+            staged_cleaned=outcome.staged_cleaned,
+            target_path=path_text,
+        )
+
+    async def _read_complete(
+        self,
+        *,
+        artifact_id: str,
+        artifact_version: int,
+        execution_id: str,
+        round_id: str,
+    ) -> tuple[Any, str | None]:
+        """跨游标取完整正文（分页未取全即报 OPERATION_UNKNOWN，不静默截断）。"""
+
+        cursor: str | None = None
+        parts: list[str] = []
+        first: Any = None
+        while True:
+            read = await self._dao.read_artifact(
+                ArtifactReadQuery(
+                    artifact_id=artifact_id,
+                    artifact_version=artifact_version,
+                    execution_id=execution_id,
+                    round_id=round_id,
+                    body_cursor=cursor,
+                ),
+                user_scope=self._user_scope,
+            )
+            if first is None:
+                first = read
+                if read.artifact_id != artifact_id or read.artifact_version != artifact_version:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID,
+                        "artifact identity mismatch",
+                        "artifact-delivery-preview",
+                    )
+                if read.execution_id != execution_id or read.round_id != round_id:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID,
+                        "artifact execution/round mismatch",
+                        "artifact-delivery-preview",
+                    )
+            elif (read.artifact_id, read.artifact_version) != (first.artifact_id, first.artifact_version):
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN,
+                    "artifact identity changed between pages",
+                    "artifact-delivery-preview",
+                )
+            if read.next_cursor is not None and read.next_cursor == cursor:
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN,
+                    "artifact body cursor did not advance",
+                    "artifact-delivery-preview",
+                )
+            if read.body_text is not None:
+                parts.append(read.body_text)
+            if read.next_cursor is None:
+                break
+            cursor = read.next_cursor
+        body_text = "".join(parts) if first.body_available and parts else None
+        return first, body_text
+
+    async def _run_blocking(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """同步工作提交线程池（R16：渲染/摘要不在事件循环上执行）。"""
+
+        from utils.thread_pool import TaskType, ThreadPoolManager
+
+        task_type = TaskType.CPU if func is render_delivery or func is build_delivery_fields else TaskType.IO
+        return await ThreadPoolManager().run_async(task_type, func, *args, **kwargs)
+
+
+def _build_artifact_delivery(*, dao: Any, user_scope: str) -> AgentArtifactDelivery | None:
+    """构造成果交付适配（失败不阻断宿主组装；UI 如实显示导出未接线）。"""
+
+    try:
+        return AgentArtifactDelivery(dao=dao, user_scope=user_scope)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "[AgentWiring] artifact delivery wiring unavailable: %s (UI export disabled)",
+            type(exc).__name__,
+        )
+        return None
