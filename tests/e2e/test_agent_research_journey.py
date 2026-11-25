@@ -19,14 +19,10 @@ pytestmark = [pytest.mark.timeout(180), pytest.mark.e2e, pytest.mark.timeout_e2e
 _FIRST_QUESTION_TEXT = "分析新能源汽车行业的景气度与竞争格局"
 
 
-def _composer_unavailable_hint() -> str:
-    return I18n.get("agent_research_composer_unavailable")
-
-
-async def _skip_if_composer_not_wired(panel: ResearchPanelPage) -> None:
-    """首问入口未接线时如实跳过（不伪造输入行为）。"""
-    if await panel.page.has_text(_composer_unavailable_hint()):
-        pytest.skip("研究运行时未接线/未就绪：首问入口不可交互，跳过输入交互断言")
+async def _skip_when_composer_unavailable(panel: ResearchPanelPage) -> None:
+    """运行时未接线/未就绪时跳过输入交互（不伪造输入行为）。"""
+    if not await panel.is_body_available():
+        pytest.skip("研究运行时未接线/未就绪：首问区不可渲染，跳过输入交互断言")
 
 
 async def test_research_panel_opens_and_states_runtime_availability(e2e_page):
@@ -34,7 +30,7 @@ async def test_research_panel_opens_and_states_runtime_availability(e2e_page):
     panel = ResearchPanelPage(e2e_page)
 
     await panel.open()
-    await e2e_page.expect_text(I18n.get("agent_research_sessions"), timeout_ms=TIMEOUTS.TITLE)
+    await e2e_page.expect_text(I18n.get("agent_research_title"), timeout_ms=TIMEOUTS.TITLE)
 
     available = await panel.is_body_available()
     not_wired = await e2e_page.has_text(I18n.get("agent_research_not_wired"))
@@ -44,6 +40,12 @@ async def test_research_panel_opens_and_states_runtime_availability(e2e_page):
         "研究面板必须恰好呈现一种状态：可用主体或唯一不可用原因"
         f"（available={available}, not_wired={not_wired}, not_ready={not_ready}）"
     )
+
+    if available:
+        await e2e_page.expect_text(I18n.get("agent_research_sessions"), timeout_ms=TIMEOUTS.TITLE)
+    else:
+        reason = I18n.get("agent_research_not_wired") if not_wired else I18n.get("agent_research_not_ready")
+        await e2e_page.expect_text(reason, timeout_ms=TIMEOUTS.TITLE)
 
 
 async def test_first_question_entry_exposes_composer_and_send_action(e2e_page):
@@ -69,7 +71,7 @@ async def test_chinese_first_question_is_kept_without_auto_send(e2e_page):
     """中文输入保留完整文本且不触发发送（发送中文案与直答区均不出现）。"""
     panel = ResearchPanelPage(e2e_page)
     await panel.open()
-    await _skip_if_composer_not_wired(panel)
+    await _skip_when_composer_unavailable(panel)
 
     await panel.fill_first_question(_FIRST_QUESTION_TEXT)
     await panel.expect_composer_value(_FIRST_QUESTION_TEXT, timeout_ms=TIMEOUTS.TITLE)
@@ -108,7 +110,7 @@ async def test_closing_panel_returns_to_business_page_and_keeps_draft(e2e_page):
     await screener.open()
     await screener.expect_run_button()
     await panel.open()
-    await _skip_if_composer_not_wired(panel)
+    await _skip_when_composer_unavailable(panel)
 
     await panel.fill_first_question(_FIRST_QUESTION_TEXT)
     await panel.expect_composer_value(_FIRST_QUESTION_TEXT, timeout_ms=TIMEOUTS.TITLE)

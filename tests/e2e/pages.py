@@ -1098,14 +1098,29 @@ class ResearchPanelPage:
         self.app = App(page)
 
     async def open(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
-        """点击公共区研究入口并等待面板标题出现。"""
+        """展开面板。
+
+        入口按钮是切换语义（已展开时再点会收起），因此必须幂等：面板标题已存在
+        时直接返回，避免共享页面下把上一用例留下的展开态关掉。
+        """
+        if await self.page.has_text(I18n.get("agent_research_title")):
+            return
         await self.page.click_button(I18n.get("agent_research_toggle"), timeout_ms=timeout_ms)
         await self.expect_open()
 
     async def close(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
-        """点击面板「收起研究」并等待面板标题消失。"""
+        """收起面板（幂等：未展开时直接返回）。"""
+        title = I18n.get("agent_research_title")
+        if not await self.page.has_text(title):
+            return
         await self.page.click_button(I18n.get("agent_research_close"), timeout_ms=timeout_ms)
-        await self.page.expect_text_gone(I18n.get("agent_research_title"), timeout_ms=TIMEOUTS.TITLE)
+        await self.page.expect_text_gone(title, timeout_ms=TIMEOUTS.TITLE)
+
+    async def is_runtime_unavailable(self) -> bool:
+        """运行时未接线或未就绪：面板只渲染唯一原因，不含会话列表与首问区。"""
+        not_wired = await self.page.has_text(I18n.get("agent_research_not_wired"))
+        not_ready = await self.page.has_text(I18n.get("agent_research_not_ready"))
+        return not_wired or not_ready
 
     async def expect_open(self, timeout_ms: int = TIMEOUTS.TITLE) -> None:
         """断言面板标题可见（面板已展开）。"""
