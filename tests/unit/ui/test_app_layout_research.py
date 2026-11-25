@@ -1921,3 +1921,99 @@ class TestShellCallbackWiring:
 
         assert type(_observation_control(env)).__name__ == "Component", "草稿已准备时展开观察层"
         assert service.read_calls[-1][0].session_id == "s-1", "按回执会话精确导航，不取历史首条"
+
+
+class TestHistoryEntry:
+    """W-04：历史面板入口（目录/检索/清理/停止使用）可展开收起，且不新增导航。"""
+
+    def _history_button(self, env: dict) -> ft.IconButton:
+        column = env["result"].content
+        assert isinstance(column, ft.Column)
+        status_bar = column.controls[1]
+        for control in _iter_controls(status_bar):
+            if isinstance(control, ft.IconButton) and control.tooltip == "agent_research_history_toggle":
+                return control
+        raise AssertionError("未找到历史入口按钮")
+
+    def test_history_panel_toggles_without_extra_nav(self, layout_env) -> None:
+        assert _observation_control(layout_env) is None
+        _invoke(self._history_button(layout_env).on_click, MagicMock())
+        _rerender(layout_env)
+        assert _observation_control(layout_env) is not None, "展开后应挂历史面板"
+        assert len(_nav_rail(layout_env).destinations) == 7, "不得新增第八导航"
+        assert layout_env["page"].run_task.call_args.args[0] == _shared_vm().load_sessions
+
+        _invoke(self._history_button(layout_env).on_click, MagicMock())
+        _rerender(layout_env)
+        assert _observation_control(layout_env) is None, "再次点击应收起历史面板"
+
+    def test_history_panel_callbacks_route_to_vm_and_run_task(self, layout_env) -> None:
+        _invoke(self._history_button(layout_env).on_click, MagicMock())
+        _rerender(layout_env)
+        panel = _observation_control(layout_env)
+        assert type(panel).__name__ == "Component"
+        vm = _shared_vm()
+        page = layout_env["page"]
+
+        panel.kwargs["on_query_text"]("回撤")
+        panel.kwargs["on_scope_filter"]("child")
+        panel.kwargs["on_status_filter"]("archived")
+        assert vm.state.history_query == "回撤"
+        assert vm.state.history_scope_filter == "child"
+        assert vm.state.session_status_filter == "archived"
+        panel.kwargs["on_cancel_cleanup"]()
+        assert vm.state.cleanup_preview is None
+
+        panel.kwargs["on_search"]()
+        assert page.run_task.call_args.args[0] == vm.run_history_search
+        panel.kwargs["on_load_more"]()
+        assert page.run_task.call_args.args[0] == vm.load_more_history
+        panel.kwargs["on_begin_cleanup"]()
+        assert page.run_task.call_args.args[0] == vm.begin_cleanup
+        panel.kwargs["on_confirm_cleanup"]()
+        assert list(page.run_task.call_args.args) == [vm.confirm_cleanup, True]
+        panel.kwargs["on_stop_using"]()
+        assert page.run_task.call_args.args[0] == vm.stop_source_use
+        panel.kwargs["on_open_session"]("s-2")
+        assert list(page.run_task.call_args.args) == [vm.open_session, "s-2"]
+
+        before = page.run_task.call_count
+        panel.kwargs["on_refresh_usage"]()
+        assert page.run_task.call_count == before, "占用摘要为同步纯状态刷新，不应调度任务"
+
+        panel.kwargs["on_close"]()
+        _rerender(layout_env)
+        assert _observation_control(layout_env) is None
+
+
+def test_history_callbacks_are_no_ops_when_research_unwired(
+    mock_i18n_state, mock_app_colors_state, monkeypatch
+) -> None:
+    """研究服务未接线时：展开历史只提示未接线，所有历史动作不得调度任务。"""
+
+    env = _mount(
+        SimpleNamespace(ready=True),
+        service=None,
+        mock_i18n_state=mock_i18n_state,
+        mock_app_colors_state=mock_app_colors_state,
+        monkeypatch=monkeypatch,
+    )
+    column = env["result"].content
+    status_bar = column.controls[1]
+    button = next(
+        control
+        for control in _iter_controls(status_bar)
+        if isinstance(control, ft.IconButton) and control.tooltip == "agent_research_history_toggle"
+    )
+
+    _invoke(button.on_click, MagicMock())
+    _rerender(env)
+    panel = _observation_control(env)
+    assert type(panel).__name__ == "Component"
+    assert _shared_vm().state.available is False
+
+    env["page"].run_task.reset_mock()
+    for name in ("on_search", "on_load_more", "on_begin_cleanup", "on_confirm_cleanup", "on_stop_using"):
+        panel.kwargs[name]()
+    assert env["page"].run_task.call_count == 0, "未接线时历史动作必须为只读空操作"
+    panel.kwargs["on_refresh_usage"]()

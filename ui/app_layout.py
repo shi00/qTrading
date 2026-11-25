@@ -23,6 +23,7 @@ from typing import Any, cast
 
 import flet as ft
 
+from services.agent_history import HistoryCleanupGateway
 from ui.agent_decision_arbiter import submit_arbitrated_action, submit_decision
 from ui.components.flet_type_helpers import (
     get_control_attr,
@@ -63,6 +64,7 @@ from ui.views.decision_center_panel import build_decision_center_panel
 from ui.views.home_view import HomeView
 from ui.viewmodels.research_comparison_view_model import ComparisonServicePort, ResearchComparisonViewModel
 from ui.views.research_comparison_panel import ResearchComparisonPanel
+from ui.views.research_history_panel import ResearchHistoryPanel
 from ui.views.research_observer_panel import ResearchObserverPanel
 from ui.views.screener_view import ScreenerView
 from ui.views.settings_view import SETTINGS_SUBTAB_INDEX, SettingsView
@@ -439,6 +441,13 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
     # --- P02: 壳层公共研究观察层（跨页共享 VM；观察不控制执行） ---
     research_service, research_unavailable_key = resolve_agent_research_service(agent_wiring)
     main_turn_intake = resolve_main_turn_intake(agent_wiring)
+    # W-04: 清理确认门面（复用 CleanupService/执行编排；未接线如实阻断，不伪造可清理）。
+    cleanup_wiring = getattr(agent_wiring, "cleanup", None)
+    cleanup_gateway = (
+        HistoryCleanupGateway(store=cleanup_wiring.store, execution=cleanup_wiring.execution)
+        if cleanup_wiring is not None
+        else None
+    )
     research_state, research_vm = use_viewmodel(
         factory=lambda: shared_research_observer(
             research_service,
@@ -447,6 +456,8 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             intake=main_turn_intake,
             mcp_catalog=getattr(agent_wiring, "mcp_lifecycle", None),
             delivery=resolve_artifact_delivery(agent_wiring),
+            cleanup=cleanup_gateway,
+            cleanup_unavailable_reason=str(getattr(agent_wiring, "cleanup_failure", "") or "") or None,
         )
     )
     research_open, set_research_open = ft.use_state(False)
@@ -472,6 +483,8 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
     # 事件/效果闭包读取最新可见性（避免 stale 快照）
     decision_open_ref: Any = ft.use_ref(None)
     decision_open_ref.current = decision_open
+    # W-04: 历史面板（目录/检索/用量/清理确认/停止使用来源；与观察层同一 VM）
+    history_open, set_history_open = ft.use_state(False)
     decision_notice: str | None = None
     decision_notice, set_decision_notice = ft.use_state(lambda: decision_notice)
     # R2-I06: 业务对象 → 研究草稿准备（只准备不发送；与观察层共用同一 facade）
@@ -601,6 +614,47 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         page = _get_page()
         if page is not None and research_vm.state.available:
             page.run_task(research_vm.archive_session, session_id)
+
+    def _toggle_history(_e: ft.ControlEvent | None = None) -> None:
+        """展开/收起历史面板；展开时刷新占用摘要并按需读取会话目录（只读）。"""
+        opening = not history_open
+        set_history_open(opening)
+        if not opening:
+            return
+        page = _get_page()
+        if page is None or not research_vm.state.available:
+            return
+        research_vm.refresh_history_usage()
+        if not research_vm.state.sessions:
+            page.run_task(research_vm.load_sessions)
+
+    def _history_search() -> None:
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.run_history_search)
+
+    def _history_load_more() -> None:
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.load_more_history)
+
+    def _history_refresh_usage() -> None:
+        research_vm.refresh_history_usage()
+
+    def _history_begin_cleanup() -> None:
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.begin_cleanup)
+
+    def _history_confirm_cleanup() -> None:
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.confirm_cleanup, True)
+
+    def _history_stop_source() -> None:
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.stop_source_use)
 
     def _toggle_comparison(_e: ft.ControlEvent | None = None) -> None:
         """展开/收起对比面板；展开时只读加载连接目录并同步当前会话。"""
@@ -1337,6 +1391,28 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         if decision_open
         else None
     )
+    # W-04: 历史面板（目录/检索/占用/清理确认/停止使用来源；动作全部显式点击）
+    history_panel = (
+        ResearchHistoryPanel(
+            state=research_state,
+            on_close=lambda: _toggle_history(None),
+            on_query_text=research_vm.set_history_query,
+            on_scope_filter=research_vm.set_history_scope_filter,
+            on_status_filter=research_vm.set_session_status_filter,
+            on_search=_history_search,
+            on_load_more=_history_load_more,
+            on_refresh_usage=_history_refresh_usage,
+            on_open_session=_open_session,
+            on_begin_cleanup=_history_begin_cleanup,
+            on_confirm_cleanup=_history_confirm_cleanup,
+            on_cancel_cleanup=research_vm.cancel_cleanup,
+            on_stop_source_id=research_vm.set_stop_source_id,
+            on_stop_source_version=research_vm.set_stop_source_version,
+            on_stop_using=_history_stop_source,
+        )
+        if history_open
+        else None
+    )
 
     # --- SEC-03 状态栏指示器: 底部轻量「本会话外发 N 次」---
     # 数据源 egress_status_state.count（内存读, 无阻塞, R16）; 会话计数进程内单调、重启归零。
@@ -1377,6 +1453,14 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
                 on_click=safe_on_click(_toggle_decision_center),
             )
         )
+    status_bar_items.append(
+        ft.IconButton(
+            icon=ft.Icons.HISTORY,
+            icon_size=AppStyles.FONT_SIZE_BODY_SM,
+            tooltip=I18n.get("agent_research_history_toggle"),
+            on_click=safe_on_click(_toggle_history),
+        )
+    )
     status_bar_egress = ft.Container(
         content=ft.Row(status_bar_items, spacing=6),
         padding=ft.Padding.only(left=16, right=16, top=6, bottom=6),
@@ -1391,6 +1475,8 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         body_controls.append(comparison_panel)
     if decision_panel is not None:
         body_controls.append(decision_panel)
+    if history_panel is not None:
+        body_controls.append(history_panel)
     body_region = ft.Container(
         content=ft.Row(safe_controls(body_controls), expand=True),
         expand=True,

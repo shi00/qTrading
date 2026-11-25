@@ -64,9 +64,14 @@ def build_session_list(
         ),
     ]
     if state.session_action_error_code:
-        rows.append(
-            error_text(I18n.get("agent_research_session_action_error_fmt").format(code=state.session_action_error_code))
-        )
+        if state.session_action_error_code == "REVISION_CONFLICT":
+            rows.append(error_text(I18n.get("agent_research_session_revision_conflict")))
+        else:
+            rows.append(
+                error_text(
+                    I18n.get("agent_research_session_action_error_fmt").format(code=state.session_action_error_code)
+                )
+            )
     elif state.session_action_error_key:
         rows.append(error_text(I18n.get(state.session_action_error_key)))
     if state.sessions_loading:
