@@ -2067,9 +2067,14 @@ class AIUsageDao(BaseDao):
     async def read_active_reserved_cny(self, *, invocation_ids: list[str] | tuple[str, ...]) -> dict[str, Decimal]:
         """逐 invocation 汇总活跃预留金额（只读；费用投影的「预留中」列）。
 
-        活跃状态 = ``reserved`` / ``dispatched`` / ``held_unconfirmed``（与预算门
-        ``_read_active_reservations_sum`` 同口径：三者都占用预算，直到 settled /
-        released）。本方法**只读**，不改写预留状态、不结算、不估算。
+        活跃占用与预算门 ``_read_active_reservations_sum`` **同口径**（N25）：普通
+        预留 ``reserved`` / ``dispatched`` 仅在 owner 租约未过期
+        （``owner_lease_expires_at > now(UTC)``）时占用——租约过期即 owner 失权，
+        fencing 保证该预留永不可再推进（未消费），其退出占用是事实零释放，读投影
+        不得继续把已过租的普通预留列为预算占用；``held_unconfirmed`` 为崩溃/失权后
+        「结果未知」的占用，**不受租约影响持续计入**（明示保留，直至 released 人工
+        解除 / settled 结算确认），不得被过期规则静默释放。终态 settled / released
+        不计。本方法**只读**，不改写预留状态、不结算、不估算。
 
         金额为 JSONB 文本，逐元素先经非负小数正则过滤再 ``::numeric``（存量垃圾
         ``NaN`` / 负值 / 非数值文本按事实零计入，不 crash、不抵消合法预留）；
@@ -2101,6 +2106,12 @@ class AIUsageDao(BaseDao):
                         WHERE i.invocation_id = ANY(CAST(:invocation_ids AS text[]))
                           AND elem->>'state' = ANY(CAST(:states AS text[]))
                           AND elem->>'amount_cny' IS NOT NULL
+                          -- N25：普通预留须 owner 租约未过期（与预算门同一判据）；
+                          -- held_unconfirmed（结果未知）不受租约影响，明示保留占用。
+                          AND (
+                                  elem->>'state' = 'held_unconfirmed'
+                                  OR i.owner_lease_expires_at > (now() AT TIME ZONE 'UTC')
+                              )
                         GROUP BY i.invocation_id
                         """
                     ),

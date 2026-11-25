@@ -62,6 +62,7 @@ def _read(**overrides: object) -> ArtifactRead:
         "next_cursor": None,
         "body_available": True,
         "unavailable_reason": None,
+        "question_public_text": "如何评估该策略的风险？",
     }
     values.update(overrides)
     return ArtifactRead(**values)  # pyright: ignore[reportArgumentType]
@@ -107,6 +108,23 @@ class TestBuildDeliveryFields:
         assert index["metadata:current_source_state"].value_text == "unknown"
         assert index["body:"].value_type == "string"
         assert index["body:"].value_text == "成果正文"
+        assert index["metadata:question_public"].value_text == "如何评估该策略的风险？"
+
+    def test_question_public_is_read_back_in_all_formats(self) -> None:
+        fields = build_delivery_fields(_read())
+
+        for format_name in ("md", "csv", "xlsx"):
+            rendered = render_delivery(fields, format_name)
+            verify_delivery_readback(fields, rendered.content, format_name)
+            readback = _by_path(read_delivery_fields(rendered.content, format_name))
+            assert readback["metadata:question_public"].value_text == "如何评估该策略的风险？"
+            assert readback["metadata:question_public"].value_type == "string"
+
+    @pytest.mark.parametrize("question", [None, ""])
+    def test_missing_public_question_is_never_exported_as_complete(self, question: str | None) -> None:
+        with pytest.raises(AgentValidationError) as error:
+            build_delivery_fields(_read(question_public_text=question))
+        assert error.value.code == "question_public_unavailable"
 
     def test_source_state_columns_are_split_and_canonical(self) -> None:
         index = _by_path(

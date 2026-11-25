@@ -115,9 +115,11 @@ class AppStateMCPGrantStore:
         *,
         read: Callable[[str], Awaitable[str | None]],
         write: Callable[[str, str], Awaitable[None]],
+        delete: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
         self._read = read
         self._write = write
+        self._delete = delete
 
     @classmethod
     def key_for(cls, identity: MCPServiceIdentity) -> str:
@@ -126,6 +128,17 @@ class AppStateMCPGrantStore:
     async def save(self, grant: MCPConnectGrant) -> None:
         text = json.dumps(grant.encode(), ensure_ascii=False, separators=_JSON_SEPARATORS, sort_keys=True)
         await self._write(self.key_for(grant.identity), text)
+
+    async def delete(self, identity: MCPServiceIdentity) -> bool:
+        """删除授权记录（服务删除收尾）；未接线删除端口即显式拒绝。"""
+
+        if self._delete is None:
+            raise AgentServiceError(
+                AgentErrorCode.CONFIG_UNAVAILABLE,
+                "mcp grant deletion is not wired",
+                identity.stable_key(),
+            )
+        return await self._delete(self.key_for(identity))
 
     async def load(self, identity: MCPServiceIdentity) -> MCPConnectGrant | None:
         text = await self._read(self.key_for(identity))

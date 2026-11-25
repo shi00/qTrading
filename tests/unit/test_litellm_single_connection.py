@@ -30,6 +30,7 @@ from core.model_management_types import (
     AttemptContext,
     InferenceRequest,
     NormalizedLLMUsage,
+    ResolvedConnection,
 )
 from services.ai_service.litellm_client import normalize_litellm_usage, resolve_credential
 from tests.virtual_clock import VirtualClock
@@ -810,6 +811,121 @@ class TestStrictNoDropNoResend:
         kwargs = mock_ac.await_args.kwargs
         assert "client" not in kwargs
         assert kwargs["drop_params"] is False
+
+
+# ---------------------------------------------------------------------------
+# N04：注入 client 关闭失败不得丢弃已获响应与报告用量
+# ---------------------------------------------------------------------------
+def _injected_client(close_side_effect: BaseException) -> SimpleNamespace:
+    return SimpleNamespace(close=AsyncMock(side_effect=close_side_effect))
+
+
+def _openai_conn() -> ResolvedConnection:
+    return _connection(
+        provider="openai",
+        model="research-model",
+        api_base="https://api.example.com/v1",
+        credential_ref="env:QTR_STRICT_CLOSE_KEY",
+    )
+
+
+class TestInjectedClientCloseFailureN04:
+    """N04：提供方已返回有效非流响应及报告用量后，收尾关闭失败只降级。
+
+    关闭（注入的严格守卫 client）在响应解析 / 用量归一化之后执行；失败不得
+    改写结果与用量，收尾状态单列（``metadata["cleanup_status"]``），
+    ``asyncio.CancelledError`` 仍传播（R2）。
+    """
+
+    async def test_close_failure_keeps_response_and_reported_usage(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("QTR_STRICT_CLOSE_KEY", "sk-close")
+        usage = SimpleNamespace(prompt_tokens=11, completion_tokens=1, total_tokens=12)
+        fake_client = _injected_client(RuntimeError("close boom"))
+        with (
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_ac,
+            patch("services.ai_service.litellm_client._build_strict_guard_client", return_value=fake_client),
+        ):
+            mock_ac.return_value = _fake_response(content="kept", usage=usage)
+            request = _request()
+            result = await LiteLLMClient(MagicMock()).invoke_single_connection(
+                request, _openai_conn(), request.deadline, _attempt_context()
+            )
+
+        assert fake_client.close.await_count == 1
+        # 结果与提供方报告用量原样保留（不被收尾异常吞掉）
+        assert result.content == "kept"
+        assert result.usage is not None
+        assert result.usage.input_total_tokens == 11
+        assert result.usage.output_tokens == 1
+        # 收尾状态单列，不进主结果语义（成功仍成功）
+        assert result.metadata["cleanup_status"] == "close_failed"
+        # 审计按模型结果记 sent，而非 failed
+        records = EgressAudit().recent(1)
+        assert records and records[0]["status"] == "sent"
+
+    async def test_close_timeout_keeps_response(self, monkeypatch: pytest.MonkeyPatch):
+        """关停挂起（超时）同样不得丢弃结果：按清理预算有界收尾。"""
+        import services.ai_service.litellm_client as litellm_client_module
+
+        monkeypatch.setenv("QTR_STRICT_CLOSE_KEY", "sk-close")
+        monkeypatch.setattr(litellm_client_module, "_STREAM_CLOSE_GRACE_S", 0.01)
+
+        async def _hang() -> None:
+            await asyncio.sleep(10.0)
+
+        fake_client = SimpleNamespace(close=AsyncMock(side_effect=_hang))
+        with (
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_ac,
+            patch("services.ai_service.litellm_client._build_strict_guard_client", return_value=fake_client),
+        ):
+            mock_ac.return_value = _fake_response(content="kept")
+            request = _request()
+            result = await LiteLLMClient(MagicMock()).invoke_single_connection(
+                request, _openai_conn(), request.deadline, _attempt_context()
+            )
+
+        assert result.content == "kept"
+        assert result.metadata["cleanup_status"] == "close_failed"
+
+    async def test_close_cancelled_still_propagates(self, monkeypatch: pytest.MonkeyPatch):
+        """R2：关闭阶段收到取消必须传播，不得降级为「已成功返回」。"""
+        monkeypatch.setenv("QTR_STRICT_CLOSE_KEY", "sk-close")
+        fake_client = _injected_client(asyncio.CancelledError())
+        with (
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_ac,
+            patch("services.ai_service.litellm_client._build_strict_guard_client", return_value=fake_client),
+        ):
+            mock_ac.return_value = _fake_response(content="kept")
+            request = _request()
+            with pytest.raises(asyncio.CancelledError) as excinfo:
+                await LiteLLMClient(MagicMock()).invoke_single_connection(
+                    request, _openai_conn(), request.deadline, _attempt_context()
+                )
+
+        # 取消来自收尾关闭（已进入关闭且未被降级吞没），审计按取消单列
+        assert excinfo.value.args == ()
+        assert fake_client.close.call_count == 1
+        records = EgressAudit().recent(1)
+        assert records and records[0]["status"] == "cancelled"
+
+    async def test_close_failure_does_not_mask_original_adapter_error(self, monkeypatch: pytest.MonkeyPatch):
+        """关闭失败不得覆盖本次尝试的真实失败原因。"""
+        monkeypatch.setenv("QTR_STRICT_CLOSE_KEY", "sk-close")
+        fake_client = _injected_client(RuntimeError("close boom"))
+        with (
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_ac,
+            patch("services.ai_service.litellm_client._build_strict_guard_client", return_value=fake_client),
+        ):
+            mock_ac.side_effect = RuntimeError("upstream boom")
+            request = _request()
+            with pytest.raises(RuntimeError, match="upstream boom"):
+                await LiteLLMClient(MagicMock()).invoke_single_connection(
+                    request, _openai_conn(), request.deadline, _attempt_context()
+                )
 
 
 # ---------------------------------------------------------------------------

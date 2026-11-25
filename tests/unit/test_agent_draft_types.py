@@ -1,7 +1,8 @@
 """草稿持久契约单测（F-03-1；DD §4.2 DraftSaveCommand/DraftReceipt、§9.3）。
 
 覆盖：全键必填/禁额外键、bool 与 0 预期版拒绝、命令引用与预期版一致、
-集合规范化（去重/排序）、自定义字段与基线摘要成对约束、研究日期与精确截止
+集合规范化（skill/MCP/customized 去重排序）与资料引用保持用户选序、
+自定义字段与基线摘要成对约束、研究日期与精确截止
 分列（含 v1 旧稿只读兼容）、不透明片段拒绝 float 与凭据/批准键、回执坏枚举
 fail-closed、输入摘要稳定。
 """
@@ -331,10 +332,13 @@ class TestDraftReadQuery:
         wire = encode_draft_payload(_payload(customized_fields=("text", "mode")))
         assert wire["customized_fields"] == ["mode", "text"]
 
-    def test_source_refs_sorted_and_deduplicated(self) -> None:
+    def test_source_refs_preserve_user_selection_order(self) -> None:
+        # UX P03「顺序保持用户选择」：非 ID 顺序写入后按原序回读（不重排）。
         payload = _payload(source_refs=(_source("src-b"), _source("src-a")))
-        decoded = decode_draft_payload(encode_draft_payload(payload))
-        assert [ref.source_id for ref in decoded.source_refs] == ["src-a", "src-b"]
+        wire = encode_draft_payload(payload)
+        assert [item["source_id"] for item in wire["source_refs"]] == ["src-b", "src-a"]
+        decoded = decode_draft_payload(wire)
+        assert [ref.source_id for ref in decoded.source_refs] == ["src-b", "src-a"]
 
     def test_duplicate_source_refs_rejected(self) -> None:
         with pytest.raises(AgentValidationError) as excinfo:
@@ -457,6 +461,15 @@ class TestDraftInputDigest:
             command=replace(_command().command, expected_revision=4),
         )
         assert draft_save_input_digest(_command()) != draft_save_input_digest(other)
+
+    def test_source_ref_order_change_changes_digest(self) -> None:
+        # 同键仅换序是异输入：命令摘要必须区分资料卡顺序（不得把换序当原请求）。
+        ab = _command(payload=_payload(source_refs=(_source("src-a"), _source("src-b"))))
+        ba = _command(payload=_payload(source_refs=(_source("src-b"), _source("src-a"))))
+        assert draft_save_input_digest(ab) != draft_save_input_digest(ba)
+        assert draft_save_input_digest(ab) == draft_save_input_digest(
+            _command(payload=_payload(source_refs=(_source("src-a"), _source("src-b"))))
+        )
 
 
 class TestDraftReceiptCodec:

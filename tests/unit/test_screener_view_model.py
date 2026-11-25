@@ -1371,6 +1371,18 @@ class TestSortHelper:
         result = ScreenerViewModel._sort_helper(df, "Z", True)
         assert result.equals(df)
 
+    def test_sorts_with_identity_dict_column_present(self):
+        """N13: 结果集含调用身份字典列时, 按业务列排序不受影响, 身份随行移动不被消费."""
+        df = pd.DataFrame(
+            {
+                "ai_score": [10.0, 30.0, 20.0],
+                "stock_agent_call": [{"call_id": "a"}, {"call_id": "b"}, {"call_id": "c"}],
+            }
+        )
+        result = ScreenerViewModel._sort_helper(df, "ai_score", False)
+        assert list(result["ai_score"]) == [30.0, 20.0, 10.0]
+        assert list(result["stock_agent_call"]) == [{"call_id": "b"}, {"call_id": "c"}, {"call_id": "a"}]
+
 
 class TestUpdatePagination:
     def test_calculates_total_items(self, vm):

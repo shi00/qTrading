@@ -5,6 +5,8 @@
 - 成功：单次 ``Agent.run`` → 实际模型名 → ``ResearchResultDraft`` 归属完整 → 保存确认
   才返回 ``complete``，``artifact_ref`` 为 ``id@version``、``input_digest`` 原样回报；
 - 前置失败：输入指纹缺失、归属事实不可读、空文本、模型名不可得、保存未确认；
+- N32：保存提交确认丢失按原成果身份查回（证明已保存 → ``complete``；查回无法证明 →
+  ``unknown`` 不固化失败）；提交前明确回滚（业务拒绝）仍如实 ``failed``；
 - 边界拒绝与模型失败映射为稳定 ``leaf_*`` 错误码；
 - T-03：绑定冻结绝对期限逐回合派生真实 ``timeout``（缺失/耗尽零外发失败）、受治理
   公开事件回调（异常隔离 / 取消传播）、SDK 超时与截断协议失败如实失败且零保存；
@@ -14,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from types import SimpleNamespace
 from typing import Any, cast
@@ -52,9 +55,11 @@ from services.agent_service.leaf_agent import (
     LEAF_MODEL_FAILED,
     LEAF_MODEL_PROTOCOL_FAILED,
     LEAF_MODEL_REF_UNAVAILABLE,
+    LEAF_MODEL_REFUSED,
     LEAF_POLICY_DENIED,
     LEAF_PREDECESSOR_ARTIFACT_UNAVAILABLE,
     LEAF_RESULT_SAVE_FAILED,
+    LEAF_RESULT_SAVE_UNCONFIRMED,
     LEAF_ROLE_PROMPT_UNAVAILABLE,
     LEAF_TIMEOUT_UNAVAILABLE,
     LEAF_TOOL_SETUP_FAILED,
@@ -148,16 +153,19 @@ class _Dao:
         facts_error: Exception | None = None,
         save_result: Any = None,
         save_error: Exception | None = None,
+        save_error_times: int = 1_000_000,
         artifacts: dict[str, Any] | None = None,
     ) -> None:
         self.facts = facts or _Facts()
         self.facts_error = facts_error
         self.save_result = save_result
         self.save_error = save_error
+        self.save_error_times = save_error_times
         self.artifacts = artifacts or {}
         self.fact_calls = 0
         self.artifact_queries: list[Any] = []
         self.drafts: list[Any] = []
+        self.save_calls = 0
 
     async def read_leaf_dispatch_facts(self, execution_id: str, round_id: str) -> Any:
         self.fact_calls += 1
@@ -177,7 +185,8 @@ class _Dao:
 
     async def save_research_result(self, draft: Any) -> Any:
         self.drafts.append(draft)
-        if self.save_error is not None:
+        self.save_calls += 1
+        if self.save_error is not None and self.save_calls <= self.save_error_times:
             raise self.save_error
         if self.save_result is None:
             return ResearchResult.from_draft(draft, artifact_id="art-1", artifact_version=2)
@@ -449,13 +458,56 @@ class TestRunLeafAgentFailures:
         assert outcome.error_code == LEAF_RESULT_SAVE_FAILED
         assert outcome.artifact_ref is None
 
-    async def test_save_error_maps_to_save_failed(self) -> None:
-        dao = _Dao(save_error=RuntimeError("write failed"))
+    async def test_save_business_rejection_is_confirmed_rollback_and_fails(self) -> None:
+        dao = _Dao(save_error=AgentServiceError(AgentErrorCode.POLICY_DENIED, "session cleanup fenced", "leaf"))
 
         outcome = await run_leaf_agent(_model(), _context(), _binding(), dao=dao)
 
         assert outcome.state == "failed"
         assert outcome.error_code == LEAF_RESULT_SAVE_FAILED
+        assert dao.save_calls == 1  # 提交前确证回滚：不查回、不补写
+
+    async def test_lost_save_confirmation_looked_up_by_identity_reports_complete(
+        self, _fake_agent: type[_FakeAgent]
+    ) -> None:
+        # 提交已生效、仅确认丢失：查回（同身份同摘要幂等重放）证明成果已保存。
+        dao = _Dao(save_error=ConnectionError("ack lost after commit"), save_error_times=1)
+
+        outcome = await run_leaf_agent(_model(), _context(), _binding(), dao=dao)
+
+        assert outcome.state == "complete"
+        assert outcome.artifact_ref == "art-1@2"
+        assert outcome.input_digest == _DIGEST
+        assert dao.save_calls == 2
+        assert dao.drafts[0] is dao.drafts[1]  # 同一 draft 身份查回，不重跑模型
+        assert _fake_agent.instances[0].run_calls == 1
+
+    async def test_lost_save_confirmation_without_proof_keeps_unknown(self, _fake_agent: type[_FakeAgent]) -> None:
+        # 查回也无法证明（同身份仍不可读/未确认）：保持未知，不固化确定失败。
+        dao = _Dao(save_error=ConnectionError("ack lost and lookup down"))
+
+        outcome = await run_leaf_agent(_model(), _context(), _binding(), dao=dao)
+
+        assert outcome.state == "unknown"
+        assert outcome.error_code == LEAF_RESULT_SAVE_UNCONFIRMED
+        assert outcome.artifact_ref is None
+        assert outcome.input_digest == _DIGEST
+        assert dao.save_calls == 2
+        assert _fake_agent.instances[0].run_calls == 1
+
+    async def test_lookup_result_with_mismatched_identity_keeps_unknown(self) -> None:
+        # 查回返回的成果身份不合（非本叶成果）：不能证明已保存 → 未知。
+        dao = _Dao(
+            save_error=ConnectionError("ack lost after commit"),
+            save_error_times=1,
+            save_result=SimpleNamespace(final_output_saved=True, node_id="other-node"),
+        )
+
+        outcome = await run_leaf_agent(_model(), _context(), _binding(), dao=dao)
+
+        assert outcome.state == "unknown"
+        assert outcome.error_code == LEAF_RESULT_SAVE_UNCONFIRMED
+        assert dao.save_calls == 2
 
     async def test_policy_denied_maps_to_leaf_policy_denied(self, _fake_agent: type[_FakeAgent]) -> None:
         _fake_agent.error = AgentServiceError(
@@ -480,6 +532,24 @@ class TestRunLeafAgentFailures:
         assert outcome.state == "failed"
         assert outcome.error_code == LEAF_MODEL_FAILED
         assert dao.drafts == []
+
+    async def test_model_refusal_maps_to_refused_without_leaking_body(
+        self, _fake_agent: type[_FakeAgent], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """确定拒绝与协议/普通失败分类不同；拒绝原文不进日志/终态（R9/R21）。"""
+        from services.agent_service.model import ModelTurnRefusedError
+
+        _fake_agent.error = ModelTurnRefusedError("chat turn refused by provider policy", "私密拒绝原文")
+        dao = _Dao()
+
+        with caplog.at_level(logging.WARNING):
+            outcome = await run_leaf_agent(_model(), _context(), _binding(), dao=dao)
+
+        assert outcome.state == "failed"
+        assert outcome.error_code == LEAF_MODEL_REFUSED
+        assert outcome.artifact_ref is None
+        assert dao.drafts == []
+        assert "私密拒绝原文" not in caplog.text
 
     async def test_cancelled_error_propagates(self, _fake_agent: type[_FakeAgent]) -> None:
         _fake_agent.error = asyncio.CancelledError()

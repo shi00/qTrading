@@ -102,6 +102,20 @@ def _estimate_tokens(text, model: str | None = None) -> int:
     return _estimate_tokens_fallback(text)
 
 
+def count_tokens_with_basis(text: object, model: str | None = None) -> tuple[int, bool]:
+    """按 ``model`` 的 tokenizer 计数，并如实回报是否已核（R21）。
+
+    返回 ``(count, verified)``。``verified`` 仅在 ``model`` 为非空模型引用、且本次
+    计数确实由 ``litellm.token_counter`` 完成（未回退到字符启发式）时为 ``True``；
+    模型引用缺失或 tokenizer 不可用时为 ``False``——调用方不得把未核值当作按
+    该模型核定的精确值。空模型引用不得以默认分词器冒充「已核」。
+    """
+    if not isinstance(model, str) or not model:
+        return _estimate_tokens(text, None), False
+    count = _estimate_tokens(text, model)
+    return count, not _litellm_token_counter_error
+
+
 def _get_model_context_window(llm_config: dict, model_override: str | None = None) -> int:
     """取生效模型的 context 窗口（Issue #70）。
 

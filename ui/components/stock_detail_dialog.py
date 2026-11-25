@@ -1015,6 +1015,10 @@ def StockDetailDialog(
     # 的返回值）+ 代次标记：卸载 / 依赖变化时递增 chart_generation_ref，使在途
     # 请求的迟到结果失效，避免更新已卸载组件（F05）。
     chart_generation_ref = ft.use_ref(0)
+    # N15: 收起/发起研究的一次性守卫。消费方按「重新实例化推送 open_state=True」
+    # 打开详情（见 open_state 参数说明），因此实例内关闭即终态；同帧内重复点击
+    # 「发起研究」不得重复准备草稿。
+    closed_ref = ft.use_ref(False)
 
     async def _load_chart_effect() -> None:
         if not open_ or not data_processor:
@@ -1048,6 +1052,9 @@ def StockDetailDialog(
 
     # --- 关闭处理（state 驱动，非 pop_dialog）---
     def _close(_e) -> None:
+        if closed_ref.current:
+            return
+        closed_ref.current = True
         set_open(False)
         if news_on_cancel is not None:
             news_on_cancel()
@@ -1060,6 +1067,14 @@ def StockDetailDialog(
     def _add_to_watchlist(_e) -> None:
         if on_add_to_watchlist is not None:
             on_add_to_watchlist(data.get("ts_code", ""), data.get("name", ""))
+
+    # --- 详情发起研究（N15）：回执数据原样转发，随后收起详情 ---
+    def _start_research(_e) -> None:
+        """转发研究草稿请求后收起详情，避免详情与研究面板两层观察界面叠加。"""
+        if closed_ref.current or on_start_research is None:
+            return
+        on_start_research(data)
+        _close(_e)
 
     news_panel = (
         NewsInsightPanel(
@@ -1082,13 +1097,13 @@ def StockDetailDialog(
     # --- 条件渲染 dialog + use_dialog 自动挂载/卸载 ---
     actions = [anchored(EIDS.DETAIL_DIALOG.CLOSE_BUTTON, ft.TextButton(I18n.get("common_close"), on_click=_close))]
     if on_start_research is not None:
-        # R2-I06: 股票详情 → 只准备研究草稿（不关闭现场、不自动发送、不重跑选股）
+        # R2-I06 / N15: 股票详情 → 只准备研究草稿（收起草稿发起的详情、不自动发送、不重跑选股）
         actions.insert(
             0,
             ft.TextButton(
                 I18n.get("agent_research_start"),
                 icon=ft.Icons.SCIENCE_OUTLINED,
-                on_click=safe_on_click(lambda _e: on_start_research(data)),
+                on_click=safe_on_click(_start_research),
             ),
         )
     if on_add_to_watchlist is not None:

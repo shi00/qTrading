@@ -10,6 +10,8 @@
 - **不重跑业务**：本 VM 只读现存对象，不回放选股/回测；返回原业务现场由既有页面
   状态保持（本 VM 不导航、不改业务页状态）；
 - **保稿**：来源失效/重复发起时不删除、不覆盖既有草稿，如实给出原因 key；
+- **写结果未知**：提交已发起但确认中断只报「未知」并保留原写键待查回，不换键补写、
+  不先清草稿（N12）；确定未写才报一般失败（可同键重试）；
 - VM 不 import flet / 不感知 locale（只产出 i18n key）。
 """
 
@@ -17,16 +19,15 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from core.agent_types import Purpose
-from services.agent_service.business_research import (
-    BusinessDraftAlreadyPrepared,
-    BusinessObjectSnapshot,
-    BusinessResearchPreparer,
-    BusinessSourceUnavailable,
-)
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
+
+if TYPE_CHECKING:
+    # N01：Agent 专用依赖（services.agent_service 包初始化会拉入 DBOS / pydantic_ai）
+    # 只在真正接线时惰性导入；依赖缺失时本模块仍可导入，研究入口如实不可用。
+    from services.agent_service.business_research import BusinessObjectSnapshot
 
 #: 桌面单用户域（与 app.agent_wiring 默认 user_scope 一致；UI 层不 import app）。
 LOCAL_DESKTOP_USER_SCOPE = "local-desktop"
@@ -39,6 +40,7 @@ UNAVAILABLE_NOT_READY = "agent_research_not_ready"
 NOTICE_DRAFT_PREPARED = "agent_research_draft_prepared"
 NOTICE_DRAFT_EXISTS = "agent_research_draft_exists"
 NOTICE_SOURCE_UNAVAILABLE = "agent_research_source_unavailable"
+NOTICE_COMMIT_UNKNOWN = "agent_research_draft_commit_unknown"
 NOTICE_PREPARE_FAILED = "agent_research_prepare_failed"
 
 #: 业务入口对象类别（与草稿 object_context.object_kind 同值域）。
@@ -72,6 +74,8 @@ class BusinessResearchRequest:
     period: str | None = None
 
     def as_snapshot(self) -> BusinessObjectSnapshot:
+        from services.agent_service.business_research import BusinessObjectSnapshot
+
         return BusinessObjectSnapshot(
             source_module=self.source_module,
             object_kind=self.object_kind,
@@ -108,7 +112,11 @@ class BusinessResearchViewModel(ObservableViewModelMixin[BusinessResearchState])
     ) -> None:
         self._user_scope = user_scope
         self._service_key = id(service) if service is not None else None
-        self._preparer = BusinessResearchPreparer(service) if service is not None else None
+        self._preparer: Any = None
+        if service is not None:
+            from services.agent_service.business_research import BusinessResearchPreparer
+
+            self._preparer = BusinessResearchPreparer(service)
         self._state = BusinessResearchState(
             available=self._preparer is not None,
             unavailable_reason_key=unavailable_reason_key if self._preparer is None else "",
@@ -128,6 +136,14 @@ class BusinessResearchViewModel(ObservableViewModelMixin[BusinessResearchState])
             return
         if self._state.preparing:
             return  # 重复发起：在途未结束时不再起第二份准备
+        # N01：仅在实际准备（已接线）时导入 Agent 服务层；依赖缺失时模块仍可导入，
+        # 研究入口在 ``_preparer is None`` 分支如实不可用且零派发。
+        from services.agent_service.business_research import (
+            BusinessDraftAlreadyPrepared,
+            BusinessDraftCommitUnknown,
+            BusinessSourceUnavailable,
+        )
+
         self._set_state(preparing=True, notice_key=None, last_error_code=None)
         # 写调用阶段：页面卸载放行自然完成，不宣称「未准备」（磁盘 SSOT）。
         self._mark_inflight_committing()
@@ -162,6 +178,17 @@ class BusinessResearchViewModel(ObservableViewModelMixin[BusinessResearchState])
         except BusinessSourceUnavailable as exc:
             # 来源失效/时点未知：如实说明，不生成空草稿（R21）；既有草稿不受影响。
             self._set_state(preparing=False, notice_key=NOTICE_SOURCE_UNAVAILABLE, last_error_code=exc.reason)
+            return
+        except BusinessDraftCommitUnknown as exc:
+            # 提交已发起但确认中断：结果未知（草稿可能已保存），保原写键按原身份查回；
+            # 不换键补写、不先清草稿（N12）。
+            cause = exc.__cause__
+            self._set_state(
+                preparing=False,
+                notice_key=NOTICE_COMMIT_UNKNOWN,
+                last_session_id=exc.session_id,
+                last_error_code=self._error_code(cause if isinstance(cause, Exception) else exc),
+            )
             return
         except Exception as exc:  # facade 已脱敏；未知错误如实报码
             self._set_state(

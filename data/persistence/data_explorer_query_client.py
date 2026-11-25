@@ -18,6 +18,12 @@ logger = logging.getLogger(__name__)
 # 不扩展关键字黑名单——statement_timeout 不关心 SQL 内容，只关心执行时长（报告 03 §2.2 C6）。
 _STATEMENT_TIMEOUT = "10s"
 
+# N03：Agent 受管表（``agent_`` 前缀）不进入通用数据页目录。这些表存放原值/模型
+# 可见/公开导出三表示（迁移 0048），公开表示只经 Agent 读取 API 提供；通用数据页
+# 按目录反射返回原始全列会绕过该投影（如 ``agent_message.body_text`` 原值、
+# ``model_text`` 模型可见），故浏览与导出共用的目录校验统一排除（fail closed）。
+_AGENT_MANAGED_TABLE_PREFIX = "agent_"
+
 _OP_MAP = {
     "=": lambda c, v: c == v,
     ">": lambda c, v: c > v,
@@ -119,6 +125,10 @@ class DataExplorerQueryClient:
     def get_all_tables(self):
         """
         Get a list of all tables in the database.
+
+        Agent 受管表（``agent_`` 前缀）不纳入通用数据页目录：其公开表示由 Agent
+        读取 API 提供（三表示见迁移 0048），原始全列读取会把未公开表示（原值/
+        模型可见）带进浏览与导出。浏览（schema/rows）与导出共用本目录校验。
         Returns:
             list[str]: List of table names.
         """
@@ -126,7 +136,7 @@ class DataExplorerQueryClient:
         try:
             assert self._engine is not None
             insp = sa.inspect(self._engine)
-            return sorted(insp.get_table_names())
+            return sorted(name for name in insp.get_table_names() if not name.startswith(_AGENT_MANAGED_TABLE_PREFIX))
         except Exception as e:
             logger.error("Error fetching tables: %s", safe_error(e))
             return []

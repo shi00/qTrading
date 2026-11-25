@@ -71,6 +71,7 @@ from ui.viewmodels.business_research_view_model import (
 from ui.viewmodels.news_insight_view_model import NewsInsightViewModel
 from ui.viewmodels.sentiment_index_view_model import SentimentIndexViewModel
 from ui.viewmodels.watchlist_view_model import WatchlistViewModel
+from utils.config_models import PresetDeleteOutcome
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
 from utils.time_utils import get_now
@@ -146,6 +147,9 @@ _HIDDEN_COLS = frozenset(
         # （exec_warnings 经 warnings 横幅呈现；filter_attribution 供历史回看消费），不上表格。
         "exec_warnings",
         "filter_attribution",
+        # N13: 结果行程序字段「调用身份」字典（strategies/ai_mixin 附加，供归档/回溯），
+        # 内部元数据不上表格 —— 否则原样渲染成可排序的字典列。
+        "stock_agent_call",
     }
 )
 
@@ -2871,7 +2875,7 @@ def ScreenerView(
             on_start_research(request)
 
     def _on_detail_research(stock_data: dict) -> None:
-        """股票详情 → 准备研究草稿（详情现场保持打开，不自动发送）。"""
+        """股票详情 → 准备研究草稿（回执原样转发；详情弹窗由弹窗侧收起，不自动发送）。"""
         if on_start_research is None:
             return
         raw = stock_data.get("_raw") if isinstance(stock_data, Mapping) else None
@@ -3026,18 +3030,24 @@ def ScreenerView(
             _release_preset_busy()
 
     async def _do_delete_preset(strategy: str, name: str) -> None:
-        """确认后删除方案并刷新列表。"""
+        """确认后删除方案并刷新列表。
+
+        N14: 写失败与目标缺失必须提示不同文案——写失败时配置未提交、方案仍在，
+        清空选择或提示「不存在」会误导用户重试。
+        """
         try:
-            deleted = await vm.delete_preset(name, strategy)
+            outcome = await vm.delete_preset(name, strategy)
             page = _get_page()
-            if vm.state.selected_strategy == strategy:
+            if vm.state.selected_strategy == strategy and outcome is not PresetDeleteOutcome.WRITE_FAILED:
                 await vm.refresh_presets(strategy)
                 set_preset_selected("")
             if page is not None:
-                if deleted:
+                if outcome is PresetDeleteOutcome.DELETED:
                     _show_toast(page, I18n.get("screener_preset_deleted", name=name), "success")
-                else:
+                elif outcome is PresetDeleteOutcome.NOT_FOUND:
                     _show_toast(page, I18n.get("screener_preset_missing"), "warning")
+                else:
+                    _show_toast(page, I18n.get("screener_preset_delete_failed", name=name), "error")
         except asyncio.CancelledError:
             raise
         except Exception as ex:

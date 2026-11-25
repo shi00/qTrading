@@ -309,6 +309,12 @@ def _fmt_decimal(value: Decimal | None) -> str:
     return f"{value:.2f}" if value is not None else I18n.get("model_usage_unknown")
 
 
+def format_cny_amount(value: Decimal | None) -> str:
+    """费用金额的公共展示口径（研究侧本轮/累计费用复用）：缺失即「未知」，不填 0。"""
+
+    return _fmt_decimal(value)
+
+
 def _summary_chip(label: str, value: str) -> ft.Control:
     return ft.Row(
         [
