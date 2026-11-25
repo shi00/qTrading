@@ -1445,6 +1445,10 @@ class SkillCatalogService:
         停用受活动引用保护：该版本仍被角色版本绑定（研究配置引用）时由持久层
         拒绝（``POLICY_DENIED``），不静默打断既有选择；导入更新的不可变版本不
         受启停影响，旧版本目录始终可读（替换不覆盖活动版本）。
+
+        启用前按版本内 ``SKILL.md`` 重核声明依赖（N30）：缺任一依赖即
+        ``POLICY_DENIED`` 并列出全部受阻项，不落成功、不改可用性投影；补齐依赖
+        后同一身份可正常启用，失败尝试零新事实（不累加修订或缺口快照）。
         """
 
         if not isinstance(ref, SkillVersionRef):
@@ -1457,6 +1461,8 @@ class SkillCatalogService:
                 _fail("invalid_type", "$.skill.enabled")
         except AgentValidationError as exc:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+        if enabled:
+            await self._require_dependencies_available(user_scope, ref, identity)
         read_state, replayed = await self._dao.set_skill_availability(
             user_scope=user_scope,
             skill_id=ref.skill_id,
@@ -1717,3 +1723,27 @@ class SkillCatalogService:
             if not await self._dao.has_skill(user_scope=user_scope, skill_id=dependency_id):
                 missing.append(dependency)
         return tuple(missing)
+
+    async def _require_dependencies_available(self, user_scope: str, ref: SkillVersionRef, identity: str) -> None:
+        """启用门（N30）：读回不可变版本声明的依赖并核当前可用性。
+
+        以版本内 ``SKILL.md`` 为准重算，不信任导入时落库的缺口快照；缺任一依赖
+        即报 ``POLICY_DENIED`` 并列出全部受阻项（声明顺序稳定），调用方不落成功。
+        内容不可读时不猜「无依赖」，同样拒绝启用。
+        """
+
+        try:
+            data = await self._run(self._store.read_file, ref, SKILL_MANIFEST_FILENAME)
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "skill version content is missing", identity) from exc
+        try:
+            manifest = await self._run(partial(parse_skill_manifest, directory_name=ref.skill_id), data)
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+        missing = await self._missing_dependencies(user_scope, manifest.dependencies)
+        if missing:
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                f"skill dependency missing: {','.join(missing)}",
+                identity,
+            )
