@@ -28,6 +28,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from pathlib import PurePath
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 from core.agent_types import (
@@ -55,6 +56,7 @@ from core.agent_types import (
     RESUMABLE_DISPLAY_STATES,
     RETRYABLE_EXECUTION_DISPLAY_STATES,
     RETRYABLE_LEAF_DISPLAY_STATES,
+    ReadState,
     RetryExecutionReceipt,
     RetryExecutionRequest,
     RevisionReceipt,
@@ -116,6 +118,54 @@ COMPOSER_MODES: Final[tuple[str, ...]] = ("discuss", "plan", "execute")
 DEFAULT_COMPOSER_MODE: Final[str] = "execute"
 #: 精确导航目标在读取期间被更新的最大重读次数（超过则如实报码，不落过期会话）。
 _REFRESH_TARGET_ATTEMPTS: Final[int] = 3
+
+# --- 研究资料（添加资料 / 已读未读 / 三类时点 / 草稿转入既有研究） ---
+
+#: D06 限额（与 ``DEFAULT_ATTACHMENT_BUDGET`` 同值；UI 只用于展示与预检）。
+MATERIAL_MAX_ITEMS: Final[int] = 5
+MATERIAL_MAX_BYTES: Final[int] = 20_000_000
+MATERIAL_MAX_CODEPOINTS: Final[int] = 100_000
+
+MATERIAL_KIND_FILE: Final[str] = "file"
+MATERIAL_KIND_FRAGMENT: Final[str] = "fragment"
+MATERIAL_KIND_REFERENCE: Final[str] = "reference"
+MATERIAL_KINDS: Final[tuple[str, ...]] = (MATERIAL_KIND_FILE, MATERIAL_KIND_FRAGMENT, MATERIAL_KIND_REFERENCE)
+
+#: 单件已读状态（READY=已读；PARTIAL/UNREAD 都按未读计入结论缺口）。
+MATERIAL_READ_READY: Final[str] = "ready"
+MATERIAL_READ_PARTIAL: Final[str] = "partial"
+MATERIAL_READ_UNREAD: Final[str] = "unread"
+
+#: 可解析原因码 → i18n key（拒绝/未读原因都用码，不解析自由文本）。
+MATERIAL_REASON_KEYS: Final[Mapping[str, str]] = {
+    "material_empty": "agent_research_materials_reason_empty",
+    "material_count_exceeded": "agent_research_materials_reason_count",
+    "material_bytes_exceeded": "agent_research_materials_reason_bytes",
+    "material_kind_invalid": "agent_research_materials_reason_kind",
+    "material_content_missing": "agent_research_materials_reason_content_missing",
+    "material_decode_failed": "agent_research_materials_reason_decode",
+    "material_truncated": "agent_research_materials_reason_truncated",
+    "material_extraction_not_wired": "agent_research_materials_reason_not_extracted",
+    "material_reference_not_read": "agent_research_materials_reason_reference_unread",
+    "material_reference_invalid": "agent_research_materials_reason_reference_invalid",
+    "material_duplicate": "agent_research_materials_reason_duplicate",
+}
+
+#: 未内置文本解析的格式（PDF/XLSX/图片）如实标未读，不暗 OCR/不冒充已读。
+_TEXTUAL_SUFFIXES: Final[frozenset[str]] = frozenset({".txt", ".md", ".csv", ".json"})
+
+#: 草稿转移/并入错误码 → i18n key（未知码另附原文，不吞掉）。
+MATERIAL_TRANSFER_ERROR_KEYS: Final[Mapping[str, str]] = {
+    "target_session_unavailable": "agent_research_materials_error_target_unavailable",
+    "target_draft_conflict": "agent_research_materials_error_target_conflict",
+    "target_not_transferable": "agent_research_materials_error_target_not_transferable",
+    "transfer_conflict": "agent_research_materials_error_transfer_conflict",
+}
+
+MATERIALS_UNAVAILABLE_NOT_WIRED: Final[str] = "agent_research_materials_unavailable_not_wired"
+MATERIALS_UNAVAILABLE_EMPTY: Final[str] = "agent_research_materials_unavailable_empty"
+MATERIALS_UNAVAILABLE_NO_TARGET: Final[str] = "agent_research_materials_unavailable_no_target"
+MATERIALS_UNAVAILABLE_TARGET_REVISION: Final[str] = "agent_research_materials_unavailable_target_revision"
 
 #: 会话列表：历史扫描上限（HistoryQuery.limit 硬上界 50）。
 _SESSION_SCAN_LIMIT: Final[int] = 50
@@ -595,6 +645,76 @@ class SessionListItemView:
 
 
 @dataclass(frozen=True)
+class MaterialCandidate:
+    """View 侧提交的一件候选资料（文件字节/片段文本/引用标识；尚未判定已读）。"""
+
+    kind: str
+    display_name: str
+    data: bytes | None = None
+    text: str | None = None
+    captured_at: str | None = None
+    content_at: str | None = None
+    source_id: str | None = None
+    source_version: str | None = None
+
+
+@dataclass(frozen=True)
+class ResearchMaterialView:
+    """已接收资料：已读状态 + 三类时点（缺失保持 None，View 渲染「未知」）。"""
+
+    key: str
+    kind: str
+    display_name: str
+    source_id: str
+    source_version: str
+    read_state: str
+    reason_code: str | None
+    captured_at: str | None
+    content_at: str | None
+    byte_size: int | None
+    codepoints: int | None
+
+    @property
+    def is_read(self) -> bool:
+        return self.read_state == MATERIAL_READ_READY
+
+    @property
+    def read_key(self) -> str:
+        if self.read_state == MATERIAL_READ_READY:
+            return "agent_research_materials_read_ready"
+        if self.read_state == MATERIAL_READ_PARTIAL:
+            return "agent_research_materials_read_partial"
+        return "agent_research_materials_read_unread"
+
+    @property
+    def reason_key(self) -> str | None:
+        if self.reason_code is None:
+            return None
+        return MATERIAL_REASON_KEYS.get(self.reason_code, "agent_research_materials_reason_unknown")
+
+    @property
+    def kind_key(self) -> str:
+        if self.kind == MATERIAL_KIND_FILE:
+            return "agent_research_materials_kind_file"
+        if self.kind == MATERIAL_KIND_FRAGMENT:
+            return "agent_research_materials_kind_fragment"
+        return "agent_research_materials_kind_reference"
+
+
+@dataclass(frozen=True)
+class RejectedMaterialView:
+    """超限/非法候选资料：保留拒绝事实与可解析原因码（不静默丢弃）。"""
+
+    display_name: str
+    kind: str
+    reason_code: str
+
+    @property
+    def reason_key(self) -> str:
+        return MATERIAL_REASON_KEYS.get(self.reason_code, "agent_research_materials_reason_unknown")
+
+
+@dataclass(frozen=True)
 class DispatchReasonView:
     """零派发的结构化原因（稳定原因码 + 键值参数；View 按码 i18n，不拼接自由文本）。"""
 
@@ -950,6 +1070,45 @@ class ResearchObserverState:
     usage_error_key: str | None = None
     durations: tuple[DurationSegment, ...] = ()
     durations_execution_id: str | None = None
+
+    # --- 研究资料：已读未读/限额/三类时点/并入或转移 ---
+    materials: tuple[ResearchMaterialView, ...] = ()
+    #: 超限/非法候选的拒绝事实（逐件保留原因码；不静默丢弃）。
+    rejected_materials: tuple[RejectedMaterialView, ...] = ()
+    materials_notice_key: str | None = None
+    materials_notice_params: tuple[tuple[str, str], ...] = ()
+    materials_error_key: str | None = None
+    materials_error_code: str | None = None
+    #: 目标会话（并入既有草稿 / 转移到空稿会话）。
+    materials_target_session_id: str | None = None
+    materials_transfer_available: bool = False
+    materials_transfer_unavailable_key: str = MATERIALS_UNAVAILABLE_NOT_WIRED
+    materials_transfer_pending: bool = False
+    materials_transfer_notice_key: str | None = None
+    materials_transfer_notice_params: tuple[tuple[str, str], ...] = ()
+    materials_transfer_error_key: str | None = None
+    materials_transfer_error_code: str | None = None
+
+    def material_counts(self) -> tuple[int, int]:
+        """返回 ``(已读, 未读)``；部分读取计入未读（不冒充完整已读）。"""
+
+        read = sum(1 for material in self.materials if material.is_read)
+        return read, len(self.materials) - read
+
+    def material_target(self) -> SessionListItemView | None:
+        """当前选中的目标会话（不在列表内返回 None）。"""
+
+        for item in self.sessions:
+            if item.session_id == self.materials_target_session_id:
+                return item
+        return None
+
+    def material_target_options(self) -> tuple[SessionListItemView, ...]:
+        """可作为目标的有效会话（清理/归档/状态未知不参与，不给「看似可用」选项）。"""
+
+        return tuple(
+            item for item in self.sessions if not item.cleaned and not item.archived and not item.status_unknown
+        )
 
     def model_option(self, connection_id: str | None) -> ModelConnectionOption | None:
         """按连接 id 读取工具栏选项（不存在返回 None，不猜近似连接）。"""
@@ -1798,6 +1957,220 @@ def _default_token_counter(text: str, model: str | None) -> tuple[int, bool]:
     return count_tokens_with_basis(text, model)
 
 
+def _materials_transfer_supported(service: object | None) -> bool:
+    """资料并入/转移能力探测：仅当 facade 同时具备读稿与转移命令入口才可用。"""
+
+    if service is None:
+        return False
+    return callable(getattr(service, "read_draft", None)) and callable(getattr(service, "transfer_draft", None))
+
+
+def _material_view(
+    *,
+    kind: str,
+    display_name: str,
+    source_id: str,
+    source_version: str,
+    read_state: str,
+    reason_code: str | None,
+    captured_at: str | None,
+    content_at: str | None,
+    byte_size: int | None,
+    codepoints: int | None,
+) -> ResearchMaterialView:
+    return ResearchMaterialView(
+        key=f"{kind}:{source_id}:{source_version}",
+        kind=kind,
+        display_name=display_name or source_id,
+        source_id=source_id,
+        source_version=source_version,
+        read_state=read_state,
+        reason_code=reason_code,
+        captured_at=captured_at,
+        content_at=content_at,
+        byte_size=byte_size,
+        codepoints=codepoints,
+    )
+
+
+def _material_from_candidate(candidate: MaterialCandidate) -> tuple[ResearchMaterialView | None, str | None]:
+    """候选资料 → 已读状态投影；返回 ``(视图, None)`` 或 ``(None, 拒绝原因码)``。
+
+    只对内置文本格式做真实解码并标「已读」；PDF/XLSX/图片等未接线解析标「未读」
+    并给 ``material_extraction_not_wired``，绝不伪造已读（R21）。
+    """
+
+    if candidate.kind not in MATERIAL_KINDS:
+        return None, "material_kind_invalid"
+    captured_at = candidate.captured_at
+    content_at = candidate.content_at
+    if candidate.kind == MATERIAL_KIND_FILE:
+        data = candidate.data
+        if data is None:
+            return None, "material_content_missing"
+        size = len(data)
+        if size > MATERIAL_MAX_BYTES:
+            return None, "material_bytes_exceeded"
+        display_name = candidate.display_name or "file"
+        source_id = candidate.source_id or f"file:{display_name}"
+        source_version = candidate.source_version or hashlib.sha256(data).hexdigest()
+        if PurePath(display_name).suffix.lower() not in _TEXTUAL_SUFFIXES:
+            return (
+                _material_view(
+                    kind=candidate.kind,
+                    display_name=display_name,
+                    source_id=source_id,
+                    source_version=source_version,
+                    read_state=MATERIAL_READ_UNREAD,
+                    reason_code="material_extraction_not_wired",
+                    captured_at=captured_at,
+                    content_at=content_at,
+                    byte_size=size,
+                    codepoints=None,
+                ),
+                None,
+            )
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return (
+                _material_view(
+                    kind=candidate.kind,
+                    display_name=display_name,
+                    source_id=source_id,
+                    source_version=source_version,
+                    read_state=MATERIAL_READ_UNREAD,
+                    reason_code="material_decode_failed",
+                    captured_at=captured_at,
+                    content_at=content_at,
+                    byte_size=size,
+                    codepoints=None,
+                ),
+                None,
+            )
+        codepoints = len(text)
+        truncated = codepoints > MATERIAL_MAX_CODEPOINTS
+        return (
+            _material_view(
+                kind=candidate.kind,
+                display_name=display_name,
+                source_id=source_id,
+                source_version=source_version,
+                read_state=MATERIAL_READ_PARTIAL if truncated else MATERIAL_READ_READY,
+                reason_code="material_truncated" if truncated else None,
+                captured_at=captured_at,
+                content_at=content_at,
+                byte_size=size,
+                codepoints=codepoints,
+            ),
+            None,
+        )
+    if candidate.kind == MATERIAL_KIND_FRAGMENT:
+        text = candidate.text
+        if text is None or not text.strip():
+            return None, "material_empty"
+        encoded = text.encode("utf-8")
+        if len(encoded) > MATERIAL_MAX_BYTES:
+            return None, "material_bytes_exceeded"
+        display_name = candidate.display_name or "fragment"
+        source_id = candidate.source_id or f"fragment:{hashlib.sha256(encoded).hexdigest()[:16]}"
+        source_version = candidate.source_version or hashlib.sha256(encoded).hexdigest()
+        codepoints = len(text)
+        truncated = codepoints > MATERIAL_MAX_CODEPOINTS
+        return (
+            _material_view(
+                kind=candidate.kind,
+                display_name=display_name,
+                source_id=source_id,
+                source_version=source_version,
+                read_state=MATERIAL_READ_PARTIAL if truncated else MATERIAL_READ_READY,
+                reason_code="material_truncated" if truncated else None,
+                captured_at=captured_at,
+                content_at=content_at,
+                byte_size=len(encoded),
+                codepoints=codepoints,
+            ),
+            None,
+        )
+    if not candidate.source_id or not candidate.source_version:
+        return None, "material_reference_invalid"
+    text = candidate.text or ""
+    if not text.strip():
+        return (
+            _material_view(
+                kind=candidate.kind,
+                display_name=candidate.display_name or candidate.source_id,
+                source_id=candidate.source_id,
+                source_version=candidate.source_version,
+                read_state=MATERIAL_READ_UNREAD,
+                reason_code="material_reference_not_read",
+                captured_at=captured_at,
+                content_at=content_at,
+                byte_size=None,
+                codepoints=None,
+            ),
+            None,
+        )
+    codepoints = len(text)
+    truncated = codepoints > MATERIAL_MAX_CODEPOINTS
+    return (
+        _material_view(
+            kind=candidate.kind,
+            display_name=candidate.display_name or candidate.source_id,
+            source_id=candidate.source_id,
+            source_version=candidate.source_version,
+            read_state=MATERIAL_READ_PARTIAL if truncated else MATERIAL_READ_READY,
+            reason_code="material_truncated" if truncated else None,
+            captured_at=captured_at,
+            content_at=content_at,
+            byte_size=len(text.encode("utf-8")),
+            codepoints=codepoints,
+        ),
+        None,
+    )
+
+
+def _to_service_material(material: ResearchMaterialView) -> Any:
+    """UI 资料视图 → 服务层资料事实（惰性 import：UI 不在导入期拉入服务重依赖）。"""
+
+    from services.agent_service.business_research import ResearchMaterial
+
+    read_state = {
+        MATERIAL_READ_READY: ReadState.READY,
+        MATERIAL_READ_PARTIAL: ReadState.PARTIAL,
+    }.get(material.read_state, ReadState.UNKNOWN)
+    return ResearchMaterial(
+        kind=material.kind,
+        source_id=material.source_id,
+        source_version=material.source_version,
+        display_name=material.display_name,
+        read_state=read_state,
+        missing_reason=material.reason_code,
+        captured_at=material.captured_at,
+        content_at=material.content_at,
+        byte_size=material.byte_size,
+    )
+
+
+def _materials_command_id(
+    target_session_id: str, target_revision: int, materials: Sequence[ResearchMaterialView]
+) -> str:
+    """幂等命令 id：目标 + 预期版 + 资料清单摘要（重复点击复用同一命令）。"""
+
+    fingerprint = "|".join(f"{material.key}@{material.source_version}" for material in materials)
+    digest = hashlib.sha256(f"{target_session_id}:{target_revision}:{fingerprint}".encode()).hexdigest()
+    return f"ui-materials-{digest[:32]}"
+
+
+def _business_research_preparer(service: Any) -> Any:
+    from services.agent_service.business_research import BusinessResearchPreparer
+
+    preparer = getattr(service, "_business_research_preparer", None)
+    if preparer is not None:
+        return preparer
+    return BusinessResearchPreparer(service)
+
+
 def _ancestor_path(executions: tuple[Any, ...], execution_id: str | None) -> tuple[str, ...]:
     """从根到该执行的父链（不含自身；父不在本页或环形引用即截断）。"""
 
@@ -2019,6 +2392,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             artifact_delivery_available=delivery is not None,
             cleanup_available=cleanup is not None,
             cleanup_unavailable_reason=cleanup_unavailable_reason if cleanup is None else None,
+            materials_transfer_available=_materials_transfer_supported(service),
         )
         self._init_mixin_fields()
 
@@ -3902,6 +4276,168 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
 
         if mode in COMPOSER_MODES:
             self._set_state(composer_mode=mode)
+
+    # -- 研究资料：添加资料 / 已读未读 / 限额 / 并入或转移 ----------
+
+    def attach_materials(self, candidates: Sequence[MaterialCandidate]) -> None:
+        """逐件接收候选资料并判定已读状态；超限/非法如实拒绝并保留原因码（R21）。
+
+        已接收资料计入 D06 件数；``UNREAD``/``PARTIAL`` 仍计入件数（不因未读而
+        腾出名额），但会如实标注未读原因，不冒充已读。
+        """
+
+        accepted = list(self._state.materials)
+        rejected = list(self._state.rejected_materials)
+        seen = {material.key for material in accepted}
+        for candidate in candidates:
+            material, reason = _material_from_candidate(candidate)
+            if material is None:
+                rejected.append(
+                    RejectedMaterialView(candidate.display_name, candidate.kind, reason or "material_kind_invalid")
+                )
+                continue
+            if len(accepted) >= MATERIAL_MAX_ITEMS:
+                rejected.append(RejectedMaterialView(material.display_name, material.kind, "material_count_exceeded"))
+                continue
+            if material.key in seen:
+                rejected.append(RejectedMaterialView(material.display_name, material.kind, "material_duplicate"))
+                continue
+            accepted.append(material)
+            seen.add(material.key)
+        self._set_state(
+            materials=tuple(accepted),
+            rejected_materials=tuple(rejected[-MATERIAL_MAX_ITEMS * 2 :]),
+            materials_error_key=None,
+            materials_error_code=None,
+            materials_notice_key=None,
+            materials_transfer_notice_key=None,
+            materials_transfer_error_key=None,
+            materials_transfer_error_code=None,
+        )
+
+    def remove_material(self, key: str) -> None:
+        """移除一件已接收资料（不补位；名额按剩余件数重新计算）。"""
+
+        self._set_state(
+            materials=tuple(material for material in self._state.materials if material.key != key),
+            materials_notice_key=None,
+            materials_transfer_notice_key=None,
+        )
+
+    def select_materials_target(self, session_id: str | None) -> None:
+        """选择目标会话（仅接受当前有效会话；不存在则不写入，避免看似可选）。"""
+
+        if session_id is None:
+            self._set_state(materials_target_session_id=None)
+            return
+        if any(item.session_id == session_id for item in self._state.material_target_options()):
+            self._set_state(materials_target_session_id=session_id)
+
+    async def add_materials_to_existing_session(self) -> None:
+        """把已选资料并入目标会话的既有草稿（只保存，不发送）。"""
+
+        await self._submit_materials_transfer(transfer=False)
+
+    async def transfer_draft_to_target(self) -> None:
+        """把资料包作为草稿转移到目标（空稿）会话（只保存，不发送）。"""
+
+        await self._submit_materials_transfer(transfer=True)
+
+    async def _submit_materials_transfer(self, *, transfer: bool) -> None:
+        """并入/转移共用入口：能力/目标/清单/版本前置检查，失败一律如实报码。"""
+
+        state = self._state
+        if state.materials_transfer_pending:
+            return
+        if not state.materials_transfer_available:
+            self._set_state(
+                materials_transfer_error_key=state.materials_transfer_unavailable_key,
+                materials_transfer_error_code="not_wired",
+            )
+            return
+        target = state.material_target()
+        if target is None:
+            self._set_state(
+                materials_transfer_error_key=MATERIALS_UNAVAILABLE_NO_TARGET,
+                materials_transfer_error_code="target_session_missing",
+            )
+            return
+        if not state.materials:
+            self._set_state(
+                materials_transfer_error_key=MATERIALS_UNAVAILABLE_EMPTY,
+                materials_transfer_error_code="material_empty",
+            )
+            return
+        if target.revision is None or target.revision < 1:
+            self._set_state(
+                materials_transfer_error_key=MATERIALS_UNAVAILABLE_TARGET_REVISION,
+                materials_transfer_error_code="target_revision_unknown",
+            )
+            return
+        if self._service is None:
+            self._set_state(
+                materials_transfer_error_key=MATERIALS_UNAVAILABLE_NOT_WIRED,
+                materials_transfer_error_code="not_wired",
+            )
+            return
+        materials = tuple(_to_service_material(material) for material in state.materials)
+        target_revision = target.revision
+        command_id = _materials_command_id(target.session_id, target_revision, state.materials)
+        self._set_state(
+            materials_transfer_pending=True,
+            materials_transfer_error_key=None,
+            materials_transfer_error_code=None,
+            materials_transfer_notice_key=None,
+        )
+        try:
+            preparer = _business_research_preparer(self._service)
+            if transfer:
+                transferred = await preparer.transfer_draft(
+                    user_scope=self._user_scope,
+                    target_session_id=target.session_id,
+                    materials=materials,
+                    command_id=command_id,
+                    target_draft_revision=target_revision,
+                )
+                revision = transferred.target_revision
+            else:
+                merged = await preparer.add_materials_to_session(
+                    user_scope=self._user_scope,
+                    target_session_id=target.session_id,
+                    materials=materials,
+                    command_id=command_id,
+                )
+                revision = merged.draft_revision
+        except asyncio.CancelledError:
+            self._set_state(materials_transfer_pending=False)
+            raise
+        except Exception as exc:
+            code = str(getattr(exc, "code", type(exc).__name__))
+            self._set_state(
+                materials_transfer_pending=False,
+                materials_transfer_error_code=code,
+                materials_transfer_error_key=MATERIAL_TRANSFER_ERROR_KEYS.get(
+                    code, "agent_research_materials_error_unknown"
+                ),
+            )
+            return
+        self._set_state(
+            materials_transfer_pending=False,
+            materials=(),
+            rejected_materials=(),
+            materials_transfer_error_key=None,
+            materials_transfer_error_code=None,
+            materials_transfer_notice_key=(
+                "agent_research_materials_notice_transferred" if transfer else "agent_research_materials_notice_added"
+            ),
+            materials_transfer_notice_params=(
+                ("name", target.title or target.session_id),
+                ("revision", str(revision)),
+            ),
+        )
+        await self.load_sessions()
+        if target.session_id == state.session_id:
+            await self.refresh(target.session_id)
 
     # -- 研究侧 MCP 范围（J25） --------------------------------------------
 

@@ -30,12 +30,17 @@ from ui.views.research_observer_conversation import (
     build_session_draft_card,
 )
 from ui.views.research_observer_decisions import build_decisions_section, build_pending_overview
+from ui.views.research_observer_materials import build_materials_section
 from ui.views.research_observer_session_list import build_session_list
 
 PANEL_WIDTH = 340
 
 
 def _ignore_text(_value: str) -> None:
+    pass
+
+
+def _ignore_optional_text(_value: str | None) -> None:
     pass
 
 
@@ -76,6 +81,11 @@ def _build_body(
     on_toggle_mcp_scope: Callable[[str], None] = _ignore_text,
     on_select_model: Callable[[str], None] = _ignore_text,
     on_select_role: Callable[[str], None] = _ignore_text,
+    on_add_materials: Callable[[], None] = _ignore_click,
+    on_remove_material: Callable[[str], None] = _ignore_text,
+    on_select_material_target: Callable[[str | None], None] = _ignore_optional_text,
+    on_add_materials_to_session: Callable[[], None] = _ignore_click,
+    on_transfer_draft: Callable[[], None] = _ignore_click,
     on_open_session: Callable[[str], None] = _ignore_text,
     on_new_session_title: Callable[[str], None] = _ignore_text,
     on_create_session: Callable[[], None] = _ignore_click,
@@ -134,6 +144,14 @@ def _build_body(
             on_toggle_mcp_scope=on_toggle_mcp_scope,
             on_select_model=on_select_model,
             on_select_role=on_select_role,
+        ),
+        build_materials_section(
+            state,
+            on_add_click=on_add_materials,
+            on_remove=on_remove_material,
+            on_select_target=on_select_material_target,
+            on_add_to_session=on_add_materials_to_session,
+            on_transfer=on_transfer_draft,
         ),
     ]
     preview = build_plan_preview(state, on_start_plan=on_start_plan)
@@ -245,6 +263,11 @@ def ResearchObserverPanel(
     on_load_mcp_scope: Callable[[], None] = _ignore_click,
     on_select_model: Callable[[str], None] = _ignore_text,
     on_select_role: Callable[[str], None] = _ignore_text,
+    on_add_materials: Callable[[], None] = _ignore_click,
+    on_remove_material: Callable[[str], None] = _ignore_text,
+    on_select_material_target: Callable[[str | None], None] = _ignore_optional_text,
+    on_add_materials_to_session: Callable[[], None] = _ignore_click,
+    on_transfer_draft: Callable[[], None] = _ignore_click,
     on_load_model_selection: Callable[[], None] = _ignore_click,
     on_refresh_usage: Callable[[], None] = _ignore_click,
     on_refresh_budget: Callable[[], None] = _ignore_click,
@@ -357,6 +380,11 @@ def ResearchObserverPanel(
             on_toggle_mcp_scope=on_toggle_mcp_scope,
             on_select_model=on_select_model,
             on_select_role=on_select_role,
+            on_add_materials=on_add_materials,
+            on_remove_material=on_remove_material,
+            on_select_material_target=on_select_material_target,
+            on_add_materials_to_session=on_add_materials_to_session,
+            on_transfer_draft=on_transfer_draft,
             on_open_session=on_open_session,
             on_new_session_title=on_new_session_title,
             on_create_session=on_create_session,
