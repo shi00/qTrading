@@ -656,11 +656,14 @@ class TestSnapshotCredibility:
             verification=VerificationState.PROGRAM_VERIFIED,
             invocation_id="inv-6",
         )
+        # execution 记录 2 次调用：账本须覆盖全部调用，才能把「过租不再计活跃」与
+        # 「覆盖缺口导致未知」区分开（R21），本用例只验证前者。
         await _seed_ledger(
             dao,
             invocation_id="inv-6",
             attempt_id="att-6",
             cost_cny="0.5",
+            extra_attempt_ids=("att-6b",),
             reservation_state="reserved",
             owner_lease_expires_at=datetime(2020, 1, 1, 12, 0, 0),
         )
