@@ -190,16 +190,20 @@ async def test_wizard_db_validation_success(external_wizard_page):
     )
     db = _parse_db_url(db_url)
 
-    db_title = I18n.get("wizard_db_title")
-    # [PITFALL FIX] 前一个用例 test_wizard_db_validation_failure 可能将向导留在 DB 步骤，
-    # 导致"开始使用"按钮不存在。确定性判定：若当前已在 DB 步骤则跳过导航点击。
+    # [PITFALL FIX] 向导可能已停留在 DB 步骤（同进程内复用 app 实例时），此时欢迎页
+    # "开始使用"按钮不存在，直接点击必然失败。判定必须用 DB 步骤独有文案
+    # wizard_db_desc：zh_CN 下欢迎页概览卡标题 wizard_overview_db_title 与步骤标题
+    # wizard_db_title 同为「数据库配置」，用标题判定会把欢迎页误判为 DB 步骤
+    # （CI run 45634520309：跳过导航后 fill_textbox(主机) 超时）。
     # accept_risk_disclaimer 为幂等「确保已勾选」（先读态再决定是否点击），
     # 故可安全无条件调用，无需 try/except 兜底。
-    if not await external_wizard_page.has_text(db_title):
+    db_step_marker = I18n.get("wizard_db_desc")
+    if not await external_wizard_page.has_text(db_step_marker):
         btn_start = I18n.get("wizard_btn_start")
         await WizardPage(external_wizard_page).accept_risk_disclaimer()
         await external_wizard_page.click_button(btn_start)
-        await external_wizard_page.expect_text(db_title)
+    # 等待 DB 步骤真正渲染后再填写，避免欢迎页同名标题造成的假阳性。
+    await external_wizard_page.expect_text(db_step_marker, timeout_ms=TIMEOUTS.TITLE)
 
     await external_wizard_page.fill_textbox(I18n.get("db_host"), db["host"])
     await external_wizard_page.fill_textbox(I18n.get("db_port"), db["port"])

@@ -1726,7 +1726,7 @@ def external_wizard_app(tmp_path_factory):
     )
     app = AppServer(proc, url, cfg_file, logs)
     yield app
-    _terminate(proc)
+    _terminate(app)
 
 
 @pytest_asyncio.fixture(loop_scope="session")
