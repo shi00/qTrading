@@ -146,7 +146,7 @@ def _build_multi_subject_candidates(news_rows: tuple[NewsRow, ...]) -> tuple[Sub
 def _build_news_multi_research_controls(
     state: MultiSubjectResearchState,
     *,
-    on_open: Callable[[ft.ControlEvent], None],
+    on_open: Callable[[], None],
     on_toggle: Callable[[str], None],
     on_select_all: Callable[[], None],
     on_clear: Callable[[], None],
