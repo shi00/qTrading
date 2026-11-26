@@ -27,6 +27,9 @@ Dialog、Dropdown、窗口缩放、最小化恢复和关闭的截图；再用 §
     # 先快速验证：只跑 Impeller 的 dark/navy
     python scripts/g4_theme_screenshots.py --exe <exe> --backends impeller --themes dark,navy
 
+    # 应用首屏需等待数据库就绪时，指定窗口出现后到首张截图的等待秒数
+    python scripts/g4_theme_screenshots.py --exe <exe> --initial-wait 15
+
     # 与 G0 基线（或上一轮候选）做像素差分
     python scripts/g4_theme_screenshots.py --compare evidence/g4-202-g0 --compare-only
 
@@ -935,6 +938,7 @@ def run_one(
     scenes_override: tuple[str, ...] | None,
     extra_env: dict[str, str],
     launch_timeout: float,
+    initial_wait: float = 0.0,
 ) -> dict[str, Any]:
     """运行一个 (backend, theme) 组合，返回该组合的 run 记录与截图条目。"""
     api = win32()
@@ -956,6 +960,7 @@ def run_one(
         "theme": theme,
         "command": command,
         "config": build_launch_config(theme),
+        "initial_wait": initial_wait,
         "started_at": _utc_now(),
         "window_title": None,
         "window_size": None,
@@ -993,6 +998,10 @@ def run_one(
             rect = api.window_rect(hwnd)
             original = (rect.right - rect.left, rect.bottom - rect.top)
             run["window_size"] = {"width": original[0], "height": original[1]}
+
+            # 窗口通常先于应用首屏出现，等待数据库/启动页结束后再截首张图。
+            if initial_wait > 0:
+                time.sleep(initial_wait)
 
             image, method = api.capture(hwnd)
             captures.append(_save_capture(image, run_dir / "default.png", backend, theme, "default", method, dpi))
@@ -1071,7 +1080,12 @@ def build_manifest(args: argparse.Namespace, backends: tuple[str, ...], themes: 
         "source": "reviews/flet upgrade 1.1.0.md §202 / §5.11",
         "generated_at": _utc_now(),
         "tool": "scripts/g4_theme_screenshots.py",
-        "requested": {"backends": list(backends), "themes": list(themes), "interactive": args.interactive},
+        "requested": {
+            "backends": list(backends),
+            "themes": list(themes),
+            "interactive": args.interactive,
+            "initial_wait": args.initial_wait,
+        },
         "baseline": {
             "path": str(baseline) if baseline else None,
             "present": bool(baseline and baseline.is_dir()),
@@ -1158,6 +1172,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--env", action="append", default=[], help="透传给应用的额外环境变量 KEY=VALUE，可重复")
     parser.add_argument("--launch-timeout", type=float, default=180.0, help="等待应用窗口出现的秒数")
+    parser.add_argument(
+        "--initial-wait",
+        type=float,
+        default=0.0,
+        help="窗口出现后到首张截图的等待秒数，用于等待应用启动页结束（默认 0）",
+    )
     parser.add_argument("--compare", default=None, help="基线目录（G0 或上一轮候选），用于像素差分")
     parser.add_argument("--compare-only", action="store_true", help="只做差分，不启动应用")
     parser.add_argument("--compare-threshold", type=int, default=12, help="单像素通道差异阈值（0-255）")
@@ -1211,6 +1231,7 @@ def main(argv: list[str] | None = None) -> int:
                 scenes_override,
                 extra_env,
                 args.launch_timeout,
+                args.initial_wait,
             )
             manifest["runs"].append(result["run"])
             manifest["captures"].extend(result["captures"])
