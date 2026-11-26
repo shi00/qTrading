@@ -190,12 +190,24 @@ class ScenarioDispatch:
     task_routes: Mapping[str, Any]
 
 
-async def resolve_executor(scenario_id: str) -> ScenarioDispatch | None:
+async def resolve_executor(scenario_id: str, *, preferred_connection_id: str | None = None) -> ScenarioDispatch | None:
     """按三条件分派新链；任一不满足返回 None（调用方走旧链）。
 
     命中时经 :func:`build_route_snapshot` 冻结完整路由策略；路由缺少 / 携非法
     可执行字段 → raise :class:`RoutePolicyIncompleteError`（D13-001 显式失败，
     不返回 None 降级旧链、不静默按默认策略继续）。
+
+    ``preferred_connection_id``（会话 / 角色模型选择，Task 7 调用）：
+
+    - ``None``：行为完全不变；
+    - 系统级不可用（executor 未组装 / ``migration_state != "active"``）→ 返回
+      ``None``：此时首选连接不生效，调用方按未命中处理（走旧链 / 旧链准入）；
+    - 路由层不可用（场景路由缺失 / ``enabled`` 为假 / 候选为空）→ raise
+      :class:`RoutePolicyIncompleteError`（"preferred_candidate_unavailable"），
+      不得静默丢弃用户显式选择（R21）；
+    - 路由可用时，首选连接必须在本场景候选内且连接存在并启用 → 候选收窄为该
+      连接；否则 raise 同一错误——按原候选继续执行会把「指定的连接未生效」伪装
+      成成功（R21）。
     """
 
     services = get_scheduling_services()
@@ -212,7 +224,27 @@ async def resolve_executor(scenario_id: str) -> ScenarioDispatch | None:
         None,
     )
     if route is None or not route.get("enabled") or not route.get("candidates"):
+        # 路由层不可用且用户显式指定了首选连接 → 显式失败，不静默丢弃选择（R21）；
+        # 系统级不可用（executor 缺失 / 迁移未激活）已在上方返回 None，此时首选
+        # 连接不生效、调用方按未命中处理。
+        if preferred_connection_id is not None:
+            raise RoutePolicyIncompleteError("preferred_candidate_unavailable")
         return None
+
+    # 首选连接收窄（会话 / 角色模型选择作用于执行链）：候选必须包含该连接且连接
+    # 存在并启用，否则显式失败——按原候选继续执行会把「指定的连接未生效」伪装
+    # 成成功（R21）。连接缺 ``enabled`` 键按启用处理（与 UI 连接可用性判定一致）。
+    if preferred_connection_id is not None:
+        if preferred_connection_id not in tuple(str(c) for c in route["candidates"]):
+            raise RoutePolicyIncompleteError("preferred_candidate_unavailable")
+        enabled_by_connection = {
+            str(c["connection_id"]): bool(c.get("enabled", True))
+            for c in mm_snapshot.connections
+            if isinstance(c, Mapping) and c.get("connection_id") is not None
+        }
+        if not enabled_by_connection.get(preferred_connection_id, False):
+            raise RoutePolicyIncompleteError("preferred_candidate_unavailable")
+        route = {**route, "candidates": [preferred_connection_id]}
 
     # F01 分派授权身份：候选携带规范化外发目标（本地连接 / 非法 api_base → None，
     # 诚实表示「无外发目标」，R21）与场景用途（purpose 域即 scenario_id，§4.3

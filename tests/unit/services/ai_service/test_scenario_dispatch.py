@@ -13,6 +13,10 @@
   缺字段 / 非法值 / 旧版三键路由 → RoutePolicyIncompleteError 显式失败；
 - M16 深冻结：路由条目 / 候选 / 预算政策快照嵌套写一律 TypeError，拒绝后旧受理
   候选与预算不变；读取投影、dict() / deepcopy / json 序列化保持兼容；
+- 首选连接收窄：None 行为不变；命中候选且连接启用 → 候选收窄为该连接；不在候选 /
+  连接缺失 / 未启用 / 路由层不可用（路由禁用 / 候选为空）→
+  RoutePolicyIncompleteError("preferred_candidate_unavailable")；系统级不可用
+  （executor 缺失 / 迁移未激活）→ None（首选不生效）；
 - R1：services 层不 import app，调度服务经注册点注入（bootstrap app→services）。
 """
 
@@ -191,6 +195,106 @@ async def test_dispatch_local_connection_target_none(monkeypatch):
     candidate = dispatch.snapshot.routes[0]["candidates"][0]
     assert candidate["target_fingerprint"] is None
     assert candidate["purpose"] == _SCENARIO_ID
+
+
+async def test_preferred_connection_none_keeps_candidates(monkeypatch):
+    """preferred_connection_id=None：行为不变，候选全量透传。"""
+    _patch_env(monkeypatch, _mm_snapshot(candidates=["conn-1", "conn-local"]), None)
+
+    dispatch = await scenario_dispatch.resolve_executor(_SCENARIO_ID, preferred_connection_id=None)
+
+    assert isinstance(dispatch, scenario_dispatch.ScenarioDispatch)
+    route = dispatch.snapshot.routes[0]
+    assert [c["connection_id"] for c in route["candidates"]] == ["conn-1", "conn-local"]
+    assert [c["candidate_index"] for c in route["candidates"]] == [0, 1]
+    assert route["candidates"][0]["target_fingerprint"] == "https://api.example.com:443/v1"
+
+
+async def test_preferred_connection_narrows_candidates(monkeypatch):
+    """命中候选且连接启用 → 候选收窄为该连接，其余路由字段 / 执行器 / 子路由不变。"""
+    executor = MagicMock()
+    _patch_env(monkeypatch, _mm_snapshot(candidates=["conn-1", "conn-local"]), {"executor": executor})
+
+    dispatch = await scenario_dispatch.resolve_executor(_SCENARIO_ID, preferred_connection_id="conn-local")
+
+    assert isinstance(dispatch, scenario_dispatch.ScenarioDispatch)
+    assert dispatch.executor is executor
+    assert dispatch.task_routes == {"sentiment": {"mode": "bundled", "candidates": [], "reuse_bundled_sentiment": True}}
+    route = dispatch.snapshot.routes[0]
+    assert set(route) == _EXPECTED_ROUTE_FIELDS
+    assert [c["connection_id"] for c in route["candidates"]] == ["conn-local"]
+    assert [c["candidate_index"] for c in route["candidates"]] == [0]
+    assert route["candidates"][0]["purpose"] == _SCENARIO_ID
+    assert route["candidates"][0]["target_fingerprint"] is None
+    assert route["route_revision"] == 3
+    assert route["transient_retries"] == 1
+    assert route["fallback_enabled"] is True
+    assert route["total_timeout_seconds"] == 45.0
+    assert dispatch.route_revision == 3
+    assert dispatch.total_timeout_seconds == 45.0
+
+
+async def test_preferred_connection_outside_candidates_fails(monkeypatch):
+    """首选连接不在本场景候选 → 显式失败，不静默按原候选执行（R21）。"""
+    _patch_env(monkeypatch, _mm_snapshot(candidates=["conn-1"]), None)
+
+    with pytest.raises(scenario_dispatch.RoutePolicyIncompleteError) as exc:
+        await scenario_dispatch.resolve_executor(_SCENARIO_ID, preferred_connection_id="conn-local")
+
+    assert str(exc.value) == "preferred_candidate_unavailable"
+
+
+async def test_preferred_connection_disabled_fails(monkeypatch):
+    """首选连接在候选中但已禁用 → 显式失败。"""
+    mm = _mm_snapshot(candidates=["conn-1"])
+    mm.connections = ({"connection_id": "conn-1", "adapter_kind": "litellm_chat", "enabled": False},)
+    _patch_env(monkeypatch, mm, None)
+
+    with pytest.raises(scenario_dispatch.RoutePolicyIncompleteError) as exc:
+        await scenario_dispatch.resolve_executor(_SCENARIO_ID, preferred_connection_id="conn-1")
+
+    assert str(exc.value) == "preferred_candidate_unavailable"
+
+
+async def test_preferred_connection_absent_from_snapshot_fails(monkeypatch):
+    """首选连接在候选中但快照无该连接定义 → 显式失败。"""
+    mm = _mm_snapshot(candidates=["conn-local"])
+    mm.connections = ({"connection_id": "conn-1", "adapter_kind": "litellm_chat"},)
+    _patch_env(monkeypatch, mm, None)
+
+    with pytest.raises(scenario_dispatch.RoutePolicyIncompleteError) as exc:
+        await scenario_dispatch.resolve_executor(_SCENARIO_ID, preferred_connection_id="conn-local")
+
+    assert str(exc.value) == "preferred_candidate_unavailable"
+
+
+async def test_preferred_connection_route_disabled_fails(monkeypatch):
+    """路由层不可用（场景路由禁用）+ 显式首选 → 显式失败，不静默丢弃选择（R21）。"""
+    _patch_env(monkeypatch, _mm_snapshot(enabled=False), None)
+
+    with pytest.raises(scenario_dispatch.RoutePolicyIncompleteError) as exc:
+        await scenario_dispatch.resolve_executor(_SCENARIO_ID, preferred_connection_id="conn-local")
+
+    assert str(exc.value) == "preferred_candidate_unavailable"
+
+
+async def test_preferred_connection_empty_candidates_fails(monkeypatch):
+    """路由层不可用（候选为空）+ 显式首选 → 显式失败，不静默丢弃选择（R21）。"""
+    _patch_env(monkeypatch, _mm_snapshot(candidates=[]), None)
+
+    with pytest.raises(scenario_dispatch.RoutePolicyIncompleteError) as exc:
+        await scenario_dispatch.resolve_executor(_SCENARIO_ID, preferred_connection_id="conn-local")
+
+    assert str(exc.value) == "preferred_candidate_unavailable"
+
+
+async def test_preferred_connection_not_applied_when_system_unavailable(monkeypatch):
+    """系统级不可用（executor 缺失 / 迁移未激活）→ 返回 None，首选连接不生效。"""
+    scenario_dispatch.set_scheduling_services_provider(lambda: {"recorder": MagicMock()})
+    assert await scenario_dispatch.resolve_executor(_SCENARIO_ID, preferred_connection_id="conn-local") is None
+
+    _patch_env(monkeypatch, _mm_snapshot(migration_state="pending"), None)
+    assert await scenario_dispatch.resolve_executor(_SCENARIO_ID, preferred_connection_id="conn-local") is None
 
 
 async def test_dispatch_fee_candidates_with_monthly_limit(monkeypatch):
