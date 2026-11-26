@@ -8408,6 +8408,121 @@ def role_skill_assignment_digest(assignment: RoleSkillAssignment) -> str:
 
 
 # ---------------------------------------------------------------------------
+# E-03-4d 角色定义（RoleDefinition，§4.2）
+# ---------------------------------------------------------------------------
+
+#: 角色定义 wire 结构版本。
+ROLE_DEFINITION_VERSION: Final[int] = 1
+
+_ROLE_ID_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{2,31}$")
+_PRESET_ROLE_IDS: Final[frozenset[str]] = frozenset({"main", "sub"})
+_ROLE_DEFINITION_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "schema_version",
+        "role_id",
+        "display_name",
+        "base",
+        "status",
+        "role_version",
+        "prompt_body",
+        "model_connection_id",
+        "capability_mode",
+        "created_at",
+        "updated_at",
+        "updated_by",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RoleDefinition:
+    """用户可编辑的角色定义（§4.2）：不可变值对象，wire 全键显式。"""
+
+    schema_version: int
+    role_id: str
+    display_name: str
+    base: str
+    status: str
+    role_version: str
+    prompt_body: str
+    model_connection_id: str | None
+    capability_mode: str
+    created_at: str
+    updated_at: str
+    updated_by: str
+
+    def wire(self) -> dict[str, Any]:
+        """规范 wire（12 键全量；键排序由 CanonicalJson 承担）。"""
+
+        return {
+            "schema_version": self.schema_version,
+            "role_id": self.role_id,
+            "display_name": self.display_name,
+            "base": self.base,
+            "status": self.status,
+            "role_version": self.role_version,
+            "prompt_body": self.prompt_body,
+            "model_connection_id": self.model_connection_id,
+            "capability_mode": self.capability_mode,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "updated_by": self.updated_by,
+        }
+
+
+def validate_role_definition(definition: RoleDefinition) -> None:
+    """校验角色定义：结构版本、role_id 语法与预置 id、基类、状态、版本与能力模式。"""
+
+    if definition.schema_version != ROLE_DEFINITION_VERSION:
+        _fail("unsupported_schema_version", "$.role_definition.schema_version")
+    if not _ROLE_ID_PATTERN.fullmatch(definition.role_id) or definition.role_id in _PRESET_ROLE_IDS:
+        _fail("invalid_role_id", "$.role_definition.role_id")
+    if not (1 <= len(definition.display_name) <= 64):
+        _fail("invalid_display_name", "$.role_definition.display_name")
+    if definition.base != "sub":
+        _fail("invalid_base", "$.role_definition.base")
+    if definition.status not in {"active", "disabled"}:
+        _fail("invalid_status", "$.role_definition.status")
+    if not re.fullmatch(r"r[1-9][0-9]*", definition.role_version):
+        _fail("invalid_role_version", "$.role_definition.role_version")
+    if definition.capability_mode != "explicit":
+        _fail("invalid_capability_mode", "$.role_definition.capability_mode")
+    if definition.model_connection_id is not None and not definition.model_connection_id.strip():
+        _fail("invalid_model_connection_id", "$.role_definition.model_connection_id")
+
+
+def decode_role_definition(value: object, path: str = "$.role_definition") -> RoleDefinition:
+    """严格解码角色定义 wire：全键必填、禁额外键，构造后即校验。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _ROLE_DEFINITION_KEYS, path)
+    schema_version = value["schema_version"]
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+        _fail("invalid_type", f"{path}.schema_version")
+    definition = RoleDefinition(
+        schema_version=schema_version,
+        role_id=_require_str(value["role_id"], f"{path}.role_id"),
+        display_name=_require_str(value["display_name"], f"{path}.display_name"),
+        base=_require_str(value["base"], f"{path}.base"),
+        status=_require_str(value["status"], f"{path}.status"),
+        role_version=_require_str(value["role_version"], f"{path}.role_version"),
+        prompt_body=_require_str(value["prompt_body"], f"{path}.prompt_body"),
+        model_connection_id=(
+            None
+            if value["model_connection_id"] is None
+            else _require_str(value["model_connection_id"], f"{path}.model_connection_id")
+        ),
+        capability_mode=_require_str(value["capability_mode"], f"{path}.capability_mode"),
+        created_at=_require_str(value["created_at"], f"{path}.created_at"),
+        updated_at=_require_str(value["updated_at"], f"{path}.updated_at"),
+        updated_by=_require_str(value["updated_by"], f"{path}.updated_by"),
+    )
+    validate_role_definition(definition)
+    return definition
+
+
+# ---------------------------------------------------------------------------
 # E-03-4b MCP 服务与角色版本的引用（F14 残余 / F15 / AC11 / J25）
 # ---------------------------------------------------------------------------
 
