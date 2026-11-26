@@ -80,6 +80,7 @@ from services.agent_service.loop import (
     DEFAULT_PLAN_TOOLS,
     AgentTurn,
     DelegationRunner,
+    DiscussionAnswerRecorder,
     ExecutionLoop,
     LoopIdentity,
     LoopLimits,
@@ -492,6 +493,7 @@ class MainTurnRunner:
         limits: LoopLimits | None = None,
         plan_store_factory: Any | None = None,
         turn_factory: TurnFactory | None = None,
+        answer_messages: DiscussionAnswerRecorder | None = None,
     ) -> None:
         self._producer = producer
         self._tools = tools
@@ -499,6 +501,7 @@ class MainTurnRunner:
         self._limits = limits
         self._plan_store_factory = plan_store_factory
         self._turn_factory = turn_factory
+        self._answer_messages = answer_messages
 
     async def run(self, request: MainTurnRequest, *, turn: AgentTurn | None = None) -> MainTurnOutcome:
         """推进一次主回合；计划成功交付时保存用户可读计划版并返回其引用。"""
@@ -525,6 +528,8 @@ class MainTurnRunner:
             limits=self._limits,
             read_tool_names=request.read_tool_names,
             plan_tool_names=request.plan_tool_names,
+            # 讨论直答入会话历史（非轮绑定成果）；执行模式仍走轮绑定成果保存。
+            answer_messages=self._answer_messages if mode is Mode.DISCUSS else None,
             depth=0,
         )
         outcome = await loop.run()
@@ -547,10 +552,14 @@ class MainTurnRunner:
         if factory is None:
             logger.info("[MainTurn] plan store not wired; readable plan saved without executable reference")
             return None
-        if outcome.result is None:
-            # 澄清终态无成果：不保存计划版（也不伪造空计划）。
+        # 计划模式不产出轮绑定成果：结构化步骤直接来自终态（``unsaved_structured_fields``）；
+        # 澄清终态两项皆空 → 不保存计划版（也不伪造空计划）。
+        structured_fields = (
+            outcome.result.structured_fields if outcome.result is not None else outcome.unsaved_structured_fields
+        )
+        if structured_fields is None:
             return None
-        steps = plan_steps_from_structured_fields(outcome.result.structured_fields)
+        steps = plan_steps_from_structured_fields(structured_fields)
         if not steps:
             logger.info("[MainTurn] no plan steps produced; plan version not saved")
             return None
