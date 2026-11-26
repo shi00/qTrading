@@ -302,7 +302,7 @@ class TestShowSnack:
 
 
 class TestBuildTabs:
-    """_build_tabs：实例化 7 个 tabs（patch 各 tab 避免真实实例化）。"""
+    """_build_tabs：实例化 9 个 tabs（patch 各 tab 避免真实实例化）。"""
 
     @pytest.fixture(autouse=True)
     def _patch_all_tabs(self):
@@ -329,7 +329,7 @@ class TestBuildTabs:
             self.mock_roles.return_value = MagicMock(name="RolesTab")
             yield
 
-    def test_build_tabs_returns_7_tabs(self):
+    def test_build_tabs_returns_9_tabs(self):
         from ui.views.settings_view import _build_tabs
 
         tabs = _build_tabs(MagicMock())
@@ -350,6 +350,7 @@ class TestBuildTabs:
         self.mock_auto.assert_not_called()
         self.mock_notify.assert_not_called()
         self.mock_system.assert_not_called()
+        self.mock_roles.assert_not_called()
 
     def test_build_tabs_notifications_tab_receives_only_show_snack(self):
         """NotificationsTab 声明式重写后只接收 show_snack (Phase D.4, 无 page_ref)。
@@ -386,6 +387,7 @@ class TestBuildTabs:
         self.mock_auto.assert_not_called()
         self.mock_notify.assert_not_called()
         self.mock_system.assert_not_called()
+        self.mock_roles.assert_not_called()
         # 非激活 tab 是空 Container
         assert tabs[0] is not tabs[2]
         assert isinstance(tabs[0], ft.Container)
@@ -405,6 +407,7 @@ class TestBuildTabs:
         self.mock_auto.assert_not_called()
         self.mock_notify.assert_not_called()
         self.mock_system.assert_not_called()
+        self.mock_roles.assert_not_called()
 
     def test_build_tabs_with_visited_tabs_constructs_all_visited(self):
         """Issue #438: visited_tabs 含多个索引时, 所有已访问 Tab 被构造。"""
@@ -422,6 +425,17 @@ class TestBuildTabs:
         self.mock_auto.assert_not_called()
         self.mock_notify.assert_not_called()
         self.mock_system.assert_not_called()
+        self.mock_roles.assert_not_called()
+
+    def test_build_tabs_passes_roles_catalog_to_roles_tab(self):
+        """组合根透传：roles_catalog 原样传给 RolesTab（current_tab=8）。"""
+        from ui.views.settings_view import _build_tabs
+
+        sentinel = object()
+        tabs = _build_tabs(MagicMock(), current_tab=8, roles_catalog=sentinel)
+
+        assert tabs[8].content is self.mock_roles.return_value
+        assert self.mock_roles.call_args.args[1] is sentinel
 
     def test_build_tabs_visible_prop_correct(self):
         """Issue #438: visible prop 按 current_tab 设置, 已访问 Tab content 非 None。"""
@@ -456,7 +470,7 @@ class TestBuildTabs:
 class TestTabConfig:
     """_TAB_CONFIG 顺序与 _build_tabs 返回顺序一致。"""
 
-    def test_tab_config_has_8_entries(self):
+    def test_tab_config_has_9_entries(self):
         from ui.views.settings_view import _TAB_CONFIG
 
         assert len(_TAB_CONFIG) == 9
@@ -516,7 +530,7 @@ class TestSettingsViewComponentBody:
 
     @pytest.fixture(autouse=True)
     def _patch_all_tabs(self):
-        """Patch 7 个 tabs 避免真实实例化。"""
+        """Patch 9 个 tabs 避免真实实例化。"""
         with (
             patch("ui.views.settings_view.DataSourceTab") as self.mock_data,
             patch("ui.views.settings_view.DatabaseTab") as self.mock_db,
@@ -560,12 +574,12 @@ class TestSettingsViewComponentBody:
         _, result = self._mount(mock_i18n_state, mock_app_colors_state)
         assert isinstance(result, ft.Container)
 
-    def test_mount_renders_eight_tab_buttons(
+    def test_mount_renders_nine_tab_buttons(
         self,
         mock_i18n_state,
         mock_app_colors_state,
     ):
-        """挂载后 tab_bar 包含 7 个 ft.Button (每个 tab 一个)。"""
+        """挂载后 tab_bar 包含 9 个 ft.Button (每个 tab 一个)。"""
         _, result = self._mount(mock_i18n_state, mock_app_colors_state)
         buttons = _find_buttons(result)
         assert len(buttons) == 9
@@ -810,7 +824,7 @@ class TestSettingsViewTargetSubtab:
 
     @pytest.fixture(autouse=True)
     def _patch_all_tabs(self):
-        """Patch 7 个 tabs 避免真实实例化。"""
+        """Patch 9 个 tabs 避免真实实例化。"""
         with (
             patch("ui.views.settings_view.DataSourceTab") as self.mock_data,
             patch("ui.views.settings_view.DatabaseTab") as self.mock_db,
@@ -820,6 +834,7 @@ class TestSettingsViewTargetSubtab:
             patch("ui.views.settings_view.NotificationsTab") as self.mock_notify,
             patch("ui.views.settings_view.SystemTab") as self.mock_system,
             patch("ui.views.settings_view.SkillsTab") as self.mock_skills,
+            patch("ui.views.settings_view.RolesTab") as self.mock_roles,
         ):
             self.mock_data.return_value = MagicMock(name="DataSourceTab")
             self.mock_db.return_value = MagicMock(name="DatabaseTab")
@@ -829,6 +844,7 @@ class TestSettingsViewTargetSubtab:
             self.mock_notify.return_value = MagicMock(name="NotificationsTab")
             self.mock_system.return_value = MagicMock(name="SystemTab")
             self.mock_skills.return_value = MagicMock(name="SkillsTab")
+            self.mock_roles.return_value = MagicMock(name="RolesTab")
             yield
 
     def _mount(self, target_subtab: object):

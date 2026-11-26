@@ -3364,5 +3364,7 @@
     "agent_roles_disabled": "角色已停用。",
     "agent_roles_enabled": "角色已启用。",
     "agent_roles_preset_main": "主角色",
-    "agent_roles_preset_sub": "子角色"
+    "agent_roles_preset_sub": "子角色",
+    "agent_roles_list_title": "角色列表",
+    "agent_roles_loading": "正在加载角色…"
 }

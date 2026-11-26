@@ -3364,5 +3364,7 @@
     "agent_roles_disabled": "Role disabled.",
     "agent_roles_enabled": "Role enabled.",
     "agent_roles_preset_main": "Main role",
-    "agent_roles_preset_sub": "Sub role"
+    "agent_roles_preset_sub": "Sub role",
+    "agent_roles_list_title": "Role list",
+    "agent_roles_loading": "Loading roles…"
 }

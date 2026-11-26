@@ -5,8 +5,9 @@
 - View 只读 ``RolesSettingsState`` 并发出命令，业务状态全部在 ViewModel；
 - 组合根未接线（``catalog is None``）时只渲染不可用说明，不构造 VM、不伪造可用（R21）；
 - 异步命令经 ``page.run_task`` 调度（R16）；
-- VM 产出的错误/提示键以模块级字面量表静态登记（i18n 死键门禁可 AST 检出），
+- VM 产出的错误/提示键以模块级字面量元组静态登记（i18n 死键门禁可 AST 检出），
   非空时经 ``ft.use_effect`` 只弹一次 snackbar（不调用 VM 私有方法）；
+- 首帧/加载失败不得伪装成「空列表」：未完成加载显示加载提示，加载失败持久显示不可用（R21）；
 - 停用/启用须经二次确认对话框，确认后才触达服务；
 - 颜色/字号只用 ``AppColors`` / ``AppStyles``（R23）；渲染顶层无 logger/print 副作用（UIX-10）。
 """
@@ -44,23 +45,20 @@ _PRESET_LABEL_KEYS: dict[str, str] = {
     "sub": "agent_roles_preset_sub",
 }
 
-#: VM 错误键 → 展示文案键（静态字面量，供 i18n 死键门禁 AST 检出）。
-_ERROR_MESSAGE_KEYS: dict[str, str] = {
-    "agent_roles_unavailable": "agent_roles_unavailable",
-    "agent_roles_preset_readonly": "agent_roles_preset_readonly",
-    "agent_roles_conflict": "agent_roles_conflict",
-    "agent_roles_invalid": "agent_roles_invalid",
-    "agent_roles_save_failed": "agent_roles_save_failed",
-}
-
-#: VM 提示键 → 展示文案键（静态字面量，供 i18n 死键门禁 AST 检出）。
-_NOTICE_MESSAGE_KEYS: dict[str, str] = {
-    "agent_roles_created": "agent_roles_created",
-    "agent_roles_saved": "agent_roles_saved",
-    "agent_roles_version_bumped": "agent_roles_version_bumped",
-    "agent_roles_disabled": "agent_roles_disabled",
-    "agent_roles_enabled": "agent_roles_enabled",
-}
+#: VM 产出并在 snackbar 展示的错误/提示键（模块级字面量，供 i18n 死键门禁 AST 检出）。
+#: 运行时直接 ``I18n.get(key)``，未知键原样展示，不静默吞掉提示。
+_VM_MESSAGE_KEYS: tuple[str, ...] = (
+    "agent_roles_unavailable",
+    "agent_roles_preset_readonly",
+    "agent_roles_conflict",
+    "agent_roles_invalid",
+    "agent_roles_save_failed",
+    "agent_roles_created",
+    "agent_roles_saved",
+    "agent_roles_version_bumped",
+    "agent_roles_disabled",
+    "agent_roles_enabled",
+)
 
 
 def _get_page() -> ft.Page | None:
@@ -89,15 +87,19 @@ def _role_name(row: RoleRow) -> str:
 
 
 def _status_text(status: str) -> str:
-    return I18n.get(_STATUS_LABEL_KEYS.get(status, "agent_roles_status_active"))
+    key = _STATUS_LABEL_KEYS.get(status)
+    if key is None:
+        # 未知状态原样展示，不回退成「启用中」（不把未知伪装成业务上的合法值，R21）。
+        return status
+    return I18n.get(key)
 
 
-def _message_text(key: str | None, table: dict[str, str]) -> str | None:
+def _message_text(key: str | None) -> str | None:
     """把 VM 键解析为展示文案；空键不产生提示。"""
 
     if not key:
         return None
-    return I18n.get(table.get(key, key))
+    return I18n.get(key)
 
 
 def _build_unavailable_view() -> ft.Control:
@@ -203,7 +205,6 @@ def _build_role_row(
 def _RolesList(
     state: RolesSettingsState,
     vm: RolesSettingsViewModel,
-    show_snack: Callable[[str], None],
 ) -> ft.Control:
     """角色列表：预置行 + 自定义行，停用/启用经二次确认。"""
 
@@ -242,8 +243,6 @@ def _RolesList(
                 on_toggle=lambda current=row: _ask_toggle(current),
             )
         )
-    if not any(not row.is_preset for row in state.roles):
-        rows.append(ft.Text(I18n.get("agent_roles_empty"), size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_HINT))
 
     disabling = confirm_disabling
     if confirm_role_id:
@@ -279,8 +278,8 @@ def _RolesList(
 
 
 @ft.component
-def _RoleEditor(draft: RoleDraft, vm: RolesSettingsViewModel) -> ft.Control:
-    """编辑态草稿：role_id 新建/复制可编辑，编辑既有角色只读。"""
+def _RoleEditor(draft: RoleDraft, vm: RolesSettingsViewModel, pending: bool) -> ft.Control:
+    """编辑态草稿：role_id 新建/复制可编辑，编辑既有角色只读；提交中禁用按钮。"""
 
     ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
@@ -380,10 +379,12 @@ def _RoleEditor(draft: RoleDraft, vm: RolesSettingsViewModel) -> ft.Control:
                     icon=ft.Icons.SAVE,
                     on_click=safe_on_click(lambda _e: _run(vm.save)),
                     style=AppStyles.primary_button(),
+                    disabled=pending,
                 ),
                 ft.TextButton(
                     I18n.get("agent_roles_cancel"),
                     on_click=safe_on_click(lambda _e: vm.cancel_edit()),
+                    disabled=pending,
                 ),
             ],
             spacing=AppStyles.SPACING_SM,
@@ -400,25 +401,55 @@ def _RolesTabBody(show_snack: Callable[[str], None], catalog: Any) -> ft.Control
     ft.use_state(AppColors.get_observable_state)
 
     state, vm = use_viewmodel(factory=lambda: RolesSettingsViewModel(catalog))
+    load_done, set_load_done = ft.use_state(False)
+    load_failed, set_load_failed = ft.use_state(False)
+
+    async def _do_load() -> None:
+        await vm.load()
+        # 只记录「加载阶段」失败：后续保存/启停错误不应把整个目录标为不可用。
+        set_load_failed(vm.state.error_key is not None)
+        set_load_done(True)
 
     def _trigger_load() -> None:
         page = _get_page()
         if page is not None:
-            page.run_task(vm.load)
+            page.run_task(_do_load)
 
     ft.use_effect(_trigger_load, dependencies=[])
 
     def _announce() -> None:
-        for key, table in (
-            (state.error_key, _ERROR_MESSAGE_KEYS),
-            (state.notice_key, _NOTICE_MESSAGE_KEYS),
-        ):
-            text = _message_text(key, table)
+        for key in (state.error_key, state.notice_key):
+            text = _message_text(key)
             if text:
                 show_snack(text)
 
     # 依赖键变化才弹一次；中间态（pending 置位清空键）不产生提示，重复失败可再次提示。
     ft.use_effect(_announce, dependencies=[(state.error_key, state.notice_key)])
+
+    if not load_done:
+        list_content: ft.Control = ft.Text(
+            I18n.get("agent_roles_loading"),
+            size=AppStyles.FONT_SIZE_BODY_SM,
+            color=AppColors.TEXT_HINT,
+        )
+    elif load_failed:
+        # 加载失败持久展示不可用，而不是把「未知」渲染成空列表（R21）。
+        list_content = ft.Text(
+            I18n.get("agent_roles_unavailable"),
+            size=AppStyles.FONT_SIZE_BODY_SM,
+            color=AppColors.ERROR,
+        )
+    else:
+        list_controls: list[ft.Control] = [_RolesList(state=state, vm=vm)]
+        if not any(not row.is_preset for row in state.roles):
+            list_controls.append(
+                ft.Text(
+                    I18n.get("agent_roles_empty"),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.TEXT_HINT,
+                )
+            )
+        list_content = ft.Column(list_controls, spacing=AppStyles.SPACING_XS)
 
     sections: list[ft.Control] = [
         DashboardCard(
@@ -439,8 +470,8 @@ def _RolesTabBody(show_snack: Callable[[str], None], catalog: Any) -> ft.Control
         DashboardCard(
             content=ft.Column(
                 [
-                    SectionHeader(I18n.get("agent_roles_title"), title_key="agent_roles_title"),
-                    _RolesList(state=state, vm=vm, show_snack=show_snack),
+                    SectionHeader(I18n.get("agent_roles_list_title"), title_key="agent_roles_list_title"),
+                    list_content,
                 ],
                 spacing=AppStyles.SPACING_SM,
             )
@@ -453,7 +484,7 @@ def _RolesTabBody(show_snack: Callable[[str], None], catalog: Any) -> ft.Control
                 content=ft.Column(
                     [
                         SectionHeader(I18n.get(editor_title_key), title_key=editor_title_key),
-                        _RoleEditor(draft=state.editing, vm=vm),
+                        _RoleEditor(draft=state.editing, vm=vm, pending=state.pending),
                     ],
                     spacing=AppStyles.SPACING_SM,
                 )

@@ -220,7 +220,11 @@ def _drain(page: _TaskRecordingPage) -> None:
 
 
 def _walk(root: Any) -> Iterator[Any]:
-    """递归遍历 Control / Component 树（含组件 props 中的子组件）。"""
+    """递归遍历 Control / Component 树（含组件 props 中的子组件）。
+
+    说明：``Component._b`` 为 Flet 私有字段（记录已渲染体），本测试借助它访问
+    子组件渲染结果；升级 Flet 时若该字段改名/移除，需同步调整此遍历器。
+    """
 
     stack: list[Any] = [root]
     seen: set[int] = set()
@@ -281,12 +285,13 @@ def _invoke(handler: Any, *args: Any) -> None:
     handler(*args)
 
 
-def _mount_body(catalog: _RecordingCatalog) -> tuple[Component, _TaskRecordingPage, MagicMock]:
+def _mount_body(catalog: _RecordingCatalog, *, drain: bool = True) -> tuple[Component, _TaskRecordingPage, MagicMock]:
     show_snack = MagicMock()
     component = make_component(mod._RolesTabBody, show_snack=show_snack, catalog=catalog)
     page = _TaskRecordingPage()
     run_mount_effects(component, page=page)
-    _drain(page)
+    if drain:
+        _drain(page)
     return component, page, show_snack
 
 
@@ -379,9 +384,44 @@ def test_list_shows_empty_hint_when_no_custom_roles(
 ) -> None:
     catalog = _RecordingCatalog()
     body, _page, _snack = _mount_body(catalog)
-    _list_component, list_view = _render_list(body)
+    body_result = render_once(body)
 
-    assert "i18n[agent_roles_empty]" in _texts(list_view)
+    assert "i18n[agent_roles_empty]" in _texts(body_result)
+    assert "i18n[agent_roles_loading]" not in _texts(body_result)
+
+
+def test_first_frame_shows_loading_instead_of_empty(
+    mock_i18n_state: Any,
+    mock_app_colors_state: Any,
+    i18n_mock: MagicMock,
+) -> None:
+    """首帧加载未完成时不得渲染成空列表（R21：不把未知伪装成空）。"""
+
+    catalog = _RecordingCatalog()
+    body, _page, _snack = _mount_body(catalog, drain=False)
+
+    texts = _texts(render_once(body))
+    assert "i18n[agent_roles_loading]" in texts
+    assert "i18n[agent_roles_empty]" not in texts
+
+
+def test_load_failure_shows_persistent_unavailable_instead_of_empty(
+    mock_i18n_state: Any,
+    mock_app_colors_state: Any,
+    i18n_mock: MagicMock,
+) -> None:
+    """加载失败后列表区持久显示不可用，而不是空列表。"""
+
+    catalog = _RecordingCatalog()
+    catalog.raise_on["list_roles"] = AgentServiceError(
+        AgentErrorCode.CONFIG_UNAVAILABLE, "role_catalog_unavailable", "role_catalog"
+    )
+    body, _page, _snack = _mount_body(catalog)
+
+    texts = _texts(render_once(body))
+    assert "i18n[agent_roles_unavailable]" in texts
+    assert "i18n[agent_roles_empty]" not in texts
+    assert "i18n[agent_roles_loading]" not in texts
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +441,7 @@ def test_disable_requires_confirmation_before_touching_service(
         )
     )
     vm = _FakeVm()
-    component = make_component(mod._RolesList, state=state, vm=vm, show_snack=MagicMock())
+    component = make_component(mod._RolesList, state=state, vm=vm)
     page = _TaskRecordingPage()
     run_mount_effects(component, page=page)
     result = render_once(component)
@@ -443,7 +483,7 @@ def test_preset_row_only_exposes_copy_action(
             RoleRow("sub", True, None, STATUS_ACTIVE, None, None),
         )
     )
-    component = make_component(mod._RolesList, state=state, vm=_FakeVm(), show_snack=MagicMock())
+    component = make_component(mod._RolesList, state=state, vm=_FakeVm())
     run_mount_effects(component, page=_TaskRecordingPage())
     result = render_once(component)
 
@@ -462,6 +502,58 @@ def test_preset_row_only_exposes_copy_action(
     assert edit_buttons == []
     assert toggle_buttons == []
     assert len(copy_buttons) == 2
+
+
+def test_unknown_status_is_not_disguised_as_active(
+    mock_i18n_state: Any,
+    mock_app_colors_state: Any,
+    i18n_mock: MagicMock,
+) -> None:
+    state = RolesSettingsState(roles=(RoleRow("risk_reviewer", False, "风险复核", "archived", "r1", None),))
+    component = make_component(mod._RolesList, state=state, vm=_FakeVm())
+    run_mount_effects(component, page=_TaskRecordingPage())
+    result = render_once(component)
+
+    texts = _texts(result)
+    assert "archived" in texts
+    assert "i18n[agent_roles_status_active]" not in texts
+
+
+def test_enable_requires_confirmation_and_calls_toggle(
+    mock_i18n_state: Any,
+    mock_app_colors_state: Any,
+    i18n_mock: MagicMock,
+) -> None:
+    state = RolesSettingsState(roles=(RoleRow("news_editor", False, "新闻编辑", STATUS_DISABLED, "r1", None),))
+    vm = _FakeVm()
+    component = make_component(mod._RolesList, state=state, vm=vm)
+    page = _TaskRecordingPage()
+    run_mount_effects(component, page=page)
+    result = render_once(component)
+
+    _invoke(_find_button(result, "i18n[agent_roles_enable]").on_click, _make_event())
+    assert page.tasks == []
+    assert vm.calls == []
+
+    rerendered = render_once(component)
+    _find_button(rerendered, "i18n[agent_roles_enable]")
+    dialogs = page._dialogs.controls
+    assert len(dialogs) == 1
+    dialog = dialogs[0]
+    assert isinstance(dialog, ft.AlertDialog)
+    assert "i18n[agent_roles_confirm_enable_title]" in _texts(dialog.title)
+    assert "i18n[agent_roles_confirm_enable_body]" in _texts(dialog.content)
+
+    confirm_buttons = [
+        action
+        for action in dialog.actions
+        if isinstance(action, (ft.Button, ft.TextButton)) and action.content == "i18n[common_confirm]"
+    ]
+    assert len(confirm_buttons) == 1
+    _invoke(confirm_buttons[0].on_click, _make_event())
+    _drain(page)
+
+    assert vm.calls == [("toggle_status", "news_editor")]
 
 
 # ---------------------------------------------------------------------------
@@ -486,7 +578,7 @@ def test_editor_role_id_is_readonly_for_existing_role(
     mock_app_colors_state: Any,
     i18n_mock: MagicMock,
 ) -> None:
-    component = make_component(mod._RoleEditor, draft=_existing_draft(), vm=_FakeVm())
+    component = make_component(mod._RoleEditor, draft=_existing_draft(), vm=_FakeVm(), pending=False)
     run_mount_effects(component, page=_TaskRecordingPage())
     result = render_once(component)
 
@@ -501,7 +593,7 @@ def test_editor_version_bump_hint_after_prompt_change(
     i18n_mock: MagicMock,
 ) -> None:
     vm = _FakeVm()
-    component = make_component(mod._RoleEditor, draft=_existing_draft(), vm=vm)
+    component = make_component(mod._RoleEditor, draft=_existing_draft(), vm=vm, pending=False)
     run_mount_effects(component, page=_TaskRecordingPage())
     result = render_once(component)
 
@@ -523,7 +615,7 @@ def test_editor_save_and_cancel_schedule_commands(
     i18n_mock: MagicMock,
 ) -> None:
     vm = _FakeVm()
-    component = make_component(mod._RoleEditor, draft=_existing_draft(), vm=vm)
+    component = make_component(mod._RoleEditor, draft=_existing_draft(), vm=vm, pending=False)
     page = _TaskRecordingPage()
     run_mount_effects(component, page=page)
     result = render_once(component)
@@ -534,6 +626,21 @@ def test_editor_save_and_cancel_schedule_commands(
 
     _invoke(_find_button(result, "i18n[agent_roles_cancel]").on_click, _make_event())
     assert ("cancel_edit",) in vm.calls
+
+
+def test_editor_buttons_disabled_while_pending(
+    mock_i18n_state: Any,
+    mock_app_colors_state: Any,
+    i18n_mock: MagicMock,
+) -> None:
+    """提交中禁用保存/取消，避免双击派发第二次 save（误导性冲突/非法提示）。"""
+
+    component = make_component(mod._RoleEditor, draft=_existing_draft(), vm=_FakeVm(), pending=True)
+    run_mount_effects(component, page=_TaskRecordingPage())
+    result = render_once(component)
+
+    assert _find_button(result, "i18n[agent_roles_save]").disabled is True
+    assert _find_button(result, "i18n[agent_roles_cancel]").disabled is True
 
 
 # ---------------------------------------------------------------------------
@@ -567,6 +674,29 @@ def test_save_prompt_change_surfaces_version_bumped_notice(
     run_render_effects(body)
 
     assert _snack_messages(show_snack) == ["i18n[agent_roles_version_bumped]"]
+
+
+def test_save_with_blank_model_inherits_and_passes_none(
+    mock_i18n_state: Any,
+    mock_app_colors_state: Any,
+    i18n_mock: MagicMock,
+) -> None:
+    """模型连接留空保存时，服务调用参数为 ``None``（继承路由默认）。"""
+
+    catalog = _RecordingCatalog()
+    asyncio.run(catalog.seed("risk_reviewer", "风险复核", "旧正文", model_connection_id="conn-1"))
+    body, page, _snack = _mount_body(catalog)
+
+    editor_view = _begin_edit_from_list(body, page)
+    model_field = _find_textfield(editor_view, "i18n[agent_roles_model_label]")
+    _invoke(model_field.on_change, _make_event(""))
+    _invoke(_find_button(editor_view, "i18n[agent_roles_save]").on_click, _make_event())
+    _drain(page)
+
+    updates = [call for call in catalog.calls if call[0] == "update"]
+    assert updates, "应发生一次角色更新"
+    # ("update", role_id, display_name, prompt_body, model_connection_id, expected_version, updated_by)
+    assert updates[-1][4] is None
 
 
 def test_save_conflict_surfaces_conflict_notice(
@@ -632,6 +762,8 @@ _NEW_I18N_KEYS: frozenset[str] = frozenset(
         "agent_roles_enabled",
         "agent_roles_preset_main",
         "agent_roles_preset_sub",
+        "agent_roles_list_title",
+        "agent_roles_loading",
     }
 )
 
