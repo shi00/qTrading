@@ -3900,6 +3900,10 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             durations_execution_id=None,
             model_selection_frozen=None,
             role_selection_frozen=None,
+            # 会话级模型选择随会话消失，避免旧会话残影（R21）。
+            session_model_connection_id=None,
+            session_model_source_key=SESSION_MODEL_SOURCE_DEFAULT,
+            session_model_error_key=None,
             # W-13：流式增量、权威水位、进度与观察现场随会话消失（不保留上一会话残影）。
             stream_fragments=(),
             stream_text="",
@@ -5152,6 +5156,9 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             role_selection=role_selection,
             role_selection_error_key=None,
         )
+        # 角色选择落定后，若尚无会话级选择，来源标签可能从默认升级为「角色继承」。
+        if self._state.session_model_connection_id is None:
+            self._set_state(session_model_source_key=self._derive_session_model_source(None))
 
     @staticmethod
     def _option(options: Sequence[ModelConnectionOption], connection_id: str | None) -> ModelConnectionOption | None:
@@ -5190,7 +5197,8 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
 
         option = self._option(self._state.model_options, connection_id)
         if option is None:
-            self._set_state(session_model_error_key=SESSION_MODEL_UNAVAILABLE_KEY)
+            # 与「存储未接线」区分：未知/已删除连接用候选拒绝原因。
+            self._set_state(session_model_error_key="agent_research_model_selection_unknown")
             return
         if option.reject_key is not None:
             self._set_state(session_model_error_key=option.reject_key)

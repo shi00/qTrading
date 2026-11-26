@@ -408,6 +408,13 @@ def build_session_model_bar(
     else:
         # 未知连接如实显示原值，不伪装成「继承默认」。
         current_text = connection_id
+    # 会话键指向已停用/已删除连接：显式报错，但保留名称显示与「恢复继承」按钮。
+    unavailable_key: str | None = None
+    if connection_id is not None:
+        if option is None:
+            unavailable_key = "agent_research_session_model_unavailable"
+        elif option.reject_key is not None:
+            unavailable_key = option.reject_key
     rows.append(
         ft.Row(
             [
@@ -435,7 +442,7 @@ def build_session_model_bar(
                 value=selected,
                 options=[ft.dropdown.Option(key=item.connection_id, text=item.display_name) for item in eligible],
                 text_size=AppStyles.FONT_SIZE_CAPTION,
-                on_select=lambda e: on_select_model(e.control.value or ""),
+                on_select=lambda e: _select_session_model_value(e.control.value, on_select_model),
             )
         )
     rows.append(
@@ -449,7 +456,16 @@ def build_session_model_bar(
     )
     if state.session_model_error_key:
         rows.append(error_text(I18n.get(state.session_model_error_key)))
+    if unavailable_key is not None:
+        rows.append(error_text(I18n.get(unavailable_key)))
     return ft.Column(rows, spacing=AppStyles.SPACING_XS)
+
+
+def _select_session_model_value(value: str | None, handler: Callable[[str], None]) -> None:
+    """下拉清空（``None``/空串）不算选择：忽略空值，避免写入空连接。"""
+
+    if value:
+        handler(value)
 
 
 def build_execution_row(

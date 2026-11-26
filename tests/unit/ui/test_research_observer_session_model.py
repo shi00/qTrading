@@ -67,6 +67,9 @@ class _Service:
         self.read_queries.append(query)
         return _session_read()
 
+    async def search(self, query: Any, *, user_scope: str) -> Any:
+        return SimpleNamespace(hits=(), read_moment="2026-11-26T02:00:00.000000Z")
+
 
 class _Store:
     """会话模型存储替身：精确记录读写参数，并支持故障注入（R2/R21 用例）。"""
@@ -152,9 +155,10 @@ def _make_vm(
     resolver: Any = None,
     intake: Any = None,
     catalog: Any = None,
+    service: _Service | None = None,
 ) -> ResearchObserverViewModel:
     return ResearchObserverViewModel(
-        cast(Any, _Service()),
+        cast(Any, service if service is not None else _Service()),
         intake=intake,
         model_catalog=catalog if catalog is not None else cast(Any, _Catalog()),
         token_counter=_token_counter,
@@ -232,6 +236,18 @@ class TestSessionModelSource:
         assert vm.state.session_model_source_key == SESSION_MODEL_SOURCE_ROLE
 
     @pytest.mark.asyncio
+    async def test_load_model_selection_recomputes_role_source_when_no_session_key(self) -> None:
+        store = _Store(None)
+        vm = await _vm_on_session(store, resolver=lambda role_key: "conn-b" if role_key == "main" else None)
+        assert vm.state.session_model_source_key == SESSION_MODEL_SOURCE_DEFAULT
+
+        await vm.load_model_selection()
+
+        assert vm.state.role_selection == "main"
+        assert vm.state.session_model_connection_id is None
+        assert vm.state.session_model_source_key == SESSION_MODEL_SOURCE_ROLE
+
+    @pytest.mark.asyncio
     async def test_missing_key_without_resolver_marks_default_source(self) -> None:
         vm = await _vm_on_session(_Store(None))
         await vm.load_model_selection()
@@ -280,7 +296,7 @@ class TestSelectSessionModel:
 
         assert store.writes == []
         assert vm.state.session_model_connection_id is None
-        assert vm.state.session_model_error_key == SESSION_MODEL_UNAVAILABLE_KEY
+        assert vm.state.session_model_error_key == "agent_research_model_selection_unknown"
 
     @pytest.mark.asyncio
     async def test_disabled_connection_is_rejected_with_its_reason(self) -> None:
@@ -408,6 +424,19 @@ class TestLoadAndClearSessionModel:
 
         assert vm.state.session_model_error_key == SESSION_MODEL_UNAVAILABLE_KEY
 
+    @pytest.mark.asyncio
+    async def test_no_session_refresh_resets_session_model_state(self) -> None:
+        store = _Store("conn-a")
+        vm = _make_vm(store=store)
+        await vm.load_session_model("s1")
+        assert vm.state.session_model_connection_id == "conn-a"
+
+        await vm.refresh()
+
+        assert vm.state.session_model_connection_id is None
+        assert vm.state.session_model_source_key == SESSION_MODEL_SOURCE_DEFAULT
+        assert vm.state.session_model_error_key is None
+
 
 # ----------------------------------------------------------------------
 # VM：首问提交把会话选择传入受理端口
@@ -517,6 +546,53 @@ class TestSessionModelBar:
         bar = build_session_model_bar(state, on_select_model=lambda _v: None, on_clear_model=lambda: None)
 
         assert I18n.get(SESSION_MODEL_UNAVAILABLE_KEY) in _texts(bar)
+
+    def test_bar_reports_disabled_session_connection_and_keeps_name(self) -> None:
+        state = ResearchObserverState(
+            available=True,
+            session_model_available=True,
+            session_model_connection_id="conn-off",
+            session_model_source_key=SESSION_MODEL_SOURCE_SESSION,
+            model_options=(_option("conn-off", "连接 C", reject_key="agent_research_model_selection_disabled"),),
+        )
+
+        bar = build_session_model_bar(state, on_select_model=lambda _v: None, on_clear_model=lambda: None)
+        texts = _texts(bar)
+
+        assert "连接 C" in texts
+        assert I18n.get("agent_research_model_selection_disabled") in texts
+        assert I18n.get("agent_research_session_model_clear") in texts
+
+    def test_bar_reports_missing_session_connection_with_raw_id(self) -> None:
+        state = ResearchObserverState(
+            available=True,
+            session_model_available=True,
+            session_model_connection_id="conn-gone",
+            session_model_source_key=SESSION_MODEL_SOURCE_SESSION,
+            model_options=(_option("conn-a", "连接 A"),),
+        )
+
+        bar = build_session_model_bar(state, on_select_model=lambda _v: None, on_clear_model=lambda: None)
+        texts = _texts(bar)
+
+        assert "conn-gone" in texts
+        assert I18n.get(SESSION_MODEL_UNAVAILABLE_KEY) in texts
+
+    def test_bar_dropdown_ignores_empty_value(self) -> None:
+        state = ResearchObserverState(
+            available=True,
+            session_model_available=True,
+            model_options=(_option("conn-a", "连接 A"),),
+        )
+        selected: list[str] = []
+
+        bar = build_session_model_bar(state, on_select_model=selected.append, on_clear_model=lambda: None)
+        dropdown = next(item for item in _walk(bar) if isinstance(item, ft.Dropdown))
+        callback = cast(Any, dropdown.on_select)
+        callback(SimpleNamespace(control=SimpleNamespace(value="")))
+        callback(SimpleNamespace(control=SimpleNamespace(value=None)))
+
+        assert selected == []
 
     def test_bar_dropdown_lists_only_eligible_options_and_reports_selection(self) -> None:
         state = ResearchObserverState(
