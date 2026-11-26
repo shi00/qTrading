@@ -32,6 +32,7 @@ from ui.views.settings_tabs.automation_tab import AutomationTab, NotificationsTa
 from ui.views.settings_tabs.data_source_tab import DataSourceTab
 from ui.views.settings_tabs.database_tab import DatabaseTab
 from ui.views.settings_tabs.mcp_services_tab import MCPServicesTab
+from ui.views.settings_tabs.roles_tab import RolesTab
 from ui.views.settings_tabs.skills_tab import SkillsTab
 from ui.views.settings_tabs.system_tab import SystemTab
 from utils.sanitizers import DataSanitizer
@@ -49,6 +50,7 @@ _TAB_CONFIG = [
     ("settings_tab_notify", ft.Icons.NOTIFICATIONS),
     ("settings_tab_system", ft.Icons.TUNE),
     ("settings_tab_skills", ft.Icons.EXTENSION),
+    ("settings_tab_roles", ft.Icons.BADGE),
 ]
 
 # UX-01 导航深链协议: 子页 key → 索引 (从 _TAB_CONFIG 派生, 单一事实源, 不手工维护顺序)
@@ -76,6 +78,7 @@ def _build_tabs(
     mcp_lifecycle: Any | None = None,
     agent_service: Any | None = None,
     user_scope: str = "local-desktop",
+    roles_catalog: Any | None = None,
 ) -> list[ft.Control]:
     """构造已访问 Tab (``visible`` prop 控制显隐), 未访问 Tab 为空 Container。
 
@@ -104,6 +107,7 @@ def _build_tabs(
         lambda: NotificationsTab(show_snack),
         lambda: SystemTab(show_snack),
         lambda: SkillsTab(agent_service, user_scope),
+        lambda: RolesTab(show_snack, roles_catalog),
     ]
     return [
         ft.Container(
@@ -160,6 +164,7 @@ def SettingsView(
     mcp_lifecycle: Any | None = None,
     agent_service: Any | None = None,
     user_scope: str = "local-desktop",
+    roles_catalog: Any | None = None,
 ) -> ft.Container:
     """Settings view — declarative shell container.
 
@@ -181,6 +186,8 @@ def SettingsView(
         active: 当前 tab 是否激活 (控制副作用执行)。
         target_subtab: 深链子页请求 ``(subtab_key, seq)`` 或 None。
         mcp_lifecycle: MCP 服务生命周期门面；None 时「MCP 服务」页只显示不可用原因。
+        roles_catalog: 角色目录服务；None 时「角色管理」页只显示不可用原因。
+            组合根接线在后续任务补上，本任务仅保留透传入口。
     """
     current_tab, set_current_tab = ft.use_state(0)
     visited_tabs, set_visited_tabs = ft.use_state({0})
@@ -224,6 +231,7 @@ def SettingsView(
         mcp_lifecycle=mcp_lifecycle,
         agent_service=agent_service,
         user_scope=user_scope,
+        roles_catalog=roles_catalog,
     )
     assert len(_TAB_CONFIG) == len(tabs), f"_TAB_CONFIG ({len(_TAB_CONFIG)}) and tabs ({len(tabs)}) length mismatch!"
 
