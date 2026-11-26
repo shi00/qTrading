@@ -82,6 +82,7 @@ if TYPE_CHECKING:
     # 该导入只用于类型标注；运行时仅在已接线（intake 存在）路径内惰性导入。
     from services.agent_service.main_turn import MainTurnIntakeResult, PlanReference
     from services.agent_service.model import StreamedTextFragment
+    from services.agent_service.session_model import SessionModelStore
 
 #: 桌面单用户域（与 app.agent_wiring 的默认 user_scope 保持一致；UI 层不 import app）。
 LOCAL_DESKTOP_USER_SCOPE = "local-desktop"
@@ -116,6 +117,14 @@ DISPATCH_REASON_UNKNOWN = "zero_dispatch"
 COMPOSER_MODES: Final[tuple[str, ...]] = ("discuss", "plan", "execute")
 #: 缺省模式：执行（F21 默认执行）。
 DEFAULT_COMPOSER_MODE: Final[str] = "execute"
+
+#: 会话模型来源键（View 按当前 locale 渲染；VM 只产出 key）：
+#: 会话键命中 / 角色覆盖 / 路由默认。
+SESSION_MODEL_SOURCE_SESSION: Final[str] = "agent_research_session_model_source_session"
+SESSION_MODEL_SOURCE_ROLE: Final[str] = "agent_research_session_model_source_role"
+SESSION_MODEL_SOURCE_DEFAULT: Final[str] = "agent_research_session_model_source_default"
+#: 会话模型选择端口缺失或读写失败的统一错误键（显式报错，不伪装成功）。
+SESSION_MODEL_UNAVAILABLE_KEY: Final[str] = "agent_research_session_model_unavailable"
 #: 精确导航目标在读取期间被更新的最大重读次数（超过则如实报码，不落过期会话）。
 _REFRESH_TARGET_ATTEMPTS: Final[int] = 3
 
@@ -286,6 +295,7 @@ class MainTurnIntakePort(Protocol):
         mcp_selection: tuple[MCPServiceIdentity, ...] = (),
         revise_source_message_id: str | None = None,
         revise_causal_cutoff_message_id: str | None = None,
+        model_connection_id: str | None = None,
     ) -> MainTurnIntakeResult: ...
 
     async def start_plan(
@@ -1144,6 +1154,15 @@ class ResearchObserverState:
     usage_error_key: str | None = None
     durations: tuple[DurationSegment, ...] = ()
     durations_execution_id: str | None = None
+
+    # --- 研究会话级模型选择（会话键真正生效；None = 未配置，不填默认值） ---
+    #: 仅当注入会话模型存储时为 True（未接线不伪装成可选）。
+    session_model_available: bool = False
+    #: 当前会话选择的连接（``None`` 表示继承角色/路由默认）。
+    session_model_connection_id: str | None = None
+    #: 来源标签 key：会话选择 / 角色继承 / 路由默认。
+    session_model_source_key: str = SESSION_MODEL_SOURCE_DEFAULT
+    session_model_error_key: str | None = None
 
     # --- 研究资料：已读未读/限额/三类时点/并入或转移 ---
     materials: tuple[ResearchMaterialView, ...] = ()
@@ -2565,11 +2584,17 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         delivery: ArtifactDeliveryPort | None = None,
         cleanup: HistoryCleanupGateway | None = None,
         cleanup_unavailable_reason: str | None = None,
+        session_models: SessionModelStore | None = None,
+        role_model_resolver: Callable[[str], str | None] | None = None,
     ) -> None:
         self._service = service
         self._user_scope = user_scope
         self._intake = intake
         self._mcp_catalog = mcp_catalog
+        #: 会话级模型选择存储（Task 7 端口；未注入即在界面如实显示未接线）。
+        self._session_models = session_models
+        #: 角色覆盖连接解析（默认 None → 不可能出现「角色继承」来源）。
+        self._role_model_resolver = role_model_resolver
         #: 既有模型连接目录（缺省按 ``ModelConfigurationService`` 只读快照；UI 不 import app）。
         self._model_catalog = model_catalog if model_catalog is not None else _default_model_catalog()
         #: 正文 token 计数（可注入替身；生产按 litellm tokenizer，经 CPU 池执行）。
@@ -2605,6 +2630,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             composer_available=service is not None and intake is not None,
             mcp_scope_available=mcp_catalog is not None,
             model_selection_available=self._model_catalog is not None,
+            session_model_available=session_models is not None,
             artifact_delivery_available=delivery is not None,
             cleanup_available=cleanup is not None,
             cleanup_unavailable_reason=cleanup_unavailable_reason if cleanup is None else None,
@@ -2652,6 +2678,8 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
                 if self._preferred_session_id is not None and self._preferred_session_id != chosen:
                     continue  # 读取期间目标已更新：以最新目标重读，不落过期会话
                 self._apply_session_read(chosen, read, overview=overview, overview_error=overview_error)
+                # 会话级模型选择是只读附加读面：读取失败只标注错误，不清会话快照（R21）。
+                await self.load_session_model(chosen)
                 if self._preferred_session_id == chosen:
                     self._preferred_session_id = None
                 # 费用与耗时投影是只读附加读面：失败不清空会话快照，只如实标注。
@@ -4007,6 +4035,10 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             {
                 "composer_text": "",
                 "composer_error_key": None,
+                # 换会话不得残留上一会话的模型选择（R21）；新值由随后的会话模型读取落定。
+                "session_model_connection_id": None,
+                "session_model_source_key": SESSION_MODEL_SOURCE_DEFAULT,
+                "session_model_error_key": None,
                 "last_answer_text": "",
                 "last_dispatch_reason": None,
                 "plan_steps": (),
@@ -5148,6 +5180,109 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         self._set_state(model_selection=connection_id, model_selection_error_key=None)
         await self.refresh_budget_hint()
 
+    async def select_session_model(self, connection_id: str) -> None:
+        """选择本会话使用的模型连接（写入会话键，对新回合生效）。
+
+        仅接受研究场景路由候选且已启用；未知/停用连接显式拒绝（不静默回退）。
+        存储未接线或写入失败时如实报不可用，且不改既有选中值（R21）；
+        取消原样传播（R2）。
+        """
+
+        option = self._option(self._state.model_options, connection_id)
+        if option is None:
+            self._set_state(session_model_error_key=SESSION_MODEL_UNAVAILABLE_KEY)
+            return
+        if option.reject_key is not None:
+            self._set_state(session_model_error_key=option.reject_key)
+            return
+        store = self._session_models
+        session_id = self._state.session_id
+        if store is None or session_id is None:
+            self._set_state(session_model_error_key=SESSION_MODEL_UNAVAILABLE_KEY)
+            return
+        try:
+            await store.write(session_id, connection_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._set_state(session_model_error_key=SESSION_MODEL_UNAVAILABLE_KEY)
+            return
+        self._set_state(
+            session_model_connection_id=connection_id,
+            session_model_source_key=SESSION_MODEL_SOURCE_SESSION,
+            session_model_error_key=None,
+        )
+
+    async def clear_session_model(self) -> None:
+        """清除会话级模型选择（回到角色/路由默认继承）；失败显式报错。"""
+
+        store = self._session_models
+        session_id = self._state.session_id
+        if store is None or session_id is None:
+            self._set_state(session_model_error_key=SESSION_MODEL_UNAVAILABLE_KEY)
+            return
+        try:
+            await store.clear(session_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._set_state(session_model_error_key=SESSION_MODEL_UNAVAILABLE_KEY)
+            return
+        self._set_state(
+            session_model_connection_id=None,
+            session_model_source_key=self._derive_session_model_source(None),
+            session_model_error_key=None,
+        )
+
+    async def load_session_model(self, session_id: str) -> None:
+        """读取会话级模型选择（有值即会话来源，无值按角色/默认来源）。
+
+        读取失败只标注错误、保留既有选择（R21）；取消原样传播（R2）。
+        存储未接线 ≠ 故障：按默认来源清空，不报错。
+        """
+
+        store = self._session_models
+        target = (session_id or "").strip()
+        if store is None or not target:
+            self._set_state(
+                session_model_connection_id=None,
+                session_model_source_key=self._derive_session_model_source(None),
+                session_model_error_key=None,
+            )
+            return
+        try:
+            connection_id = await store.read(target)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._set_state(session_model_error_key=SESSION_MODEL_UNAVAILABLE_KEY)
+            return
+        if connection_id is None:
+            self._set_state(
+                session_model_connection_id=None,
+                session_model_source_key=self._derive_session_model_source(None),
+                session_model_error_key=None,
+            )
+            return
+        self._set_state(
+            session_model_connection_id=connection_id,
+            session_model_source_key=SESSION_MODEL_SOURCE_SESSION,
+            session_model_error_key=None,
+        )
+
+    def _derive_session_model_source(self, connection_id: str | None) -> str:
+        """按「会话键 → 角色覆盖 → 路由默认」推导来源标签（VM 只产出 key）。"""
+
+        if connection_id is not None:
+            return SESSION_MODEL_SOURCE_SESSION
+        resolver = self._role_model_resolver
+        role_key = self._state.role_selection
+        if resolver is not None and role_key is not None:
+            resolved = resolver(role_key)
+            if isinstance(resolved, str) and resolved.strip():
+                return SESSION_MODEL_SOURCE_ROLE
+        return SESSION_MODEL_SOURCE_DEFAULT
+
     def select_role(self, role_key: str) -> None:
         """选择研究角色：未知/子角色/版本缺失显式拒绝，不静默替换为默认角色。"""
 
@@ -5399,6 +5534,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
                 expected_revision=(self._state.session_draft_revision if self._state.session_id is not None else 0),
                 role_prompt_refs=role_refs,
                 mcp_selection=selection,
+                model_connection_id=self._state.session_model_connection_id,
             )
         except asyncio.CancelledError:
             self._set_state(composer_pending=False)

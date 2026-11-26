@@ -29,6 +29,7 @@ from ui.views.research_observer_conversation import (
     build_execution_section,
     build_messages_section,
     build_session_draft_card,
+    build_session_model_bar,
 )
 from ui.views.research_observer_decisions import build_decisions_section, build_pending_overview
 from ui.views.research_observer_materials import build_materials_section
@@ -82,6 +83,8 @@ def _build_body(
     on_toggle_mcp_scope: Callable[[str], None] = _ignore_text,
     on_select_model: Callable[[str], None] = _ignore_text,
     on_select_role: Callable[[str], None] = _ignore_text,
+    on_select_session_model: Callable[[str], None] = _ignore_text,
+    on_clear_session_model: Callable[[], None] = _ignore_click,
     on_add_materials: Callable[[], None] = _ignore_click,
     on_remove_material: Callable[[str], None] = _ignore_text,
     on_select_material_target: Callable[[str | None], None] = _ignore_optional_text,
@@ -192,6 +195,14 @@ def _build_body(
         return ft.Column(rows, spacing=AppStyles.SPACING_SM)
     if state.session_draft_revision > 0:
         rows.append(build_session_draft_card(state, session_id=session_id, on_load_draft=on_load_draft))
+    # 会话头的会话级模型选择（切换只对新回合生效；未接线如实显示）。
+    rows.append(
+        build_session_model_bar(
+            state,
+            on_select_model=on_select_session_model,
+            on_clear_model=on_clear_session_model,
+        )
+    )
     rows.extend(build_messages_section(state, handlers=message_handlers))
     rows.extend(
         build_execution_section(
@@ -265,6 +276,8 @@ def ResearchObserverPanel(
     on_load_mcp_scope: Callable[[], None] = _ignore_click,
     on_select_model: Callable[[str], None] = _ignore_text,
     on_select_role: Callable[[str], None] = _ignore_text,
+    on_select_session_model: Callable[[str], None] = _ignore_text,
+    on_clear_session_model: Callable[[], None] = _ignore_click,
     on_add_materials: Callable[[], None] = _ignore_click,
     on_remove_material: Callable[[str], None] = _ignore_text,
     on_select_material_target: Callable[[str | None], None] = _ignore_optional_text,
@@ -383,6 +396,8 @@ def ResearchObserverPanel(
             on_toggle_mcp_scope=on_toggle_mcp_scope,
             on_select_model=on_select_model,
             on_select_role=on_select_role,
+            on_select_session_model=on_select_session_model,
+            on_clear_session_model=on_clear_session_model,
             on_add_materials=on_add_materials,
             on_remove_material=on_remove_material,
             on_select_material_target=on_select_material_target,
