@@ -12,7 +12,8 @@
   最新来源事实与上下文窗口判定（I65 的生产消费方）；窗口取真实授权连接，其余
   候选窗口取最严者，并预留输出 token；
 - **角色 Prompt 单一来源**：叶指令 = 设置页已保存的「子研究角色」默认正文 + 用户
-  追加（运行装配时一次解析并冻结），不保留与本设置无关的内置指令旁路；
+  追加（运行装配时一次解析并冻结），不保留与本设置无关的内置指令旁路；自定义角色
+  按冻结的 ``(role_id, role_version)`` 定义取正文，不回落预置正文；
 - **不伪造**：输入指纹 / 归属事实 / 实际模型名 / 非空文本任一不可得即如实失败
   （R21）；``CancelledError`` 原样传播（R2）。
 
@@ -48,6 +49,7 @@ from core.agent_types import (
     ArtifactReadQuery,
     ResearchResult,
     ResearchResultDraft,
+    RoleDefinition,
     is_digest,
 )
 from core.model_management_types import ModelTurnProtocolError
@@ -180,15 +182,37 @@ class RolePromptIdentity:
 RolePromptReader = Callable[[str], RolePromptIdentity]
 
 
-def _read_saved_role_prompt(role_key: str) -> RolePromptIdentity:
-    """读设置页已保存的角色 Prompt（默认正文 + 追加）；缺键按默认，不伪造内容。
+def _read_saved_role_prompt(
+    role_key: str,
+    *,
+    definition: RoleDefinition | None = None,
+    expected_version: str | None = None,
+) -> RolePromptIdentity:
+    """读角色 Prompt：预置角色读设置页保存值，自定义角色取冻结定义正文。
+
+    预置角色（``main`` / ``sub``）走原逻辑：默认正文 + 用户追加，缺键按默认，
+    不伪造内容。自定义角色必须传入冻结定义 ``definition``，且状态为 ``active``、
+    版本与 ``expected_version``（调用方冻结的 ``role_version``，若可拿到）一致，
+    否则按 ``CONFIG_UNAVAILABLE`` 显式失败——不回落预置正文、不读设置页。
 
     追加中的占位符（如 ``{company}``）在叶内**不**替换：叶没有对应真实取数上下文，
     替换即伪造取值；设置页的变量预览仅用于核对。
     """
 
     from utils.config_handler import ConfigHandler
+    from utils.config.llm import RESEARCH_ROLE_KEYS
     from utils.config_models import ROLE_PROMPT_DEFAULTS
+
+    if role_key not in RESEARCH_ROLE_KEYS:
+        if definition is None:
+            raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "custom role definition missing", role_key)
+        if definition.status != "active":
+            raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "custom role definition not active", role_key)
+        if expected_version is not None and definition.role_version != expected_version:
+            raise AgentServiceError(
+                AgentErrorCode.CONFIG_UNAVAILABLE, "custom role definition version mismatch", role_key
+            )
+        return RolePromptIdentity(text=definition.prompt_body, version=definition.role_version)
 
     default_text, default_version = ROLE_PROMPT_DEFAULTS[role_key]
     append = ConfigHandler.get_ai_role_prompt_append(role_key)

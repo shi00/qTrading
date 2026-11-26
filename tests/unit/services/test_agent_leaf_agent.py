@@ -42,6 +42,7 @@ from core.agent_types import (
     ResearchResult,
     SourceKind,
     SourceVersionRef,
+    decode_role_definition,
 )
 from core.model_management_types import ExecutionSnapshot, ModelTurnProtocolError
 from services.agent_service import leaf_agent
@@ -853,3 +854,94 @@ class TestSavedRolePromptSource:
         )
 
         assert leaf_agent._authorized_connection_id(model_binding) is None
+
+
+def _wire(**overrides: Any) -> dict[str, Any]:
+    """自定义角色定义的完整 wire（12 键）；用例按需覆盖个别字段。"""
+
+    wire: dict[str, Any] = {
+        "schema_version": 1,
+        "role_id": "risk_reviewer",
+        "display_name": "风险复核",
+        "base": "sub",
+        "status": "active",
+        "role_version": "r1",
+        "prompt_body": "默认自定义正文",
+        "model_connection_id": None,
+        "capability_mode": "explicit",
+        "created_at": "2026-11-26T00:00:00+00:00",
+        "updated_at": "2026-11-26T00:00:00+00:00",
+        "updated_by": "tester",
+    }
+    wire.update(overrides)
+    return wire
+
+
+class TestCustomRolePrompt:
+    """Task 5：自定义角色按冻结的 ``(role_id, role_version)`` 定义取正文。"""
+
+    def test_custom_role_uses_frozen_prompt_body(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(leaf_agent, "_read_saved_role_prompt", _ORIGINAL_READ_SAVED_ROLE_PROMPT)
+        definition = decode_role_definition(_wire(role_version="r2", prompt_body="冻结正文"))
+
+        identity = leaf_agent._read_saved_role_prompt("risk_reviewer", definition=definition)
+
+        assert identity.text == "冻结正文"
+        assert identity.version == "r2"
+
+    def test_custom_role_without_definition_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(leaf_agent, "_read_saved_role_prompt", _ORIGINAL_READ_SAVED_ROLE_PROMPT)
+
+        with pytest.raises(AgentServiceError) as exc:
+            leaf_agent._read_saved_role_prompt("risk_reviewer", definition=None)
+
+        assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+
+    def test_custom_role_disabled_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(leaf_agent, "_read_saved_role_prompt", _ORIGINAL_READ_SAVED_ROLE_PROMPT)
+        definition = decode_role_definition(_wire(status="disabled"))
+
+        with pytest.raises(AgentServiceError) as exc:
+            leaf_agent._read_saved_role_prompt("risk_reviewer", definition=definition)
+
+        assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+
+    def test_custom_role_version_mismatch_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(leaf_agent, "_read_saved_role_prompt", _ORIGINAL_READ_SAVED_ROLE_PROMPT)
+        definition = decode_role_definition(_wire(role_version="r2"))
+
+        with pytest.raises(AgentServiceError) as exc:
+            leaf_agent._read_saved_role_prompt("risk_reviewer", definition=definition, expected_version="r1")
+
+        assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+
+    def test_custom_role_does_not_read_saved_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from utils.config_handler import ConfigHandler
+
+        def _forbid(*_args: Any, **_kwargs: Any) -> str:
+            raise AssertionError("custom role must not read saved role config")
+
+        monkeypatch.setattr(leaf_agent, "_read_saved_role_prompt", _ORIGINAL_READ_SAVED_ROLE_PROMPT)
+        monkeypatch.setattr(ConfigHandler, "get_ai_role_prompt_append", staticmethod(_forbid))
+        monkeypatch.setattr(ConfigHandler, "get_ai_role_prompt_version", staticmethod(_forbid))
+        definition = decode_role_definition(_wire(prompt_body="直接正文"))
+
+        identity = leaf_agent._read_saved_role_prompt("risk_reviewer", definition=definition)
+
+        assert identity.text == "直接正文"
+        assert identity.version == "r1"
+
+    def test_preset_role_ignores_provided_definition(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from utils.config_handler import ConfigHandler
+        from utils.config_models import ROLE_PROMPT_DEFAULTS
+
+        default_text, _ = ROLE_PROMPT_DEFAULTS[leaf_agent.LEAF_ROLE_PROMPT_KEY]
+        monkeypatch.setattr(ConfigHandler, "get_ai_role_prompt_append", staticmethod(lambda role_key: ""))
+        monkeypatch.setattr(ConfigHandler, "get_ai_role_prompt_version", staticmethod(lambda role_key: "v-saved"))
+        monkeypatch.setattr(leaf_agent, "_read_saved_role_prompt", _ORIGINAL_READ_SAVED_ROLE_PROMPT)
+        definition = decode_role_definition(_wire(prompt_body="不应被采用"))
+
+        identity = leaf_agent._read_saved_role_prompt(leaf_agent.LEAF_ROLE_PROMPT_KEY, definition=definition)
+
+        assert identity.text == default_text
+        assert identity.version == "v-saved"
