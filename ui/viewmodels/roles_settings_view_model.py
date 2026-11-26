@@ -128,6 +128,10 @@ class RolesSettingsState:
     error_key: str | None = None
     notice_key: str | None = None
     pending: bool = False
+    #: 是否已完成至少一次目录加载（区分「加载中」与「已加载」）。
+    loaded: bool = False
+    #: 最近一次加载是否失败（保存/启停触发的内部 reload 同样更新；View 纯派生）。
+    load_failed: bool = False
 
 
 class RolesSettingsViewModel(ObservableViewModelMixin[RolesSettingsState]):
@@ -149,14 +153,27 @@ class RolesSettingsViewModel(ObservableViewModelMixin[RolesSettingsState]):
             definitions = await self._catalog.list_roles()
         except asyncio.CancelledError:
             self._set_state(pending=False)
-            raise  # R2: 取消必须原样传播
+            raise  # R2: 取消必须原样传播（不改 loaded/load_failed，保持上一次事实）
         except AgentServiceError as exc:
-            self._fail(exc, fallback_key=ERROR_UNAVAILABLE)
+            self._record_load_failure(exc)
             return
         except Exception as exc:
-            self._fail(exc, fallback_key=ERROR_UNAVAILABLE)
+            self._record_load_failure(exc)
             return
-        self._set_state(roles=self._rows(definitions), pending=False)
+        self._set_state(
+            roles=self._rows(definitions),
+            pending=False,
+            loaded=True,
+            load_failed=False,
+            error_key=None,
+        )
+
+    def _record_load_failure(self, exc: Exception) -> None:
+        """加载失败单次快照落地：loaded/load_failed 与错误键一起更新，避免中间态。"""
+
+        key = self._error_key_for(exc, ERROR_UNAVAILABLE) if isinstance(exc, AgentServiceError) else ERROR_UNAVAILABLE
+        self._record_failure(exc)
+        self._set_state(pending=False, error_key=key, loaded=True, load_failed=True)
 
     @staticmethod
     def _rows(definitions: tuple[RoleDefinition, ...]) -> tuple[RoleRow, ...]:
@@ -413,6 +430,12 @@ class RolesSettingsViewModel(ObservableViewModelMixin[RolesSettingsState]):
         """失败统一出口：错误码映射 + 分类记录 + 脱敏，不伪装成功（R9/R21）。"""
 
         key = self._error_key_for(exc, fallback_key) if isinstance(exc, AgentServiceError) else fallback_key
+        self._record_failure(exc)
+        self._set_state(pending=False, error_key=key)
+
+    def _record_failure(self, exc: Exception) -> None:
+        """分类严重度并记录脱敏日志（不改状态，供单快照失败路径复用）。"""
+
         sanitized = DataSanitizer.sanitize_error(exc)
         severity = classify_severity(exc, "agent_role")
         code = classify_error(exc, "agent_role").get("code", "unknown")
@@ -420,7 +443,6 @@ class RolesSettingsViewModel(ObservableViewModelMixin[RolesSettingsState]):
             logger.error("[RolesSettingsVM] operation failed code=%s: %s", code, sanitized)
         else:
             logger.warning("[RolesSettingsVM] operation failed code=%s: %s", code, sanitized)
-        self._set_state(pending=False, error_key=key)
 
 
 __all__ = [
