@@ -13,6 +13,15 @@ from tests.e2e.timeouts import TIMEOUTS
 
 logger = logging.getLogger(__name__)
 
+# fill_textbox 回读校验用：密码类输入框在 a11y DOM 中只暴露掩码字符，无法逐字比对。
+_FILL_MASK_CHARS = frozenset("*•●")
+_FILL_MAX_ATTEMPTS = 3
+
+
+def _is_masked_value(text: str) -> bool:
+    """a11y DOM 回读值是否为掩码（如 ``***`` / ``••••``）。"""
+    return bool(text) and set(text) <= _FILL_MASK_CHARS
+
 
 class FletPage:
     def __init__(self, page: Page, timeout_multiplier: float = 1.0):
@@ -208,11 +217,11 @@ class FletPage:
                 # CanvasKit/flutter-view a11y 模式下，el.clear() 会触发 Flutter 同步把
                 # TextEditingController 清空，但 el.type() 不触发反向同步，导致有默认值
                 # 的 TextField（如 wizard 的 host=localhost）控制器变为空。
-                # 改用 Control+A 全选 + page.keyboard.type 替换，避免触发清空同步：
-                # Control+A 选中已有文本，keyboard.type 直接替换选中文本，Flutter 会
-                # 通过 selection 替换机制正确更新 TextEditingController。
-                await self.page.keyboard.press("Control+A")
-                await self.page.keyboard.type(value, delay=30)
+                # 改用「全选 + 单次原子插入」替换并回读校验：逐键 keyboard.type 会与
+                # 受控 TextField 的每次重渲染竞争，导致丢字/重字（见 _replace_text 说明）。
+                await self._replace_text(el, label, value, timeout_ms=scaled)
+            except AssertionError:
+                raise
             except Exception as exc:  # noqa: BLE001
                 logger.debug(
                     "fill_textbox: keyboard.type failed for '%s', falling back to fill(): %s",
@@ -220,6 +229,8 @@ class FletPage:
                     exc,
                 )
                 await el.fill(value, timeout=scaled)
+        except AssertionError:
+            raise
         except Exception as e:  # noqa: BLE001
             try:
                 # [PITFALL_WARNING] Flet TextField 元素定位黑洞
@@ -254,6 +265,65 @@ class FletPage:
             except Exception as fallback_exc:  # noqa: BLE001
                 logger.error("fill_textbox fallback failed for label '%s': %s", label, fallback_exc, exc_info=True)
                 raise
+
+    async def _replace_text(self, el: Any, label: str, value: str, timeout_ms: int) -> None:
+        """全选 + 单次原子插入替换输入框内容，并回读 DOM value 校验。
+
+        CI run 45654373321 实证：CanvasKit a11y 下逐键 ``keyboard.type`` 的每个字符
+        都会触发受控 TextField 的 ``on_change`` → VM state → 重渲染；重渲染窗口内
+        联合输入框会丢失刚输入的字符或重复已有文本（端口 ``5432`` 变 ``435432``、
+        用户名 ``postgres`` 变 ``postgrespostgres``），端口越界使向导停在 DB 步骤。
+
+        改为 ``insert_text``（单个 input 事件，原子替换选区）后回读校验；不一致时
+        下一轮改用逐键输入（更大间隔降低重渲染竞争）。密码类掩码字段回读只得到
+        ``***``，按掩码跳过校验。
+
+        Raises:
+            AssertionError: 重试耗尽仍与期望值不一致（fail-fast，避免下游以超时形式
+                掩盖输入被污染的真实原因）。
+        """
+        last_actual: str | None = None
+        for attempt in range(1, _FILL_MAX_ATTEMPTS + 1):
+            await el.click(timeout=timeout_ms)
+            await self.page.keyboard.press("Control+A")
+            # 给 Flutter 一帧时间应用「全选」，否则插入落在旧光标位置变成追加。
+            await self.page.wait_for_timeout(80)
+            try:
+                if attempt == 1:
+                    await self.page.keyboard.insert_text(value)
+                else:
+                    await self.page.keyboard.type(value, delay=80)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("fill_textbox: 键盘输入失败（'%s' 第 %d 次），改用 type(): %s", label, attempt, exc)
+                await self.page.keyboard.type(value, delay=80)
+            await self.page.wait_for_timeout(120)
+
+            actual = await self._read_textbox_value(label)
+            if actual is None or actual == value or _is_masked_value(actual):
+                return
+            last_actual = actual
+            logger.warning(
+                "fill_textbox: '%s' 回读不一致（第 %d/%d 次）: actual=%r expected=%r",
+                label,
+                attempt,
+                _FILL_MAX_ATTEMPTS,
+                actual,
+                value,
+            )
+        raise AssertionError(
+            f"fill_textbox: 输入框 '{label}' 替换后回读校验失败：actual={last_actual!r} expected={value!r}"
+        )
+
+    async def _read_textbox_value(self, label: str) -> str | None:
+        """回读标签匹配输入框的 DOM value；无法定位/读取时返回 None（跳过校验）。"""
+        loc = self.page.locator(f'input[aria-label*="{label}" i], textarea[aria-label*="{label}" i]')
+        try:
+            if await loc.count() == 0:
+                return None
+            return await loc.first.evaluate("e => e.value")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("fill_textbox: 回读 '%s' 值失败: %s", label, exc)
+            return None
 
     async def select_dropdown(
         self,
