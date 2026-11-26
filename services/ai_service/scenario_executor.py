@@ -185,6 +185,11 @@ _CANCEL_CLEANUP_MARGIN_S: Final[float] = 1.0
 # F19：取消终态错误码（与超时 / 失败 / 仍运行可区分的账本事实）
 _CANCELLED_ERROR_CODE: Final[str] = "CANCELLED"
 
+# M09：传输未完成的回合错误码——``transport_state`` 非 ``ok``（连接中断 / 请求
+# 作废 / 结果未知）时回合不得按成功收敛（R21）；两态分开留证，调用方按稳定码映射。
+_TRANSPORT_FAILED_ERROR_CODE: Final[str] = "TRANSPORT_FAILED"
+_TRANSPORT_UNKNOWN_ERROR_CODE: Final[str] = "TRANSPORT_UNKNOWN"
+
 # M08：终态状态序（单调守卫）——同一 attempt 的终态写回只允许「不更低」的事实：
 # 重复写同序经 DAO revision 水位幂等，过期（更低序）结果零覆盖并记录忽略原因
 # （R21 不静默）。成功事实一旦落账，迟到的失败 / 取消写回不得将其回退。
@@ -637,14 +642,18 @@ class ScenarioExecutor:
         result = await self._execute_traversal(identity, snapshot, policy)
         candidate = result.candidate
         if result.status == "succeeded" and candidate is not None:
+            chat_response = candidate.chat_response
             outcome = ChatTurnOutcome(
                 model_call_id=request.model_call_id,
                 invocation_id=identity.invocation_id,
                 status="succeeded",
-                transport_state="ok",
+                # M09：成功分支的传输事实取响应实际值（成功收敛已在 _finalize_chat
+                # 以 transport_state == "ok" 为前提，不得在此硬编码冒充）；响应缺失
+                # 属契约破坏，由 ensure_valid 以 invalid_field 拒绝（不伪装成功）。
+                transport_state=chat_response.transport_state if chat_response is not None else "unknown",
                 settlement_state=candidate.settlement_state,
                 attempt_id=candidate.attempt_id,
-                response=candidate.chat_response,
+                response=chat_response,
                 partial_text=None,
                 error_code=None,
             )
@@ -654,7 +663,8 @@ class ScenarioExecutor:
         # （partial/unknown）与确认失败分别承载（INV-07，R21 不伪装）。
         transport: ChatTurnTransportState = "failed"
         if candidate is not None and candidate.chat_response is not None:
-            transport = "ok"
+            # M09：传输事实原样投影（拒绝回合 ok；传输未完成 failed / unknown）
+            transport = candidate.chat_response.transport_state
         outcome = ChatTurnOutcome(
             model_call_id=request.model_call_id,
             invocation_id=identity.invocation_id,
@@ -1818,6 +1828,10 @@ class ScenarioExecutor:
           是完成的模型回合——failed 终态携带稳定码 CONTENT_REFUSED 与已观测用量
           （R21 不丢弃），halt 候选遍历（禁止换候选绕过），完整 response 随
           outcome 供调用方读取原文；
+        - 传输未完成（``transport_state`` ≠ ``ok``）：回合可能带着文本 / 用量返回，
+          但传输事实未成立（请求作废 / 连接中断 / 结果未知）——不得报成功（M09，
+          R21）：failed 终态携带稳定码与已观测用量，完整 response 随 outcome，
+          halt 候选遍历（不换模型拼接未完成回合）；
         - 其余：succeeded 终态 + response 原样承载（业务 final 校验不在本入口，
           §6.1——由调用方 workflow / Gateway 层承载）。
         """
@@ -1853,6 +1867,39 @@ class ScenarioExecutor:
             )
 
         usage_tuple = (chat_response.usage,) if chat_response.usage is not None else ()
+        if chat_response.transport_state != "ok":
+            # M09：传输未完成（failed / unknown）不得报成功（R21）——适配器可能
+            # 在连接中断 / 请求作废后仍返回文本与已观测用量；此处保留 response
+            # 原文与用量，终态显式 failed，halt 遍历（不换模型拼接未完成回合）。
+            transport_code = (
+                _TRANSPORT_UNKNOWN_ERROR_CODE
+                if chat_response.transport_state == "unknown"
+                else _TRANSPORT_FAILED_ERROR_CODE
+            )
+            await self._submit_terminal_logged(
+                _terminal_record(
+                    scope.identity,
+                    scope.attempt_id,
+                    usage=chat_response.usage,
+                    actual_model=chat_response.actual_model,
+                    status="failed",
+                    error_code=transport_code,
+                    reservation_id=scope.reservation_id,
+                    metadata=scope.metadata,
+                    duration_ms=duration_ms,
+                ),
+                scope.ledger,
+            )
+            return _CandidateOutcome(
+                status="failed",
+                decision_hint="failed",
+                reason=transport_code,
+                outputs=(),
+                usages=(),
+                halt_candidates=True,
+                attempt_id=scope.attempt_id,
+                chat_response=chat_response,
+            )
         await self._submit_terminal_logged(
             _terminal_record(
                 scope.identity,

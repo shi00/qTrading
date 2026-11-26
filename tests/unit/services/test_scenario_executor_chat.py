@@ -315,6 +315,8 @@ class TestChatSuccessPath:
         assert outcome.error_code is None
         assert outcome.partial_text is None
         assert outcome.response is not None and outcome.response.finish_reason == "final"
+        # 成功分支的传输事实取自响应实际值（不硬编码冒充成功）
+        assert outcome.transport_state == outcome.response.transport_state
         # 身份关联：model_call → invocation（一回合一 invocation）→ 实际 attempt
         assert outcome.model_call_id == "mc-1"
         assert outcome.invocation_id == "mc-1"
@@ -814,6 +816,61 @@ class TestChatRefusal:
         assert len(adapter.invoke_calls) == 1
         terminal = recorder.submit_terminal.await_args.args[0]
         assert terminal.status == "failed"
+        assert terminal.usage is usage
+
+
+class TestChatTransportNotOk:
+    """M09：传输未完成（请求作废 / 连接中断 / 结果未知）的回合不得报成功（R21）。
+
+    槽级验收：单候选单尝试槽（唯一实际 attempt）返回 ``transport_state`` 非
+    ``ok`` 的完整 response——出口必须 failed + 传输事实原样投影 + 已观测用量
+    保留在 failed 终态，且不切换候选（不换模型拼接未完成回合）。
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("transport_state", "expected_code"),
+        [("failed", "TRANSPORT_FAILED"), ("unknown", "TRANSPORT_UNKNOWN")],
+    )
+    async def test_non_ok_transport_never_reports_success(self, transport_state: str, expected_code: str):
+        usage = _usage()
+        response = ChatTurnResponse(
+            text="半截输出",
+            finish_reason="final",
+            actual_model="glm-4-air",
+            usage_observed=True,
+            usage=usage,
+            transport_state=cast(Any, transport_state),
+        )
+        adapter = _ScriptedChatAdapter(
+            [((), None, response), ((), None, _chat_ok_response())]  # 第二候选不得派发
+        )
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder)
+
+        outcome = await executor.execute_chat_turn(
+            _chat_request(),
+            _snapshot(
+                (_candidate(0, "conn-remote"), _candidate(1, "conn-remote-2")),
+                (_remote_conn(), _remote_conn("conn-remote-2")),
+            ),
+            binding=_binding(),
+        )
+
+        # 不得报成功：状态 / 传输事实 / 错误码三项一致失败
+        assert outcome.status == "failed"
+        assert outcome.transport_state == transport_state
+        assert outcome.error_code == expected_code
+        assert outcome.response is response  # 原文承载，不丢弃
+        assert outcome.attempt_id == adapter.invoke_calls[0]["attempt_id"]
+        # 该槽已有账目事实：终态已落账 → settled（不是无账目 None）
+        assert outcome.settlement_state == "settled"
+        # 未完成回合不换候选拼接
+        assert len(adapter.invoke_calls) == 1
+        # failed 终态保留已观测用量（R21 不丢证据），错误码为稳定传输码
+        terminal = recorder.submit_terminal.await_args.args[0]
+        assert terminal.status == "failed"
+        assert terminal.error_code == expected_code
         assert terminal.usage is usage
 
 
