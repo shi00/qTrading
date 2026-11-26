@@ -17,7 +17,8 @@
   子循环若再次提案委派会在派发前被拒（不递归、不借 MCP 起下级 Agent）。
 - **成果保存**：终态必须由 :class:`ResearchResultProducer` 写入
   ``ResearchResult``；保存失败或未确认保存（``final_output_saved=False``）
-  一律不返回成功，不伪造 ``complete``（R21）。
+  一律不返回成功，不伪造 ``complete``（R21）。讨论模式直答不产出轮绑定成果，
+  由 :class:`DiscussionAnswerRecorder` 作为公开消息入会话历史。
 - **取消/失败**：``asyncio.CancelledError`` 原样传播（R2）；模型/工具/委派
   异常不被吞没，失败时不保存成果、不返回成功终态。
 """
@@ -26,6 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Final, Protocol
 
@@ -36,11 +38,18 @@ from core.agent_types import (
     AgentErrorCode,
     AgentServiceError,
     CanonicalJson,
+    EventFact,
+    EventKind,
+    EventPayloadKind,
+    MessageRole,
     Mode,
+    RecordEventRequest,
     ResearchResult,
     ResearchResultDraft,
     SourceVersionRef,
     is_digest,
+    json_doc,
+    stable_id,
 )
 
 __all__ = [
@@ -49,6 +58,7 @@ __all__ = [
     "DelegationResult",
     "DelegationRunner",
     "DelegationScope",
+    "DiscussionAnswerRecorder",
     "ExecutionLoop",
     "LoopAction",
     "LoopIdentity",
@@ -58,6 +68,7 @@ __all__ = [
     "LoopRunOutcome",
     "LoopRunState",
     "ModePolicy",
+    "PublicMessageStore",
     "ResearchResultProducer",
     "ResearchResultStore",
     "ToolCall",
@@ -364,7 +375,11 @@ class LoopRunOutcome:
     """循环成功终态（保存失败会抛错，不构造本对象）。
 
     ``CLARIFIED`` 终态不产出成果（``result`` 为 ``None``），只携带澄清提案
-    ``clarification``；其余终态必须有已保存成果（``result`` 非空）。
+    ``clarification``；讨论模式的 ``ANSWERED`` 同样不产出轮绑定成果
+    （``result`` 为 ``None``，答复已作为公开消息入会话历史）；计划模式
+    ``PLANNED`` 不产出轮绑定成果，计划结构化字段由 ``unsaved_structured_fields``
+    携带（调用方按既有计划存储保存）。执行模式的终态必须有已保存成果
+    （``result`` 非空）。
     """
 
     state: LoopRunState
@@ -374,6 +389,8 @@ class LoopRunOutcome:
     delegations: int
     observations: tuple[LoopObservation, ...]
     clarification: TurnDecision | None = None
+    #: 计划模式未落成果的结构化字段（计划步骤提案；``None`` 表示模型未给出）。
+    unsaved_structured_fields: CanonicalJson | None = None
 
 
 LoopPolicy = ModePolicy
@@ -444,6 +461,70 @@ class ResearchResultProducer:
         return saved
 
 
+class PublicMessageStore(Protocol):
+    """会话公开消息可靠写入端口（生产为 :meth:`AgentDao.record_event`）。"""
+
+    async def record_event(self, request: RecordEventRequest) -> EventFact: ...
+
+
+class DiscussionAnswerRecorder:
+    """把讨论直答作为 ``assistant`` 公开消息写入会话历史。
+
+    讨论模式零研究派发、不建轮（``ResearchDispatcher`` 对非执行模式
+    ``zero_dispatch``），因此直答不是研究轮成果：不得以轮绑定成果保存
+    （§9.7 轮归属不放宽，也不伪造轮/工作流）。消息为纯 session 事件
+    （execution/round 均为 NULL，§9.6 CHECK），与受理消息 M1 同一形态；
+    写入失败原样抛出，不以内存文本冒充已保存答复。
+    """
+
+    def __init__(self, store: PublicMessageStore) -> None:
+        self._store = store
+
+    async def record(self, *, identity: LoopIdentity, decision: TurnDecision) -> None:
+        text = decision.text
+        if not isinstance(text, str) or not text.strip():
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                "discussion answer text is empty",
+                f"{identity.user_scope}/{identity.execution_id}",
+            )
+        # 稳定身份：同一轮同一节点重复执行重放同一消息，不重复落行（§9.6 去重）。
+        message_id = stable_id(
+            "message",
+            [
+                identity.user_scope,
+                identity.session_id,
+                identity.execution_id,
+                identity.node_id,
+                str(identity.input_revision),
+                ANSWER_RESULT_KIND,
+            ],
+        )
+        occurred_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        await self._store.record_event(
+            RecordEventRequest(
+                user_scope=identity.user_scope,
+                session_id=identity.session_id,
+                message_id=message_id,
+                native_event_id=message_id,
+                event_kind=EventKind.PUBLIC_MESSAGE_SAVED,
+                subject_id=message_id,
+                subject_revision=1,
+                payload_kind=EventPayloadKind.PUBLIC_MESSAGE.value,
+                payload_canonical_json=json_doc(
+                    {"schema_version": 1, "message_id": message_id, "role": MessageRole.ASSISTANT.value}
+                ),
+                occurred_at=occurred_at,
+                role=MessageRole.ASSISTANT,
+                body_text=text,
+                # 模型答复可能承载外部资料内容：按不可信文本中和后再投影
+                # （原值仍落 body_text，公开导出/搜索投影经 R9 脱敏）。
+                body_untrusted=True,
+                search_text=text,
+            )
+        )
+
+
 class ExecutionLoop:
     """唯一 Agent 执行循环（模式裁剪 → 工具/一层委派 → 成果保存）。
 
@@ -464,6 +545,7 @@ class ExecutionLoop:
         policy: ModePolicy | None = None,
         read_tool_names: frozenset[str] = frozenset(),
         plan_tool_names: frozenset[str] = DEFAULT_PLAN_TOOLS,
+        answer_messages: DiscussionAnswerRecorder | None = None,
         depth: int = 0,
     ) -> None:
         if isinstance(depth, bool) or not isinstance(depth, int) or depth not in (0, 1):
@@ -472,6 +554,7 @@ class ExecutionLoop:
         self._mode = mode
         self._turn = turn
         self._producer = producer
+        self._answer_messages = answer_messages
         self._tools = tools
         self._delegate = delegate
         self._limits = limits or LoopLimits()
@@ -592,15 +675,43 @@ class ExecutionLoop:
                 observations=tuple(observations),
                 clarification=decision,
             )
-        if decision.action is LoopAction.PLAN:
-            result_kind = PLAN_RESULT_KIND
-            state = LoopRunState.PLANNED
-            execution_state = "planned"
-        elif decision.action is LoopAction.RESULT:
+        if self._mode is Mode.PLAN:
+            # 计划模式零派发不建轮（``ResearchDispatcher`` 对非执行模式
+            # ``zero_dispatch``）：计划内容不是轮绑定成果，不伪造轮/工作流，也不
+            # 放宽 §9.7 轮归属；结构化步骤原样交付调用方按既有计划存储保存。
+            return LoopRunOutcome(
+                state=LoopRunState.PLANNED,
+                result=None,
+                turns=turns,
+                tool_calls=tool_calls,
+                delegations=delegations,
+                observations=tuple(observations),
+                unsaved_structured_fields=decision.structured_fields,
+            )
+        if decision.action is LoopAction.RESULT:
             assert decision.result_kind is not None  # TurnDecision 已校验
             result_kind = decision.result_kind
             state = LoopRunState.RESEARCHED
             execution_state = "complete" if decision.convergence_confirmed else "running"
+        elif self._mode is Mode.DISCUSS:
+            # 讨论直答不是研究轮成果：讨论模式零派发不建轮（§9.7，不放宽轮归属、
+            # 不伪造轮/工作流），答复作为 assistant 公开消息入会话历史；未接线或
+            # 保存失败即失败，不以内存文本冒充已保存成果（R21）。
+            if self._answer_messages is None:
+                raise AgentServiceError(
+                    AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                    "discussion answer message store not wired",
+                    f"{self._identity.user_scope}/{self._identity.execution_id}",
+                )
+            await self._answer_messages.record(identity=self._identity, decision=decision)
+            return LoopRunOutcome(
+                state=LoopRunState.ANSWERED,
+                result=None,
+                turns=turns,
+                tool_calls=tool_calls,
+                delegations=delegations,
+                observations=tuple(observations),
+            )
         else:
             result_kind = ANSWER_RESULT_KIND
             state = LoopRunState.ANSWERED

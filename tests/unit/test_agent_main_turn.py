@@ -18,13 +18,16 @@ from core.agent_types import (
     ClarificationAnswerFact,
     CommandRef,
     CommitState,
+    EventFact,
     MCPServiceIdentity,
+    MessageRole,
     Mode,
     PlanItemSnapshot,
     PlanNodeSpec,
     PlanProposal,
     PlanSpecProposal,
     Purpose,
+    RecordEventRequest,
     ResearchResult,
     ResearchResultDraft,
     SessionAction,
@@ -46,6 +49,7 @@ from services.agent_service.loop import (
     DelegationRequest,
     DelegationResult,
     DelegationScope,
+    DiscussionAnswerRecorder,
     LoopAction,
     LoopIdentity,
     ResearchResultProducer,
@@ -440,14 +444,35 @@ class _PlanStore:
         self.revision = 1
 
 
+class _MessageStore:
+    def __init__(self) -> None:
+        self.requests: list[RecordEventRequest] = []
+
+    async def record_event(self, request: RecordEventRequest) -> EventFact:
+        self.requests.append(request)
+        return EventFact(
+            message_id=request.message_id,
+            event_id="event-1",
+            session_seq=1,
+            execution_seq=None,
+            session_event_seq=1,
+            execution_event_seq=None,
+            committed_at="2026-06-01T12:00:00.000000Z",
+            replayed=False,
+        )
+
+
 @pytest.mark.asyncio
 async def test_discuss_turn_answers_with_zero_tools_and_zero_delegation() -> None:
     tools = _RecordingTools()
     delegate = _RecordingDelegate()
+    store = _Store()
+    messages = _MessageStore()
     runner = MainTurnRunner(
-        producer=ResearchResultProducer(_Store()),
+        producer=ResearchResultProducer(store),
         tools=tools,
         delegate=delegate,
+        answer_messages=DiscussionAnswerRecorder(messages),
     )
     request = MainTurnRequest(
         identity=_IDENTITY, mode=Mode.DISCUSS, prompt_text="研究问题", read_tool_names=frozenset({"read_source"})
@@ -456,7 +481,12 @@ async def test_discuss_turn_answers_with_zero_tools_and_zero_delegation() -> Non
 
     outcome = await runner.run(request, turn=turn)
 
-    assert outcome.outcome.result.body_text == "直接回答"
+    # 讨论直答不产出轮绑定成果：答复作为 assistant 公开消息入会话历史。
+    assert outcome.outcome.result is None
+    assert store.drafts == []
+    assert [(r.role, r.body_text, r.execution_id, r.round_id) for r in messages.requests] == [
+        (MessageRole.ASSISTANT, "直接回答", None, None)
+    ]
     assert outcome.plan_reference is None
     assert tools.calls == []
     assert delegate.calls == []

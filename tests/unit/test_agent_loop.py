@@ -11,7 +11,10 @@ from core.agent_types import (
     AgentErrorCode,
     AgentServiceError,
     AgentValidationError,
+    EventFact,
+    MessageRole,
     Mode,
+    RecordEventRequest,
     ResearchResult,
     ResearchResultDraft,
     json_doc,
@@ -20,6 +23,7 @@ from services.agent_service.loop import (
     DelegationRequest,
     DelegationResult,
     DelegationScope,
+    DiscussionAnswerRecorder,
     ExecutionLoop,
     LoopAction,
     LoopIdentity,
@@ -57,6 +61,44 @@ class _Store:
         if self._unconfirmed:
             return cast(ResearchResult, object())
         return ResearchResult.from_draft(draft, artifact_id="artifact-1", artifact_version=1)
+
+
+class _RoundBoundStore:
+    """生产语义替身：轮归属核定失败即 ``INPUT_INVALID``（§9.7 ``save_research_result``）。"""
+
+    def __init__(self, *, bound_rounds: frozenset[str] = frozenset()) -> None:
+        self.drafts: list[ResearchResultDraft] = []
+        self._bound_rounds = bound_rounds
+
+    async def save_research_result(self, draft: ResearchResultDraft) -> ResearchResult:
+        self.drafts.append(draft)
+        if draft.round_id not in self._bound_rounds:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                "round does not belong to execution",
+                draft.round_id,
+            )
+        return ResearchResult.from_draft(draft, artifact_id="artifact-1", artifact_version=1)
+
+
+class _MessageStore:
+    """会话公开消息写入端口替身（记录请求，不落库）。"""
+
+    def __init__(self) -> None:
+        self.requests: list[RecordEventRequest] = []
+
+    async def record_event(self, request: RecordEventRequest) -> EventFact:
+        self.requests.append(request)
+        return EventFact(
+            message_id=request.message_id,
+            event_id="event-1",
+            session_seq=1,
+            execution_seq=None,
+            session_event_seq=1,
+            execution_event_seq=None,
+            committed_at="2026-06-01T12:00:00.000000Z",
+            replayed=False,
+        )
 
 
 class _ScriptedTurn:
@@ -97,11 +139,12 @@ def _loop(
     *,
     mode: Mode,
     turn: _ScriptedTurn,
-    store: _Store,
+    store: _RoundBoundStore | _Store,
     tools: _RecordingTools | None = None,
     delegate: _RecordingDelegate | None = None,
     limits: LoopLimits | None = None,
     read_tool_names: frozenset[str] = frozenset(),
+    answer_messages: DiscussionAnswerRecorder | None = None,
 ) -> ExecutionLoop:
     return ExecutionLoop(
         identity=_IDENTITY,
@@ -112,6 +155,7 @@ def _loop(
         delegate=delegate,
         limits=limits,
         read_tool_names=read_tool_names,
+        answer_messages=answer_messages,
     )
 
 
@@ -168,6 +212,7 @@ def test_execute_mode_can_answer_directly_without_tools_or_delegation() -> None:
 
 def test_discuss_mode_only_reads_approved_sources_then_answers() -> None:
     store = _Store()
+    messages = _MessageStore()
     tools = _RecordingTools()
     turn = _ScriptedTurn([_tool("read_source"), TurnDecision(action=LoopAction.ANSWER, text="理解结论")])
 
@@ -178,12 +223,15 @@ def test_discuss_mode_only_reads_approved_sources_then_answers() -> None:
             store=store,
             tools=tools,
             read_tool_names=frozenset({"read_source"}),
+            answer_messages=DiscussionAnswerRecorder(messages),
         ).run()
     )
 
     assert outcome.state is LoopRunState.ANSWERED
     assert [call.tool_name for call in tools.calls] == ["read_source"]
     assert turn.contexts[1].observations[0].kind == "tool"
+    assert [request.body_text for request in messages.requests] == ["理解结论"]
+    assert store.drafts == []
 
 
 def test_discuss_mode_rejects_research_tool_before_execution() -> None:
@@ -207,21 +255,86 @@ def test_discuss_mode_rejects_research_tool_before_execution() -> None:
     assert store.drafts == []
 
 
+def test_discuss_answer_is_not_a_round_bound_research_result() -> None:
+    """讨论直答不是研究轮成果：讨论模式不建轮，不得走轮绑定成果保存（§9.7）。"""
+
+    store = _RoundBoundStore()
+    messages = _MessageStore()
+    turn = _ScriptedTurn([TurnDecision(action=LoopAction.ANSWER, text="理解结论")])
+
+    outcome = asyncio.run(
+        _loop(
+            mode=Mode.DISCUSS,
+            turn=turn,
+            store=store,
+            answer_messages=DiscussionAnswerRecorder(messages),
+        ).run()
+    )
+
+    assert outcome.state is LoopRunState.ANSWERED
+    assert outcome.result is None
+    assert store.drafts == []
+    assert [
+        (request.role, request.body_text, request.execution_id, request.round_id, request.session_id)
+        for request in messages.requests
+    ] == [(MessageRole.ASSISTANT, "理解结论", None, None, "s1")]
+
+
+def test_discuss_answer_without_message_store_fails_closed() -> None:
+    """未接线消息端口即失败：不以内存文本冒充已保存答复（R21）。"""
+
+    store = _RoundBoundStore()
+    turn = _ScriptedTurn([TurnDecision(action=LoopAction.ANSWER, text="理解结论")])
+
+    with pytest.raises(AgentServiceError) as excinfo:
+        asyncio.run(_loop(mode=Mode.DISCUSS, turn=turn, store=store).run())
+
+    assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+    assert store.drafts == []
+
+
+def test_execute_direct_answer_still_saves_round_bound_result() -> None:
+    """执行模式直答保持原行为：仍走轮绑定成果保存，不写会话消息。"""
+
+    store = _RoundBoundStore(bound_rounds=frozenset({"round-1"}))
+    messages = _MessageStore()
+    turn = _ScriptedTurn([TurnDecision(action=LoopAction.ANSWER, text="直接回答")])
+
+    outcome = asyncio.run(
+        _loop(
+            mode=Mode.EXECUTE,
+            turn=turn,
+            store=store,
+            answer_messages=DiscussionAnswerRecorder(messages),
+        ).run()
+    )
+
+    assert outcome.state is LoopRunState.ANSWERED
+    assert outcome.result is not None
+    assert outcome.result.final_output_saved is True
+    assert [(draft.round_id, draft.result_kind) for draft in store.drafts] == [("round-1", "explanation")]
+    assert messages.requests == []
+
+
 def test_plan_mode_delivers_plan_and_never_auto_executes() -> None:
-    store = _Store()
+    """计划模式零派发不建轮：计划步骤随终态交付，不写轮绑定成果（§9.7）。"""
+
+    store = _RoundBoundStore()
     tools = _RecordingTools()
     delegate = _RecordingDelegate()
-    turn = _ScriptedTurn([TurnDecision(action=LoopAction.PLAN, text="先核对财报，再比较估值")])
+    fields = json_doc({"steps": [{"id": "step-1", "content": "核对财报", "depends_on": []}]})
+    turn = _ScriptedTurn(
+        [TurnDecision(action=LoopAction.PLAN, text="先核对财报，再比较估值", structured_fields=fields)]
+    )
 
     outcome = asyncio.run(_loop(mode=Mode.PLAN, turn=turn, store=store, tools=tools, delegate=delegate).run())
 
     assert outcome.state is LoopRunState.PLANNED
-    assert outcome.result.result_kind == "plan"
-    assert outcome.result.execution_state == "planned"
+    assert outcome.result is None
+    assert outcome.unsaved_structured_fields == fields
     assert len(turn.contexts) == 1
     assert tools.calls == [] and delegate.calls == []
-    assert store.drafts[0].result_kind == "plan"
-    assert store.drafts[0].convergence_confirmed is False
+    assert store.drafts == []
 
 
 def test_plan_mode_rejects_answer_instead_of_plan() -> None:

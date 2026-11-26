@@ -107,7 +107,7 @@ from services.agent_service.dispatch import (
     build_binding_identity_provider,
 )
 from services.agent_service.leaf_runtime import default_leaf_runtime
-from services.agent_service.loop import AgentTurn, ResearchResultProducer
+from services.agent_service.loop import AgentTurn, DiscussionAnswerRecorder, ResearchResultProducer
 from services.agent_service.main_turn import (
     MainTurnIntake,
     MainTurnRunner,
@@ -1217,6 +1217,8 @@ async def wire_agent_runtime(
     turn_factory = (lambda _request: main_turn_turn) if main_turn_turn is not None else build_governed_turn_factory()
     main_turn = MainTurnRunner(
         producer=ResearchResultProducer(dao),
+        # 讨论直答作为公开消息入会话历史：讨论模式零派发不建轮，不走轮绑定成果保存。
+        answer_messages=DiscussionAnswerRecorder(dao),
         plan_store_factory=lambda identity: PlanProposalStore(
             dao,
             PlanStoreBinding(user_scope=identity.user_scope, execution_id=identity.execution_id),
