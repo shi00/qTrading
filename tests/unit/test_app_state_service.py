@@ -9,6 +9,7 @@ from data.persistence.app_state_service import (
     get_app_state,
     list_app_state,
     set_app_state,
+    set_app_state_if,
     set_app_state_max,
 )
 from data.persistence.daos.base_dao import EngineDisposedError
@@ -357,3 +358,35 @@ class TestDisposedEngineGuard:
             advanced = True
 
         assert advanced is False
+
+
+class TestSetAppStateIf:
+    @pytest.mark.asyncio
+    async def test_insert_when_absent_returns_true(self):
+        mock_conn = MagicMock()
+        mock_result = MagicMock()
+        mock_result.rowcount = 1
+        mock_conn.execute = AsyncMock(return_value=mock_result)
+        engine = _make_begin_engine(mock_conn)
+
+        assert await set_app_state_if(engine, "agent.role.def.x", None, '{"a":1}') is True
+
+    @pytest.mark.asyncio
+    async def test_update_mismatch_returns_false(self):
+        mock_conn = MagicMock()
+        mock_result = MagicMock()
+        mock_result.rowcount = 0
+        mock_conn.execute = AsyncMock(return_value=mock_result)
+        engine = _make_begin_engine(mock_conn)
+
+        assert await set_app_state_if(engine, "k", "old", "new") is False
+
+    @pytest.mark.asyncio
+    async def test_cancelled_propagates(self):
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(side_effect=asyncio.CancelledError())
+        engine = _make_begin_engine(mock_conn)
+
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await set_app_state_if(engine, "k", None, "v")
+        assert type(exc.value) is asyncio.CancelledError

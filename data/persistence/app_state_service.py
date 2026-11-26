@@ -113,6 +113,38 @@ async def set_app_state(engine, key: str, value: str, *, strict: bool = False) -
 
 
 @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+async def set_app_state_if(engine, key: str, expected_value: str | None, value: str) -> bool:
+    """条件写（CAS）：expected 为 None 表示仅插入；否则仅当当前值相等时更新。"""
+
+    if engine is None:
+        return False
+    try:
+        await _guard_engine(engine, "write")
+        async with engine.begin() as conn:
+            if expected_value is None:
+                stmt = (
+                    pg_insert(AppState)
+                    .values(config_key=key, config_value=value)
+                    .on_conflict_do_nothing(index_elements=["config_key"])
+                )
+            else:
+                stmt = (
+                    sa.update(AppState)
+                    .where(AppState.config_key == key, AppState.config_value == expected_value)
+                    .values(config_value=value, updated_at=sa.func.now())
+                )
+            result = await conn.execute(stmt)
+            return bool(result.rowcount)
+    except asyncio.CancelledError:
+        raise
+    except EngineDisposedError:
+        raise
+    except Exception as e:
+        logger.warning("[AppState] Conditional write failed key='%s': %s", key, e)
+        raise
+
+
+@log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
 async def delete_app_state(engine, key: str) -> bool:
     """按键删除 app_state 行（MCP 服务删除收尾）。
 
