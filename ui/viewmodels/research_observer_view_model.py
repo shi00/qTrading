@@ -5905,6 +5905,7 @@ def shared_research_observer(
     delivery: ArtifactDeliveryPort | None = None,
     cleanup: HistoryCleanupGateway | None = None,
     cleanup_unavailable_reason: str | None = None,
+    session_models: SessionModelStore | None = None,
 ) -> ResearchObserverViewModel:
     """取本会话共享的观察层 VM（同一 facade/受理/清理端口复用；变化或已销毁则重建）。"""
 
@@ -5920,6 +5921,8 @@ def shared_research_observer(
         or (model_catalog is not None and _shared_vm._model_catalog is not model_catalog)
         or _shared_vm._delivery is not delivery
         or _shared_vm._cleanup is not cleanup
+        # 会话模型存储变化必须重建：否则会话级模型选择端口停留旧接线（R21）。
+        or _shared_vm._session_models is not session_models
     ):
         stale = _shared_vm
         _shared_vm = ResearchObserverViewModel(
@@ -5932,6 +5935,7 @@ def shared_research_observer(
             delivery=delivery,
             cleanup=cleanup,
             cleanup_unavailable_reason=cleanup_unavailable_reason,
+            session_models=session_models,
         )
         if stale is not None and not stale.disposed:
             stale.dispose()

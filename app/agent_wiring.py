@@ -78,6 +78,13 @@ from core.agent_types import (
     stable_id,
     validate_delivery_target_path,
 )
+from data.persistence.app_state_service import (
+    delete_app_state,
+    get_app_state,
+    list_app_state,
+    set_app_state,
+    set_app_state_if,
+)
 from services.agent_service import (
     AgentRuntime,
     AgentRuntimeHandle,
@@ -121,6 +128,8 @@ from services.agent_service.recovery import (
     STARTUP_ACTIVE_STATUSES,
     STARTUP_WORKFLOW_NAMES,
 )
+from services.agent_service.roles import RoleCatalogService, RoleCatalogStore
+from services.agent_service.session_model import SessionModelStore
 from services.agent_service.runtime import (
     RUNTIME_DB_NAME,
     CloseCommandIdentity,
@@ -256,6 +265,10 @@ class AgentWiring:
     instance_guard: Any | None = None
     #: 成果预览/导出端口（W-03；构造失败为 ``None``，UI 如实显示未接线）。
     delivery: AgentArtifactDelivery | None = None
+    #: 研究角色目录（自定义角色 CRUD；未接线为 ``None``，UI 如实显示不可用）。
+    role_catalog: RoleCatalogService | None = None
+    #: 会话级模型选择存储（主回合首选连接；未接线为 ``None``，不伪装可选）。
+    session_models: SessionModelStore | None = None
     _close_command: CloseCommandIdentity | None = None
     _receipt: CloseReadinessReceipt | None = None
     #: MCP 关停未核事实（连接未确认断开）：进入关闭回执阻塞项，不得报「已安全关闭」。
@@ -980,6 +993,28 @@ def _build_skill_catalog(dao: Any, root: str | None) -> SkillCatalogService | No
         return None
 
 
+def _build_role_services(engine: Any) -> tuple[RoleCatalogService, SessionModelStore]:
+    """构造角色目录与会话模型存储（纯构造、无 IO；端口适配到 ``app_state``）。
+
+    - 角色目录复用 ``app_state`` 配置域：读取 / 条件写（CAS）/ 前缀扫描；
+    - 会话模型选择：普通读取 / 严格覆盖写（写失败向上抛）/ 按键删除；
+    - 构造期不触达数据库，任何端口异常在真正读写时按既有语义传播
+      （含 ``asyncio.CancelledError``，R2）。
+    """
+
+    role_store = RoleCatalogStore(
+        read=lambda key: get_app_state(engine, key),
+        write_if=lambda key, expected, value: set_app_state_if(engine, key, expected, value),
+        scan=lambda prefix: list_app_state(engine, prefix),
+    )
+    session_models = SessionModelStore(
+        read=lambda key: get_app_state(engine, key),
+        write=lambda key, value: set_app_state(engine, key, value, strict=True),
+        delete=lambda key: delete_app_state(engine, key),
+    )
+    return RoleCatalogService(role_store), session_models
+
+
 async def wire_agent_runtime(
     cache_manager: Any,
     *,
@@ -1022,6 +1057,9 @@ async def wire_agent_runtime(
     if dao is None or engine is None:
         logger.warning("[AgentWiring] shared engine/ledger unavailable; agent runtime not wired (zero dispatch)")
         return AgentWiring(service=None, bridge=bridge, failure="shared_ledger_unavailable")
+
+    #: 角色目录与会话模型选择复用共享 ``app_state`` 配置域（纯构造、零 IO）。
+    role_catalog, session_models = _build_role_services(engine)
 
     usage_dao = getattr(cache_manager, "ai_usage_dao", None)
     skills = _build_skill_catalog(dao, skills_root)
@@ -1232,6 +1270,8 @@ async def wire_agent_runtime(
         main_turn=main_turn,
         # 执行模式首问：受理后先产出计划，再由入口显式派发（同一门闩/计划准入）。
         dispatcher=dispatcher,
+        # 会话级模型选择：首问首选连接经该存储读写（未注入即按默认继承）。
+        session_models=session_models,
     )
     return AgentWiring(
         service=facade,
@@ -1250,6 +1290,8 @@ async def wire_agent_runtime(
         launched_ledger=ledger,
         instance_guard=outcome.instance_guard,
         delivery=_build_artifact_delivery(dao=dao, user_scope=user_scope),
+        role_catalog=role_catalog,
+        session_models=session_models,
     )
 
 
