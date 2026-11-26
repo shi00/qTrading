@@ -78,6 +78,8 @@
 | P3-AgentSkill-InvocationFlags-Unwired | `SKILL.md` 的 `disable-model-invocation`/`user-invocable` 已解析进 `SkillManifest`，但全仓无消费方；原文件保版可重读 | P3 | ① 正式 Harness loader/技能选择器接入时；② 或出现禁用的 Skill 被模型自动调用的实例时 |
 | P3-AgentAttachment-CsvHeader-AppConfirm | `csv_header_confirmed` 仅由 `AttachmentExtractionRequest` 透传，APP/UI 无「用户确认表头」入口，默认 `False` → 不扣首条（偏严格，不少算/不丢数据） | P3 | ① 附件确认 UI/服务编排落地时；② 或出现用户已确认表头却仍被少算/多扣的实例时 |
 | P3-AgentAttachment-Openpyxl-PrivateSteps | XLSX 解析复刻 `load_workbook` 私有步骤，延迟导入 `openpyxl.reader.excel.ExcelReader` 与 `openpyxl.styles.stylesheet.apply_stylesheet`；已有容器前置预算保护 | P3 | ① openpyxl 主/次版本升级前；② 或出现受支持 XLSX 解析结构错乱/异常时 |
+| P3-AgentClarification-RestoreFailure | `data/persistence/daos/agent_dao.py` 的 `restore_clarification_consumption` 在补偿写入本身失败时，答复的 `answer_consumed_at` 已落定且未注入下一轮，当前仅记录脱敏 warning；极低概率下用户答复丢失 | P3 | 真实环境出现一次答复丢失即升级（补偿失败改为标记需人工干预或转重试队列） |
+| P3-AgentClarification-CancelNoRestore | `services/agent_service/main_turn.py` 的 `CancelledError` 路径直接上抛、不调用 `restore_clarification_consumption` 补偿，已消费答复保持消费态并依赖上层重试边界；取消后未重试即答复丢失 | P3 | 真实环境出现一次取消后答复丢失即升级；或上层重试边界取消/变更时 |
 
 ## 技术债清单
 
