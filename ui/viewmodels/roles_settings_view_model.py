@@ -42,6 +42,7 @@ ERROR_KEYS: dict[AgentErrorCode, str] = {
     AgentErrorCode.REVISION_CONFLICT: "agent_roles_conflict",
     AgentErrorCode.CONFIG_UNAVAILABLE: "agent_roles_unavailable",
     AgentErrorCode.INPUT_INVALID: "agent_roles_invalid",
+    AgentErrorCode.POLICY_DENIED: "agent_roles_model_unavailable",
 }
 
 ERROR_PRESET_READONLY = "agent_roles_preset_readonly"
@@ -50,7 +51,6 @@ ERROR_SAVE_FAILED = "agent_roles_save_failed"
 
 #: 修订冲突的服务原因 → 更精确的页面错误键（未识别原因统一落到冲突）。
 CONFLICT_REASON_KEYS: dict[str, str] = {
-    "role_already_exists": "agent_roles_invalid",
     "role_not_found": "agent_roles_unavailable",
 }
 
@@ -65,7 +65,13 @@ class RoleCatalogPort(Protocol):
     """角色目录读写的端口（签名与 :class:`RoleCatalogService` 一致，便于替身注入）。"""
 
     async def create_new(
-        self, role_id: str, display_name: str, prompt_body: str, *, updated_by: str
+        self,
+        role_id: str,
+        display_name: str,
+        prompt_body: str,
+        *,
+        updated_by: str,
+        model_connection_id: str | None = None,
     ) -> RoleDefinition: ...
 
     async def update(
@@ -316,18 +322,14 @@ class RolesSettingsViewModel(ObservableViewModelMixin[RolesSettingsState]):
         self._set_state(pending=True, error_key=None, notice_key=None)
         try:
             if draft.is_new:
-                # 草稿即真相：复制不再重读来源，正文/名称按用户编辑值落库
+                # 草稿即真相：复制不再重读来源，正文/名称/模型覆盖按用户编辑值单次落库。
                 await self._catalog.create_new(
-                    draft.role_id, draft.display_name, draft.prompt_body, updated_by=self._updated_by
+                    draft.role_id,
+                    draft.display_name,
+                    draft.prompt_body,
+                    updated_by=self._updated_by,
+                    model_connection_id=draft.model_connection_id,
                 )
-                if draft.model_connection_id is not None:
-                    # 新建固定 r1；模型覆盖单独写入（不改提示词、不升版本）
-                    await self._catalog.update(
-                        draft.role_id,
-                        model_connection_id=draft.model_connection_id,
-                        expected_version="r1",
-                        updated_by=self._updated_by,
-                    )
                 notice_key = NOTICE_CREATED
             else:
                 if draft.role_version is None:

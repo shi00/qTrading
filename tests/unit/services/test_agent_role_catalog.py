@@ -114,14 +114,16 @@ async def test_update_missing_role_conflicts(store: tuple[RoleCatalogStore, dict
 
 
 @pytest.mark.asyncio
-async def test_duplicate_create_conflicts(store: tuple[RoleCatalogStore, dict[str, str]]) -> None:
+async def test_duplicate_create_is_input_invalid(store: tuple[RoleCatalogStore, dict[str, str]]) -> None:
+    """重复 ``role_id`` 是输入冲突（``INPUT_INVALID``），不是修订冲突（设计 §9）。"""
+
     catalog, _ = store
     service = RoleCatalogService(catalog)
     await service.create_new("risk_reviewer", "风险复核", "v1", updated_by="tester")
     with pytest.raises(AgentServiceError) as excinfo:
         await service.create_new("risk_reviewer", "风险复核", "v1", updated_by="tester")
     assert type(excinfo.value) is AgentServiceError
-    assert excinfo.value.code is AgentErrorCode.REVISION_CONFLICT
+    assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
     assert excinfo.value.sanitized_message == "role_already_exists"
 
 
@@ -210,28 +212,28 @@ async def test_update_refreshes_updated_at_and_keeps_created_at(
 
 
 @pytest.mark.asyncio
-async def test_copy_from_clones_prompt_and_model(store: tuple[RoleCatalogStore, dict[str, str]]) -> None:
-    catalog, _ = store
-    service = RoleCatalogService(catalog)
-    await service.create_new("source_role", "源角色", "复核风险", updated_by="tester")
-    await service.update("source_role", model_connection_id="model-1", expected_version="r1", updated_by="tester")
-    copied = await service.copy_from("source_role", "risk_reviewer", "风险复核", updated_by="copier")
-    assert copied.role_version == "r1"
-    assert copied.status == "active"
-    assert copied.prompt_body == "复核风险"
-    assert copied.model_connection_id == "model-1"
-    assert copied.updated_by == "copier"
+async def test_create_new_persists_model_connection_atomically(
+    store: tuple[RoleCatalogStore, dict[str, str]],
+) -> None:
+    """新建时模型覆盖与正文同一次写入落库（不再二次 update）。"""
 
-
-@pytest.mark.asyncio
-async def test_copy_from_missing_source_is_unavailable(store: tuple[RoleCatalogStore, dict[str, str]]) -> None:
-    catalog, _ = store
+    catalog, data = store
     service = RoleCatalogService(catalog)
-    with pytest.raises(AgentServiceError) as excinfo:
-        await service.copy_from("missing_role", "risk_reviewer", "风险复核", updated_by="copier")
-    assert type(excinfo.value) is AgentServiceError
-    assert excinfo.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
-    assert excinfo.value.sanitized_message == "source_role_not_found"
+    created = await service.create_new(
+        "risk_reviewer",
+        "风险复核",
+        "复核风险",
+        updated_by="creator",
+        model_connection_id="model-1",
+    )
+    assert created.role_version == "r1"
+    assert created.status == "active"
+    assert created.prompt_body == "复核风险"
+    assert created.model_connection_id == "model-1"
+    stored = await RoleCatalogService(catalog).resolve("risk_reviewer")
+    assert stored is not None
+    assert stored.model_connection_id == "model-1"
+    assert set(data) == {"agent.role.def.risk_reviewer"}
 
 
 @pytest.mark.asyncio
@@ -303,20 +305,11 @@ async def test_list_roles_undecodable_is_unavailable(store: tuple[RoleCatalogSto
     assert excinfo.value.sanitized_message == "role definition is not decodable"
 
 
-async def _seed_role_with_model(catalog: RoleCatalogStore) -> None:
-    """以未接线校验的实例种入一个带模型覆盖的源角色。"""
-
-    service = RoleCatalogService(catalog)
-    await service.create_new("source_role", "源角色", "复核风险", updated_by="tester")
-    await service.update("source_role", model_connection_id="model-1", expected_version="r1", updated_by="tester")
-
-
 @pytest.mark.asyncio
-async def test_copy_from_rejects_unavailable_model_connection(
+async def test_create_new_rejects_unavailable_model_connection(
     store: tuple[RoleCatalogStore, dict[str, str]],
 ) -> None:
     catalog, data = store
-    await _seed_role_with_model(catalog)
     checked: list[str] = []
 
     async def _reject(connection_id: str) -> bool:
@@ -325,7 +318,13 @@ async def test_copy_from_rejects_unavailable_model_connection(
 
     service = RoleCatalogService(catalog, model_connection_validator=_reject)
     with pytest.raises(AgentServiceError) as excinfo:
-        await service.copy_from("source_role", "risk_reviewer", "风险复核", updated_by="copier")
+        await service.create_new(
+            "risk_reviewer",
+            "风险复核",
+            "复核风险",
+            updated_by="creator",
+            model_connection_id="model-1",
+        )
     assert type(excinfo.value) is AgentServiceError
     assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
     assert excinfo.value.sanitized_message == "model_connection_unavailable"
@@ -335,18 +334,23 @@ async def test_copy_from_rejects_unavailable_model_connection(
 
 
 @pytest.mark.asyncio
-async def test_copy_from_accepts_available_model_connection(
+async def test_create_new_accepts_available_model_connection(
     store: tuple[RoleCatalogStore, dict[str, str]],
 ) -> None:
     catalog, data = store
-    await _seed_role_with_model(catalog)
 
     async def _accept(_connection_id: str) -> bool:
         return True
 
     service = RoleCatalogService(catalog, model_connection_validator=_accept)
-    copied = await service.copy_from("source_role", "risk_reviewer", "风险复核", updated_by="copier")
-    assert copied.model_connection_id == "model-1"
+    created = await service.create_new(
+        "risk_reviewer",
+        "风险复核",
+        "复核风险",
+        updated_by="creator",
+        model_connection_id="model-1",
+    )
+    assert created.model_connection_id == "model-1"
     assert "agent.role.def.risk_reviewer" in data
 
 

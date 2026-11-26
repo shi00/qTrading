@@ -17,7 +17,7 @@ from typing import Any, cast
 import flet as ft
 import pytest
 
-from core.agent_types import Mode
+from core.agent_types import AgentErrorCode, AgentServiceError, Mode
 from ui.i18n import I18n
 from ui.viewmodels.research_observer_view_model import (
     AGENT_RESEARCH_SCENARIO_ID,
@@ -476,8 +476,8 @@ class TestFirstQuestionPassesSessionModel:
         assert intake.calls[0]["model_connection_id"] is None
 
     @pytest.mark.asyncio
-    async def test_first_question_uses_toolbar_selection_for_new_session(self) -> None:
-        """新会话无会话键时，工具栏当前选择必须真正写入首问（否则选值不生效）。"""
+    async def test_first_question_auto_default_does_not_write_key(self) -> None:
+        """自动默认选择不算用户显式选择：不写会话键（保持继承）。"""
 
         intake = _RecordingIntake()
         vm = _make_vm(store=_Store(None), intake=intake)
@@ -485,11 +485,46 @@ class TestFirstQuestionPassesSessionModel:
         await vm.load_model_selection()
         assert vm.state.session_id is None
         assert vm.state.model_selection == "conn-a"
+        assert vm.state.model_selection_explicit is False
         vm.set_composer_text("研究银行股")
 
         await vm.send_first_question()
 
-        assert intake.calls[0]["model_connection_id"] == "conn-a"
+        assert intake.calls[0]["model_connection_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_first_question_explicit_toolbar_selection_is_written(self) -> None:
+        intake = _RecordingIntake()
+        vm = _make_vm(store=_Store(None), intake=intake)
+        await vm.refresh()
+        await vm.load_model_selection()
+        await vm.select_model_connection("conn-b")
+        assert vm.state.model_selection == "conn-b"
+        assert vm.state.model_selection_explicit is True
+        vm.set_composer_text("研究银行股")
+
+        await vm.send_first_question()
+
+        assert intake.calls[0]["model_connection_id"] == "conn-b"
+
+    @pytest.mark.asyncio
+    async def test_first_question_read_error_does_not_override_stored_key(self) -> None:
+        """会话模型读失败时即使显式选择过也传 None（不覆盖已存键）。"""
+
+        intake = _RecordingIntake()
+        store = _Store(None, read_error=AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "boom", "s1"))
+        vm = _make_vm(store=store, intake=intake)
+        await vm.refresh(session_id="s1")
+        await vm.load_model_selection()
+        await vm.load_session_model("s1")
+        assert vm.state.session_model_error_key == SESSION_MODEL_UNAVAILABLE_KEY
+        await vm.select_model_connection("conn-a")
+        assert vm.state.model_selection_explicit is True
+        vm.set_composer_text("研究银行股")
+
+        await vm.send_first_question()
+
+        assert intake.calls[0]["model_connection_id"] is None
 
     @pytest.mark.asyncio
     async def test_first_question_prefers_session_key_over_toolbar_selection(self) -> None:
@@ -576,6 +611,21 @@ class TestSessionModelBar:
         bar = build_session_model_bar(state, on_select_model=lambda _v: None, on_clear_model=lambda: None)
 
         assert I18n.get(SESSION_MODEL_UNAVAILABLE_KEY) in _texts(bar)
+
+    def test_bar_does_not_report_unavailable_when_options_not_loaded(self) -> None:
+        """候选尚未加载（空集）时不得把会话连接误报为不可用。"""
+
+        state = ResearchObserverState(
+            available=True,
+            session_model_available=True,
+            session_model_connection_id="conn-x",
+            session_model_source_key=SESSION_MODEL_SOURCE_SESSION,
+            model_options=(),
+        )
+
+        bar = build_session_model_bar(state, on_select_model=lambda _v: None, on_clear_model=lambda: None)
+
+        assert I18n.get("agent_research_session_model_unavailable") not in _texts(bar)
 
     def test_bar_dedupes_error_when_keys_match(self) -> None:
         """会话错误键与不可用提示同键时只渲染一行（不重复提示）。"""

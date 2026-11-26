@@ -150,8 +150,9 @@ class RoleCatalogService:
         prompt_body: str,
         *,
         updated_by: str,
+        model_connection_id: str | None = None,
     ) -> RoleDefinition:
-        """新建 ``r1`` 活跃角色；目标已存在即冲突。"""
+        """新建 ``r1`` 活跃角色；目标已存在即 ``INPUT_INVALID``（设计 §9）。"""
 
         now = _now()
         definition = RoleDefinition(
@@ -162,40 +163,7 @@ class RoleCatalogService:
             status=_ACTIVE,
             role_version="r1",
             prompt_body=_guard_prompt(prompt_body, role_id),
-            model_connection_id=None,
-            capability_mode="explicit",
-            created_at=now,
-            updated_at=now,
-            updated_by=updated_by,
-        )
-        _validate(definition)
-        if not await self._store.create(definition):
-            raise AgentServiceError(AgentErrorCode.REVISION_CONFLICT, "role_already_exists", role_id)
-        return definition
-
-    async def copy_from(
-        self,
-        source_role_id: str,
-        role_id: str,
-        display_name: str,
-        *,
-        updated_by: str,
-    ) -> RoleDefinition:
-        """以既有角色为模板新建 ``r1`` 活跃角色（复制提示词与模型覆盖）。"""
-
-        source = await self._store.load(source_role_id)
-        if source is None:
-            raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "source_role_not_found", source_role_id)
-        now = _now()
-        definition = RoleDefinition(
-            schema_version=ROLE_DEFINITION_VERSION,
-            role_id=role_id,
-            display_name=display_name,
-            base="sub",
-            status=_ACTIVE,
-            role_version="r1",
-            prompt_body=_guard_prompt(source.prompt_body, role_id),
-            model_connection_id=source.model_connection_id,
+            model_connection_id=model_connection_id,
             capability_mode="explicit",
             created_at=now,
             updated_at=now,
@@ -204,7 +172,7 @@ class RoleCatalogService:
         _validate(definition)
         await self._ensure_model_connection_allowed(definition.role_id, definition.model_connection_id)
         if not await self._store.create(definition):
-            raise AgentServiceError(AgentErrorCode.REVISION_CONFLICT, "role_already_exists", role_id)
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "role_already_exists", role_id)
         return definition
 
     async def update(

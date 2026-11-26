@@ -87,10 +87,24 @@ class _RecordingCatalog:
 
     # -- RoleCatalogPort ------------------------------------------------------
 
-    async def create_new(self, role_id: str, display_name: str, prompt_body: str, *, updated_by: str) -> RoleDefinition:
-        self.calls.append(("create_new", role_id, display_name, prompt_body, updated_by))
+    async def create_new(
+        self,
+        role_id: str,
+        display_name: str,
+        prompt_body: str,
+        *,
+        updated_by: str,
+        model_connection_id: str | None = None,
+    ) -> RoleDefinition:
+        self.calls.append(("create_new", role_id, display_name, prompt_body, updated_by, model_connection_id))
         self._maybe_raise("create_new")
-        return await self._service.create_new(role_id, display_name, prompt_body, updated_by=updated_by)
+        return await self._service.create_new(
+            role_id,
+            display_name,
+            prompt_body,
+            updated_by=updated_by,
+            model_connection_id=model_connection_id,
+        )
 
     async def copy_from(
         self, source_role_id: str, role_id: str, display_name: str, *, updated_by: str
@@ -233,7 +247,7 @@ async def test_begin_create_prefills_sub_template_then_save_creates_r1() -> None
     assert state.error_key is None
     assert state.notice_key == "agent_roles_created"
     assert catalog.calls == [
-        ("create_new", "risk_reviewer", "风险复核", "只核对风险。", "local"),
+        ("create_new", "risk_reviewer", "风险复核", "只核对风险。", "local", None),
         ("list_roles",),
     ]
     assert [row.role_id for row in state.roles] == ["main", "sub", "risk_reviewer"]
@@ -269,10 +283,9 @@ async def test_copy_prefills_source_prompt_and_model_then_saves_copy() -> None:
 
     assert await vm.save() is True
 
-    # 草稿即真相：create_new 落草稿正文，再单写模型覆盖（不改正文、不升版本）
+    # 草稿即真相：create_new 单次落库（含模型覆盖），不再二次 update。
     assert catalog.calls == [
-        ("create_new", "audit_viewer", "审计复核", "只核对风险。", "local"),
-        ("update", "audit_viewer", None, None, "conn-1", "r1", "local"),
+        ("create_new", "audit_viewer", "审计复核", "只核对风险。", "local", "conn-1"),
         ("list_roles",),
     ]
     assert vm.state.notice_key == "agent_roles_created"
@@ -490,6 +503,83 @@ async def test_duplicate_role_id_maps_to_invalid_key() -> None:
 
     assert vm.state.error_key == "agent_roles_invalid"
     assert vm.state.editing.role_id == "risk_reviewer"
+
+
+@pytest.mark.asyncio
+async def test_policy_denied_maps_to_model_unavailable_key() -> None:
+    """角色模型覆盖不可用（POLICY_DENIED）如实映射专用错误键，保留草稿可重试。"""
+
+    catalog = _RecordingCatalog()
+    vm = await _vm_with(catalog)
+    vm.begin_create()
+    vm.set_role_id("risk_reviewer")
+    vm.set_display_name("风险复核")
+    vm.set_prompt_body("正文")
+    catalog.raise_on["create_new"] = AgentServiceError(
+        AgentErrorCode.POLICY_DENIED, "model_connection_unavailable", "risk_reviewer"
+    )
+
+    assert await vm.save() is False
+
+    assert vm.state.error_key == "agent_roles_model_unavailable"
+    assert vm.state.editing is not None
+
+
+@pytest.mark.asyncio
+async def test_role_not_found_maps_to_unavailable_key() -> None:
+    """修订冲突中的 ``role_not_found`` 仍映射「目录不可用」。"""
+
+    catalog = _RecordingCatalog()
+    await catalog.seed("risk_reviewer", "风险复核", "旧正文")
+    vm = await _vm_with(catalog)
+    await vm.begin_edit("risk_reviewer")
+    catalog.raise_on["update"] = AgentServiceError(AgentErrorCode.REVISION_CONFLICT, "role_not_found", "risk_reviewer")
+
+    assert await vm.save() is False
+
+    assert vm.state.error_key == "agent_roles_unavailable"
+    assert vm.state.editing is not None
+
+
+@pytest.mark.asyncio
+async def test_save_success_recovers_from_previous_load_failure() -> None:
+    """加载失败后保存成功（内部重载成功）即恢复可用，不再残留错误。"""
+
+    catalog = _RecordingCatalog()
+    vm = await _vm_with(catalog)
+    catalog.raise_on["list_roles"] = AgentServiceError(
+        AgentErrorCode.CONFIG_UNAVAILABLE, "role_catalog_unavailable", "role_catalog"
+    )
+    await vm.load()
+    assert vm.state.error_key == "agent_roles_unavailable"
+
+    catalog.raise_on.clear()
+    vm.begin_create()
+    vm.set_role_id("risk_reviewer")
+    vm.set_display_name("风险复核")
+    vm.set_prompt_body("正文")
+
+    assert await vm.save() is True
+    assert vm.state.error_key is None
+    assert any(row.role_id == "risk_reviewer" for row in vm.state.roles)
+
+
+@pytest.mark.asyncio
+async def test_save_success_but_reload_failure_reports_unavailable() -> None:
+    """保存成功但随后重载失败：以后一次加载结果为准，如实显示不可用。"""
+
+    catalog = _RecordingCatalog()
+    vm = await _vm_with(catalog)
+    vm.begin_create()
+    vm.set_role_id("risk_reviewer")
+    vm.set_display_name("风险复核")
+    vm.set_prompt_body("正文")
+    catalog.raise_on["list_roles"] = AgentServiceError(
+        AgentErrorCode.CONFIG_UNAVAILABLE, "role_catalog_unavailable", "role_catalog"
+    )
+
+    assert await vm.save() is True
+    assert vm.state.error_key == "agent_roles_unavailable"
 
 
 @pytest.mark.asyncio
