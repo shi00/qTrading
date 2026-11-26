@@ -552,6 +552,8 @@ async def test_save_success_recovers_from_previous_load_failure() -> None:
     )
     await vm.load()
     assert vm.state.error_key == "agent_roles_unavailable"
+    assert vm.state.loaded is True
+    assert vm.state.load_failed is True
 
     catalog.raise_on.clear()
     vm.begin_create()
@@ -561,7 +563,9 @@ async def test_save_success_recovers_from_previous_load_failure() -> None:
 
     assert await vm.save() is True
     assert vm.state.error_key is None
-    assert any(row.role_id == "risk_reviewer" for row in vm.state.roles)
+    assert vm.state.loaded is True
+    assert vm.state.load_failed is False
+    assert [row.role_id for row in vm.state.roles] == ["main", "sub", "risk_reviewer"]
 
 
 @pytest.mark.asyncio
@@ -570,6 +574,8 @@ async def test_save_success_but_reload_failure_reports_unavailable() -> None:
 
     catalog = _RecordingCatalog()
     vm = await _vm_with(catalog)
+    assert vm.state.loaded is True
+    assert vm.state.load_failed is False
     vm.begin_create()
     vm.set_role_id("risk_reviewer")
     vm.set_display_name("风险复核")
@@ -580,6 +586,27 @@ async def test_save_success_but_reload_failure_reports_unavailable() -> None:
 
     assert await vm.save() is True
     assert vm.state.error_key == "agent_roles_unavailable"
+    assert vm.state.loaded is True
+    assert vm.state.load_failed is True
+
+
+@pytest.mark.asyncio
+async def test_load_failure_then_success_resets_load_failed() -> None:
+    """加载状态随每次 ``load()`` 结果更新：失败置位、再次成功复位。"""
+
+    catalog = _RecordingCatalog()
+    vm = RolesSettingsViewModel(catalog=catalog)
+    catalog.raise_on["list_roles"] = AgentServiceError(
+        AgentErrorCode.CONFIG_UNAVAILABLE, "role_catalog_unavailable", "role_catalog"
+    )
+
+    await vm.load()
+    assert (vm.state.loaded, vm.state.load_failed) == (True, True)
+
+    catalog.raise_on.clear()
+    await vm.load()
+    assert (vm.state.loaded, vm.state.load_failed) == (True, False)
+    assert [row.role_id for row in vm.state.roles] == ["main", "sub"]
 
 
 @pytest.mark.asyncio

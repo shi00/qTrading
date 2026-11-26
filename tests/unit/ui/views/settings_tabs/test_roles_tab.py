@@ -42,6 +42,7 @@ from ui.viewmodels.roles_settings_view_model import (
     RoleDraft,
     RoleRow,
     RolesSettingsState,
+    RolesSettingsViewModel,
 )
 from ui.views.settings_tabs import roles_tab as mod
 
@@ -424,6 +425,37 @@ def test_load_failure_shows_persistent_unavailable_instead_of_empty(
     assert "i18n[agent_roles_loading]" not in texts
 
 
+def test_recovery_after_internal_reload_renders_list(
+    mock_i18n_state: Any,
+    mock_app_colors_state: Any,
+    i18n_mock: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """加载状态归入 VM：内部 reload 成功后列表恢复，不再显示不可用。"""
+
+    catalog = _RecordingCatalog()
+    catalog.raise_on["list_roles"] = AgentServiceError(
+        AgentErrorCode.CONFIG_UNAVAILABLE, "role_catalog_unavailable", "role_catalog"
+    )
+    captured: list[RolesSettingsViewModel] = []
+
+    class _CapturedViewModel(RolesSettingsViewModel):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            captured.append(self)
+
+    monkeypatch.setattr(mod, "RolesSettingsViewModel", _CapturedViewModel)
+    body, _page, _snack = _mount_body(catalog)
+    assert "i18n[agent_roles_unavailable]" in _texts(render_once(body))
+
+    catalog.raise_on.clear()
+    asyncio.run(captured[-1].load())
+    texts = _texts(render_once(body))
+
+    assert "i18n[agent_roles_unavailable]" not in texts
+    assert "i18n[agent_roles_empty]" in texts
+
+
 # ---------------------------------------------------------------------------
 # 停用二次确认
 # ---------------------------------------------------------------------------
@@ -754,6 +786,7 @@ _NEW_I18N_KEYS: frozenset[str] = frozenset(
         "agent_roles_preset_readonly",
         "agent_roles_conflict",
         "agent_roles_invalid",
+        "agent_roles_model_unavailable",
         "agent_roles_save_failed",
         "agent_roles_created",
         "agent_roles_saved",
