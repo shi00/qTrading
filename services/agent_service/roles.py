@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import replace as dataclass_replace
+from dataclasses import dataclass, replace as dataclass_replace
 from datetime import UTC, datetime
 from types import EllipsisType
 from typing import Any, Final
@@ -23,12 +23,14 @@ from core.agent_types import (
     AgentServiceError,
     AgentValidationError,
     RoleDefinition,
+    RoleMCPAssignment,
+    RoleSkillAssignment,
     decode_role_definition,
     validate_role_definition,
 )
 from utils.prompt_guard import sanitize_prompt, validate_prompt
 
-__all__ = ["RoleCatalogService", "RoleCatalogStore"]
+__all__ = ["RoleCatalogService", "RoleCatalogStore", "RolePolicy", "derive_role_policy"]
 
 #: 规范 JSON 序列化参数：create 与 replace 必须逐字节一致，CAS 的 expected 才能命中。
 _DUMPS: Final[dict[str, Any]] = {"ensure_ascii": False, "separators": (",", ":"), "sort_keys": True}
@@ -286,3 +288,40 @@ def _validate(definition: RoleDefinition) -> None:
         validate_role_definition(definition)
     except AgentValidationError as exc:
         raise AgentServiceError(AgentErrorCode.INPUT_INVALID, exc.code, definition.role_id) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class RolePolicy:
+    """角色版本的能力上限：Skill 引用、MCP 服务范围与模型连接（缺失即空集）。"""
+
+    role_id: str
+    role_version: str
+    #: 形如 ``skill:<skill_id>@<version>``。
+    allowed_skills: frozenset[str]
+    #: 形如 ``mcp_scope:<stable_key>``。
+    allowed_mcp: frozenset[str]
+    #: ``None`` 表示继承默认模型连接。
+    model_connection_id: str | None
+
+
+def derive_role_policy(
+    definition: RoleDefinition,
+    *,
+    skills: RoleSkillAssignment | None,
+    mcp: RoleMCPAssignment | None,
+) -> RolePolicy:
+    """角色定义 + 既有分配 → 能力上限；无分配记录即空集（不解释为全部，R21）。"""
+
+    allowed_skills = frozenset(
+        f"skill:{ref.skill_id}@{ref.version}" for ref in (skills.enabled if skills is not None else ())
+    )
+    allowed_mcp = frozenset(
+        f"mcp_scope:{item.identity.stable_key()}" for item in (mcp.available if mcp is not None else ())
+    )
+    return RolePolicy(
+        role_id=definition.role_id,
+        role_version=definition.role_version,
+        allowed_skills=allowed_skills,
+        allowed_mcp=allowed_mcp,
+        model_connection_id=definition.model_connection_id,
+    )
