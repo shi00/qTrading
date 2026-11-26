@@ -372,6 +372,18 @@ class TestSetAppStateIf:
         assert await set_app_state_if(engine, "agent.role.def.x", None, '{"a":1}') is True
 
     @pytest.mark.asyncio
+    async def test_update_hit_returns_true(self):
+        """条件更新命中（rowcount=1）必须返回 True。"""
+
+        mock_conn = MagicMock()
+        mock_result = MagicMock()
+        mock_result.rowcount = 1
+        mock_conn.execute = AsyncMock(return_value=mock_result)
+        engine = _make_begin_engine(mock_conn)
+
+        assert await set_app_state_if(engine, "k", "old", "new") is True
+
+    @pytest.mark.asyncio
     async def test_update_mismatch_returns_false(self):
         mock_conn = MagicMock()
         mock_result = MagicMock()

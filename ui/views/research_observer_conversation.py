@@ -412,7 +412,9 @@ def build_session_model_bar(
     unavailable_key: str | None = None
     if connection_id is not None:
         if option is None:
-            unavailable_key = "agent_research_session_model_unavailable"
+            # 候选尚未加载时（空集）不误报不可用；仅目录已加载且查无此项才提示。
+            if state.model_options:
+                unavailable_key = "agent_research_session_model_unavailable"
         elif option.reject_key is not None:
             unavailable_key = option.reject_key
     rows.append(

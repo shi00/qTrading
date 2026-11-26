@@ -3365,6 +3365,7 @@
     "agent_roles_preset_readonly": "Preset roles are read-only; copy one to edit.",
     "agent_roles_conflict": "The role was changed by another operation; refresh and retry.",
     "agent_roles_invalid": "The role ID or content is invalid; check and retry.",
+    "agent_roles_model_unavailable": "The selected model connection is unavailable for research (disabled or not a route candidate); choose another.",
     "agent_roles_save_failed": "Failed to save the role; try again later.",
     "agent_roles_created": "Role created.",
     "agent_roles_saved": "Role saved.",

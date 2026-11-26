@@ -3365,6 +3365,7 @@
     "agent_roles_preset_readonly": "预置角色为只读，可复制后编辑。",
     "agent_roles_conflict": "角色已被其他操作修改，请刷新后重试。",
     "agent_roles_invalid": "角色 ID 或内容不合法，请检查后重试。",
+    "agent_roles_model_unavailable": "所选模型连接不可用于研究场景（未启用或不在候选内），请重新选择。",
     "agent_roles_save_failed": "保存角色失败，请稍后重试。",
     "agent_roles_created": "角色已创建。",
     "agent_roles_saved": "角色已保存。",
