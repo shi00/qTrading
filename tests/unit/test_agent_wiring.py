@@ -198,6 +198,9 @@ async def test_facade_reuses_shared_engine_and_ledger(monkeypatch: pytest.Monkey
     assert isinstance(wiring.service, AgentService)
     assert wiring.service._dao is cache.agent_dao  # 共享引擎/账本，不另起连接池
     assert isinstance(wiring.bridge, OwnerLoopBridge)
+    # 角色目录与会话模型选择已接线（复用共享 app_state 配置域）。
+    assert wiring.role_catalog is not None
+    assert wiring.session_models is not None
     assert launched == []  # needs-spike 门闩：不提前 launch
 
 

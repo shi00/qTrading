@@ -92,7 +92,11 @@ class _ResolvedRoute(Protocol):
 
 
 #: 场景路由解析（测试注入替身；生产走 ``resolve_executor``）。
-RouteResolver = Callable[[], Any]
+#:
+#: 调用契约：``preferred_connection_id`` 为 ``None`` 时按**零参**调用（兼容既有
+#: 零参替身）；非 ``None`` 时以 ``preferred_connection_id`` 关键字调用（会话/角色
+#: 模型选择须作用于本次路由解析，不可静默丢弃）。
+RouteResolver = Callable[..., Any]
 #: 模型桥工厂（测试注入替身；生产为 ``GatewayModel``）。
 ModelFactory = Callable[..., Any]
 #: 单次受治理调用（测试注入替身；生产为 pydantic-ai ``Agent``）。
@@ -141,10 +145,18 @@ def _turn_prompt(request: MainTurnRequest) -> _TurnPrompt:
     return _TurnPrompt(instructions=_DISCUSS_INSTRUCTIONS, prompt=prompt, output=_TurnEnvelope)
 
 
-async def _resolve_route() -> _ResolvedRoute | None:
+async def _resolve_route(preferred_connection_id: str | None = None) -> _ResolvedRoute | None:
+    """解析 ``agent_research`` 场景路由；首选连接非空时收窄候选。
+
+    ``None`` 时保持原样调用 ``resolve_executor(scenario_id)``（行为不变）；非
+    ``None`` 时透传首选连接，首选不可用由 ``resolve_executor`` 显式抛错。
+    """
+
     from services.ai_service.scenario_dispatch import resolve_executor
 
-    return await resolve_executor(AGENT_RESEARCH_SCENARIO_ID)
+    if preferred_connection_id is None:
+        return await resolve_executor(AGENT_RESEARCH_SCENARIO_ID)
+    return await resolve_executor(AGENT_RESEARCH_SCENARIO_ID, preferred_connection_id=preferred_connection_id)
 
 
 async def _invoke_agent(
@@ -272,13 +284,22 @@ async def run_governed_turn(
     request: MainTurnRequest,
     context: TurnContext,
     *,
+    preferred_connection_id: str | None = None,
     resolve_route: RouteResolver = _resolve_route,
     build_model: ModelFactory | None = None,
     invoke_agent: AgentInvoker = _invoke_agent,
 ) -> TurnDecision:
-    """一次主回合的受治理模型调用（讨论/计划零研究动作，fail-closed）。"""
+    """一次主回合的受治理模型调用（讨论/计划零研究动作，fail-closed）。
+
+    ``preferred_connection_id`` 显式优先；缺省取请求上冻结的会话模型选择
+    （``None`` 即继承场景路由默认顺序），确保受理入口解析出的选择真正进入
+    路由解析、不被静默忽略。
+    """
 
     identity = request.identity
+    effective_connection_id = (
+        preferred_connection_id if preferred_connection_id is not None else request.preferred_connection_id
+    )
     prompt = _turn_prompt(request)
     if context.observations:
         # 讨论/计划只有可达的读资料观测；如实带入提示，不当作新的行动许可。
@@ -296,7 +317,11 @@ async def run_governed_turn(
             "attached sources require data consent, zero model dispatch",
             identity.execution_id,
         )
-    route = await resolve_route()
+    route = (
+        await resolve_route()
+        if effective_connection_id is None
+        else await resolve_route(preferred_connection_id=effective_connection_id)
+    )
     if route is None:
         raise AgentServiceError(
             AgentErrorCode.CONFIG_UNAVAILABLE,

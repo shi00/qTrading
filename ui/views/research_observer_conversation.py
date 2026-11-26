@@ -383,6 +383,92 @@ def build_messages_section(
     return rows
 
 
+def build_session_model_bar(
+    state: ResearchObserverState,
+    *,
+    on_select_model: Callable[[str], None],
+    on_clear_model: Callable[[], None],
+) -> ft.Control:
+    """会话头模型选择条（当前连接 + 来源标签 + 切换与恢复继承）。
+
+    切换只对之后的新回合生效（历史上下文将发送给新模型）；未接线存储时如实
+    显示不可用，不渲染成「可选」。颜色/字号只用设计令牌（R23），纯声明式不发 IO。
+    """
+
+    rows: list[ft.Control] = [section_title("agent_research_session_model_title")]
+    if not state.session_model_available:
+        rows.append(hint_text("agent_research_session_model_unavailable"))
+        return ft.Column(rows, spacing=AppStyles.SPACING_XS)
+    connection_id = state.session_model_connection_id
+    option = state.model_option(connection_id)
+    if connection_id is None:
+        current_text = I18n.get("agent_research_session_model_inherit")
+    elif option is not None:
+        current_text = option.display_name
+    else:
+        # 未知连接如实显示原值，不伪装成「继承默认」。
+        current_text = connection_id
+    # 会话键指向已停用/已删除连接：显式报错，但保留名称显示与「恢复继承」按钮。
+    unavailable_key: str | None = None
+    if connection_id is not None:
+        if option is None:
+            unavailable_key = "agent_research_session_model_unavailable"
+        elif option.reject_key is not None:
+            unavailable_key = option.reject_key
+    rows.append(
+        ft.Row(
+            [
+                ft.Text(
+                    current_text,
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+                ft.Text(
+                    I18n.get(state.session_model_source_key),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.TEXT_HINT,
+                ),
+            ],
+            spacing=AppStyles.SPACING_SM,
+        )
+    )
+    rows.append(hint_text("agent_research_session_model_hint"))
+    eligible = [item for item in state.model_options if item.eligible]
+    if eligible:
+        selected = connection_id if any(item.connection_id == connection_id for item in eligible) else None
+        rows.append(
+            ft.Dropdown(
+                key="agent_research_session_model_select",
+                value=selected,
+                options=[ft.dropdown.Option(key=item.connection_id, text=item.display_name) for item in eligible],
+                text_size=AppStyles.FONT_SIZE_CAPTION,
+                on_select=lambda e: _select_session_model_value(e.control.value, on_select_model),
+            )
+        )
+    rows.append(
+        ft.TextButton(
+            content=ft.Text(
+                I18n.get("agent_research_session_model_clear"),
+                size=AppStyles.FONT_SIZE_BODY_SM,
+            ),
+            on_click=lambda _e: on_clear_model(),
+        )
+    )
+    if state.session_model_error_key:
+        rows.append(error_text(I18n.get(state.session_model_error_key)))
+    if unavailable_key is not None and unavailable_key != state.session_model_error_key:
+        # 与会话错误同键时只渲染一行，避免重复提示。
+        rows.append(error_text(I18n.get(unavailable_key)))
+    return ft.Column(rows, spacing=AppStyles.SPACING_XS)
+
+
+def _select_session_model_value(value: str | None, handler: Callable[[str], None]) -> None:
+    """下拉清空（``None``/空串）不算选择：忽略空值，避免写入空连接。"""
+
+    if value:
+        handler(value)
+
+
 def build_execution_row(
     node: ExecutionNodeView,
     *,

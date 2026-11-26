@@ -203,6 +203,7 @@ def _build_pages_stack(
     agent_service: Any = None,
     user_scope: str = "local-desktop",
     watchlist_stock_request: tuple[str, int] | None = None,
+    roles_catalog: Any = None,
 ) -> ft.Stack:
     """构造所有页面控件的 ``ft.Stack`` (``visible`` prop 控制显示/隐藏)。
 
@@ -319,6 +320,7 @@ def _build_pages_stack(
                     mcp_lifecycle=mcp_lifecycle,
                     agent_service=agent_service,
                     user_scope=user_scope,
+                    roles_catalog=roles_catalog,
                 ),
                 current_tab == NavTabs.SETTINGS,
             ),
@@ -469,6 +471,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             delivery=resolve_artifact_delivery(agent_wiring),
             cleanup=cleanup_gateway,
             cleanup_unavailable_reason=str(getattr(agent_wiring, "cleanup_failure", "") or "") or None,
+            session_models=getattr(agent_wiring, "session_models", None),
         )
     )
     research_open, set_research_open = ft.use_state(False)
@@ -580,6 +583,18 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         page = _get_page()
         if page is not None and connection_id:
             page.run_task(research_vm.select_model_connection, connection_id)
+
+    def _select_session_model(connection_id: str) -> None:
+        """选择本会话模型连接（写入会话键；对新回合生效）。"""
+        page = _get_page()
+        if page is not None and connection_id:
+            page.run_task(research_vm.select_session_model, connection_id)
+
+    def _clear_session_model() -> None:
+        """清除会话级模型选择（回到角色/路由默认继承）。"""
+        page = _get_page()
+        if page is not None:
+            page.run_task(research_vm.clear_session_model)
 
     def _refresh_usage() -> None:
         """刷新本轮/累计费用与五段耗时（只读投影）。"""
@@ -1395,6 +1410,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             getattr(agent_wiring, "service", None),
             str(getattr(agent_wiring, "user_scope", LOCAL_DESKTOP_USER_SCOPE)),
             watchlist_stock_request=watchlist_stock_request,
+            roles_catalog=getattr(agent_wiring, "role_catalog", None),
         ),
         expand=True,
         padding=AppStyles.SPACING_XL,
@@ -1437,6 +1453,8 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             on_toggle_mcp_scope=research_vm.toggle_mcp_scope,
             on_load_mcp_scope=_load_mcp_scope,
             on_select_model=_select_model,
+            on_select_session_model=_select_session_model,
+            on_clear_session_model=_clear_session_model,
             on_select_role=research_vm.select_role,
             on_add_materials=_pick_materials,
             on_remove_material=_remove_material,

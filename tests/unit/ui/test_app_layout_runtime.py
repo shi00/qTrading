@@ -525,7 +525,12 @@ class TestBuildPagesStackE2E:
         view_mocks["DataExplorerView"].assert_called_once_with(active=False)
         view_mocks["TaskCenterView"].assert_called_once_with(active=False)
         view_mocks["SettingsView"].assert_called_once_with(
-            active=False, target_subtab=None, mcp_lifecycle=None, agent_service=None, user_scope="local-desktop"
+            active=False,
+            target_subtab=None,
+            mcp_lifecycle=None,
+            agent_service=None,
+            user_scope="local-desktop",
+            roles_catalog=None,
         )
         view_mocks["WatchlistView"].assert_called_once_with(active=False, stock_detail_request=None)
 
@@ -563,7 +568,12 @@ class TestBuildPagesStackE2E:
         view_mocks["DataExplorerView"].assert_called_once_with(active=False)
         view_mocks["TaskCenterView"].assert_called_once_with(active=False)
         view_mocks["SettingsView"].assert_called_once_with(
-            active=False, target_subtab=None, mcp_lifecycle=None, agent_service=None, user_scope="local-desktop"
+            active=False,
+            target_subtab=None,
+            mcp_lifecycle=None,
+            agent_service=None,
+            user_scope="local-desktop",
+            roles_catalog=None,
         )
         view_mocks["WatchlistView"].assert_called_once_with(active=False, stock_detail_request=None)
 

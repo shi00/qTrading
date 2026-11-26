@@ -54,6 +54,7 @@ from core.agent_types import (
 
 __all__ = [
     "AgentTurn",
+    "DelegationGuard",
     "DelegationRequest",
     "DelegationResult",
     "DelegationRunner",
@@ -363,6 +364,9 @@ ToolExecutor = Callable[[ToolCall], Awaitable[str | None]]
 DelegationRunner = Callable[[DelegationRequest, DelegationScope], Awaitable[DelegationResult]]
 """子 Agent 执行端口：必须按 ``DelegationScope`` 禁止递归委派。"""
 
+DelegationGuard = Callable[[DelegationRequest], None]
+"""委派校验端口：派发前按角色能力上限复核，越界抛 ``POLICY_DENIED``（原样传播）。"""
+
 
 class ResearchResultStore(Protocol):
     """成果可靠保存端口（生产为 :class:`~data.persistence.daos.agent_dao.AgentDao`）。"""
@@ -547,6 +551,7 @@ class ExecutionLoop:
         plan_tool_names: frozenset[str] = DEFAULT_PLAN_TOOLS,
         answer_messages: DiscussionAnswerRecorder | None = None,
         depth: int = 0,
+        delegation_guard: DelegationGuard | None = None,
     ) -> None:
         if isinstance(depth, bool) or not isinstance(depth, int) or depth not in (0, 1):
             raise ValueError("loop depth must be 0 (main) or 1 (subagent)")
@@ -557,6 +562,7 @@ class ExecutionLoop:
         self._answer_messages = answer_messages
         self._tools = tools
         self._delegate = delegate
+        self._delegation_guard = delegation_guard
         self._limits = limits or LoopLimits()
         self._depth = depth
         self._policy = policy or mode_policy(
@@ -627,6 +633,9 @@ class ExecutionLoop:
                         "delegation budget exhausted",
                         self._identity.execution_id,
                     )
+                # 角色能力上限复核：越界异常原样传播（POLICY_DENIED，不吞没）；未注入即零额外分支。
+                if self._delegation_guard is not None:
+                    self._delegation_guard(request)
                 result = await self._delegate(
                     request,
                     DelegationScope(depth=1, allow_delegation=False),

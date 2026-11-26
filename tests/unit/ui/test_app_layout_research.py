@@ -1532,6 +1532,14 @@ class TestW12ToolbarRouting:
         assert list(page.run_task.call_args.args) == [vm.select_model_connection, "conn-a"]
 
         page.run_task.reset_mock()
+        panel.kwargs["on_select_session_model"]("conn-a")
+        assert list(page.run_task.call_args.args) == [vm.select_session_model, "conn-a"]
+
+        page.run_task.reset_mock()
+        panel.kwargs["on_clear_session_model"]()
+        assert list(page.run_task.call_args.args) == [vm.clear_session_model]
+
+        page.run_task.reset_mock()
         panel.kwargs["on_select_model"]("")
         assert page.run_task.call_args_list == [], "空连接不得调度选择命令"
 
@@ -1673,6 +1681,8 @@ class TestHandlersWithoutPage:
             ("on_refresh_usage", ()),
             ("on_refresh_budget", ()),
             ("on_select_model", ("conn-a",)),
+            ("on_select_session_model", ("conn-a",)),
+            ("on_clear_session_model", ()),
             ("on_load_sessions", ()),
             ("on_open_session", ("s-1",)),
             ("on_create_session", ()),

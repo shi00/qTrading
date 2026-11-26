@@ -597,3 +597,80 @@ def test_plan_decision_drops_non_text_summary_and_non_text_dependencies() -> Non
     decoded = decode_json_doc(decision.structured_fields or "{}")
     assert isinstance(decoded, dict)
     assert decoded["steps"] == [{"id": "s1", "content": "梳理行业", "depends_on": ["s0"]}]
+
+
+# ---------------------------------------------------------------------------
+# 会话模型选择（首选连接）透传路由解析
+# ---------------------------------------------------------------------------
+
+
+class _PreferredRouteRecorder:
+    """记录首选连接的零副作用路由替身（仅支持关键字调用形态）。"""
+
+    def __init__(self, route: Any) -> None:
+        self.route = route
+        self.preferred: list[str | None] = []
+
+    async def __call__(self, *, preferred_connection_id: str | None = None) -> Any:
+        self.preferred.append(preferred_connection_id)
+        return self.route
+
+
+@pytest.mark.asyncio
+async def test_request_preferred_connection_is_threaded_to_route_resolution() -> None:
+    route = _PreferredRouteRecorder(_ROUTE)
+    invoker = _Invoker(_TurnEnvelope(answer=_AnswerDraft(answer="答")))
+    request = MainTurnRequest(
+        identity=_IDENTITY,
+        mode=Mode.DISCUSS,
+        prompt_text="问题",
+        preferred_connection_id="conn-local",
+    )
+
+    decision = await run_governed_turn(
+        request,
+        _CONTEXT,
+        resolve_route=cast(Any, route),
+        build_model=_ModelFactory(),
+        invoke_agent=invoker,
+    )
+
+    assert decision.action is LoopAction.ANSWER
+    assert route.preferred == ["conn-local"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_preferred_connection_overrides_request_value() -> None:
+    route = _PreferredRouteRecorder(_ROUTE)
+    invoker = _Invoker(_TurnEnvelope(answer=_AnswerDraft(answer="答")))
+    request = MainTurnRequest(
+        identity=_IDENTITY,
+        mode=Mode.DISCUSS,
+        prompt_text="问题",
+        preferred_connection_id="conn-local",
+    )
+
+    await run_governed_turn(
+        request,
+        _CONTEXT,
+        preferred_connection_id="conn-override",
+        resolve_route=cast(Any, route),
+        build_model=_ModelFactory(),
+        invoke_agent=invoker,
+    )
+
+    assert route.preferred == ["conn-override"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_route_threads_preferred_connection_to_executor(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[str] = []
+
+    async def _fake_resolve(scenario_id: str, *, preferred_connection_id: str | None = None) -> Any:
+        captured.append(f"{scenario_id}|{preferred_connection_id}")
+        return _ROUTE
+
+    monkeypatch.setattr("services.ai_service.scenario_dispatch.resolve_executor", _fake_resolve)
+
+    assert await _resolve_route("conn-local") is _ROUTE
+    assert captured == ["agent_research|conn-local"]

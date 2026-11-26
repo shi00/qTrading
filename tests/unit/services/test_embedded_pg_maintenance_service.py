@@ -1796,6 +1796,13 @@ class TestProcessTreeHelpersUnit:
                 "services.embedded_pg_maintenance_service.subprocess.Popen",
                 return_value=proc_mock,
             ),
+            # 假进程（pid=4321）没有真实进程组：POSIX 下真实探测会命中宿主同号进程组，
+            # 使「取消未完成（进程树未证明停止）」分支先于 target 状态判定触发。
+            # 本用例只验证 target stat 失败后的分类，故固定「整树已停止」这一前提。
+            patch(
+                "services.embedded_pg_maintenance_service._wait_process_tree_exit",
+                return_value=True,
+            ),
             patch.object(Path, "stat", fake_stat),
         ):
             with pytest.raises(EmbeddedPgMaintenanceCancelUnprovenError, match="无法确认输出文件状态"):

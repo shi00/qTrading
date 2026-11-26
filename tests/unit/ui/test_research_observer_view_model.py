@@ -1364,6 +1364,7 @@ class _FakeIntake:
         self.question_calls: list[tuple[str, Any, str | None, int | None, tuple[Any, ...]]] = []
         self.plan_calls: list[tuple[Any, str, int]] = []
         self.revise_calls: list[tuple[str | None, str | None]] = []
+        self.model_connection_calls: list[str | None] = []
 
     async def start_question(
         self,
@@ -1378,9 +1379,11 @@ class _FakeIntake:
         mcp_selection: tuple[Any, ...] = (),
         revise_source_message_id: str | None = None,
         revise_causal_cutoff_message_id: str | None = None,
+        model_connection_id: str | None = None,
     ) -> Any:
         self.question_calls.append((text, mode, session_id, expected_revision, mcp_selection))
         self.revise_calls.append((revise_source_message_id, revise_causal_cutoff_message_id))
+        self.model_connection_calls.append(model_connection_id)
         if self.error is not None:
             raise self.error
         return SimpleNamespace(receipt=object(), dispatch=self.dispatch, plan_reference=None)
