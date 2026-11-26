@@ -90,6 +90,7 @@ from services.agent_service.loop import (
     ToolExecutor,
     TurnDecision,
 )
+from services.agent_service.session_model import SessionModelStore
 from utils.sanitizers import DataSanitizer
 
 __all__ = [
@@ -442,6 +443,8 @@ class MainTurnRequest:
     plan_tool_names: frozenset[str] = DEFAULT_PLAN_TOOLS
     #: 本轮之前已答复且尚未消费的澄清问答（由受理入口取一次，只注入不重取）。
     clarification_answers: tuple[ClarificationAnswerFact, ...] = ()
+    #: 会话/角色层解析出的首选模型连接；``None`` 表示继承场景路由默认顺序。
+    preferred_connection_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.identity, LoopIdentity):
@@ -450,6 +453,10 @@ class MainTurnRequest:
             raise ValueError("main turn mode must be a Mode")
         if not isinstance(self.prompt_text, str) or not self.prompt_text.strip():
             raise ValueError("main turn prompt_text must be non-empty text")
+        if self.preferred_connection_id is not None and (
+            not isinstance(self.preferred_connection_id, str) or not self.preferred_connection_id.strip()
+        ):
+            raise ValueError("main turn preferred_connection_id must be non-empty text")
         for name in ("read_tool_names", "plan_tool_names"):
             value = getattr(self, name)
             if not isinstance(value, frozenset) or any(not isinstance(item, str) or not item for item in value):
@@ -669,6 +676,7 @@ class MainTurnIntake:
         source_display_name: str = "Agent",
         main_turn: MainTurnRunner | None = None,
         dispatcher: ResearchDispatcher | None = None,
+        session_models: SessionModelStore | None = None,
     ) -> None:
         self._facade = facade
         self._manifest_reader = manifest_reader
@@ -677,6 +685,7 @@ class MainTurnIntake:
         self._source_display_name = source_display_name
         self._main_turn = main_turn
         self._dispatcher = dispatcher
+        self._session_models = session_models
 
     async def start_question(
         self,
@@ -691,6 +700,7 @@ class MainTurnIntake:
         mcp_selection: Sequence[MCPServiceIdentity] = (),
         revise_source_message_id: str | None = None,
         revise_causal_cutoff_message_id: str | None = None,
+        model_connection_id: str | None = None,
     ) -> MainTurnIntakeResult:
         """首问：必要时新建会话，冻结本次手选集合后受理。
 
@@ -699,6 +709,11 @@ class MainTurnIntake:
         能力来源据此 fail-closed；不由本入口补默认角色/能力）。``revise_*`` 为
         可选修订声明：仅编辑并重发旧问题时声明，随新意图在同一受理事务内原子
         切换因果头（不覆盖原消息历史）；缺省表示普通新问题。
+
+        ``model_connection_id`` 为本次显式模型选择：非 ``None`` 时先写入会话键
+        （未注入会话模型存储即显式失败，不静默丢弃用户选择）；``None`` 时读该
+        会话既有值作为本回合首选（恢复的会话沿用上次选择），无值即继承默认。
+        读取/写入失败原样传播，不吞（``CancelledError`` 亦如此，R2）。
         """
 
         question = text.strip()
@@ -726,6 +741,7 @@ class MainTurnIntake:
                     title=self._title(question, session_title),
                 )
             )
+        preferred_connection_id = await self._resolve_preferred_connection(target_session, model_connection_id)
         manifest = self._base_manifest(
             text=question,
             mode=mode,
@@ -740,6 +756,7 @@ class MainTurnIntake:
                 expected_revision=revision,
                 manifest=manifest,
                 question=question,
+                preferred_connection_id=preferred_connection_id,
                 revise_source_message_id=revise_source_message_id,
                 revise_causal_cutoff_message_id=revise_causal_cutoff_message_id,
             )
@@ -762,6 +779,7 @@ class MainTurnIntake:
                     mode=mode,
                     prompt_text=question,
                     clarification_answers=clarification_answers,
+                    preferred_connection_id=preferred_connection_id,
                 )
             )
         except asyncio.CancelledError:
@@ -782,6 +800,30 @@ class MainTurnIntake:
             clarification_decision_id=clarification_decision_id,
         )
 
+    async def _resolve_preferred_connection(self, session_id: str, model_connection_id: str | None) -> str | None:
+        """解析本回合首选模型连接：显式选择即写入会话键，否则沿用既有会话值。
+
+        - 显式 ``model_connection_id``：未注入会话模型存储即显式失败（不得静默
+          丢弃用户选择，R21）；写入成功返回该值；
+        - ``None``：已注入存储则读取该会话既有值（恢复会话沿用上次选择），
+          未注入即 ``None``（继承默认）；
+        - 端口异常（含 ``CancelledError``）原样传播，不吞（R2）。
+        """
+
+        if model_connection_id is not None:
+            store = self._session_models
+            if store is None:
+                raise AgentServiceError(
+                    AgentErrorCode.CONFIG_UNAVAILABLE,
+                    "session model store not wired",
+                    self._user_scope,
+                )
+            await store.write(session_id, model_connection_id)
+            return model_connection_id
+        if self._session_models is None:
+            return None
+        return await self._session_models.read(session_id)
+
     async def _start_execute_question(
         self,
         session_id: str,
@@ -789,6 +831,7 @@ class MainTurnIntake:
         expected_revision: int,
         manifest: CanonicalJson,
         question: str,
+        preferred_connection_id: str | None = None,
         revise_source_message_id: str | None = None,
         revise_causal_cutoff_message_id: str | None = None,
     ) -> MainTurnIntakeResult:
@@ -796,7 +839,8 @@ class MainTurnIntake:
 
         任何一步不可得都返回结构化 ``PLAN_UNAVAILABLE``（cause 参数），零派发：
         未接主回合、模型失败、无步骤/非法步骤均不投递，不把空计划冒充已启动。
-        ``CancelledError`` 原样传播（R2）。
+        计划回合沿用本会话的首选连接（``preferred_connection_id``），与讨论/计划
+        路径共享同一模型解析链。``CancelledError`` 原样传播（R2）。
         """
 
         result = await self._accept(
@@ -822,6 +866,7 @@ class MainTurnIntake:
                     mode=Mode.PLAN,
                     prompt_text=question,
                     clarification_answers=clarification_answers,
+                    preferred_connection_id=preferred_connection_id,
                 )
             )
         except asyncio.CancelledError:

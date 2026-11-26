@@ -70,6 +70,7 @@ from services.agent_service.main_turn import (
     plan_spec_from_proposal,
     plan_steps_from_structured_fields,
 )
+from services.agent_service.session_model import SessionModelStore
 
 _IDENTITY = LoopIdentity(
     user_scope="u1",
@@ -1137,6 +1138,178 @@ async def test_intake_execute_clarification_zero_dispatch_without_plan_failure()
     assert result.clarification_decision_id == "decision-clarify-1"
     assert result.main_turn is not None
     assert result.main_turn.clarification is decision
+
+
+# ---------------------------------------------------------------------------
+# 会话模型选择：首问写入会话键并进入执行链
+# ---------------------------------------------------------------------------
+
+
+class _SessionModelPort:
+    """会话模型键的字典端口替身（记录读写以做精确断言）。"""
+
+    def __init__(self, values: dict[str, str] | None = None) -> None:
+        self.values = dict(values or {})
+        self.reads: list[str] = []
+        self.writes: list[tuple[str, str]] = []
+
+    async def read(self, key: str) -> str | None:
+        self.reads.append(key)
+        return self.values.get(key)
+
+    async def write(self, key: str, value: str) -> None:
+        self.writes.append((key, value))
+        self.values[key] = value
+
+    async def delete(self, key: str) -> bool:
+        return self.values.pop(key, None) is not None
+
+
+class _FailingSessionModelPort:
+    """读取失败的端口替身（验证失败传播而非静默降级）。"""
+
+    async def read(self, key: str) -> str | None:
+        raise RuntimeError("session model store down")
+
+    async def write(self, key: str, value: str) -> None:
+        raise AssertionError("must not write")
+
+    async def delete(self, key: str) -> bool:
+        return False
+
+
+def _session_models(port: Any) -> SessionModelStore:
+    return SessionModelStore(read=port.read, write=port.write, delete=port.delete)
+
+
+@pytest.mark.asyncio
+async def test_intake_first_question_persists_explicit_model_selection() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    port = _SessionModelPort()
+    runner = _MainTurnRunnerStub()
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+        session_models=_session_models(port),
+    )
+
+    result = await intake.start_question("研究银行股", mode=Mode.DISCUSS, model_connection_id="conn-local")
+
+    assert port.writes == [(f"agent.session.model.{result.session_id}", "conn-local")]
+    assert runner.requests[0].preferred_connection_id == "conn-local"
+
+
+@pytest.mark.asyncio
+async def test_intake_without_selection_inherits_existing_session_model() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    port = _SessionModelPort({"agent.session.model.session-1": "conn-resumed"})
+    runner = _MainTurnRunnerStub()
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+        session_models=_session_models(port),
+    )
+
+    await intake.start_question("继续分析", mode=Mode.DISCUSS, session_id="session-1")
+
+    assert port.writes == []
+    assert port.reads == ["agent.session.model.session-1"]
+    assert runner.requests[0].preferred_connection_id == "conn-resumed"
+
+
+@pytest.mark.asyncio
+async def test_intake_without_selection_and_without_session_value_keeps_inheritance() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    port = _SessionModelPort()
+    runner = _MainTurnRunnerStub()
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+        session_models=_session_models(port),
+    )
+
+    await intake.start_question("继续分析", mode=Mode.DISCUSS, session_id="session-1")
+
+    assert port.writes == []
+    assert runner.requests[0].preferred_connection_id is None
+
+
+@pytest.mark.asyncio
+async def test_intake_explicit_selection_without_store_fails_closed() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    intake = MainTurnIntake(facade, manifest_reader=_ManifestDao(None), user_scope="u1")
+
+    with pytest.raises(AgentServiceError) as excinfo:
+        await intake.start_question(
+            "研究银行股", mode=Mode.DISCUSS, session_id="session-1", model_connection_id="conn-local"
+        )
+
+    assert excinfo.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+    assert excinfo.value.sanitized_message == "session model store not wired"
+    assert facade.requests == []
+
+
+@pytest.mark.asyncio
+async def test_intake_session_model_read_failure_propagates() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    runner = _MainTurnRunnerStub()
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+        session_models=_session_models(_FailingSessionModelPort()),
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await intake.start_question("继续分析", mode=Mode.DISCUSS, session_id="session-1")
+
+    assert str(excinfo.value) == "session model store down"
+    assert facade.requests == []
+
+
+@pytest.mark.asyncio
+async def test_intake_execute_first_question_threads_model_selection_into_plan_turn() -> None:
+    facade = _IntakeFacade(_intake_receipt())
+    port = _SessionModelPort()
+    runner = _MainTurnRunnerStub(plan_reference=PlanReference(execution_id="execution-1", plan_revision=1))
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+        session_models=_session_models(port),
+    )
+
+    await intake.start_question(
+        "执行研究",
+        mode=Mode.EXECUTE,
+        session_id="session-1",
+        role_prompt_refs=(("researcher", "v1"),),
+        skill_refs=(("skill-a", "2"),),
+        model_connection_id="conn-local",
+    )
+
+    assert port.writes == [("agent.session.model.session-1", "conn-local")]
+    assert runner.requests[0].preferred_connection_id == "conn-local"
+
+
+def test_request_rejects_blank_preferred_connection_id() -> None:
+    with pytest.raises(ValueError) as excinfo:
+        MainTurnRequest(
+            identity=_IDENTITY,
+            mode=Mode.DISCUSS,
+            prompt_text="问题",
+            preferred_connection_id="   ",
+        )
+
+    assert str(excinfo.value) == "main turn preferred_connection_id must be non-empty text"
 
 
 @pytest.mark.asyncio
