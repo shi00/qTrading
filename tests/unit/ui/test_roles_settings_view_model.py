@@ -23,6 +23,10 @@ from ui.viewmodels.roles_settings_view_model import (
     RolesSettingsState,
     RolesSettingsViewModel,
 )
+from utils.config_models import ROLE_PROMPT_DEFAULTS
+
+#: 新建/复制的期望模板正文（与设计 §7.1 的 ``sub`` 模板一致，取自配置正本）。
+SUB_TEMPLATE = ROLE_PROMPT_DEFAULTS["sub"][0]
 
 pytestmark = pytest.mark.unit
 
@@ -91,9 +95,7 @@ class _RecordingCatalog:
     async def copy_from(
         self, source_role_id: str, role_id: str, display_name: str, *, updated_by: str
     ) -> RoleDefinition:
-        self.calls.append(("copy_from", source_role_id, role_id, display_name, updated_by))
-        self._maybe_raise("copy_from")
-        return await self._service.copy_from(source_role_id, role_id, display_name, updated_by=updated_by)
+        raise AssertionError("VM 不应再调用 copy_from（草稿即真相）")
 
     async def update(
         self,
@@ -204,15 +206,15 @@ async def test_load_failure_maps_unavailable_and_keeps_pending_false() -> None:
 
 
 @pytest.mark.asyncio
-async def test_begin_create_starts_empty_draft_then_save_creates_r1() -> None:
+async def test_begin_create_prefills_sub_template_then_save_creates_r1() -> None:
     catalog = _RecordingCatalog()
     vm = await _vm_with(catalog)
     catalog.calls.clear()
 
     vm.begin_create()
     draft = vm.state.editing
-    assert draft is not None
-    assert (draft.role_id, draft.display_name, draft.prompt_body) == ("", "", "")
+    assert (draft.role_id, draft.display_name) == ("", "")
+    assert draft.prompt_body == SUB_TEMPLATE
     assert draft.model_connection_id is None
     assert draft.role_version is None
     assert draft.is_new is True
@@ -252,7 +254,6 @@ async def test_copy_prefills_source_prompt_and_model_then_saves_copy() -> None:
     await vm.copy("risk_reviewer")
 
     draft = vm.state.editing
-    assert draft is not None
     assert draft.role_id == ""
     assert draft.display_name == ""
     assert draft.prompt_body == "只核对风险。"
@@ -268,14 +269,66 @@ async def test_copy_prefills_source_prompt_and_model_then_saves_copy() -> None:
 
     assert await vm.save() is True
 
+    # 草稿即真相：create_new 落草稿正文，再单写模型覆盖（不改正文、不升版本）
     assert catalog.calls == [
-        ("copy_from", "risk_reviewer", "audit_viewer", "审计复核", "local"),
+        ("create_new", "audit_viewer", "审计复核", "只核对风险。", "local"),
+        ("update", "audit_viewer", None, None, "conn-1", "r1", "local"),
         ("list_roles",),
     ]
     assert vm.state.notice_key == "agent_roles_created"
     copied = _row(vm.state, "audit_viewer")
     assert copied.role_version == "r1"
     assert copied.model_connection_id == "conn-1"
+
+
+@pytest.mark.asyncio
+async def test_copy_draft_body_edit_is_persisted() -> None:
+    catalog = _RecordingCatalog()
+    await catalog.seed("risk_reviewer", "风险复核", "旧正文")
+    vm = await _vm_with(catalog)
+    await vm.copy("risk_reviewer")
+    vm.set_role_id("audit_viewer")
+    vm.set_display_name("审计复核")
+    vm.set_prompt_body("复制后改写正文")
+
+    assert await vm.save() is True
+
+    stored = await catalog.resolve("audit_viewer")
+    assert stored.prompt_body == "复制后改写正文"
+    assert _row(vm.state, "audit_viewer").role_version == "r1"
+
+
+@pytest.mark.asyncio
+async def test_copy_draft_model_override_is_persisted() -> None:
+    catalog = _RecordingCatalog()
+    await catalog.seed("risk_reviewer", "风险复核", "旧正文")
+    vm = await _vm_with(catalog)
+    await vm.copy("risk_reviewer")
+    vm.set_role_id("audit_viewer")
+    vm.set_display_name("审计复核")
+    vm.set_model_connection_id("conn-2")
+
+    assert await vm.save() is True
+
+    stored = await catalog.resolve("audit_viewer")
+    assert stored.model_connection_id == "conn-2"
+    assert stored.role_version == "r1"
+
+
+@pytest.mark.asyncio
+async def test_copy_preset_uses_static_template_without_service() -> None:
+    catalog = _RecordingCatalog()
+    vm = await _vm_with(catalog)
+    catalog.calls.clear()
+
+    await vm.copy("sub")
+
+    draft = vm.state.editing
+    assert draft.prompt_body == SUB_TEMPLATE
+    assert draft.model_connection_id is None
+    assert draft.copy_from == "sub"
+    assert vm.state.error_key is None
+    assert catalog.calls == []
 
 
 @pytest.mark.asyncio
@@ -423,6 +476,23 @@ async def test_conflict_keeps_editing_for_retry() -> None:
 
 
 @pytest.mark.asyncio
+async def test_duplicate_role_id_maps_to_invalid_key() -> None:
+    catalog = _RecordingCatalog()
+    await catalog.seed("risk_reviewer", "风险复核", "旧正文")
+    vm = await _vm_with(catalog)
+
+    vm.begin_create()
+    vm.set_role_id("risk_reviewer")
+    vm.set_display_name("重复角色")
+    vm.set_prompt_body("正文")
+
+    assert await vm.save() is False
+
+    assert vm.state.error_key == "agent_roles_invalid"
+    assert vm.state.editing.role_id == "risk_reviewer"
+
+
+@pytest.mark.asyncio
 async def test_input_invalid_maps_to_invalid_key() -> None:
     catalog = _RecordingCatalog()
     await catalog.seed("risk_reviewer", "风险复核", "旧正文")
@@ -468,6 +538,20 @@ async def test_unexpected_error_maps_to_save_failed_key() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancelled_error_propagates_from_load() -> None:
+    catalog = _RecordingCatalog()
+    catalog.raise_on["list_roles"] = asyncio.CancelledError()
+    vm = RolesSettingsViewModel(catalog=catalog)
+
+    with pytest.raises(asyncio.CancelledError) as excinfo:
+        await vm.load()
+
+    assert type(excinfo.value) is asyncio.CancelledError
+    assert vm.state.pending is False
+    assert vm.state.roles == ()
+
+
+@pytest.mark.asyncio
 async def test_cancelled_error_propagates_from_save() -> None:
     catalog = _RecordingCatalog()
     await catalog.seed("risk_reviewer", "风险复核", "旧正文")
@@ -504,7 +588,7 @@ async def test_toggle_status_disables_then_enables() -> None:
 
     catalog.calls.clear()
     assert vm.state.pending is False
-    await vm.toggle_status("risk_reviewer")
+    assert await vm.toggle_status("risk_reviewer") is True
 
     assert catalog.calls == [("disable", "risk_reviewer", "r1"), ("list_roles",)]
     assert vm.state.notice_key == "agent_roles_disabled"
@@ -513,7 +597,7 @@ async def test_toggle_status_disables_then_enables() -> None:
     assert _row(vm.state, "risk_reviewer").status == "disabled"
 
     catalog.calls.clear()
-    await vm.toggle_status("risk_reviewer")
+    assert await vm.toggle_status("risk_reviewer") is True
 
     assert catalog.calls == [("enable", "risk_reviewer", "r1"), ("list_roles",)]
     assert vm.state.notice_key == "agent_roles_enabled"
@@ -529,9 +613,36 @@ async def test_toggle_status_conflict_maps_and_keeps_row_status() -> None:
         AgentErrorCode.REVISION_CONFLICT, "role_version_conflict", "risk_reviewer"
     )
 
-    await vm.toggle_status("risk_reviewer")
+    assert await vm.toggle_status("risk_reviewer") is False
 
     assert vm.state.error_key == "agent_roles_conflict"
+    assert vm.state.pending is False
+    assert _row(vm.state, "risk_reviewer").status == "active"
+
+
+@pytest.mark.asyncio
+async def test_toggle_unknown_role_maps_unavailable() -> None:
+    catalog = _RecordingCatalog()
+    vm = await _vm_with(catalog)
+    catalog.calls.clear()
+
+    assert await vm.toggle_status("ghost_role") is False
+
+    assert vm.state.error_key == "agent_roles_unavailable"
+    assert catalog.calls == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_error_propagates_from_toggle_status() -> None:
+    catalog = _RecordingCatalog()
+    await catalog.seed("risk_reviewer", "风险复核", "旧正文")
+    vm = await _vm_with(catalog)
+    catalog.raise_on["disable"] = asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError) as excinfo:
+        await vm.toggle_status("risk_reviewer")
+
+    assert type(excinfo.value) is asyncio.CancelledError
     assert vm.state.pending is False
     assert _row(vm.state, "risk_reviewer").status == "active"
 
@@ -542,8 +653,8 @@ async def test_toggle_status_ignores_preset_rows() -> None:
     vm = await _vm_with(catalog)
     catalog.calls.clear()
 
-    await vm.toggle_status("main")
-    await vm.toggle_status("sub")
+    assert await vm.toggle_status("main") is False
+    assert await vm.toggle_status("sub") is False
 
     assert catalog.calls == []
     assert vm.state.error_key is None

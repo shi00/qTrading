@@ -22,6 +22,7 @@ from typing import Any, Protocol
 
 from core.agent_types import AgentErrorCode, AgentServiceError, RoleDefinition
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
+from utils.config_models import ROLE_PROMPT_DEFAULTS
 from utils.error_classifier import classify_error, classify_severity
 from utils.sanitizers import DataSanitizer
 
@@ -29,6 +30,9 @@ logger = logging.getLogger(__name__)
 
 #: 预置角色（固定置顶、只读，展示名由 View 用 i18n key 渲染）。
 PRESET_ROLE_IDS: tuple[str, ...] = ("main", "sub")
+
+#: 新建/复制的静态模板正文（设计 §7.1「新建以 ``sub`` 为模板复制」）。
+SUB_ROLE_PROMPT_TEMPLATE: str = ROLE_PROMPT_DEFAULTS["sub"][0]
 
 STATUS_ACTIVE = "active"
 STATUS_DISABLED = "disabled"
@@ -44,6 +48,12 @@ ERROR_PRESET_READONLY = "agent_roles_preset_readonly"
 ERROR_UNAVAILABLE = "agent_roles_unavailable"
 ERROR_SAVE_FAILED = "agent_roles_save_failed"
 
+#: 修订冲突的服务原因 → 更精确的页面错误键（未识别原因统一落到冲突）。
+CONFLICT_REASON_KEYS: dict[str, str] = {
+    "role_already_exists": "agent_roles_invalid",
+    "role_not_found": "agent_roles_unavailable",
+}
+
 NOTICE_CREATED = "agent_roles_created"
 NOTICE_SAVED = "agent_roles_saved"
 NOTICE_VERSION_BUMPED = "agent_roles_version_bumped"
@@ -56,10 +66,6 @@ class RoleCatalogPort(Protocol):
 
     async def create_new(
         self, role_id: str, display_name: str, prompt_body: str, *, updated_by: str
-    ) -> RoleDefinition: ...
-
-    async def copy_from(
-        self, source_role_id: str, role_id: str, display_name: str, *, updated_by: str
     ) -> RoleDefinition: ...
 
     async def update(
@@ -194,13 +200,13 @@ class RolesSettingsViewModel(ObservableViewModelMixin[RolesSettingsState]):
     # -- 编辑态命令 ---------------------------------------------------------
 
     def begin_create(self) -> None:
-        """进入空白新建草稿。"""
+        """进入新建草稿（正文预填 ``sub`` 预置模板，设计 §7.1）。"""
 
         self._set_state(
             editing=RoleDraft(
                 role_id="",
                 display_name="",
-                prompt_body="",
+                prompt_body=SUB_ROLE_PROMPT_TEMPLATE,
                 model_connection_id=None,
                 role_version=None,
                 is_new=True,
@@ -211,8 +217,27 @@ class RolesSettingsViewModel(ObservableViewModelMixin[RolesSettingsState]):
         )
 
     async def copy(self, source_role_id: str) -> None:
-        """以来源角色的提示词与模型覆盖为模板预填新建草稿。"""
+        """以来源角色的提示词与模型覆盖为模板预填新建草稿。
 
+        预置角色直接使用静态 ``sub`` 模板（不读目录，目录中无预置定义）；
+        自定义角色读目录定义。
+        """
+
+        if source_role_id in PRESET_ROLE_IDS:
+            self._set_state(
+                editing=RoleDraft(
+                    role_id="",
+                    display_name="",
+                    prompt_body=SUB_ROLE_PROMPT_TEMPLATE,
+                    model_connection_id=None,
+                    role_version=None,
+                    is_new=True,
+                    copy_from=source_role_id,
+                ),
+                error_key=None,
+                notice_key=None,
+            )
+            return
         definition = await self._resolve_definition(source_role_id)
         if definition is None:
             return
@@ -291,13 +316,17 @@ class RolesSettingsViewModel(ObservableViewModelMixin[RolesSettingsState]):
         self._set_state(pending=True, error_key=None, notice_key=None)
         try:
             if draft.is_new:
-                if draft.copy_from is not None:
-                    await self._catalog.copy_from(
-                        draft.copy_from, draft.role_id, draft.display_name, updated_by=self._updated_by
-                    )
-                else:
-                    await self._catalog.create_new(
-                        draft.role_id, draft.display_name, draft.prompt_body, updated_by=self._updated_by
+                # 草稿即真相：复制不再重读来源，正文/名称按用户编辑值落库
+                await self._catalog.create_new(
+                    draft.role_id, draft.display_name, draft.prompt_body, updated_by=self._updated_by
+                )
+                if draft.model_connection_id is not None:
+                    # 新建固定 r1；模型覆盖单独写入（不改提示词、不升版本）
+                    await self._catalog.update(
+                        draft.role_id,
+                        model_connection_id=draft.model_connection_id,
+                        expected_version="r1",
+                        updated_by=self._updated_by,
                     )
                 notice_key = NOTICE_CREATED
             else:
@@ -324,22 +353,26 @@ class RolesSettingsViewModel(ObservableViewModelMixin[RolesSettingsState]):
         except Exception as exc:
             self._fail(exc, fallback_key=ERROR_SAVE_FAILED)
             return False
-        self._set_state(editing=None, notice_key=notice_key, pending=False)
+        # 先清草稿与提示，再由 load() 统一收敛 pending（避免 True→False→True 抖动）
+        self._set_state(editing=None, notice_key=notice_key)
         await self.load()
         return True
 
     # -- 启停 ---------------------------------------------------------------
 
-    async def toggle_status(self, role_id: str) -> None:
-        """按当前状态停用/启用角色；预置行不处理。"""
+    async def toggle_status(self, role_id: str) -> bool:
+        """按当前状态停用/启用角色；预置行不处理，未知角色报不可用。"""
 
         row = next((item for item in self._state.roles if item.role_id == role_id), None)
-        if row is None or row.is_preset:
-            return
+        if row is None:
+            self._set_state(error_key=ERROR_UNAVAILABLE)
+            return False
+        if row.is_preset:
+            return False
         if row.role_version is None:
             # 自定义行缺版本无法做 CAS（构造契约不可达）：如实报不可用
             self._set_state(error_key=ERROR_UNAVAILABLE)
-            return
+            return False
         expected_version = row.role_version
         disabling = row.status == STATUS_ACTIVE
         self._set_state(pending=True, error_key=None, notice_key=None)
@@ -353,28 +386,34 @@ class RolesSettingsViewModel(ObservableViewModelMixin[RolesSettingsState]):
             raise  # R2
         except AgentServiceError as exc:
             self._fail(exc, fallback_key=ERROR_SAVE_FAILED)
-            return
+            return False
         except Exception as exc:
             self._fail(exc, fallback_key=ERROR_SAVE_FAILED)
-            return
+            return False
         self._set_state(
             notice_key=NOTICE_DISABLED if disabling else NOTICE_ENABLED,
             pending=False,
         )
         await self.load()
+        return True
 
     # -- 内部 ---------------------------------------------------------------
 
-    def _fail(self, exc: BaseException, *, fallback_key: str) -> None:
+    @staticmethod
+    def _error_key_for(exc: AgentServiceError, fallback_key: str) -> str:
+        """错误码 → i18n key；修订冲突按服务原因细分（重复 id / 不存在）。"""
+
+        if exc.code is AgentErrorCode.REVISION_CONFLICT:
+            return CONFLICT_REASON_KEYS.get(exc.sanitized_message, "agent_roles_conflict")
+        return ERROR_KEYS.get(exc.code, fallback_key)
+
+    def _fail(self, exc: Exception, *, fallback_key: str) -> None:
         """失败统一出口：错误码映射 + 分类记录 + 脱敏，不伪装成功（R9/R21）。"""
 
-        key = fallback_key
-        if isinstance(exc, AgentServiceError):
-            key = ERROR_KEYS.get(exc.code, fallback_key)
-        sanitized = DataSanitizer.sanitize_error(exc if isinstance(exc, Exception) else str(exc))
-        error = exc if isinstance(exc, Exception) else Exception(str(exc))
-        severity = classify_severity(error, "agent_role")
-        code = classify_error(error, "agent_role").get("code", "unknown")
+        key = self._error_key_for(exc, fallback_key) if isinstance(exc, AgentServiceError) else fallback_key
+        sanitized = DataSanitizer.sanitize_error(exc)
+        severity = classify_severity(exc, "agent_role")
+        code = classify_error(exc, "agent_role").get("code", "unknown")
         if severity == "system":
             logger.error("[RolesSettingsVM] operation failed code=%s: %s", code, sanitized)
         else:
@@ -383,6 +422,7 @@ class RolesSettingsViewModel(ObservableViewModelMixin[RolesSettingsState]):
 
 
 __all__ = [
+    "CONFLICT_REASON_KEYS",
     "ERROR_KEYS",
     "ERROR_PRESET_READONLY",
     "ERROR_SAVE_FAILED",
@@ -395,6 +435,7 @@ __all__ = [
     "PRESET_ROLE_IDS",
     "STATUS_ACTIVE",
     "STATUS_DISABLED",
+    "SUB_ROLE_PROMPT_TEMPLATE",
     "RoleCatalogPort",
     "RoleDraft",
     "RoleRow",
