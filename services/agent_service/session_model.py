@@ -56,13 +56,14 @@ class SessionModelStore:
         text = await self._read(self.key_for(session_id))
         if text is None:
             return None
-        if not text.strip():
+        normalized = text.strip()
+        if not normalized:
             raise AgentServiceError(
                 AgentErrorCode.CONFIG_UNAVAILABLE,
                 _MODEL_SELECTION_DECODABLE,
                 session_id,
             )
-        return text
+        return normalized
 
     async def write(self, session_id: str, connection_id: str) -> None:
         """写入会话模型选择；连接 ID 必须是非空字符串（含非纯空白）。"""

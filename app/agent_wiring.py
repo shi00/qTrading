@@ -46,7 +46,7 @@ import json
 import logging
 import os
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from importlib.metadata import version
 from pathlib import Path
@@ -163,6 +163,9 @@ AGENT_RUNTIME_DATABASE: Final[str] = "qtrading_agent_runtime"
 
 #: 桌面单用户域（Agent 用户域唯一来源）。
 _LOCAL_USER_SCOPE: Final[str] = "local-desktop"
+
+#: 研究场景 id（角色模型覆盖只允许该场景路由候选；与连接目录配置同源）。
+_AGENT_RESEARCH_SCENARIO_ID: Final[str] = "agent_research"
 
 #: 关闭前置预算（先于 watchdog/do_cleanup 执行，须有界以免拖死退出路径）。
 AGENT_CLOSE_PRELUDE_TIMEOUT_S: Final[float] = 15.0
@@ -1007,12 +1010,35 @@ def _build_role_services(engine: Any) -> tuple[RoleCatalogService, SessionModelS
         write_if=lambda key, expected, value: set_app_state_if(engine, key, expected, value),
         scan=lambda prefix: list_app_state(engine, prefix),
     )
+
+    async def _validate_model_connection(connection_id: str) -> bool:
+        """连接必须命中 ``agent_research`` 路由候选且已启用（服务层只读快照）。"""
+
+        from services.model_configuration_service import ModelConfigurationService
+
+        snapshot = await ModelConfigurationService().get_snapshot()
+        for route in getattr(snapshot, "scenario_routes", ()) or ():
+            if not isinstance(route, Mapping) or route.get("scenario_id") != _AGENT_RESEARCH_SCENARIO_ID:
+                continue
+            if not route.get("enabled"):
+                return False
+            if connection_id not in (route.get("candidates") or ()):
+                return False
+            for connection in getattr(snapshot, "connections", ()) or ():
+                if isinstance(connection, Mapping) and connection.get("connection_id") == connection_id:
+                    return bool(connection.get("enabled", True))
+            return False
+        return False
+
     session_models = SessionModelStore(
         read=lambda key: get_app_state(engine, key),
         write=lambda key, value: set_app_state(engine, key, value, strict=True),
         delete=lambda key: delete_app_state(engine, key),
     )
-    return RoleCatalogService(role_store), session_models
+    return (
+        RoleCatalogService(role_store, model_connection_validator=_validate_model_connection),
+        session_models,
+    )
 
 
 async def wire_agent_runtime(

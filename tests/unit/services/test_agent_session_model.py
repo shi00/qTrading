@@ -58,6 +58,16 @@ async def test_round_trip_and_clear(store: tuple[SessionModelStore, dict[str, st
 
 
 @pytest.mark.asyncio
+async def test_read_strips_surrounding_whitespace(store: tuple[SessionModelStore, dict[str, str]]) -> None:
+    """历史值带前后空白时归一后再返回（空白本身仍视为损坏）。"""
+
+    catalog, data = store
+    data["agent.session.model.session-1"] = "  conn-local\t"
+
+    assert await catalog.read("session-1") == "conn-local"
+
+
+@pytest.mark.asyncio
 async def test_blank_stored_value_is_corruption(store: tuple[SessionModelStore, dict[str, str]]) -> None:
     """空串/仅空白不得伪装成「未配置」（R21）。"""
 

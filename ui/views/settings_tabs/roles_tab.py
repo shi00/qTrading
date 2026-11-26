@@ -418,6 +418,9 @@ def _RolesTabBody(show_snack: Callable[[str], None], catalog: Any) -> ft.Control
     ft.use_effect(_trigger_load, dependencies=[])
 
     def _announce() -> None:
+        if state.error_key is None and state.notice_key is not None:
+            # 保存/启停成功即复位加载失败标记，避免「已保存」与「目录不可用」并存。
+            set_load_failed(False)
         for key in (state.error_key, state.notice_key):
             text = _message_text(key)
             if text:

@@ -166,6 +166,50 @@ def test_derive_role_policy_preserves_model_connection_id() -> None:
     assert policy.model_connection_id == "conn-reasoning"
 
 
+def test_stale_role_version_assignments_are_empty() -> None:
+    """旧版本分配不再生效：按空集计入，不沿用旧权限（设计 §4.3）。"""
+
+    definition = decode_role_definition(_wire(role_version="r2"))
+    skills = RoleSkillAssignment(
+        role_id="risk_reviewer",
+        role_version="r1",
+        enabled=(SkillVersionRef(skill_id="checklist", version=3),),
+        defaults=(),
+    )
+    mcp = RoleMCPAssignment(
+        role_id="risk_reviewer",
+        role_version="r1",
+        available=(RoleMCPServiceBinding(identity=MCPServiceIdentity(service_id="market", config_version=2)),),
+    )
+
+    policy = derive_role_policy(definition, skills=skills, mcp=mcp)
+
+    assert policy.allowed_skills == frozenset()
+    assert policy.allowed_mcp == frozenset()
+
+
+def test_cross_role_assignments_are_empty() -> None:
+    """跨角色分配同样不生效（不因 role_id 相同前缀而误用）。"""
+
+    definition = decode_role_definition(_wire(role_id="risk_reviewer"))
+    skills = RoleSkillAssignment(
+        role_id="other_role",
+        role_version="r1",
+        enabled=(SkillVersionRef(skill_id="checklist", version=3),),
+        defaults=(),
+    )
+    mcp = RoleMCPAssignment(
+        role_id="other_role",
+        role_version="r1",
+        available=(RoleMCPServiceBinding(identity=MCPServiceIdentity(service_id="market", config_version=2)),),
+    )
+
+    policy = derive_role_policy(definition, skills=skills, mcp=mcp)
+
+    assert policy.allowed_skills == frozenset()
+    assert policy.allowed_mcp == frozenset()
+
+
 @pytest.mark.asyncio
 async def test_loop_rejects_delegation_outside_role_capabilities() -> None:
     request = DelegationRequest(node_id="n1", target="梳理财务", role_key="risk_reviewer")

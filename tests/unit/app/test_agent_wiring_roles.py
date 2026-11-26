@@ -120,3 +120,37 @@ def test_role_fields_default_to_none_without_side_effects(monkeypatch: pytest.Mo
 
     assert wiring.role_catalog is None
     assert wiring.session_models is None
+
+
+async def test_model_connection_validator_requires_research_route_and_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """角色模型覆盖校验：只接受 ``agent_research`` 路由候选且已启用的连接。"""
+
+    from services import model_configuration_service as model_config_mod
+
+    class _FakeModelConfigurationService:
+        async def get_snapshot(self) -> Any:
+            return SimpleNamespace(
+                scenario_routes=(
+                    {
+                        "scenario_id": "agent_research",
+                        "enabled": True,
+                        "candidates": ("conn-a", "conn-off"),
+                    },
+                ),
+                connections=(
+                    {"connection_id": "conn-a", "enabled": True},
+                    {"connection_id": "conn-off", "enabled": False},
+                    {"connection_id": "conn-other", "enabled": True},
+                ),
+            )
+
+    monkeypatch.setattr(model_config_mod, "ModelConfigurationService", _FakeModelConfigurationService)
+
+    catalog, _session_models = _build_role_services(object())
+    validator = catalog._model_connection_validator
+    assert validator is not None
+
+    assert await validator("conn-a") is True
+    assert await validator("conn-off") is False, "停用连接不得作为角色覆盖"
+    assert await validator("conn-other") is False, "路由外连接不得作为角色覆盖"
+    assert await validator("conn-missing") is False

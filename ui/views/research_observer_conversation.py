@@ -456,7 +456,8 @@ def build_session_model_bar(
     )
     if state.session_model_error_key:
         rows.append(error_text(I18n.get(state.session_model_error_key)))
-    if unavailable_key is not None:
+    if unavailable_key is not None and unavailable_key != state.session_model_error_key:
+        # 与会话错误同键时只渲染一行，避免重复提示。
         rows.append(error_text(I18n.get(unavailable_key)))
     return ft.Column(rows, spacing=AppStyles.SPACING_XS)
 

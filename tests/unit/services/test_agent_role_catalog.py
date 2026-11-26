@@ -301,3 +301,85 @@ async def test_list_roles_undecodable_is_unavailable(store: tuple[RoleCatalogSto
     assert type(excinfo.value) is AgentServiceError
     assert excinfo.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
     assert excinfo.value.sanitized_message == "role definition is not decodable"
+
+
+async def _seed_role_with_model(catalog: RoleCatalogStore) -> None:
+    """以未接线校验的实例种入一个带模型覆盖的源角色。"""
+
+    service = RoleCatalogService(catalog)
+    await service.create_new("source_role", "源角色", "复核风险", updated_by="tester")
+    await service.update("source_role", model_connection_id="model-1", expected_version="r1", updated_by="tester")
+
+
+@pytest.mark.asyncio
+async def test_copy_from_rejects_unavailable_model_connection(
+    store: tuple[RoleCatalogStore, dict[str, str]],
+) -> None:
+    catalog, data = store
+    await _seed_role_with_model(catalog)
+    checked: list[str] = []
+
+    async def _reject(connection_id: str) -> bool:
+        checked.append(connection_id)
+        return False
+
+    service = RoleCatalogService(catalog, model_connection_validator=_reject)
+    with pytest.raises(AgentServiceError) as excinfo:
+        await service.copy_from("source_role", "risk_reviewer", "风险复核", updated_by="copier")
+    assert type(excinfo.value) is AgentServiceError
+    assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+    assert excinfo.value.sanitized_message == "model_connection_unavailable"
+    assert excinfo.value.identity == "risk_reviewer"
+    assert checked == ["model-1"]
+    assert "agent.role.def.risk_reviewer" not in data
+
+
+@pytest.mark.asyncio
+async def test_copy_from_accepts_available_model_connection(
+    store: tuple[RoleCatalogStore, dict[str, str]],
+) -> None:
+    catalog, data = store
+    await _seed_role_with_model(catalog)
+
+    async def _accept(_connection_id: str) -> bool:
+        return True
+
+    service = RoleCatalogService(catalog, model_connection_validator=_accept)
+    copied = await service.copy_from("source_role", "risk_reviewer", "风险复核", updated_by="copier")
+    assert copied.model_connection_id == "model-1"
+    assert "agent.role.def.risk_reviewer" in data
+
+
+@pytest.mark.asyncio
+async def test_update_rejects_unavailable_model_connection_without_write(
+    store: tuple[RoleCatalogStore, dict[str, str]],
+) -> None:
+    catalog, data = store
+    service = RoleCatalogService(catalog)
+    await service.create_new("risk_reviewer", "风险复核", "v1", updated_by="tester")
+    before = data["agent.role.def.risk_reviewer"]
+
+    async def _reject(_connection_id: str) -> bool:
+        return False
+
+    guarded = RoleCatalogService(catalog, model_connection_validator=_reject)
+    with pytest.raises(AgentServiceError) as excinfo:
+        await guarded.update(
+            "risk_reviewer", model_connection_id="conn-gone", expected_version="r1", updated_by="tester"
+        )
+    assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+    assert excinfo.value.sanitized_message == "model_connection_unavailable"
+    assert data["agent.role.def.risk_reviewer"] == before
+
+
+@pytest.mark.asyncio
+async def test_validator_none_keeps_existing_behavior(store: tuple[RoleCatalogStore, dict[str, str]]) -> None:
+    """未接线校验端口时不阻断（视为未接线，不伪装成功也不额外拒绝）。"""
+
+    catalog, _ = store
+    service = RoleCatalogService(catalog)
+    await service.create_new("risk_reviewer", "风险复核", "v1", updated_by="tester")
+    updated = await service.update(
+        "risk_reviewer", model_connection_id="model-1", expected_version="r1", updated_by="tester"
+    )
+    assert updated.model_connection_id == "model-1"

@@ -5535,6 +5535,9 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             self._mcp_identities[key] for key in self._state.mcp_scope_selected if key in self._mcp_identities
         )
         try:
+            # 新会话没有会话键时，当前工具栏选择即用户所选项（真正写入会话键）；
+            # 两者皆无则保持继承（None，不伪造默认连接）。
+            model_connection_id = self._state.session_model_connection_id or self._state.model_selection
             result = await intake.start_question(
                 text,
                 mode=Mode(self._state.composer_mode),
@@ -5542,7 +5545,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
                 expected_revision=(self._state.session_draft_revision if self._state.session_id is not None else 0),
                 role_prompt_refs=role_refs,
                 mcp_selection=selection,
-                model_connection_id=self._state.session_model_connection_id,
+                model_connection_id=model_connection_id,
             )
         except asyncio.CancelledError:
             self._set_state(composer_pending=False)

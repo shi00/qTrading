@@ -186,8 +186,7 @@ def SettingsView(
         active: 当前 tab 是否激活 (控制副作用执行)。
         target_subtab: 深链子页请求 ``(subtab_key, seq)`` 或 None。
         mcp_lifecycle: MCP 服务生命周期门面；None 时「MCP 服务」页只显示不可用原因。
-        roles_catalog: 角色目录服务；None 时「角色管理」页只显示不可用原因。
-            组合根接线在后续任务补上，本任务仅保留透传入口。
+        roles_catalog: 角色目录服务；None 时「角色管理」页如实显示不可用；组合根已接线。
     """
     current_tab, set_current_tab = ft.use_state(0)
     visited_tabs, set_visited_tabs = ft.use_state({0})

@@ -132,8 +132,16 @@ class RoleCatalogStore:
 class RoleCatalogService:
     """角色目录的唯一读写入口（CAS + 版本递增 + prompt 校验）。"""
 
-    def __init__(self, store: RoleCatalogStore) -> None:
+    def __init__(
+        self,
+        store: RoleCatalogStore,
+        *,
+        model_connection_validator: Callable[[str], Awaitable[bool]] | None = None,
+    ) -> None:
         self._store = store
+        #: 角色模型覆盖校验端口（研究场景候选且启用）；``None`` 视为未接线、
+        #: 不阻断写入（组合根未注入时保持既有行为，报告中如实登记）。
+        self._model_connection_validator = model_connection_validator
 
     async def create_new(
         self,
@@ -194,6 +202,7 @@ class RoleCatalogService:
             updated_by=updated_by,
         )
         _validate(definition)
+        await self._ensure_model_connection_allowed(definition.role_id, definition.model_connection_id)
         if not await self._store.create(definition):
             raise AgentServiceError(AgentErrorCode.REVISION_CONFLICT, "role_already_exists", role_id)
         return definition
@@ -226,6 +235,7 @@ class RoleCatalogService:
             updated_by=updated_by,
         )
         _validate(definition)
+        await self._ensure_model_connection_allowed(definition.role_id, definition.model_connection_id)
         if not await self._store.replace(definition, expected_version=expected_version):
             raise AgentServiceError(AgentErrorCode.REVISION_CONFLICT, "role_version_conflict", role_id)
         return definition
@@ -260,6 +270,14 @@ class RoleCatalogService:
         """按 ``role_id`` 读取单个角色；不存在返回 ``None``。"""
 
         return await self._store.load(role_id)
+
+    async def _ensure_model_connection_allowed(self, role_id: str, model_connection_id: str | None) -> None:
+        """模型覆盖必须命中研究场景候选且启用；未接线（``None`` 端口）保持现状。"""
+
+        if model_connection_id is None or self._model_connection_validator is None:
+            return
+        if not await self._model_connection_validator(model_connection_id):
+            raise AgentServiceError(AgentErrorCode.POLICY_DENIED, "model_connection_unavailable", role_id)
 
     async def _load_for_update(self, role_id: str, expected_version: str) -> RoleDefinition:
         """读当前定义并校验版本；不存在或版本不匹配统一按修订冲突拒绝。"""
@@ -310,13 +328,20 @@ def derive_role_policy(
     skills: RoleSkillAssignment | None,
     mcp: RoleMCPAssignment | None,
 ) -> RolePolicy:
-    """角色定义 + 既有分配 → 能力上限；无分配记录即空集（不解释为全部，R21）。"""
+    """角色定义 + 既有分配 → 能力上限；无分配记录即空集（不解释为全部，R21）。
 
+    分配记录必须与定义同 ``role_id`` 且同 ``role_version``：旧版本/跨角色分配
+    视为不再生效，按空集计入（不抛异常、也不沿用旧权限）。
+    """
+
+    skills_active = skills is not None and _assignment_matches(definition, skills)
+    mcp_active = mcp is not None and _assignment_matches(definition, mcp)
     allowed_skills = frozenset(
-        f"skill:{ref.skill_id}@{ref.version}" for ref in (skills.enabled if skills is not None else ())
+        f"skill:{ref.skill_id}@{ref.version}"
+        for ref in (skills.enabled if skills_active and skills is not None else ())
     )
     allowed_mcp = frozenset(
-        f"mcp_scope:{item.identity.stable_key()}" for item in (mcp.available if mcp is not None else ())
+        f"mcp_scope:{item.identity.stable_key()}" for item in (mcp.available if mcp_active and mcp is not None else ())
     )
     return RolePolicy(
         role_id=definition.role_id,
@@ -325,3 +350,12 @@ def derive_role_policy(
         allowed_mcp=allowed_mcp,
         model_connection_id=definition.model_connection_id,
     )
+
+
+def _assignment_matches(
+    definition: RoleDefinition,
+    assignment: RoleSkillAssignment | RoleMCPAssignment,
+) -> bool:
+    """分配记录与角色定义的身份是否一致（版本不可复用，旧分配不再生效）。"""
+
+    return assignment.role_id == definition.role_id and assignment.role_version == definition.role_version

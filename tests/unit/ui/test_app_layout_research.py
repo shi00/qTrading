@@ -1537,7 +1537,7 @@ class TestW12ToolbarRouting:
 
         page.run_task.reset_mock()
         panel.kwargs["on_clear_session_model"]()
-        assert page.run_task.call_args.args[0] == vm.clear_session_model
+        assert list(page.run_task.call_args.args) == [vm.clear_session_model]
 
         page.run_task.reset_mock()
         panel.kwargs["on_select_model"]("")

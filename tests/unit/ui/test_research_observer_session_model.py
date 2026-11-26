@@ -469,12 +469,42 @@ class TestFirstQuestionPassesSessionModel:
     async def test_first_question_without_selection_inherits(self) -> None:
         intake = _RecordingIntake()
         vm = _make_vm(store=_Store(None), intake=intake)
-        await vm.refresh(session_id="s1")
         vm.set_composer_text("研究银行股")
 
         await vm.send_first_question()
 
         assert intake.calls[0]["model_connection_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_first_question_uses_toolbar_selection_for_new_session(self) -> None:
+        """新会话无会话键时，工具栏当前选择必须真正写入首问（否则选值不生效）。"""
+
+        intake = _RecordingIntake()
+        vm = _make_vm(store=_Store(None), intake=intake)
+        await vm.refresh()
+        await vm.load_model_selection()
+        assert vm.state.session_id is None
+        assert vm.state.model_selection == "conn-a"
+        vm.set_composer_text("研究银行股")
+
+        await vm.send_first_question()
+
+        assert intake.calls[0]["model_connection_id"] == "conn-a"
+
+    @pytest.mark.asyncio
+    async def test_first_question_prefers_session_key_over_toolbar_selection(self) -> None:
+        intake = _RecordingIntake()
+        vm = _make_vm(store=_Store("conn-b"), intake=intake)
+        await vm.refresh(session_id="s1")
+        await vm.load_model_selection()
+        await vm.load_session_model("s1")
+        assert vm.state.model_selection == "conn-a"
+        assert vm.state.session_model_connection_id == "conn-b"
+        vm.set_composer_text("研究银行股")
+
+        await vm.send_first_question()
+
+        assert intake.calls[0]["model_connection_id"] == "conn-b"
 
 
 # ----------------------------------------------------------------------
@@ -546,6 +576,22 @@ class TestSessionModelBar:
         bar = build_session_model_bar(state, on_select_model=lambda _v: None, on_clear_model=lambda: None)
 
         assert I18n.get(SESSION_MODEL_UNAVAILABLE_KEY) in _texts(bar)
+
+    def test_bar_dedupes_error_when_keys_match(self) -> None:
+        """会话错误键与不可用提示同键时只渲染一行（不重复提示）。"""
+
+        state = ResearchObserverState(
+            available=True,
+            session_model_available=True,
+            session_model_connection_id="conn-gone",
+            session_model_source_key=SESSION_MODEL_SOURCE_SESSION,
+            session_model_error_key=SESSION_MODEL_UNAVAILABLE_KEY,
+            model_options=(),
+        )
+
+        bar = build_session_model_bar(state, on_select_model=lambda _v: None, on_clear_model=lambda: None)
+
+        assert _texts(bar).count(I18n.get(SESSION_MODEL_UNAVAILABLE_KEY)) == 1
 
     def test_bar_reports_disabled_session_connection_and_keeps_name(self) -> None:
         state = ResearchObserverState(
