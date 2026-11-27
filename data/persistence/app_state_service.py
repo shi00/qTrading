@@ -1,15 +1,37 @@
 import asyncio
 import logging
+import typing
 
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import StatementError
 
 from data.persistence import engine_provider
-from data.persistence.daos.base_dao import BaseDao, EngineDisposedError
+from data.persistence.daos.base_dao import BaseDao, DatabaseQueryError, EngineDisposedError
 from utils.log_decorators import PerfThreshold, log_async_operation
 from data.persistence.models import AppState
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_db_error(exc: BaseException) -> str:
+    """DB 异常安全摘要（R9 / D1-06）：类名 + SQLSTATE + 脱敏描述（剔除绑定参数段）。"""
+    return DataSanitizer.sanitize_db_error(exc)
+
+
+def _raise_sanitized_db_error(exc: Exception, context: str) -> typing.NoReturn:
+    """上抛 DB 异常前的脱敏边界（R9 / D1-06）。
+
+    SQLAlchemy 的 ``StatementError`` 家族把完整绑定参数渲染进异常字符串，且
+    traceback 会原样带出——直接向上传播会让任意带 ``exc_info=True`` 的调用方
+    泄露业务明文。此处转译为 ``DatabaseQueryError`` 并以 ``from None`` 断开
+    原始异常链；类名、SQLSTATE、脱敏描述保留在消息中，定因能力不丢失。
+    非参数型异常原样传播（保持既有类型契约与 traceback）。
+    """
+    if isinstance(exc, StatementError):
+        raise DatabaseQueryError(f"[AppState] Database {context} failed: {_safe_db_error(exc)}") from None
+    raise
 
 
 def _ensure_engine_alive(engine, context: str) -> None:
@@ -52,7 +74,7 @@ async def get_app_state(engine, key: str) -> str | None:
         # R5：生命周期错误不得被 best-effort 捕获降级为「无值」
         raise
     except Exception as e:
-        logger.debug("[AppState] Failed to read key='%s': %s", key, e)
+        logger.debug("[AppState] Failed to read key='%s': %s", key, _safe_db_error(e))
         return None
 
 
@@ -78,8 +100,8 @@ async def list_app_state(engine, prefix: str) -> dict[str, str]:
     except EngineDisposedError:
         raise
     except Exception as e:
-        logger.warning("[AppState] Failed to list prefix='%s': %s", prefix, type(e).__name__)
-        raise
+        logger.warning("[AppState] Failed to list prefix='%s': %s", prefix, _safe_db_error(e))
+        _raise_sanitized_db_error(e, "list")
 
 
 @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
@@ -108,8 +130,8 @@ async def set_app_state(engine, key: str, value: str, *, strict: bool = False) -
         raise
     except Exception as e:
         if strict:
-            raise
-        logger.warning("[AppState] Failed to write key='%s': %s", key, e)
+            _raise_sanitized_db_error(e, "write")
+        logger.warning("[AppState] Failed to write key='%s': %s", key, _safe_db_error(e))
 
 
 @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
@@ -140,8 +162,8 @@ async def set_app_state_if(engine, key: str, expected_value: str | None, value: 
     except EngineDisposedError:
         raise
     except Exception as e:
-        logger.warning("[AppState] Conditional write failed key='%s': %s", key, e)
-        raise
+        logger.warning("[AppState] Conditional write failed key='%s': %s", key, _safe_db_error(e))
+        _raise_sanitized_db_error(e, "conditional write")
 
 
 @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
@@ -164,8 +186,8 @@ async def delete_app_state(engine, key: str) -> bool:
     except EngineDisposedError:
         raise
     except Exception as e:
-        logger.warning("[AppState] Failed to delete key='%s': %s", key, type(e).__name__)
-        raise
+        logger.warning("[AppState] Failed to delete key='%s': %s", key, _safe_db_error(e))
+        _raise_sanitized_db_error(e, "delete")
 
 
 @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
@@ -198,5 +220,5 @@ async def set_app_state_max(engine, key: str, value: str, *, strict: bool = Fals
         raise
     except Exception as e:
         if strict:
-            raise
-        logger.warning("[AppState] Failed to write max key='%s': %s", key, e)
+            _raise_sanitized_db_error(e, "write max")
+        logger.warning("[AppState] Failed to write max key='%s': %s", key, _safe_db_error(e))

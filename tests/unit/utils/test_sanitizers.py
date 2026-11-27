@@ -1335,3 +1335,71 @@ def test_sanitizers_import_does_not_load_pandas(tmp_path, monkeypatch):
     )
     assert result.returncode == 0, f"子进程失败: {result.stderr or result.stdout}"
     assert "OK: pandas not loaded" in result.stdout
+
+
+# D1-06 / R9：SQLAlchemy 绑定参数块剔除。测试内凭据均为显式构造值，非真实密钥（R10）。
+_TEST_BOUND_SECRET = "my-pin"
+_TEST_DSN_PASSWORD = "fake-dsn-password"
+
+
+class _FakePgError(Exception):
+    """模拟 asyncpg 驱动异常（带 sqlstate 属性）。"""
+
+    sqlstate: str
+
+    def __init__(self, message: str, sqlstate: str) -> None:
+        super().__init__(message)
+        self.sqlstate = sqlstate
+
+
+def _make_dbapi_error():
+    """构造携带短凭据与连接串的 SQLAlchemy DBAPIError。"""
+    from sqlalchemy.exc import DBAPIError
+
+    orig = _FakePgError(
+        'duplicate key value violates unique constraint "app_state_pkey"; '
+        f"dsn=postgresql+asyncpg://app_user:{_TEST_DSN_PASSWORD}@db.internal:5432/qtrading",
+        "23505",
+    )
+    return DBAPIError(
+        "INSERT INTO app_state (config_key, config_value) VALUES ($1, $2)",
+        ("config_key", _TEST_BOUND_SECRET),
+        orig,
+    )
+
+
+class TestSanitizeDbError:
+    """D1-06：DB 异常文本中的绑定参数与连接串凭据必须剔除。"""
+
+    def test_sanitize_error_strips_parameters_block(self):
+        text = DataSanitizer.sanitize_error(_make_dbapi_error())
+        assert _TEST_BOUND_SECRET not in text
+        assert "[parameters" not in text
+        assert "Background on this error" not in text
+        assert "duplicate key value violates unique constraint" in text
+        assert _TEST_DSN_PASSWORD not in text
+
+    def test_sanitize_db_error_keeps_class_and_sqlstate(self):
+        summary = DataSanitizer.sanitize_db_error(_make_dbapi_error())
+        assert summary.startswith("DBAPIError (sqlstate=23505):")
+        assert _TEST_BOUND_SECRET not in summary
+        assert "[parameters" not in summary
+        assert _TEST_DSN_PASSWORD not in summary
+
+    def test_sanitize_db_error_accepts_plain_string(self):
+        assert DataSanitizer.sanitize_db_error("plain failure") == "str: plain failure"
+
+    def test_sanitize_error_traceback_strips_parameters_block(self):
+        try:
+            raise _make_dbapi_error()
+        except Exception as exc:
+            text = DataSanitizer.sanitize_error(exc, show_traceback=True)
+
+        assert "Traceback" in text
+        assert _TEST_BOUND_SECRET not in text
+        assert "[parameters" not in text
+
+    def test_sanitize_db_error_truncates_long_text(self):
+        summary = DataSanitizer.sanitize_db_error("x" * 5000)
+        assert len(summary) < 700
+        assert summary.endswith("...(truncated)")

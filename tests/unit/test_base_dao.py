@@ -16,6 +16,7 @@ import numpy as np
 import sqlalchemy as sa
 from decimal import Decimal
 from sqlalchemy import Date
+from sqlalchemy.exc import DBAPIError
 
 from data.persistence.daos.base_dao import (
     BaseDao,
@@ -4129,3 +4130,162 @@ class TestNormalizeRecordsFrame:
         assert records[0]["event_time"] == datetime.datetime(2024, 1, 1, 10, 0, 0)
         assert records[1]["event_time"] is None
         assert _count_real_null(records) == 0
+
+
+# D1-06 / R9：DB 异常绑定参数不得经日志 / traceback / 上抛异常泄露。
+# 测试内凭据均为显式构造值，非真实密钥（R10）。
+_TEST_BOUND_SECRET = "my-pin"
+_TEST_DSN_PASSWORD = "fake-dsn-password"
+
+
+class _FakePgError(Exception):
+    """模拟 asyncpg 驱动异常（带 sqlstate 属性）。"""
+
+    sqlstate: str
+
+    def __init__(self, message: str, sqlstate: str) -> None:
+        super().__init__(message)
+        self.sqlstate = sqlstate
+
+
+def _make_dbapi_error() -> DBAPIError:
+    """构造携带短凭据与连接串的 DBAPIError（模拟 SQLAlchemy 对 asyncpg 的包装）。"""
+    orig = _FakePgError(
+        'duplicate key value violates unique constraint "app_state_pkey"; '
+        f"dsn=postgresql+asyncpg://app_user:{_TEST_DSN_PASSWORD}@db.internal:5432/qtrading",
+        "23505",
+    )
+    return DBAPIError(
+        "INSERT INTO app_state (config_key, config_value) VALUES ($1, $2)",
+        ("config_key", _TEST_BOUND_SECRET),
+        orig,
+    )
+
+
+def _full_log_text(caplog) -> str:
+    """渲染含 exc_info 的完整日志文本（record.getMessage 不含 traceback）。"""
+    formatter = logging.Formatter("%(message)s")
+    return "\n".join(formatter.format(record) for record in caplog.records)
+
+
+class TestDbErrorRedaction:
+    """D1-06 / R9：日志、traceback 与上抛异常均不得含绑定参数明文。"""
+
+    @staticmethod
+    def _assert_no_leak(text: str) -> None:
+        assert _TEST_BOUND_SECRET not in text
+        assert _TEST_DSN_PASSWORD not in text
+
+    @pytest.mark.asyncio
+    async def test_read_db_raises_sanitized_error_without_cause(self, caplog):
+        mock_conn = AsyncMock()
+        mock_conn.exec_driver_sql.side_effect = _make_dbapi_error()
+        dao = BaseDao(_setup_mock_engine_connect(mock_conn))
+
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(DatabaseQueryError) as exc_info:
+                await dao._read_db("SELECT * FROM app_state", suppress_errors=False)
+
+        message = str(exc_info.value)
+        self._assert_no_leak(message)
+        # 诊断要素保留：安全类名 + SQLSTATE
+        assert "DBAPIError" in message
+        assert "sqlstate=23505" in message
+        # 原始异常链断开，调用方以 exc_info=True 记录也不会带出参数块
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__suppress_context__ is True
+        self._assert_no_leak(_full_log_text(caplog))
+
+    @pytest.mark.asyncio
+    async def test_write_db_shared_conn_raises_sanitized_error(self, caplog):
+        mock_conn = AsyncMock()
+        mock_conn.exec_driver_sql.side_effect = _make_dbapi_error()
+        dao = BaseDao(MagicMock())
+
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(DatabaseQueryError) as exc_info:
+                await dao._write_db(
+                    "INSERT INTO app_state VALUES ($1, $2)",
+                    params=("config_key", _TEST_BOUND_SECRET),
+                    conn=mock_conn,
+                )
+
+        message = str(exc_info.value)
+        self._assert_no_leak(message)
+        assert "sqlstate=23505" in message
+        assert exc_info.value.__cause__ is None
+        self._assert_no_leak(_full_log_text(caplog))
+
+    @pytest.mark.asyncio
+    async def test_save_upsert_shared_conn_raises_sanitized_error(self, caplog):
+        mock_conn = AsyncMock()
+        mock_conn.execute.side_effect = _make_dbapi_error()
+        mock_table = MagicMock()
+        mock_table.columns = {}
+        mock_col_a = MagicMock()
+        mock_col_a.name = "a"
+        mock_table.c = {"a": mock_col_a}
+        dao = BaseDao(MagicMock())
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+            caplog.at_level(logging.DEBUG),
+        ):
+            mock_cm._instance = None
+            mock_meta.tables = {"test_table": mock_table}
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"a": 1}], {}))
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+
+            with pytest.raises(DatabaseQueryError) as exc_info:
+                await dao._save_upsert(
+                    pd.DataFrame({"a": [1]}),
+                    "test_table",
+                    ["a"],
+                    ["a"],
+                    conn=mock_conn,
+                )
+
+        message = str(exc_info.value)
+        self._assert_no_leak(message)
+        assert "sqlstate=23505" in message
+        assert exc_info.value.__cause__ is None
+        self._assert_no_leak(_full_log_text(caplog))
+
+    @pytest.mark.asyncio
+    async def test_chunked_execute_raises_sanitized_error(self):
+        async def _failing_db_fn(sql, params, **kwargs):
+            raise _make_dbapi_error()
+
+        with pytest.raises(DatabaseQueryError) as exc_info:
+            await BaseDao._chunked_execute(
+                _failing_db_fn,
+                "SELECT 1 WHERE id IN ({placeholders})",
+                [1, 2],
+            )
+
+        message = str(exc_info.value)
+        self._assert_no_leak(message)
+        assert "sqlstate=23505" in message
+        assert exc_info.value.__cause__ is None
+
+    @pytest.mark.asyncio
+    async def test_guarded_begin_raises_sanitized_error(self):
+        engine = MagicMock()
+        engine.begin.return_value.__aenter__ = AsyncMock(side_effect=_make_dbapi_error())
+        engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+        dao = BaseDao(engine)
+
+        with pytest.raises(DatabaseQueryError) as exc_info:
+            async with dao._guarded_begin():
+                pass  # pragma: no cover - 建事务即失败
+
+        self._assert_no_leak(str(exc_info.value))
+        assert exc_info.value.__cause__ is None
