@@ -22,7 +22,7 @@ from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
-from data.persistence.data_explorer_query_client import DataExplorerQueryClient
+from data.persistence.data_explorer_query_client import DataExplorerQueryClient, FilterValidationError
 from data.sync.base import safe_error  # F5-P3: R9 异常脱敏
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
@@ -33,8 +33,6 @@ _NUMERIC_TYPE_PATTERN = re.compile(
     r"(INT|REAL|FLOAT|DOUBLE|NUMERIC|DECIMAL)",
     re.IGNORECASE,
 )
-
-_DATE_VALUE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Phase 6.3 (FR-UX-006): Export row limit — exporting all data caps at this count
 MAX_EXPORT_ROWS = 50000
@@ -417,6 +415,16 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
         except asyncio.CancelledError:
             logger.warning("[DataExplorerVM] Cancelled during query_data.")
             raise
+        except FilterValidationError as e:
+            # 非法筛选值（按反射列类型解析失败）：给出可读校验提示，不落到裸 DB 异常分类
+            logger.warning("[DataExplorerVM] Invalid filter rejected before DB execution: %s", safe_error(e))
+            if generation == self._table_generation:
+                self._set_state(
+                    error_message=Message("data_filter_invalid", {"detail": safe_error(e)}),
+                    table_rows=(),
+                    total_rows=0,
+                )
+            return pd.DataFrame()
         except Exception as e:
             error_info = classify_error(e, context="db")
             severity = classify_severity(e, context="db")
@@ -472,6 +480,11 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
         except asyncio.CancelledError:
             logger.warning("[DataExplorerVM] Cancelled during query_count.")
             raise
+        except FilterValidationError as e:
+            # 非法筛选值：可读校验提示（同 query_data），不触库即返回 0
+            logger.warning("[DataExplorerVM] Invalid filter rejected before DB execution: %s", safe_error(e))
+            self._set_state(error_message=Message("data_filter_invalid", {"detail": safe_error(e)}))
+            return 0
         except Exception as e:
             error_info = classify_error(e, context="db")
             severity = classify_severity(e, context="db")
@@ -800,12 +813,13 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
         return None
 
     def _build_filters(self) -> list[tuple[str, str, str]]:
-        """Build filter tuples from current filter state."""
+        """Build filter tuples from current filter state.
+
+        日期值保持 ``YYYY-MM-DD``（与 DATE 列的 ``CAST(date AS TEXT)`` 表示一致）；
+        不再按列名剥离连字符——列类型解析与非法值校验由查询客户端按反射类型完成。
+        """
         if self._state.filter_val and self._state.filter_col:
-            val = self._state.filter_val
-            if "date" in self._state.filter_col and _DATE_VALUE_PATTERN.match(val):
-                val = val.replace("-", "")
-            return [(self._state.filter_col, self._state.filter_op, val)]
+            return [(self._state.filter_col, self._state.filter_op, self._state.filter_val)]
         return []
 
     @staticmethod
