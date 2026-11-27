@@ -53,7 +53,53 @@ class DatabaseConfigService:
     DEFAULT_USER = "postgres"
     DEFAULT_DATABASE = "astock"
 
+    # 通配监听地址：不是可连接的单目标地址（连接 0.0.0.0 语义未定义）。
+    _WILDCARD_HOSTS = frozenset({"0.0.0.0", "*"})
+    _IPV6_ANY = "::"
+    _IPV6_LOOPBACK = "::1"
+    # host 直接进入 URL authority 段，这些分隔符会改写 URL 目标（注入），禁止出现。
+    # 方括号允许成对出现（上面已剥离），残留的单个方括号属畸形输入，同样拒绝。
+    _FORBIDDEN_URL_HOST_CHARS = frozenset("@/?#\\[]")
+
     CONNECTION_TIMEOUT = 5.0
+
+    @staticmethod
+    def _strip_ipv6_brackets(host: str) -> str:
+        raw = host.strip()
+        if len(raw) >= 2 and raw.startswith("[") and raw.endswith("]"):
+            return raw[1:-1]
+        return raw
+
+    @classmethod
+    def _render_url_host(cls, host: str) -> str:
+        """把 host 渲染为 URL 主机部分（IPv6 按 RFC 3986 包 ``[]``）。
+
+        Raises:
+            ValueError: host 含 URL 分隔符/空白/控制字符（会改写连接目标）。
+        """
+        raw = cls._strip_ipv6_brackets(host)
+        if not raw:
+            return ""
+        if any(ch in cls._FORBIDDEN_URL_HOST_CHARS for ch in raw) or any(ch.isspace() or ord(ch) < 0x20 for ch in raw):
+            raise ValueError(f"invalid database host: {host!r}")
+        if ":" in raw:
+            return f"[{raw}]"
+        return raw
+
+    @classmethod
+    def host_for_client(cls, host: str) -> str:
+        """把监听/用户输入地址归一为单目标客户端地址（``asyncpg.connect`` 接受的形式）。
+
+        - 去掉 IPv6 方括号（asyncpg 只接受裸地址/主机名）
+        - 通配监听地址（``0.0.0.0`` / ``*`` / ``::``）改写为本机回环：监听地址不等于
+          可连接地址，直接连通配地址语义未定义
+        """
+        raw = cls._strip_ipv6_brackets(host)
+        if raw in cls._WILDCARD_HOSTS:
+            return cls.DEFAULT_HOST
+        if raw == cls._IPV6_ANY:
+            return cls._IPV6_LOOPBACK
+        return raw
 
     @classmethod
     @log_async_operation(operation_name="db_test_connection", threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
@@ -83,7 +129,7 @@ class DatabaseConfigService:
         try:
             conn = await asyncio.wait_for(
                 asyncpg.connect(
-                    host=host,
+                    host=cls.host_for_client(host),
                     port=port,
                     user=user,
                     password=password,
@@ -152,7 +198,7 @@ class DatabaseConfigService:
                 )
                 return ConnectionResult(
                     status=ConnectionStatus.CONNECTION_ERROR,
-                    message=I18n.get("db_err_refused").format(host=host, port=port),
+                    message=I18n.get("db_err_refused").format(host=cls.host_for_client(host), port=port),
                 )
             if "WinError 64" in str(e):
                 logger.warning(
@@ -187,7 +233,7 @@ class DatabaseConfigService:
                     try:
                         verify_conn = await asyncio.wait_for(
                             asyncpg.connect(
-                                host=host,
+                                host=cls.host_for_client(host),
                                 port=port,
                                 user=user,
                                 password=password,
@@ -305,7 +351,7 @@ class DatabaseConfigService:
         try:
             conn = await asyncio.wait_for(
                 asyncpg.connect(
-                    host=host,
+                    host=cls.host_for_client(host),
                     port=port,
                     user=user,
                     password=password,
@@ -358,7 +404,7 @@ class DatabaseConfigService:
         try:
             conn = await asyncio.wait_for(
                 asyncpg.connect(
-                    host=host,
+                    host=cls.host_for_client(host),
                     port=port,
                     user=user,
                     password=password,
@@ -418,12 +464,17 @@ class DatabaseConfigService:
             userinfo 使用 URI 百分号编码（``quote(..., safe="")``），空格编码为
             ``%20``。不得使用表单编码 ``quote_plus``：SQLAlchemy / asyncpg 等驱动
             按 URI 语义解码 userinfo，不会把 ``+`` 还原为空格。
+
+        Note:
+            IPv6 主机（含 zone id，如 ``fe80::1%eth0``）统一包 ``[]``；zone id 的
+            ``%`` 保持字面（SQLAlchemy / asyncpg 不还原 ``%25``，编码后反而连错接口）。
+            host 含 URL 分隔符/空白/控制字符时抛 ``ValueError``（防止改写连接目标）。
         """
         encoded_user = quote(user, safe="")
         encoded_password = quote(password, safe="")
 
         driver = "+asyncpg" if async_driver else ""
-        return f"postgresql{driver}://{encoded_user}:{encoded_password}@{host}:{port}/{database}"
+        return f"postgresql{driver}://{encoded_user}:{encoded_password}@{cls._render_url_host(host)}:{port}/{database}"
 
     @classmethod
     def parse_url(cls, url: str) -> dict | None:
@@ -538,7 +589,7 @@ class DatabaseConfigService:
         try:
             conn = await asyncio.wait_for(
                 asyncpg.connect(
-                    host=host,
+                    host=cls.host_for_client(host),
                     port=port,
                     user=user,
                     password=password,
@@ -579,7 +630,7 @@ class DatabaseConfigService:
         try:
             conn = await asyncio.wait_for(
                 asyncpg.connect(
-                    host=host,
+                    host=cls.host_for_client(host),
                     port=port,
                     user=user,
                     password=password,
