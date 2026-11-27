@@ -30,8 +30,9 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 
 import services.agent_service.context_compaction as compaction
-from core.agent_types import AgentErrorCode, AgentServiceError, is_digest
+from core.agent_types import AgentErrorCode, AgentServiceError, Mode, is_digest
 from core.model_management_types import ExecutionSnapshot, ModelTurnProtocolError
+from services.agent_service.capabilities import ResearchBoundary, ResearchBoundaryPolicy
 from services.agent_service.context_compaction import (
     COMPACTION_BOUNDARY_UNCUTTABLE,
     COMPACTION_BUDGET_INSUFFICIENT,
@@ -42,6 +43,7 @@ from services.agent_service.context_compaction import (
     COMPACTION_SUMMARY_FAILED,
     COMPACTION_SUMMARY_MODEL_UNBOUND,
     COMPACTION_SUMMARY_NO_MODEL,
+    COMPACTION_SUMMARY_SEGMENT_OVER_WINDOW,
     COMPACTION_SUMMARY_TIMEOUT,
     COMPACTION_SUMMARY_TIMEOUT_UNAVAILABLE,
     COMPACTION_SUMMARY_TRUNCATED,
@@ -60,7 +62,9 @@ from services.agent_service.context_compaction import (
     mark_user_correction,
     plan_compaction,
     resolve_compaction_budget,
+    summarize_segment_within_window,
 )
+from services.agent_service.leaf_agent import LeafRequestGuard
 from services.ai_service.token_budget import OUTPUT_RESERVE_TOKENS
 
 pytestmark = pytest.mark.unit
@@ -114,6 +118,25 @@ def _long_history(*, padding: int = 20_000) -> list[ModelMessage]:
         _user("初始目标：给出有依据的结论"),
         _assistant("明白"),
         _user("x" * padding),
+        _assistant("已读取长资料"),
+        _user("继续推进"),
+        _assistant("正在整理"),
+        _user("补充约束：只看主板"),
+        _assistant("收到"),
+        _user("请给结论"),
+    ]
+
+
+def _varied_history(chars: int = 24_000) -> list[ModelMessage]:
+    """含真实可分词长文本的历史（重复单字符会被 tokenizer 高度压缩，不能用于超窗断言）。"""
+
+    unit = "个股研究记录：营收同比、毛利率、经营现金流与行业景气度变化。"
+    text = (unit * (chars // len(unit) + 1))[:chars]
+    return [
+        ModelRequest(parts=[SystemPromptPart(content="你是研究助手，保持引用可核。")]),
+        _user("初始目标：给出有依据的结论"),
+        _assistant("明白"),
+        _user(text),
         _assistant("已读取长资料"),
         _user("继续推进"),
         _assistant("正在整理"),
@@ -719,6 +742,39 @@ class TestToolPairingGuards:
 
         assert is_tool_pair_safe_cut(messages, 2) is True
 
+    def test_orphan_tool_return_in_kept_tail_is_unsafe(self) -> None:
+        """保留区间内的孤立 ToolReturnPart 外发时会被供应商拒绝（D7-02）。"""
+
+        messages: list[ModelMessage] = [_user("a"), _user("b"), _result("missing")]
+
+        assert is_tool_pair_safe_cut(messages, 2) is False
+
+    def test_pending_tool_call_in_kept_tail_is_unsafe(self) -> None:
+        """保留区间内未闭合的 ToolCallPart 永远等不到结果（D7-02）。"""
+
+        messages: list[ModelMessage] = [_user("a"), _user("b"), _call("c1")]
+
+        assert is_tool_pair_safe_cut(messages, 2) is False
+
+    def test_retry_prompt_split_from_its_call_is_unsafe(self) -> None:
+        retry = ModelRequest(parts=[RetryPromptPart(content="请改用代码", tool_call_id="c1")])
+        messages: list[ModelMessage] = [_user("a"), _call("c1"), retry, _user("b")]
+
+        assert is_tool_pair_safe_cut(messages, 2) is False
+        assert is_tool_pair_safe_cut(messages, 3) is True
+
+    def test_retry_feedback_without_id_split_from_call_is_unsafe(self) -> None:
+        retry = ModelRequest(parts=[RetryPromptPart(content="参数不合法")])
+        messages: list[ModelMessage] = [_user("a"), _call("c1"), retry, _user("b")]
+
+        assert is_tool_pair_safe_cut(messages, 2) is False
+        assert is_tool_pair_safe_cut(messages, 3) is True
+
+    def test_matched_pair_wholly_kept_is_safe(self) -> None:
+        messages: list[ModelMessage] = [_user("a"), _call("c1"), _result("c1"), _user("b")]
+
+        assert is_tool_pair_safe_cut(messages, 1) is True
+
 
 class TestSummaryTurnFailures:
     async def test_cancellation_propagates(self) -> None:
@@ -917,3 +973,158 @@ class TestCapabilityBudgetUnknown:
         assert outcomes[-1].compressed is False
         assert outcomes[-1].reason == COMPACTION_BUDGET_UNKNOWN
         assert "x" * 100 in _render_text(calls[0])  # 原文未被改写
+
+
+# ---------------------------------------------------------------------------
+# I. 待摘要片段窗口（摘要模型自身窗口上限）
+# ---------------------------------------------------------------------------
+
+
+class TestSummarySegmentWindow:
+    def test_segment_within_window_is_accepted(self) -> None:
+        messages = _long_history()
+        plan = plan_compaction(messages, keep_messages=6)
+        assert plan.reason is None
+        assert plan.cutoff == 4  # 历史共 10 条、保留尾部 6 条，摘要区间恰为前 4 条
+
+        assert summarize_segment_within_window(messages, 4, _budget()) is True
+
+    def test_segment_over_window_is_rejected(self) -> None:
+        messages = _long_history(padding=40_000)
+        plan = plan_compaction(messages, keep_messages=6)
+        assert plan.reason is None
+        assert plan.cutoff == 4  # 同一历史结构，边界不随填充长度变化
+
+        assert summarize_segment_within_window(messages, 4, _budget()) is False
+
+    def test_unknown_window_segment_is_not_claimed_safe(self) -> None:
+        messages = _long_history()
+
+        assert summarize_segment_within_window(messages, 4, _budget(None)) is False
+
+    async def test_compact_messages_refuses_oversized_summary_request(self) -> None:
+        """片段超摘要窗口时不发出必然超窗的摘要回合，显式保留原文（D7-02）。"""
+
+        messages = _long_history(padding=40_000)
+        outcome = await compact_messages(
+            TestModel(custom_output_text="摘要"),
+            messages,
+            budget=_budget(),
+            timeout_seconds=5.0,
+            estimated_input_tokens=50_000,
+        )
+
+        assert outcome.compressed is False
+        assert outcome.reason == COMPACTION_SUMMARY_SEGMENT_OVER_WINDOW
+        assert outcome.messages == tuple(messages)
+
+
+# ---------------------------------------------------------------------------
+# J. 叶请求三段式门（准入 → 压缩 → 压缩后窗口复核，D7-02）
+# ---------------------------------------------------------------------------
+
+
+def _boundary(
+    *,
+    window: int = 8192,
+    active: frozenset[tuple[str, str]] = frozenset({("src-1", "1")}),
+    disabled: frozenset[tuple[str, str]] = frozenset(),
+) -> ResearchBoundary:
+    async def _policy(_ctx: Any) -> ResearchBoundaryPolicy:
+        return ResearchBoundaryPolicy(
+            mode=Mode.EXECUTE,
+            allowed_tool_names=frozenset(),
+            active_source_keys=active,
+            disabled_source_keys=disabled,
+            context_window_tokens=window,
+            estimated_input_tokens=None,
+            output_reserve_tokens=OUTPUT_RESERVE_TOKENS,
+            tokenizer_model=None,
+        )
+
+    return ResearchBoundary(policy_provider=_policy)
+
+
+def _rendering_model(calls: list[list[ModelMessage]], *, summary: str = "压缩摘要内容") -> FunctionModel:
+    def _fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        calls.append(list(messages))
+        if "<messages>" in _render_text(messages):
+            return ModelResponse(parts=[TextPart(content=summary)])
+        return ModelResponse(parts=[TextPart(content="最终答复")])
+
+    return FunctionModel(_fn)
+
+
+class TestLeafRequestPipeline:
+    @pytest.fixture(autouse=True)
+    def _deterministic_token_estimator(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """会话级 conftest 把 litellm 换成 MagicMock（token_counter 恒返回 1）。
+
+        强制走字符启发式（CJK 1:1），使窗口判定按真实体量发生，而不是被 mock 数值
+        掩盖（不 mock 被测代码本身）。
+        """
+
+        from services.ai_service import token_budget
+
+        monkeypatch.setattr(token_budget, "_litellm_token_counter_error", True)
+
+    async def test_over_window_history_is_compacted_before_window_gate(self) -> None:
+        """超窗请求应由压缩挽救，而不是被边界先行终止（D7-02 顺序回归）。"""
+
+        calls: list[list[ModelMessage]] = []
+        guard = LeafRequestGuard(
+            boundary=_boundary(),
+            compaction=ContextCompaction(budget=_budget(), timeout_seconds=lambda: 5.0),
+        )
+        agent: Agent[None, str] = Agent(_rendering_model(calls), output_type=str, capabilities=(guard,))
+
+        result = await agent.run("继续", message_history=_varied_history(), model_settings={"timeout": 5.0})
+
+        assert result.output == "最终答复"
+        assert len(calls) == 2  # 摘要回合 + 主回合（边界未提前抛错）
+        assert "压缩摘要内容" in _render_text(calls[1])
+        assert "个股研究记录" * 100 not in _render_text(calls[1])
+        assert "请给结论" in _render_text(calls[1])
+
+    async def test_source_disabled_is_denied_before_any_summary_request(self) -> None:
+        calls: list[list[ModelMessage]] = []
+        key = ("src-1", "1")
+        guard = LeafRequestGuard(
+            boundary=_boundary(active=frozenset({key}), disabled=frozenset({key})),
+            compaction=ContextCompaction(budget=_budget(), timeout_seconds=lambda: 5.0),
+        )
+        agent: Agent[None, str] = Agent(_rendering_model(calls), output_type=str, capabilities=(guard,))
+
+        with pytest.raises(AgentServiceError) as exc_info:
+            await agent.run("继续", message_history=_varied_history(), model_settings={"timeout": 5.0})
+
+        assert exc_info.value.code is AgentErrorCode.POLICY_DENIED
+        assert calls == []  # 零外发（摘要也不发）
+
+    async def test_without_compaction_over_window_is_denied_by_final_gate(self) -> None:
+        calls: list[list[ModelMessage]] = []
+        guard = LeafRequestGuard(boundary=_boundary(), compaction=None)
+        agent: Agent[None, str] = Agent(_rendering_model(calls), output_type=str, capabilities=(guard,))
+
+        with pytest.raises(AgentServiceError) as exc_info:
+            await agent.run("继续", message_history=_varied_history(), model_settings={"timeout": 5.0})
+
+        assert exc_info.value.code is AgentErrorCode.POLICY_DENIED
+        assert "context window exceeded" in exc_info.value.sanitized_message
+        assert calls == []
+
+    async def test_summary_segment_over_window_is_denied_without_outbound(self) -> None:
+        calls: list[list[ModelMessage]] = []
+        guard = LeafRequestGuard(
+            boundary=_boundary(window=8192),
+            compaction=ContextCompaction(budget=_budget(), timeout_seconds=lambda: 5.0),
+        )
+        agent: Agent[None, str] = Agent(_rendering_model(calls), output_type=str, capabilities=(guard,))
+        messages = _varied_history(chars=40_000)
+
+        with pytest.raises(AgentServiceError) as exc_info:
+            await agent.run("继续", message_history=messages, model_settings={"timeout": 5.0})
+
+        assert exc_info.value.code is AgentErrorCode.POLICY_DENIED
+        assert "summary segment" in exc_info.value.sanitized_message
+        assert calls == []
