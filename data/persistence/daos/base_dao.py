@@ -39,6 +39,81 @@ class DatabaseQueryError(RuntimeError):
     """Raised when a database query or write operation fails."""
 
 
+class MaintenanceGenerationChangedError(RuntimeError):
+    """超长批 UPSERT 检测到跨维护代际（D1-07）时抛出的受控中止异常。
+
+    ``_save_upsert`` 在记录数超 ``_LONG_TX_ROW_THRESHOLD`` 时逐块独立事务；分块之间
+    若发生清库重建（``clear_all_cache``）或停机（``close``），CacheManager 会递增维护
+    代际并等待在途分块排空。本异常表示当前批次开始后代际已变化（或 DAO 引擎实例被
+    替换），剩余分块被丢弃，避免把维护前准备的陈旧数据写入新库 / 与维护 DDL 抢写。
+
+    已提交的分块保持（UPSERT 幂等），调用方按失败处理并整批重跑即可收敛；
+    ``suppress_errors=True`` 时按写库异常语义返回 -1（结果未知），不静默返回成功行数。
+    """
+
+
+class MaintenanceBarrier:
+    """维护代际（epoch）与在途写入排空计数（D1-07）。
+
+    生命周期：CacheManager 进入维护窗口（``clear_all_cache`` / ``close``）时先
+    ``clear`` 维护事件阻塞新写入，再调用 :meth:`bump_epoch` 递增代际，并
+    ``await wait_drained()`` 等待已进入事务的长批分块写完；维护完成并 ``set``
+    维护事件后，被阻塞的写入恢复，长批通过代际比较发现跨代际并中止。
+
+    并发模型：本对象经 ``get_loop_local`` 按事件循环隔离（R11），所有计数读写都
+    发生在同一事件循环线程内，且方法内部无 ``await``，因此天然原子，无需额外锁。
+    多事件循环（如 web 多 session）各自持有独立实例，与 loop-local 维护事件一致。
+
+    代际回绕：CPython ``int`` 为任意精度，不存在数值回绕；判定一律使用 ``==`` / ``!=``
+    相等比较，不依赖大小有序。
+    """
+
+    __slots__ = ("_active", "_drained", "_epoch")
+
+    def __init__(self) -> None:
+        self._epoch = 0
+        self._active = 0
+        self._drained = asyncio.Event()
+        self._drained.set()
+
+    @property
+    def epoch(self) -> int:
+        """单调递增的维护代际；仅相等比较有意义。"""
+        return self._epoch
+
+    def bump_epoch(self) -> int:
+        """递增维护代际（进入维护窗口时由 CacheManager 调用）。"""
+        self._epoch += 1
+        return self._epoch
+
+    def begin_write(self) -> None:
+        """登记一个已进入（或即将进入）单块事务的写入，阻止维护窗口提前排空。"""
+        self._active += 1
+        self._drained.clear()
+
+    def end_write(self) -> None:
+        """回收写入登记；必须与 :meth:`begin_write` 配对（在 finally 中调用）。"""
+        if self._active > 0:
+            self._active -= 1
+        if self._active == 0:
+            self._drained.set()
+
+    async def wait_drained(self, timeout: float) -> bool:
+        """等待在途写入排空。
+
+        Returns:
+            True 表示已排空；False 表示超过 ``timeout`` 仍有在途写入（调用方决定是
+            继续维护还是中止；不在此处永久阻塞，避免维护与写入互相拖死）。
+        """
+        if self._active == 0:
+            return True
+        try:
+            await asyncio.wait_for(self._drained.wait(), timeout=timeout)
+        except TimeoutError:
+            return False
+        return True
+
+
 _IN_CHUNK_SIZE = 500
 _UPSERT_CHUNK_SIZE = 500
 # review03-C2: 超过该行数时 _save_upsert 改为每块独立事务（UPSERT 幂等，重跑安全）
@@ -497,6 +572,11 @@ class BaseDao:
 
         return get_loop_local("basedao_maint_event", _factory)
 
+    @classmethod
+    def _get_maintenance_barrier(cls) -> MaintenanceBarrier:
+        """按事件循环获取维护代际/排空屏障（与 ``_get_maintenance_event`` 同域，R11）。"""
+        return get_loop_local("basedao_maint_barrier", MaintenanceBarrier)
+
     def __init__(self, engine: typing.Any):
         self.engine = engine
 
@@ -728,6 +808,11 @@ class BaseDao:
 
         await self._wait_maintenance_guard(context="upsert")
 
+        # D1-07: 记录起始维护代际与引擎引用。超长批的分块事务之间的 await 是维护窗口
+        # 可插入点——跨代际（清库重建 / 停机）后必须立即中止剩余分块，禁止陈旧数据写新库。
+        start_epoch = self._get_maintenance_barrier().epoch
+        start_engine = self.engine
+
         table = Base.metadata.tables.get(table_name)
         if table is None:
             logger.error(
@@ -872,10 +957,27 @@ class BaseDao:
                     # review03-C2: 超大批量时每块独立事务（依赖 UPSERT 幂等性保证重跑安全）。
                     # 避免数十秒级长事务阻塞 vacuum/DDL、增大取消时回滚成本；
                     # 中段失败时前 N 块已提交，可在日志看到已提交行数后重跑收敛。
+                    # D1-07: 分块之间是维护窗口可插入点——每块开事务前重新等待维护事件、
+                    # 复查引擎并校验维护代际/引擎身份，跨代际立即中止（不抢写、不跨库写）。
+                    # 排空计数登记与事务在同一 try/finally 内配对，取消/异常路径均回收。
+                    barrier = self._get_maintenance_barrier()
                     for i in range(0, len(records), _UPSERT_CHUNK_SIZE):
                         chunk = records[i : i + _UPSERT_CHUNK_SIZE]
-                        async with self.engine.begin() as tx_conn:
-                            await tx_conn.execute(stmt, chunk)
+                        await self._wait_maintenance_guard(context="upsert:chunk")
+                        self._check_engine(context="upsert:chunk")
+                        if self.engine is not start_engine or barrier.epoch != start_epoch:
+                            raise MaintenanceGenerationChangedError(
+                                f"[{self.__class__.__name__}] UPSERT '{table_name}' aborted at chunk "
+                                f"offset {i}/{len(records)}: maintenance window changed DB generation "
+                                f"(epoch {start_epoch} -> {barrier.epoch}) or engine instance; remaining "
+                                f"chunks discarded (committed {total_written} rows)."
+                            )
+                        barrier.begin_write()
+                        try:
+                            async with self.engine.begin() as tx_conn:
+                                await tx_conn.execute(stmt, chunk)
+                        finally:
+                            barrier.end_write()
                         total_written += len(chunk)
                 else:
                     async with self.engine.begin() as tx_conn:
@@ -925,6 +1027,10 @@ class BaseDao:
                 table_name,
             )
             # CancelledError is a control flow signal, MUST strictly propagate it
+            raise
+        except EngineDisposedError:
+            # R5: 引擎释放异常必须传播，不得被 suppress_errors 吞成 -1（结果未知会被
+            # 调用方误当作可容忍失败），也不得伪装成 DatabaseQueryError 绕过重连/降级路径。
             raise
         except Exception as e:
             elapsed = (time.perf_counter() - start_time) * 1000
