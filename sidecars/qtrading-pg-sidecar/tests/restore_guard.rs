@@ -290,6 +290,33 @@ fn test_restore_rejects_orphan_postgres_then_succeeds_after_stop() {
         baks[0].path().join("PG_VERSION").exists(),
         "the .bak copy must preserve the original cluster"
     );
+
+    // D1-13：切换后的 state.json 属于新集群实例——旧实例诊断归档为历史，
+    // 不得被新集群继承（last_start_error/last_stop_mode/kill_fallback_count 混同）。
+    let state_path = data_dir
+        .parent()
+        .unwrap()
+        .join("runtime")
+        .join("state.json");
+    let st: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&state_path).expect("restored state.json must exist"),
+    )
+    .expect("state.json must be valid JSON");
+    assert_eq!(st["kill_fallback_count"], 0);
+    assert!(st["last_start_error"].is_null(), "state: {st}");
+    assert!(st["last_stop_mode"].is_null(), "state: {st}");
+    assert!(
+        st["cluster_instance_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "restored cluster must get a fresh cluster_instance_id: {st}"
+    );
+    assert!(
+        st["archived_clusters"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty()),
+        "old cluster diagnostics must be archived, not silently dropped: {st}"
+    );
 }
 
 /// sidecar 与 postgres 均死亡（真双死、stale pid 残留）→ 无活实例，restore 仍可恢复。

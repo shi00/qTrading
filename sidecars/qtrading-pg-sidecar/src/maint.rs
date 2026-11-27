@@ -1515,6 +1515,137 @@ fn verify_target_credentials(target_layout: &Layout, password: &str) -> Result<(
     }
 }
 
+// ---- 备份目录原子切换（D1-13） ----
+//
+// `.bak-<ts>` 只到秒级：同秒内重复 restore 或系统时钟回拨都会撞名。Unix 的 `rename`
+// 会覆盖目标，Windows 则报「已存在」→ 最后一步切换失败时原目录已被改名，留下半完成
+// 状态。因此备份改名必须用平台级「不覆盖」原语，冲突时换 `-1`…`-15` 后缀重试。
+
+/// `.bak` 换名上限（base 被占时依次尝试 `-1`…`-15`，与恢复目录同款上限）。
+const BAK_DIR_ATTEMPTS: u8 = 16;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn c_path(path: &Path) -> std::io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "路径包含 NUL 字节，无法传给 rename 系统调用",
+        )
+    })
+}
+
+/// 平台原子「不覆盖」重命名：目标已存在时失败，绝不覆盖。
+#[cfg(target_os = "linux")]
+fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    let from_c = c_path(from)?;
+    let to_c = c_path(to)?;
+    // SAFETY: 两个 C 字符串在调用期间均有效；AT_FDCWD 表示相对当前工作目录解析。
+    let rc = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            from_c.as_ptr(),
+            libc::AT_FDCWD,
+            to_c.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// 平台原子「不覆盖」重命名：目标已存在时失败，绝不覆盖。
+#[cfg(target_os = "macos")]
+fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    let from_c = c_path(from)?;
+    let to_c = c_path(to)?;
+    // SAFETY: 同上；RENAME_EXCL 表示目标存在即失败。
+    let rc = unsafe { libc::renamex_np(from_c.as_ptr(), to_c.as_ptr(), libc::RENAME_EXCL) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// 平台原子「不覆盖」重命名：目标已存在时失败，绝不覆盖。
+#[cfg(windows)]
+fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+    let from_w = wide(from);
+    let to_w = wide(to);
+    // SAFETY: 两个宽字符串均以 NUL 结尾且在调用期间有效；flags=0 表示不带
+    // MOVEFILE_REPLACE_EXISTING（不覆盖既有目标）也不跨卷复制。
+    let ok = unsafe { MoveFileExW(from_w.as_ptr(), to_w.as_ptr(), 0) };
+    if ok != 0 {
+        Ok(())
+    } else {
+        // SAFETY: 仅读取本线程最近一次 Win32 错误码。
+        let err = unsafe { GetLastError() };
+        Err(std::io::Error::from_raw_os_error(err as i32))
+    }
+}
+
+/// 平台原子「不覆盖」重命名：目标已存在时失败，绝不覆盖。
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn rename_noreplace(_from: &Path, _to: &Path) -> std::io::Result<()> {
+    // 其他平台没有原子「不覆盖」重命名：fail closed，绝不静默覆盖既有备份目录。
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "当前平台不支持原子不覆盖重命名",
+    ))
+}
+
+/// 把目录原子改名为 `base`（被占时依次尝试 `-1`…`-15`），返回实际使用的路径。
+fn rename_to_free_sibling(source: &Path, base: &Path) -> Result<PathBuf, u8> {
+    for attempt in 0..BAK_DIR_ATTEMPTS {
+        let target = if attempt == 0 {
+            base.to_path_buf()
+        } else {
+            sibling_with_suffix(base, &format!("-{attempt}"))
+        };
+        match rename_noreplace(source, &target) {
+            Ok(()) => {
+                if attempt > 0 {
+                    eprintln!(
+                        "[sidecar] 备份目录 {} 已存在，改用 {}（不覆盖既有备份）",
+                        base.display(),
+                        target.display()
+                    );
+                }
+                return Ok(target);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                eprintln!(
+                    "[sidecar] 备份改名失败 {} → {}: {e}",
+                    source.display(),
+                    target.display()
+                );
+                return Err(exit_codes::DUMP_RESTORE_FAILED);
+            }
+        }
+    }
+    eprintln!(
+        "[sidecar] 连续 {} 个备份目录名均被占用，无法完成切换：{}",
+        BAK_DIR_ATTEMPTS,
+        base.display()
+    );
+    Err(exit_codes::DUMP_RESTORE_FAILED)
+}
+
 // ---- 恢复目录所有权（D07-006） ----
 
 /// 默认恢复目录名的换名上限（`<data>.restore-<ts>` 被占时依次尝试 `-1`…）。
@@ -1811,16 +1942,21 @@ pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
             .file_name()
             .unwrap_or_default()
             .to_string_lossy();
-        let bak = layout.data_dir.with_file_name(format!("{name}.bak-{ts}"));
-        swap_restore_dir(&layout.data_dir, &restore_dir.path, &bak)?;
-        // cluster 身份已更换：重置 state 避免残留旧实例的 running/port 误导 status
+        let bak_base = layout.data_dir.with_file_name(format!("{name}.bak-{ts}"));
+        // 原子不覆盖改名：同秒/时钟回拨撞名时改用 `-1`…后缀，既有 `.bak` 不被覆盖。
+        let used_bak = swap_restore_dir(&layout.data_dir, &restore_dir.path, &bak_base)?;
+        // cluster 身份已更换：新集群实例获得新代际，旧实例的诊断归档为历史
+        // （不伪造清零，也不让新集群继承旧 last_start_error/last_stop_mode）。
         let mut st = state::read(&layout.state_file).unwrap_or_default();
-        st.status = "stopped".to_string();
-        st.postgres_pid = None;
-        st.port = None;
-        st.postgres_version = Some(setup::bundled_pg_version().to_string());
+        st.reset_for_restored_cluster(&run::utc_now_iso8601(), setup::bundled_pg_version());
         let _ = state::write(&layout.state_file, &st);
-        eprintln!("[sidecar] 恢复完成，原目录保留于 {}", bak.display());
+        match used_bak {
+            Some(bak) => eprintln!("[sidecar] 恢复完成，原目录保留于 {}", bak.display()),
+            None => eprintln!(
+                "[sidecar] 恢复完成，数据目录为 {}",
+                layout.data_dir.display()
+            ),
+        }
     } else {
         if let Some(credentials) = &target_credentials {
             finalize_target_credentials(credentials, &password, &restore_dir)?;
@@ -1841,27 +1977,30 @@ pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
     Ok(())
 }
 
-/// 把恢复目录原子切换为当前数据目录：原目录先改名为 `.bak-<ts>`，再改入恢复目录。
+/// 把恢复目录原子切换为当前数据目录：原目录先不覆盖改名为 `.bak-<ts>`（撞名换后缀），
+/// 再改入恢复目录。
 ///
-/// 任一步失败都不删除恢复目录（已完成的恢复成果）；第二次改名失败时尝试把原目录
-/// 改回去，回滚失败则保留 `.bak-*` 供人工处理。
-fn swap_restore_dir(data_dir: &Path, restore_dir: &Path, bak: &Path) -> Result<(), u8> {
-    if data_dir.exists() {
-        std::fs::rename(data_dir, bak).map_err(|e| {
-            eprintln!(
-                "[sidecar] 原目录改名失败（恢复原状需手动处理 {} 与 {}）: {e}",
-                data_dir.display(),
-                restore_dir.display()
-            );
-            exit_codes::DUMP_RESTORE_FAILED
-        })?;
-    }
-    if let Err(e) = std::fs::rename(restore_dir, data_dir) {
-        rollback_backup(bak, data_dir);
+/// 返回实际使用的备份目录（数据目录原本不存在时为 `None`）。任一步失败都不删除恢复
+/// 目录（已完成的恢复成果）；第二次改名失败时尝试把原目录改回去，回滚失败则保留
+/// `.bak-*` 供人工处理。
+fn swap_restore_dir(
+    data_dir: &Path,
+    restore_dir: &Path,
+    bak_base: &Path,
+) -> Result<Option<PathBuf>, u8> {
+    let bak = if data_dir.exists() {
+        Some(rename_to_free_sibling(data_dir, bak_base)?)
+    } else {
+        None
+    };
+    if let Err(e) = rename_noreplace(restore_dir, data_dir) {
+        if let Some(bak) = &bak {
+            rollback_backup(bak, data_dir);
+        }
         eprintln!("[sidecar] 新目录切换失败（已尝试回滚）: {e}");
         return Err(exit_codes::DUMP_RESTORE_FAILED);
     }
-    Ok(())
+    Ok(bak)
 }
 
 /// 切换失败时把 `.bak-*` 改回原数据目录；回滚本身失败不改动任何目录。
@@ -1869,7 +2008,8 @@ fn rollback_backup(bak: &Path, data_dir: &Path) {
     if !bak.exists() {
         return;
     }
-    if let Err(e) = std::fs::rename(bak, data_dir) {
+    // 回滚同样不覆盖：切换窗口内若已有新目录占住 data_dir，保留 `.bak` 交人工处理。
+    if let Err(e) = rename_noreplace(bak, data_dir) {
         eprintln!(
             "[sidecar] 回滚失败：原数据保留于 {}，请手动改回 {}: {e}",
             bak.display(),
@@ -3327,22 +3467,67 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `.bak-*` 占名时切换失败：源目录与恢复目录都必须原地保留。
+    /// `.bak-*` 占名（同秒重复 restore / 时钟回拨）：改用 `-1` 后缀完成切换，
+    /// 既有 `.bak` 不被覆盖，源目录内容与恢复目录内容都不丢。
     #[test]
-    fn swap_restore_dir_failure_preserves_restore_dir_and_source() {
-        let dir = unique_tmp("d07006-swap-bak-occupied");
+    fn swap_restore_dir_uses_free_backup_suffix_when_base_occupied() {
+        let dir = unique_tmp("d1-13-swap-bak-occupied");
         let data_dir = dir.join("data");
         let restore_dir = dir.join("data.restore-20260101T000000Z");
-        let bak = dir.join("data.bak-20260101T000000Z");
+        let bak_base = dir.join("data.bak-20260101T000000Z");
         std::fs::create_dir_all(&data_dir).unwrap();
         std::fs::create_dir_all(&restore_dir).unwrap();
-        std::fs::create_dir_all(&bak).unwrap();
+        std::fs::create_dir_all(&bak_base).unwrap();
         std::fs::write(data_dir.join("marker"), b"source").unwrap();
         std::fs::write(restore_dir.join("marker"), b"restored").unwrap();
-        std::fs::write(bak.join("marker"), b"old-bak").unwrap();
+        std::fs::write(bak_base.join("marker"), b"old-bak").unwrap();
+
+        let used = swap_restore_dir(&data_dir, &restore_dir, &bak_base)
+            .expect("occupied .bak must not block the swap")
+            .expect("data dir existed, so a backup path must be reported");
+        assert_eq!(used, dir.join("data.bak-20260101T000000Z-1"));
+        assert_eq!(
+            std::fs::read(used.join("marker")).unwrap(),
+            b"source",
+            "原目录必须完整保留在换名后的 .bak"
+        );
+        assert_eq!(
+            std::fs::read(bak_base.join("marker")).unwrap(),
+            b"old-bak",
+            "既有 .bak 不得被覆盖"
+        );
+        assert_eq!(
+            std::fs::read(data_dir.join("marker")).unwrap(),
+            b"restored",
+            "恢复目录必须切入数据目录"
+        );
+        assert!(!restore_dir.exists(), "恢复目录改名后不再存在");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `.bak` 与 `-1`…`-15` 全被占用：切换失败，源目录/恢复目录/全部既有备份原地保留。
+    #[test]
+    fn swap_restore_dir_fails_closed_when_all_backup_names_occupied() {
+        let dir = unique_tmp("d1-13-swap-bak-exhausted");
+        let data_dir = dir.join("data");
+        let restore_dir = dir.join("data.restore-20260101T000000Z");
+        let bak_base = dir.join("data.bak-20260101T000000Z");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&restore_dir).unwrap();
+        std::fs::write(data_dir.join("marker"), b"source").unwrap();
+        std::fs::write(restore_dir.join("marker"), b"restored").unwrap();
+        for attempt in 0..BAK_DIR_ATTEMPTS {
+            let path = if attempt == 0 {
+                bak_base.clone()
+            } else {
+                sibling_with_suffix(&bak_base, &format!("-{attempt}"))
+            };
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("marker"), b"old-bak").unwrap();
+        }
 
         assert_eq!(
-            swap_restore_dir(&data_dir, &restore_dir, &bak),
+            swap_restore_dir(&data_dir, &restore_dir, &bak_base),
             Err(exit_codes::DUMP_RESTORE_FAILED)
         );
         assert_eq!(std::fs::read(data_dir.join("marker")).unwrap(), b"source");
@@ -3351,11 +3536,43 @@ mod tests {
             b"restored",
             "切换失败不得删除已完成的恢复目录"
         );
-        assert_eq!(
-            std::fs::read(bak.join("marker")).unwrap(),
-            b"old-bak",
-            "既有 .bak 不得被覆盖"
-        );
+        for attempt in 0..BAK_DIR_ATTEMPTS {
+            let path = if attempt == 0 {
+                bak_base.clone()
+            } else {
+                sibling_with_suffix(&bak_base, &format!("-{attempt}"))
+            };
+            assert_eq!(
+                std::fs::read(path.join("marker")).unwrap(),
+                b"old-bak",
+                "既有 .bak 一律不得被覆盖：{}",
+                path.display()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 原子不覆盖改名：目标已存在时报 AlreadyExists 且两侧内容不变；目标空闲时成功。
+    #[test]
+    fn rename_noreplace_refuses_existing_target() {
+        let dir = unique_tmp("d1-13-rename-noreplace");
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("src");
+        let occupied = dir.join("dst");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&occupied).unwrap();
+        std::fs::write(source.join("marker"), b"source").unwrap();
+        std::fs::write(occupied.join("marker"), b"keep").unwrap();
+
+        let err = rename_noreplace(&source, &occupied).expect_err("must not overwrite");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists, "got {err}");
+        assert_eq!(std::fs::read(source.join("marker")).unwrap(), b"source");
+        assert_eq!(std::fs::read(occupied.join("marker")).unwrap(), b"keep");
+
+        let free = dir.join("free");
+        rename_noreplace(&source, &free).expect("free target must succeed");
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(free.join("marker")).unwrap(), b"source");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
