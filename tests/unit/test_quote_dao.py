@@ -156,8 +156,9 @@ class TestQuoteDaoGetDailyQuotes:
             await dao.get_daily_quotes(ts_code_list=codes, start_date="20240101", suppress_errors=False)
         # 页失败必须作为异常上抛并被 _chunked_execute 记录原因，而非被吞成空页。
         assert "partial results discarded" in str(exc_info.value)
-        assert isinstance(exc_info.value.__cause__, DatabaseQueryError)
-        assert str(exc_info.value.__cause__) == "page read failed"
+        assert "page read failed" in str(exc_info.value)
+        # D1-06：上抛异常已用 from None 断开原始异常链，避免底层异常携带绑定参数随 traceback 泄露。
+        assert exc_info.value.__cause__ is None
 
     @pytest.mark.asyncio
     async def test_empty_code_list_returns_empty_without_query(self):
