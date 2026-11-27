@@ -148,8 +148,35 @@ def test_base_manifest_empty_mcp_selection_keeps_digest_none() -> None:
 
 
 def test_policy_empty_selection_is_fail_closed() -> None:
-    assert derive_frozen_selection_policy(_manifest(skill_refs=[])) is None
     assert derive_frozen_selection_policy(_manifest(role_prompt_refs=[])) is None
+
+
+def test_policy_role_without_skills_or_mcp_is_approved_empty_capability_set() -> None:
+    """已选定角色且显式未勾选 Skill/MCP：零能力是已核准集合，不是策略缺失。"""
+
+    policy = derive_frozen_selection_policy(_manifest(skill_refs=[], mcp_scope_digest=None))
+
+    assert policy is not None
+    assert policy.role_key == "researcher"
+    assert policy.capabilities == frozenset()
+
+
+def test_policy_missing_selection_keys_is_unknown() -> None:
+    """缺少 skill_refs/mcp_scope_digest 键：无法区分显式零选择与缺失，按未知处理。"""
+
+    manifest = json_doc(
+        {
+            "schema_version": 1,
+            "text": "研究问题",
+            "mode": "execute",
+            "purpose": "concept",
+            "cutoff": None,
+            "source_refs": [],
+            "role_prompt_refs": [["researcher", "v1"]],
+        }
+    )
+
+    assert derive_frozen_selection_policy(manifest) is None
 
 
 def test_policy_multiple_roles_is_ambiguous() -> None:
@@ -388,7 +415,8 @@ async def test_plan_provider_auto_plan_requires_saved_version_and_selection() ->
 @pytest.mark.asyncio
 async def test_capability_provider_fail_closed_without_selection() -> None:
     assert await build_role_capability_provider(_ManifestDao(None))("u1", "e") is None
-    assert await build_role_capability_provider(_ManifestDao(_manifest(skill_refs=[])))("u1", "e") is None
+    empty = await build_role_capability_provider(_ManifestDao(_manifest(skill_refs=[])))("u1", "e")
+    assert empty == {"researcher": frozenset()}
     policy = await build_role_capability_provider(_ManifestDao(_manifest()))("u1", "e")
     assert policy == {"researcher": frozenset({"skill:skill-a@2"})}
 
@@ -1518,6 +1546,70 @@ async def test_intake_execute_without_selection_returns_plan_unavailable() -> No
     assert result.dispatch is not None
     assert result.dispatch.reason_code == PLAN_UNAVAILABLE
     assert result.dispatch.reason_params == (("cause", "role_policy_missing"),)
+
+
+class _AcceptedManifestDao:
+    """读取最近一次受理的冻结 manifest（供派发侧能力来源复读同一份输入）。"""
+
+    def __init__(self, facade: _IntakeFacade) -> None:
+        self._facade = facade
+
+    async def read_authoritative_manifest(self, *, user_scope: str, execution_id: str) -> str | None:
+        return self._facade.accepts[0].manifest_payload if self._facade.accepts else None
+
+
+@pytest.mark.asyncio
+async def test_intake_execute_without_skills_dispatches_empty_capability_analysis() -> None:
+    """零 Skill/MCP 的执行首问：已核准空能力放行，纯分析节点（capabilities=()）可派发。"""
+
+    facade = _IntakeFacade(_intake_receipt())
+    runner = _MainTurnRunnerStub(plan_reference=PlanReference(execution_id="execution-1", plan_revision=1))
+    submitted: list[str] = []
+    empty_spec = PlanSpecProposal(
+        nodes=(
+            PlanNodeSpec(node_id="n1", target="整理内部资料", role_key="researcher", depends_on=(), capabilities=()),
+        )
+    )
+
+    async def _submit(workflow_id: str, payload: dict[str, Any]) -> None:
+        submitted.append(workflow_id)
+
+    async def _plan(user_scope: str, execution_id: str) -> PlanSpecProposal:
+        return empty_spec
+
+    async def _read(workflow_id: str) -> ResearchWorkflowResult:
+        return ResearchWorkflowResult(workflow_id=workflow_id, state="SUCCESS", output={"summary": "ok"})
+
+    dispatcher = ResearchDispatcher(
+        gate=_SwitchGate(closed=False),
+        submit=_submit,
+        plan_provider=_plan,
+        read_result=_read,
+        capability_provider=build_role_capability_provider(cast(Any, _AcceptedManifestDao(facade))),
+        binding_identity_provider=_binding,
+    )
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+        dispatcher=dispatcher,
+    )
+
+    result = await intake.start_question(
+        "整理内部资料",
+        mode=Mode.EXECUTE,
+        role_prompt_refs=(("researcher", "v1"),),
+    )
+
+    frozen = json.loads(facade.accepts[0].manifest_payload)
+    assert frozen["role_prompt_refs"] == [["researcher", "v1"]]
+    assert frozen["skill_refs"] == []
+    assert frozen["mcp_scope_digest"] is None
+    assert [request.mode for request in runner.requests] == [Mode.PLAN]
+    assert submitted == ["workflow-1"]
+    assert result.dispatch is not None
+    assert result.dispatch.submitted is True
 
 
 @pytest.mark.asyncio

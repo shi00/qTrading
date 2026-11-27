@@ -184,7 +184,7 @@ def build_model_selection(
                 options=[
                     ft.dropdown.Option(
                         key=option.role_key,
-                        text=_option_text(I18n.get(option.name_key), "", option.reject_key),
+                        text=_option_text(option.display_name or I18n.get(option.name_key), "", option.reject_key),
                         disabled=not option.eligible,
                     )
                     for option in state.role_options
