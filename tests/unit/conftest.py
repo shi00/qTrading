@@ -38,6 +38,29 @@ def pytest_collection_modifyitems(items):
             item.add_marker(pytest.mark.unit)
 
 
+def _reset_ui_shared_runtime_state() -> None:
+    """复位进程级 UI 共享状态：决定仲裁器 + 共享研究观察 VM（R7 测试状态污染）。
+
+    ``ui.agent_decision_arbiter.get_decision_arbiter()`` 与
+    ``ui.viewmodels.research_observer_view_model.shared_research_observer()`` 都是
+    模块级共享实例（非 ``@register_singleton`` 管理），其状态会跨用例泄漏：
+    前者残留的 owner 会让后续提交被误判为 ``agent_decision_busy``；后者残留的
+    VM（含订阅者/在途任务）会串会话。二者均有真实复位入口（``reset()`` /
+    ``reset_shared_research_observer()``），此处统一调用。
+
+    观察 VM 模块仅在测试已导入时才复位（``sys.modules`` 判定）：未导入即无共享
+    状态可清，避免为无关用例引入 UI 重依赖导入。
+    """
+    import sys
+
+    from ui.agent_decision_arbiter import get_decision_arbiter
+
+    get_decision_arbiter().reset()
+    vm_mod = sys.modules.get("ui.viewmodels.research_observer_view_model")
+    if vm_mod is not None:
+        vm_mod.reset_shared_research_observer()
+
+
 @pytest.fixture(autouse=True)
 def _reset_all_singletons():
     """Reset all registered singletons before and after each unit test.
@@ -67,11 +90,15 @@ def _reset_all_singletons():
     _sr._graceful_shutdown_completed = False
     reset_all_singletons()
     ProxyManager._reset_singleton()
+    # D7-12: 进程级共享 UI 状态（决定仲裁器 / 共享研究观察 VM）非注册单例，
+    # 需在此统一复位，避免 owner 残留与共享 VM 跨用例泄漏（R7）。
+    _reset_ui_shared_runtime_state()
     yield
     clear_all_loop_locals()
     _sr._graceful_shutdown_completed = False
     reset_all_singletons()
     ProxyManager._reset_singleton()
+    _reset_ui_shared_runtime_state()
 
 
 @pytest.fixture(autouse=True)

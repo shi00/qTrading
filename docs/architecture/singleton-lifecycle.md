@@ -80,7 +80,7 @@ def __init__(self, *, config=None, clock=None):
 
 > R15 人工评审对照基准。新增/移除单例时同步更新本清单。
 
-**注册单例（`@register_singleton`，25 个）**：
+**注册单例（`@register_singleton`，26 个）**：
 
 | 类名 | 模块路径 | 职责 |
 |------|---------|------|
@@ -109,6 +109,7 @@ def __init__(self, *, config=None, clock=None):
 | `ActualInputBinderRegistry` | `services/agent_service/workflows.py` | 父实际输入绑定器登记（P1-07：组装期注入、未登记即 `actual_input_binding_unavailable` 父零叶派发；`_reset_singleton` 清空登记，测试自动隔离） |
 | `LeafTicketGateRegistry` | `services/agent_service/workflows.py` | 叶资源票据门登记（P1-07：组装期注入、未登记即 `leaf_ticket_gate_unavailable` 父零叶派发；`_reset_singleton` 清空登记，测试自动隔离） |
 | `AnswerConsumerRegistry` | `services/agent_service/workflows.py` | 答复消费者登记（P1-05：组合根注入用户域 + 共享 DAO，未登记即明确拒绝、不伪造已消费；`_reset_singleton` 清空登记，测试自动隔离） |
+| `TerminalStateDaoRegistry` | `services/agent_service/workflows.py` | 应用执行终态写入端口登记（P1-08：组合根安装或惰性取共享 `CacheManager().agent_dao`，不可得即明确拒绝；`_reset_singleton` 清空登记，测试自动隔离） |
 
 **非注册单例（无 `@register_singleton`，但事实单例）**：
 
@@ -139,6 +140,7 @@ def __init__(self, *, config=None, clock=None):
 
 - **单元测试（`tests/unit/`）**：`tests/unit/conftest.py` 的 `_reset_all_singletons` autouse fixture 在每个用例前后调用 `reset_all_singletons()`（逐类执行 `_reset_singleton`，单类异常仅告警不阻断），并复位模块级 `_graceful_shutdown_completed`（`_atexit_fired` 由 `reset_all_singletons()` 一并复位），使每个用例从「未优雅停机」基线开始。
 - **非注册单例**：`ProxyManager._reset_singleton()` 由同一 autouse fixture 显式调用；`DataExplorerQueryClient` 由 `_reset_data_explorer_shared_engine` autouse fixture 复位（见上表）。
+- **模块级 UI 共享状态**：`ui/agent_decision_arbiter.py` 的 `get_decision_arbiter()`（进程级决定仲裁器，残留 owner 会误判 `agent_decision_busy`）与 `ui/viewmodels/research_observer_view_model.py` 的 `shared_research_observer()`（共享观察 VM）均为模块级共享实例，不属于 `@register_singleton`；由同一 autouse fixture 经 `_reset_ui_shared_runtime_state()` 调用真实复位入口（`reset()` / `reset_shared_research_observer()`）前后复位。
 - **集成 / e2e 测试**：不做逐用例自动重置（integration 仅由 `tests/integration/conftest.py` 的 `cleanup_singletons_session` 在会话 teardown 统一关闭并 `reset_all_singletons()`），需手动调用 `_reset_singleton`，或用 `tests/conftest.py::singleton_state` 保存/恢复 `_instance`（后者不触发 registry 重置与 `_atexit_cleanup`）。
 - 机制正本：[docs/guides/testing.md](../guides/testing.md)「测试编写规则」。
 
