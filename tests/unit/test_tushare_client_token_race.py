@@ -133,6 +133,32 @@ class TestTokenInvalidRaceCondition:
 
         assert client.is_token_invalid is False
 
+    @pytest.mark.asyncio
+    async def test_set_token_async_takes_thread_lock_inside_async_lock(self, tushare_client_mocks):
+        """D2-15 锁顺序：线程锁必须在 asyncio.Lock 内层短持，禁止线程锁内 await。
+
+        _handle_api_call 采用「先 asyncio.Lock 后同步锁」顺序；若 set_token_async
+        反向「先 self._lock 后 asyncio.Lock」则构成 ABBA 死锁。以探针锁记录进入
+        self._lock 时 asyncio.Lock 是否已持有（应为 True）。
+        """
+        client, _, _ = tushare_client_mocks
+        async_lock = client._get_token_invalid_lock()
+        observed: list[bool] = []
+
+        class _ProbeLock:
+            def __enter__(self):
+                observed.append(async_lock.locked())
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        client._lock = _ProbeLock()
+        await client.set_token_async("new_token_lock_order")
+
+        assert observed == [True], "self._lock 必须在 asyncio.Lock 临界区内获取"
+        assert client.token == "new_token_lock_order"
+
 
 class TestSetTokenWithoutEventLoop:
     """事件循环未运行时 set_token 抛异常（DoD 4）。"""

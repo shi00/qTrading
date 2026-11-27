@@ -1061,6 +1061,40 @@ class TestTushareClientApiMethods:
         assert "start_date" not in call_args.kwargs  # 不传日期区间作为入参过滤
         assert "end_date" not in call_args.kwargs
 
+    @pytest.mark.asyncio
+    async def test_get_dividend_wrapper_only_forwards_supported_filters(self, tushare_client_mocks):
+        """D2-15：dividend (doc_id=103) 不支持服务端日期区间，仅转发 ts_code/ann_date。"""
+        client, _, _ = tushare_client_mocks
+        expected_df = pd.DataFrame({"ts_code": ["000001.SZ"], "ann_date": ["20240614"]})
+        client._handle_api_call = AsyncMock(return_value=expected_df)
+
+        result = await client.get_dividend(ts_code="000001.SZ", ann_date="20240614")
+
+        assert isinstance(result, pd.DataFrame)
+        client._handle_api_call.assert_called_once()
+        call_args = client._handle_api_call.call_args
+        assert callable(call_args.args[0])
+        assert call_args.kwargs["ts_code"] == "000001.SZ"
+        assert call_args.kwargs["ann_date"] == "20240614"
+        # end_date 是输出字段「分红年度」，不得作为入参转发；start_date 上游不支持
+        assert "end_date" not in call_args.kwargs
+        assert "start_date" not in call_args.kwargs
+        fields_str = call_args.kwargs["fields"]
+        assert "ts_code" in fields_str
+        assert "ann_date" in fields_str
+        assert "end_date" in fields_str
+        assert "record_date" in fields_str
+        assert "ex_date" in fields_str
+
+    def test_get_dividend_rejects_removed_date_range_params(self, tushare_client_mocks):
+        """D2-15：误导性形参 start_date/end_date 已移除，误用即 TypeError（不再静默丢弃）。"""
+        client, _, _ = tushare_client_mocks
+
+        with pytest.raises(TypeError):
+            client.get_dividend(ts_code="000001.SZ", start_date="20240101")
+        with pytest.raises(TypeError):
+            client.get_dividend(ts_code="000001.SZ", end_date="20241231")
+
 
 class TestTushareClientBuildRateLimiters:
     def test_with_limit(self, tushare_client_mocks):

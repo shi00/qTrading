@@ -604,7 +604,7 @@ class TushareClient:
         """
         Set token and clear capability cache (async, loop-local lock protected).
 
-        _token_invalid 读写经 _get_token_local_lock() 串行化，避免旧协程在 set_token
+        _token_invalid 读写经 `_get_token_invalid_lock()` 串行化，避免旧协程在 set_token
         后将 _token_invalid 覆盖为 True（P3-Tushare-Token-Invalid-Race 修复）。
 
         Args:
@@ -619,27 +619,28 @@ class TushareClient:
             which schedules this coroutine via run_coroutine_threadsafe.
         """
         self._capture_loop()
-        # token 字符串与 capability_cache 操作走 threading.Lock（与原 set_token 一致，
-        # 保护 _capability_cache dict 与 rate_limiter 引用替换）。
-        # _token_invalid 重置走 loop-local asyncio.Lock（与 _handle_api_call 写入路径互斥）。
-        with self._lock:
-            if token == self.token:
-                # 同 token 提交时也重置熔断标志：用户可能在 Tushare 官网修复了 token 权限但 token 字符串不变
-                lock = self._get_token_invalid_lock()
-                async with lock:
+        # D2-15 锁分层顺序：外层 loop-local asyncio.Lock（与 _handle_api_call 的
+        # token_invalid 读写路径互斥），内层短持 threading.Lock（保护 token/pro/
+        # rate_limiter 引用替换与 _token_invalid 原子更新）。
+        # 严禁在持有 self._lock（线程锁）时 await 或获取 asyncio.Lock：_handle_api_call
+        # 采用「先 asyncio 后同步」顺序，反向嵌套会构成 ABBA 死锁。
+        # 线程锁临界区内零 await，故不存在持锁被取消的中间态。
+        lock = self._get_token_invalid_lock()
+        async with lock:
+            with self._lock:
+                if token == self.token:
+                    # 同 token 提交时也重置熔断标志：用户可能在 Tushare 官网修复了 token 权限但 token 字符串不变
                     if self._token_invalid:
                         self._token_invalid = False
                         logger.info("[API] Token breaker reset (same token resubmitted)")
-                logger.debug("[API] Token unchanged, skipping cache clear")
-                return False
+                    logger.debug("[API] Token unchanged, skipping cache clear")
+                    return False
 
-            # 不同 token：替换 token、重建 pro_api、清空 cache（核心逻辑同步，可被 __init__ 复用）
-            self._set_token_core(token)
-            # 新 token 提交，重置熔断标志（经 loop-local lock 保护，与 _handle_api_call 写入互斥）
-            lock = self._get_token_invalid_lock()
-            async with lock:
+                # 不同 token：替换 token、重建 pro_api、清空 cache（核心逻辑同步，可被 __init__ 复用）
+                self._set_token_core(token)
+                # 新 token 提交，重置熔断标志（已在 asyncio.Lock 临界区内）
                 self._token_invalid = False
-            return True
+                return True
 
     def set_token(self, token: str | None) -> bool:
         """
@@ -1544,17 +1545,28 @@ class TushareClient:
     async def get_dividend(
         self,
         ts_code: str | None = None,
-        start_date: str | None = None,
-        end_date: str | None = None,
         ann_date: str | None = None,
     ):
-        """Get dividend history"""
+        """Get dividend history (doc_id=103).
 
+        D2-15：Tushare ``dividend`` 接口不支持服务端日期区间过滤——官方入参只有
+        ts_code / ann_date / record_date / ex_date / imp_ann_date / div_proc；
+        其中的 ``end_date`` 是输出字段「分红年度」，不是查询过滤条件。
+        故此处仅转发 ts_code / ann_date（旧实现把 ``end_date`` 当入参转发且静默
+        丢弃 ``start_date``）。需要按日期区间裁剪时，由调用方在返回 DataFrame 上
+        基于 ``ann_date`` 自行过滤，避免形参名实不符。
+
+        Args:
+            ts_code: TS 代码。
+            ann_date: 公告日（YYYYMMDD）。
+
+        Returns:
+            DataFrame，包含 ts_code/end_date/ann_date/div_proc/stk_div/.../record_date/ex_date。
+        """
         return await self._handle_api_call(
             self.pro.dividend,
             ts_code=ts_code,
             ann_date=ann_date,
-            end_date=end_date,
             fields="ts_code,end_date,ann_date,div_proc,stk_div,stk_bo_rate,stk_co_rate,cash_div,cash_div_tax,record_date,ex_date",
         )
 
