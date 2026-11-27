@@ -3,6 +3,9 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import datetime
+import decimal
+
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
@@ -10,7 +13,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.sql import operators
 
-from data.persistence.data_explorer_query_client import DataExplorerQueryClient
+from data.persistence.data_explorer_query_client import DataExplorerQueryClient, FilterValidationError
 
 pytestmark = pytest.mark.unit
 
@@ -20,8 +23,10 @@ def _make_dm():
 
     注意：_engine 是只读 property，返回类级别 _shared_engine。
     必须设置 DataExplorerQueryClient._shared_engine 而非实例属性。
+    方言设为 postgresql，使只读事务守卫（SET TRANSACTION READ ONLY）在替身上执行。
     """
     DataExplorerQueryClient._shared_engine = MagicMock()
+    DataExplorerQueryClient._shared_engine.dialect.name = "postgresql"
     return DataExplorerQueryClient()
 
 
@@ -47,6 +52,21 @@ def _assert_filter_predicate(predicate, column: str, operator, value) -> None:
     # 过滤值必须以绑定参数出现而非 SQL 字面量（R4：SQL 参数化）
     assert isinstance(predicate.right, sa.sql.elements.BindParameter)
     assert predicate.right.value == value
+
+
+def _assert_like_predicate(predicate, column: str, value) -> None:
+    """LIKE 谓词必须对列 CAST 为字符串后参数化绑定（DATE/BIGINT/NUMERIC 亦可 LIKE）。"""
+    assert isinstance(predicate, sa.sql.elements.BinaryExpression)
+    assert predicate.operator is operators.like_op
+    assert isinstance(predicate.left, sa.sql.expression.Cast)
+    assert predicate.left.clause.name == column
+    assert isinstance(predicate.right, sa.sql.elements.BindParameter)
+    assert predicate.right.value == value
+
+
+def _data_statements(executed: list) -> list:
+    """剔除只读事务前置语句（SET / set_config），保留真正的数据查询语句。"""
+    return [stmt for stmt in executed if "SET TRANSACTION" not in str(stmt) and "set_config" not in str(stmt)]
 
 
 class TestDataExplorerQueryClientInit:
@@ -90,6 +110,8 @@ class TestEnsureEngine:
         mock_create.assert_called_once()
         call_url = mock_create.call_args[0][0]
         assert "+asyncpg" not in call_url
+        # D2-13: 连接建立超时经 connect_args 注入（libpq connect_timeout）
+        assert mock_create.call_args.kwargs["connect_args"]["connect_timeout"] > 0
 
     def test_already_initialized(self):
         dm = _make_dm()
@@ -233,10 +255,11 @@ class TestGetTableCount:
         ):
             result = dm.get_table_count("stock_basic", filters=[("ts_code", "=", "000001.SZ")])
             assert result == 50
-            assert len(executed) == 1
-            [predicate] = _where_expressions(executed[0])
+            data_statements = _data_statements(executed)
+            assert len(data_statements) == 1
+            [predicate] = _where_expressions(data_statements[0])
             _assert_filter_predicate(predicate, "ts_code", operators.eq, "000001.SZ")
-            assert "WHERE ts_code = %(" in _compile_sql(executed[0])
+            assert "WHERE ts_code = %(" in _compile_sql(data_statements[0])
 
     def test_exception(self):
         """UIR-F13-002: 执行失败必须传播，不得 return 0 冒充空表。"""
@@ -354,9 +377,9 @@ class TestApplyFilters:
         result = DataExplorerQueryClient._apply_filters(stmt, [("name", "LIKE", "银行")])
         assert isinstance(result, sa.Select)
         [predicate] = _where_expressions(result)
-        # 无通配符的 LIKE 输入应自动包裹 %...%
-        _assert_filter_predicate(predicate, "name", operators.like_op, "%银行%")
-        assert "WHERE name LIKE %(" in _compile_sql(result)
+        # 无通配符的 LIKE 输入应自动包裹 %...%，并对列做字符串 CAST
+        _assert_like_predicate(predicate, "name", "%银行%")
+        assert "CAST(name AS VARCHAR) LIKE %(" in _compile_sql(result)
 
     def test_with_like_already_has_wildcard(self):
         stmt = sa.select(sa.text("*"))
@@ -364,8 +387,22 @@ class TestApplyFilters:
         assert isinstance(result, sa.Select)
         [predicate] = _where_expressions(result)
         # 已含通配符的 LIKE 输入不得被二次包裹
-        _assert_filter_predicate(predicate, "name", operators.like_op, "%银行%")
-        assert "WHERE name LIKE %(" in _compile_sql(result)
+        _assert_like_predicate(predicate, "name", "%银行%")
+        assert "CAST(name AS VARCHAR) LIKE %(" in _compile_sql(result)
+
+    def test_like_on_date_and_numeric_columns_is_cast(self):
+        """DATE/BIGINT/NUMERIC 列 LIKE 必须先 CAST 为字符串（否则 PG 报 date ~~ unknown）。"""
+        for col_type in ("DATE", "BIGINT", "NUMERIC(18, 4)"):
+            stmt = sa.select(sa.text("*"))
+            result = DataExplorerQueryClient._apply_filters(
+                stmt,
+                [("col", "LIKE", "2026")],
+                schema_cols={"col"},
+                schema_types={"col": col_type},
+            )
+            [predicate] = _where_expressions(result)
+            _assert_like_predicate(predicate, "col", "%2026%")
+            assert "CAST(col AS VARCHAR) LIKE %(" in _compile_sql(result)
 
     def test_multiple_filters_are_all_applied(self):
         stmt = sa.select(sa.text("*"))
@@ -378,10 +415,10 @@ class TestApplyFilters:
         predicates = _where_expressions(result)
         assert len(predicates) == 2
         _assert_filter_predicate(predicates[0], "ts_code", operators.eq, "000001.SZ")
-        _assert_filter_predicate(predicates[1], "name", operators.like_op, "%银行%")
+        _assert_like_predicate(predicates[1], "name", "%银行%")
         compiled = _compile_sql(result)
         assert "WHERE ts_code = %(" in compiled
-        assert "AND name LIKE %(" in compiled
+        assert "AND CAST(name AS VARCHAR) LIKE %(" in compiled
 
     def test_unsupported_operator(self):
         stmt = sa.select(sa.text("*"))
@@ -415,6 +452,160 @@ class TestApplyFilters:
             [predicate] = _where_expressions(result)
             _assert_filter_predicate(predicate, "col", expected_operator, "val")
             assert f"WHERE col {sql_operator} %(" in _compile_sql(result)
+
+
+class TestFilterTypeValidation:
+    """D2-13: 比较操作符按反射列类型解析参数，非法值前置拒绝（不抛裸 DB 异常）。"""
+
+    @staticmethod
+    def _apply(col_type: str, op: str, value):
+        stmt = sa.select(sa.text("*"))
+        result = DataExplorerQueryClient._apply_filters(
+            stmt,
+            [("trade_date", op, value)],
+            schema_cols={"trade_date"},
+            schema_types={"trade_date": col_type},
+        )
+        [predicate] = _where_expressions(result)
+        return result, predicate
+
+    def test_date_column_parses_iso_value(self):
+        _, predicate = self._apply("DATE", "=", "2026-03-21")
+        _assert_filter_predicate(predicate, "trade_date", operators.eq, datetime.date(2026, 3, 21))
+
+    def test_date_column_does_not_strip_dashes(self):
+        """BUG 回归：2026-03-21 不得被剥成 20260321（与 DATE 列表示冲突）。"""
+        result, predicate = self._apply("DATE", "=", "2026-03-21")
+        assert predicate.right.value == datetime.date(2026, 3, 21)
+        assert "20260321" not in _compile_sql(result)
+
+    def test_date_column_accepts_yyyymmdd(self):
+        _, predicate = self._apply("DATE", ">=", "20260321")
+        assert predicate.right.value == datetime.date(2026, 3, 21)
+
+    def test_timestamp_column_parses_iso(self):
+        _, predicate = self._apply("TIMESTAMP WITHOUT TIME ZONE", "<", "2026-03-21T10:30:00")
+        assert predicate.right.value == datetime.datetime(2026, 3, 21, 10, 30)
+
+    def test_bigint_column_parses_integer(self):
+        _, predicate = self._apply("BIGINT", ">", "123")
+        _assert_filter_predicate(predicate, "trade_date", operators.gt, 123)
+
+    def test_numeric_column_parses_decimal(self):
+        _, predicate = self._apply("NUMERIC(18, 4)", "<=", "10.50")
+        _assert_filter_predicate(predicate, "trade_date", operators.le, decimal.Decimal("10.50"))
+
+    def test_text_column_value_passed_through(self):
+        _, predicate = self._apply("TEXT", "=", "2026-03-21")
+        _assert_filter_predicate(predicate, "trade_date", operators.eq, "2026-03-21")
+
+    def test_array_type_not_coerced(self):
+        _, predicate = self._apply("INTEGER[]", "=", "{1,2}")
+        _assert_filter_predicate(predicate, "trade_date", operators.eq, "{1,2}")
+
+    @pytest.mark.parametrize(
+        ("col_type", "value"),
+        [
+            ("DATE", "2026/03/21"),
+            ("DATE", "not-a-date"),
+            ("BIGINT", "10.5"),
+            ("BIGINT", "abc"),
+            ("NUMERIC(18, 4)", "abc"),
+        ],
+    )
+    def test_invalid_value_raises_readable_validation_error(self, col_type, value):
+        stmt = sa.select(sa.text("*"))
+        with pytest.raises(FilterValidationError) as exc_info:
+            DataExplorerQueryClient._apply_filters(
+                stmt,
+                [("trade_date", ">", value)],
+                schema_cols={"trade_date"},
+                schema_types={"trade_date": col_type},
+            )
+        message = str(exc_info.value)
+        assert "Invalid filter value" in message
+        assert "trade_date" in message
+        assert value in message
+
+
+class TestReadOnlyGuards:
+    """D2-13: 反射/计数/读行（含 5 万行导出）统一包裹只读受限事务。"""
+
+    @staticmethod
+    def _install_recording_conn(dm, result):
+        conn = MagicMock()
+        executed: list = []
+
+        def _record(statement, *args, **kwargs):
+            executed.append(statement)
+            return result
+
+        conn.execute.side_effect = _record
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        return executed
+
+    def test_get_table_count_sets_read_only_and_timeout(self):
+        dm = _make_dm()
+        result = MagicMock()
+        result.scalar.return_value = 7
+        executed = self._install_recording_conn(dm, result)
+        with patch.object(dm, "_validate_table_name"):
+            assert dm.get_table_count("stock_basic") == 7
+
+        texts = [str(statement) for statement in executed]
+        assert texts[0] == "SET TRANSACTION READ ONLY"
+        assert "set_config('statement_timeout', :v, true)" in texts[1]
+        assert "count(" in texts[-1].lower()
+
+    def test_query_table_sets_read_only_and_timeout(self):
+        dm = _make_dm()
+        result = MagicMock()
+        result.fetchall.return_value = [("x",)]
+        result.keys.return_value = ["c"]
+        executed = self._install_recording_conn(dm, result)
+        with (
+            patch.object(dm, "_validate_table_name"),
+            patch.object(dm, "get_table_schema", return_value=[{"name": "c", "type": "TEXT"}]),
+        ):
+            dm.query_table("stock_basic")
+
+        texts = [str(statement) for statement in executed]
+        assert texts[0] == "SET TRANSACTION READ ONLY"
+        assert "set_config('statement_timeout', :v, true)" in texts[1]
+        assert "SELECT" in texts[-1].upper()
+
+    def test_export_page_size_query_uses_read_only_transaction(self):
+        """5 万行导出（page_size=MAX_EXPORT_ROWS）同样走只读受限事务。"""
+        dm = _make_dm()
+        result = MagicMock()
+        result.fetchall.return_value = [("x",)]
+        result.keys.return_value = ["c"]
+        executed = self._install_recording_conn(dm, result)
+        with (
+            patch.object(dm, "_validate_table_name"),
+            patch.object(dm, "get_table_schema", return_value=[{"name": "c", "type": "TEXT"}]),
+        ):
+            dm.query_table("stock_basic", page=1, page_size=50000)
+
+        texts = [str(statement) for statement in executed]
+        assert texts[0] == "SET TRANSACTION READ ONLY"
+        assert "set_config('statement_timeout', :v, true)" in texts[1]
+        assert "LIMIT" in texts[-1].upper()
+
+    def test_schema_reflected_once_per_query(self):
+        """单次查询内复用反射 schema（过滤 + 排序不再重复反射）。"""
+        dm = _make_dm()
+        result = MagicMock()
+        result.fetchall.return_value = []
+        self._install_recording_conn(dm, result)
+        with (
+            patch.object(dm, "_validate_table_name"),
+            patch.object(dm, "get_table_schema", return_value=[{"name": "c", "type": "TEXT"}]) as schema_mock,
+        ):
+            dm.query_table("stock_basic", filters=[("c", "LIKE", "x")], sort_col="c")
+
+        schema_mock.assert_called_once()
 
 
 class TestQueryTable:
@@ -539,10 +730,11 @@ class TestQueryTable:
         ):
             result = dm.query_table("stock_basic", filters=[("ts_code", "=", "000001.SZ")])
             assert isinstance(result, pd.DataFrame)
-            assert len(executed) == 1
-            [predicate] = _where_expressions(executed[0])
+            data_statements = _data_statements(executed)
+            assert len(data_statements) == 1
+            [predicate] = _where_expressions(data_statements[0])
             _assert_filter_predicate(predicate, "ts_code", operators.eq, "000001.SZ")
-            assert "WHERE ts_code = %(" in _compile_sql(executed[0])
+            assert "WHERE ts_code = %(" in _compile_sql(data_statements[0])
 
     def test_exception(self):
         """UIR-F13-002: 执行失败必须传播，不得返回空 DataFrame 冒充无数据。"""

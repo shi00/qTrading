@@ -40,6 +40,9 @@ SQL 控制台的越界直读防护分两层，**两层必须同时在位**：
 ``SET LOCAL ROLE`` 会失败并以脱敏错误返回（运行角色须按上方 GRANT 授权）。
 """
 
+import contextlib
+import datetime
+import decimal
 import logging
 import re
 import threading
@@ -59,6 +62,10 @@ logger = logging.getLogger(__name__)
 # C6（review03）：会话级语句超时，防止用户手滑的重查询挂住连接（SELECT pg_sleep 等）。
 # 不扩展关键字黑名单——statement_timeout 不关心 SQL 内容，只关心执行时长（报告 03 §2.2 C6）。
 _STATEMENT_TIMEOUT = "10s"
+
+# 连接建立超时（libpq connect_timeout，秒）。connect_timeout 只能在建连时设置，
+# 故在 create_engine 的 connect_args 注入，覆盖反射/浏览/导出全部只读路径。
+_CONNECT_TIMEOUT_SECONDS = 10
 
 # N03：Agent 受管表（``agent_`` 前缀）不进入通用数据页目录。这些表存放原值/模型
 # 可见/公开导出三表示（迁移 0048），公开表示只经 Agent 读取 API 提供；通用数据页
@@ -181,8 +188,62 @@ _OP_MAP = {
     ">=": lambda c, v: c >= v,
     "<=": lambda c, v: c <= v,
     "!=": lambda c, v: c != v,
-    "LIKE": lambda c, v: c.like(v),
 }
+
+# 反射列类型 → 比较参数解析规则。类型串来自 ``str(column.type)``（如 "BIGINT"、
+# "NUMERIC(18, 4)"、"DATE"、"TIMESTAMP WITHOUT TIME ZONE"）。
+_INTEGER_TYPE_PATTERN = re.compile(
+    r"^(SMALLINT|INTEGER|BIGINT|INT2|INT4|INT8|SMALLSERIAL|SERIAL|BIGSERIAL)\b",
+    re.IGNORECASE,
+)
+_NUMERIC_TYPE_PATTERN = re.compile(
+    r"^(NUMERIC|DECIMAL|REAL|DOUBLE|FLOAT)\b",
+    re.IGNORECASE,
+)
+_DATE_TYPE_PATTERN = re.compile(r"^(DATE|TIMESTAMP)\b", re.IGNORECASE)
+
+
+class FilterValidationError(ValueError):
+    """筛选值无法按反射列类型解析（应用层前置校验，非裸 DB 异常）。
+
+    由 ``_coerce_comparison_value`` 在构造语句前抛出，调用方（ViewModel）据此
+    给出可读校验提示，而不是把非法文本直接绑给 DATE/NUMERIC/BIGINT 列后
+    收到 ``operator does not exist`` 一类的数据库原始错误。
+    """
+
+
+def _coerce_comparison_value(col_name: str, col_type: str, val: typing.Any) -> typing.Any:
+    """按反射列类型把筛选文本解析为可比较的 Python 值。
+
+    未知列类型 / 数组类型原样返回，保持既有「交给数据库比较」的行为。
+    解析失败抛 :class:`FilterValidationError`。
+    """
+    text = str(val).strip()
+    normalized = col_type.strip().upper()
+    if not normalized or "[" in normalized:
+        return val
+
+    if _DATE_TYPE_PATTERN.match(normalized):
+        expected = "an ISO timestamp" if normalized.startswith("TIMESTAMP") else "a YYYY-MM-DD date"
+    elif _INTEGER_TYPE_PATTERN.match(normalized):
+        expected = "an integer"
+    elif _NUMERIC_TYPE_PATTERN.match(normalized):
+        expected = "a number"
+    else:
+        return val
+
+    try:
+        if _DATE_TYPE_PATTERN.match(normalized):
+            if normalized.startswith("TIMESTAMP"):
+                return datetime.datetime.fromisoformat(text)
+            return datetime.date.fromisoformat(text)
+        if _INTEGER_TYPE_PATTERN.match(normalized):
+            return int(text)
+        return decimal.Decimal(text)
+    except (ValueError, decimal.InvalidOperation) as e:
+        raise FilterValidationError(
+            f"Invalid filter value {text!r} for column '{col_name}' ({col_type}), expected {expected}."
+        ) from e
 
 
 class DataExplorerQueryClient:
@@ -256,6 +317,7 @@ class DataExplorerQueryClient:
                 DataExplorerQueryClient._shared_engine = sa.create_engine(
                     db_url_sync,
                     echo=False,
+                    connect_args={"connect_timeout": _CONNECT_TIMEOUT_SECONDS},
                     **pool_config,
                 )
 
@@ -263,6 +325,29 @@ class DataExplorerQueryClient:
     def _engine(self) -> sa.Engine | None:
         """只读属性，返回类级别共享引擎。"""
         return DataExplorerQueryClient._shared_engine
+
+    @contextlib.contextmanager
+    def _read_only_connection(self) -> typing.Iterator[typing.Any]:
+        """只读受限事务上下文（READ ONLY + statement_timeout）。
+
+        connect_timeout 在引擎创建时经 ``connect_args`` 注入（libpq 级别，不能按事务
+        设置）。``SET TRANSACTION READ ONLY`` / ``set_config`` 为 PostgreSQL 方言专属，
+        非 PG 引擎（单元测试用 SQLite）跳过，避免不支持该语句导致误报。
+
+        事务内统一先设置只读与超时，再做反射/计数/读行，5 万行导出同样受此约束。
+        """
+        engine = self._engine
+        assert engine is not None
+        with engine.connect() as conn:
+            with conn.begin():
+                if engine.dialect.name == "postgresql":
+                    conn.execute(sa.text("SET TRANSACTION READ ONLY"))
+                    # DAT-08: SET 不支持参数绑定，set_config(..., true) 等价 SET LOCAL
+                    conn.execute(
+                        sa.text("SELECT set_config('statement_timeout', :v, true)"),
+                        {"v": _STATEMENT_TIMEOUT},
+                    )
+                yield conn
 
     def close(self):
         """实例级 close 为空操作。
@@ -291,26 +376,34 @@ class DataExplorerQueryClient:
             logger.error("Error fetching tables: %s", safe_error(e))
             return []
 
-    def get_table_schema(self, table_name: str):
+    def get_table_schema(self, table_name: str, conn: typing.Any = None):
         """
         Get the schema (column names and types) for a specific table.
+
+        Args:
+            table_name: 表名（白名单校验在 conn 为 None 时执行）。
+            conn: 可选，调用方已有的只读连接；单次查询内复用反射结果，避免重复反射
+                （提供时视为调用方已完成表名白名单校验）。
+
         Returns:
             list[dict]: List of column info {'name': 'col_name', 'type': 'TEXT'}
         """
         self._ensure_engine()
         try:
-            self._validate_table_name(table_name)
-            assert self._engine is not None
-            insp = sa.inspect(self._engine)
-            columns = []
-            for col_info in insp.get_columns(table_name):
-                columns.append(
-                    {"name": col_info["name"], "type": str(col_info["type"])},
-                )
-            return columns
+            if conn is None:
+                self._validate_table_name(table_name)
+                with self._read_only_connection() as active_conn:
+                    return self._read_table_columns(active_conn, table_name)
+            return self._read_table_columns(conn, table_name)
         except Exception as e:
             logger.error("Error fetching schema for %s: %s", table_name, safe_error(e))
             return []
+
+    @staticmethod
+    def _read_table_columns(conn: typing.Any, table_name: str) -> list[dict]:
+        """在给定连接（只读事务内）反射列名与类型串。"""
+        insp = sa.inspect(conn)
+        return [{"name": col_info["name"], "type": str(col_info["type"])} for col_info in insp.get_columns(table_name)]
 
     def get_table_count(self, table_name: str, filters: list | None = None):
         """
@@ -336,11 +429,18 @@ class DataExplorerQueryClient:
             tbl = sa.table(table_name)
             stmt = sa.select(sa.func.count()).select_from(tbl)
 
-            if filters:
-                schema_cols = {c["name"] for c in self.get_table_schema(table_name)}
-                stmt = self._apply_filters(stmt, filters, schema_cols=schema_cols)
+            with self._read_only_connection() as conn:
+                if filters:
+                    schema_types = {
+                        c["name"]: str(c.get("type") or "") for c in self.get_table_schema(table_name, conn=conn)
+                    }
+                    stmt = self._apply_filters(
+                        stmt,
+                        filters,
+                        schema_cols=set(schema_types),
+                        schema_types=schema_types,
+                    )
 
-            with self._engine.connect() as conn:  # type: ignore[union-attr]
                 result = conn.execute(stmt)
                 return result.scalar() or 0
         except Exception as e:
@@ -379,9 +479,18 @@ class DataExplorerQueryClient:
             raise ValueError(f"Invalid table name: {table_name}")
 
     @staticmethod
-    def _apply_filters(stmt: typing.Any, filters: list | None, schema_cols: typing.Any = None):
+    def _apply_filters(
+        stmt: typing.Any,
+        filters: list | None,
+        schema_cols: typing.Any = None,
+        schema_types: typing.Mapping[str, str] | None = None,
+    ):
         """Apply WHERE filters using SQLAlchemy Core operators (zero f-string).
-        schema_cols: optional set of valid column names for whitelist validation."""
+
+        schema_cols: optional set of valid column names for whitelist validation.
+        schema_types: optional reflected column type strings; comparison values are
+            coerced/validated against the column type before binding.
+        """
         if not filters:
             return stmt
         for col_name, op, val in filters:
@@ -392,14 +501,18 @@ class DataExplorerQueryClient:
                     col_name,
                 )
                 continue
-            op_func = _OP_MAP.get(op)
-            if op_func is None:
+            if op not in _OP_MAP and op != "LIKE":
                 continue  # Skip unsupported operator
             col_obj = sa.column(col_name)
-            # Handle LIKE wildcards
-            if op == "LIKE" and "%" not in str(val):
-                val = f"%{val}%"
-            stmt = stmt.where(op_func(col_obj, val))
+            if op == "LIKE":
+                # LIKE 统一按文本匹配：DATE/BIGINT/NUMERIC 列直接 LIKE 会触发
+                # ``operator does not exist: date ~~ unknown``，故先 CAST 为字符串。
+                if "%" not in str(val):
+                    val = f"%{val}%"
+                stmt = stmt.where(sa.cast(col_obj, sa.String).like(val))
+                continue
+            col_type = (schema_types or {}).get(col_name, "")
+            stmt = stmt.where(_OP_MAP[op](col_obj, _coerce_comparison_value(col_name, col_type, val)))
         return stmt
 
     def query_table(
@@ -432,31 +545,39 @@ class DataExplorerQueryClient:
             tbl = sa.table(table_name)
             stmt = sa.select(sa.text("*")).select_from(tbl)
 
-            # 1. Apply Filters
-            schema_cols = {c["name"] for c in self.get_table_schema(table_name)}
-            if filters:
-                stmt = self._apply_filters(stmt, filters, schema_cols=schema_cols)
+            with self._read_only_connection() as conn:
+                # 单次查询内只反射一次 schema，过滤/排序共用（避免重复反射与重复建连）
+                schema_types = {
+                    c["name"]: str(c.get("type") or "") for c in self.get_table_schema(table_name, conn=conn)
+                }
 
-            # 2. Apply Sorting
-            if sort_col:
-                # Validate sort_col exists in the table schema
-                schema_cols = {c["name"] for c in self.get_table_schema(table_name)}
-                if sort_col in schema_cols:
-                    col_obj = sa.column(sort_col)
-                    stmt = stmt.order_by(
-                        sa.asc(col_obj) if sort_asc else sa.desc(col_obj),
+                # 1. Apply Filters
+                if filters:
+                    stmt = self._apply_filters(
+                        stmt,
+                        filters,
+                        schema_cols=set(schema_types),
+                        schema_types=schema_types,
                     )
-            elif table_name == "daily_quotes":
-                # Default sort for common tables
-                stmt = stmt.order_by(
-                    sa.desc(sa.column("trade_date")),
-                    sa.asc(sa.column("ts_code")),
-                )
 
-            # 3. Apply Pagination
-            stmt = stmt.limit(page_size).offset(offset)
+                # 2. Apply Sorting
+                if sort_col:
+                    # Validate sort_col exists in the table schema
+                    if sort_col in schema_types:
+                        col_obj = sa.column(sort_col)
+                        stmt = stmt.order_by(
+                            sa.asc(col_obj) if sort_asc else sa.desc(col_obj),
+                        )
+                elif table_name == "daily_quotes":
+                    # Default sort for common tables
+                    stmt = stmt.order_by(
+                        sa.desc(sa.column("trade_date")),
+                        sa.asc(sa.column("ts_code")),
+                    )
 
-            with self._engine.connect() as conn:  # type: ignore[union-attr]
+                # 3. Apply Pagination
+                stmt = stmt.limit(page_size).offset(offset)
+
                 result = conn.execute(stmt)
                 rows = result.fetchall()
                 if not rows:
