@@ -2248,6 +2248,70 @@ class TestDataProcessorInitializeSystem:
 
         assert result is None
 
+    @pytest.mark.asyncio
+    async def test_holder_permission_only_degrades_visibly_without_failing_init(self):
+        """D2-03：holder 权限跳过（warnings-only partial）保留可见告警但不阻断初始化。"""
+        dp = _make_dp()
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
+        dp.strategies["macro"].run = AsyncMock(return_value=SyncResult())
+        dp.strategies["holder"].run = AsyncMock(
+            return_value=SyncResult(
+                status="partial",
+                warnings=["top10_holders period=20240331: skipped (Tushare permission denied)"],
+            )
+        )
+        dp.check_data_health = AsyncMock(return_value={"tier": 3})
+        dp.clear_cancel()
+        progress: list = []
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            result = await dp.initialize_system(
+                quick=True,
+                progress_callback=lambda c, t, m: progress.append((c, t, m)),
+            )
+
+        # 权限受限表不应把整个初始化判为失败（其他已完成的表保持可用）
+        assert result == {"tier": 3}
+        dp.check_data_health.assert_awaited_once()
+        assert any(m.key == "init_step_complete" for _, _, m in progress)
+
+    @pytest.mark.asyncio
+    async def test_holder_permission_with_real_errors_still_degrades(self):
+        """D2-03：混合真实错误时仍按失败降级（不得借权限告警绕过）。"""
+        dp = _make_dp()
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
+        dp.strategies["macro"].run = AsyncMock(return_value=SyncResult())
+        dp.strategies["holder"].run = AsyncMock(
+            return_value=SyncResult(
+                status="partial",
+                errors=["pledge_stat"],
+                warnings=["top10_holders period=20240331: skipped (Tushare permission denied)"],
+            )
+        )
+        dp.check_data_health = AsyncMock(return_value={"tier": 3})
+        dp.clear_cancel()
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            result = await dp.initialize_system(quick=True)
+
+        assert result is None
+
     def test_base_dimension_strategies_bind_cache_registered_daos(self):
         """UIR-F14-002：DAO 取自 CacheManager 注册实例（引擎重建时 sync_engines 可同步），
         不得自建（R13/R5 同一路径）。"""

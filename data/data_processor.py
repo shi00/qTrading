@@ -1182,18 +1182,35 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             holder_res = await self.strategies["holder"].run()
             # D05-F05：holder 少量表失败时策略上报 partial（errors 记录失败目标/期间）。
             # 此前仅检查 failed，导致 partial/errors 缺口被忽略并在初始化末段假报完整成功。
+            # D2-03：Tushare 权限不可用属「可见降级」而非 IO/DB 失败——holder 策略把权限
+            # 跳过聚合为 warnings-only partial（errors 为空、sync_status 已记
+            # skipped_permission）。此时保留可见告警但不阻断初始化（不因权限受限表把
+            # 其他已完成的表一并判失败），也不静默当作已完备（capability 指示器据此反映）。
             if holder_res.status == SyncStatus.CANCELLED.value:
                 logger.warning(
                     "[DataProcessor] Init | ⏹️ Holder sync cancelled; init not reported as complete.",
                 )
                 return None
-            if holder_res.status in (SyncStatus.FAILED.value, SyncStatus.PARTIAL.value) or holder_res.errors:
+            if holder_res.status == SyncStatus.FAILED.value or holder_res.errors:
                 degraded_steps.append("holder")
                 logger.warning(
                     "[DataProcessor] Init | ⚠️ Holder sync not fully ready (status=%s, errors=%s); continuing, final status degraded.",
                     holder_res.status,
                     holder_res.errors,
                 )
+            elif holder_res.status == SyncStatus.PARTIAL.value:
+                if holder_res.warnings:
+                    logger.warning(
+                        "[DataProcessor] Init | ⚠️ Holder sync tables skipped due to Tushare permission (%s); "
+                        "keeping the degradation visible without failing init.",
+                        "; ".join(holder_res.warnings),
+                    )
+                else:
+                    degraded_steps.append("holder")
+                    logger.warning(
+                        "[DataProcessor] Init | ⚠️ Holder sync not fully ready (status=%s); continuing, final status degraded.",
+                        holder_res.status,
+                    )
 
             report_step(5, 2, 3, Message("init_step_5_done"))
 

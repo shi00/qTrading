@@ -27,6 +27,14 @@ _CHECKPOINT_INTERVAL = 5000
 # M7.7: 循环体取消检查的时间间隔（秒），参考 data/sync/sw_industry.py 模式。
 _CANCEL_CHECK_INTERVAL_SECONDS = 2.0
 
+# 子同步返回码约定（子方法 → _run_impl）：
+#   >=0 : 成功写入行数
+#   -1  : 失败（取数/落库失败、分页截断）；取消由 _cancelled / _shutdown_event 标志识别，
+#         不占用返回码（data-sync.md C18：协作取消不得伪造 CancelledError）。
+#   -2  : Tushare 权限不可用（已登记 sync_status.skipped_permission）——不计入
+#         _MAX_ERRORS 熔断、不混入 IO/DB 失败，由 _run_impl 聚合为可见 warnings。
+_SUB_SYNC_SKIPPED_PERMISSION = -2
+
 
 class HolderSyncStrategy(ISyncStrategy):
     """
@@ -87,6 +95,17 @@ class HolderSyncStrategy(ISyncStrategy):
 
         return await get_effective_trade_date(getattr(self.context, "processor", None))
 
+    @staticmethod
+    def _record_permission_skip(result: SyncResult, target: str) -> None:
+        """登记权限跳过：进 warnings（可见降级），不计入 errors / _MAX_ERRORS 熔断。
+
+        R21：缺失表不得伪装为数据已完备——status 置 partial 并保留 warning；
+        同步层 sync_status 另记 skipped_permission（UI capability 指示器据此反映）。
+        """
+        result.warnings.append(f"{target}: skipped (Tushare permission denied)")
+        if result.status not in (SyncStatus.FAILED.value, SyncStatus.CANCELLED.value):
+            result.status = SyncStatus.PARTIAL.value
+
     @log_async_operation(
         operation_name="HolderSyncStrategy.run",
         threshold_ms=PerfThreshold.DB_BULK_IO,
@@ -109,7 +128,9 @@ class HolderSyncStrategy(ISyncStrategy):
                     break
 
                 count = await self._sync_stk_holdernumber(qe)
-                if count < 0:
+                if count == _SUB_SYNC_SKIPPED_PERMISSION:
+                    self._record_permission_skip(result, f"stk_holdernumber period={qe}")
+                elif count < 0:
                     errors += 1
                     result.errors.append(f"stk_holdernumber period={qe}")
                 else:
@@ -126,7 +147,9 @@ class HolderSyncStrategy(ISyncStrategy):
                     break
 
                 count = await self._sync_top10_holders(qe, result)
-                if count < 0:
+                if count == _SUB_SYNC_SKIPPED_PERMISSION:
+                    self._record_permission_skip(result, f"top10_holders period={qe}")
+                elif count < 0:
                     errors += 1
                     result.errors.append(f"top10_holders period={qe}")
                 else:
@@ -144,7 +167,9 @@ class HolderSyncStrategy(ISyncStrategy):
 
             if errors < _MAX_ERRORS and not self._cancelled:
                 count, actual_date = await self._sync_pledge_stat()
-                if count < 0:
+                if count == _SUB_SYNC_SKIPPED_PERMISSION:
+                    self._record_permission_skip(result, "pledge_stat")
+                elif count < 0:
                     errors += 1
                     result.errors.append("pledge_stat")
                 elif count > 0:
@@ -157,7 +182,9 @@ class HolderSyncStrategy(ISyncStrategy):
 
             if errors < _MAX_ERRORS and not self._cancelled:
                 count, actual_date = await self._sync_share_float()
-                if count < 0:
+                if count == _SUB_SYNC_SKIPPED_PERMISSION:
+                    self._record_permission_skip(result, "share_float")
+                elif count < 0:
                     errors += 1
                     result.errors.append("share_float")
                 elif count > 0:
@@ -170,7 +197,9 @@ class HolderSyncStrategy(ISyncStrategy):
 
             if errors < _MAX_ERRORS and not self._cancelled:
                 count, actual_date = await self._sync_pledge_detail()
-                if count < 0:
+                if count == _SUB_SYNC_SKIPPED_PERMISSION:
+                    self._record_permission_skip(result, "pledge_detail")
+                elif count < 0:
                     errors += 1
                     result.errors.append("pledge_detail")
                 elif count > 0:
@@ -183,7 +212,9 @@ class HolderSyncStrategy(ISyncStrategy):
 
             if errors < _MAX_ERRORS and not self._cancelled:
                 count, actual_date = await self._sync_stk_holdertrade()
-                if count < 0:
+                if count == _SUB_SYNC_SKIPPED_PERMISSION:
+                    self._record_permission_skip(result, "stk_holdertrade")
+                elif count < 0:
                     errors += 1
                     result.errors.append("stk_holdertrade")
                 elif count > 0:
@@ -195,8 +226,10 @@ class HolderSyncStrategy(ISyncStrategy):
                     )
 
             # D05-F05：中止阈值与最终判据分离。errors >= _MAX_ERRORS 仍提前中止，
-            # 但任一 -1（含分页截断、权限拒绝）都已登记失败目标；只要 errors>0
-            # 且无更严重终态，就必须如实上报 partial，不得回落默认 success。
+            # 但任一 -1（含分页截断）都已登记失败目标；只要 errors>0 且无更严重终态，
+            # 就必须如实上报 partial，不得回落默认 success。
+            # D2-03：权限跳过（-2）不进 errors，不触发 _MAX_ERRORS 熔断，只聚合 warnings；
+            # 其 partial 语义已在 _record_permission_skip 中登记。
             # 优先级：failed/cancelled 不得被覆盖（取消优先于 error 累积）。
             if result.status != "failed":
                 if self._cancelled or result.status == "cancelled":
@@ -255,7 +288,7 @@ class HolderSyncStrategy(ISyncStrategy):
     async def _sync_stk_holdernumber(self, enddate: str):
         """
         Fetch full-market stk_holdernumber snapshot by enddate.
-        Returns row count on success, -1 on error.
+        Returns row count on success, -1 on error, -2 when Tushare permission is unavailable.
         """
         try:
             df = await self.context.api.get_stk_holdernumber(enddate=enddate)
@@ -293,7 +326,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 status="skipped_permission",
                 last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
             )
-            return -1
+            return _SUB_SYNC_SKIPPED_PERMISSION
         except Exception as e:
             self._log_sync_error("stk_holdernumber", enddate, e)
             return -1
@@ -320,7 +353,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 ``result.errors`` records the failing ts_code, so callers
                 aggregating results can distinguish full success from partial.
 
-        Returns total row count on success, -1 on error.
+        Returns total row count on success, -1 on error, -2 when Tushare permission is unavailable.
         """
         try:
             stock_df = await self.context.cache.stock_dao.get_stock_basic()
@@ -385,7 +418,9 @@ class HolderSyncStrategy(ISyncStrategy):
                         all_dfs.append(df)
                         total_rows += len(df)
                     consecutive_errors = 0
-                except EngineDisposedError:
+                except (asyncio.CancelledError, EngineDisposedError, TushareAPIPermissionError):
+                    # 取消/引擎释放/权限拒绝必须立即向上传播：
+                    # 权限拒绝若被下方宽泛 except 吞没，会对全部数千只股票重复无效请求。
                     raise
                 except Exception as e:
                     stock_errors += 1
@@ -501,6 +536,34 @@ class HolderSyncStrategy(ISyncStrategy):
             return total_rows
         except EngineDisposedError:
             raise
+        except TushareAPIPermissionError:
+            logger.warning(
+                "[HolderSync] ⛔ Permission denied for top10_holders (period=%s)",
+                period,
+            )
+            try:
+                qe_date = datetime.datetime.strptime(period, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
+                await self.context.cache.sync_dao.update_sync_status(
+                    "top10_holders",
+                    qe_date,
+                    0,
+                    status="skipped_permission",
+                    last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
+                )
+            except EngineDisposedError:
+                raise
+            except Exception as e:
+                severity = classify_severity(e, context="general")
+                log_classified(
+                    logger,
+                    e,
+                    "general",
+                    "[HolderSync] top10_holders | Failed to record skipped_permission status (%s): %s",
+                    exc_info=True,
+                )
+                if severity == "system":
+                    raise
+            return _SUB_SYNC_SKIPPED_PERMISSION
         except Exception as e:
             self._log_sync_error("top10_holders", period, e)
             return -1
@@ -626,7 +689,7 @@ class HolderSyncStrategy(ISyncStrategy):
                     status="skipped_permission",
                     last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                 )
-            return -1
+            return _SUB_SYNC_SKIPPED_PERMISSION
         except Exception as e:
             severity = classify_severity(e, context="general")
             log_classified(
@@ -649,7 +712,8 @@ class HolderSyncStrategy(ISyncStrategy):
         pledge_stat snapshots are keyed by end_date (typically weekly Fridays).
 
         Strategy: Try the most recent 4 Fridays as end_date to find a valid snapshot.
-        Returns (row_count, actual_end_date) on success, (-1, None) on error.
+        Returns (row_count, actual_end_date) on success, (-1, None) on error,
+        (-2, None) when Tushare permission is unavailable.
         """
         try:
             today = await self._get_effective_trade_date()
@@ -670,7 +734,8 @@ class HolderSyncStrategy(ISyncStrategy):
                 try:
                     df = await self.context.api.get_pledge_stat(end_date=end_date)
                     all_api_failed = False
-                except EngineDisposedError:
+                except (asyncio.CancelledError, EngineDisposedError, TushareAPIPermissionError):
+                    # 取消/引擎释放/权限拒绝立即传播，不得被重试循环吞没（避免 4 次无效重试）。
                     raise
                 except Exception as api_err:
                     severity = classify_severity(api_err, context="general")
@@ -746,7 +811,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 )
                 if severity == "system":
                     raise
-            return -1, None
+            return _SUB_SYNC_SKIPPED_PERMISSION, None
         except Exception as e:
             severity = classify_severity(e, context="general")
             log_classified(
@@ -769,7 +834,8 @@ class HolderSyncStrategy(ISyncStrategy):
         actual float_date. Sync a window of [today - 90 days, today + 30 days]
         to capture both recent and upcoming 解禁 events.
 
-        Returns (row_count, actual_date) on success, (-1, None) on error.
+        Returns (row_count, actual_date) on success, (-1, None) on error,
+        (-2, None) when Tushare permission is unavailable.
         """
         try:
             today = await self._get_effective_trade_date()
@@ -826,7 +892,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 )
                 if severity == "system":
                     raise
-            return -1, None
+            return _SUB_SYNC_SKIPPED_PERMISSION, None
         except Exception as e:
             severity = classify_severity(e, context="general")
             log_classified(
@@ -857,7 +923,8 @@ class HolderSyncStrategy(ISyncStrategy):
         （单日全市场质押公告远小于 1000 行）。交易日历不可用时回退自然日
         （周末/节假日 API 返回空，不报错）。
 
-        Returns (row_count, actual_date) on success, (-1, None) on error.
+        Returns (row_count, actual_date) on success, (-1, None) on error,
+        (-2, None) when Tushare permission is unavailable.
         """
         try:
             today = await self._get_effective_trade_date()
@@ -884,7 +951,8 @@ class HolderSyncStrategy(ISyncStrategy):
                     break
                 try:
                     df = await self.context.api.get_pledge_detail(ann_date=day.strftime("%Y%m%d"))
-                except EngineDisposedError:
+                except (asyncio.CancelledError, EngineDisposedError, TushareAPIPermissionError):
+                    # 取消/引擎释放/权限拒绝立即传播，不得被逐日循环吞没（避免数十次无效请求）。
                     raise
                 except Exception as e:
                     severity = classify_severity(e, context="general")
@@ -959,7 +1027,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 )
                 if severity == "system":
                     raise
-            return -1, None
+            return _SUB_SYNC_SKIPPED_PERMISSION, None
         except Exception as e:
             severity = classify_severity(e, context="general")
             log_classified(
@@ -981,7 +1049,8 @@ class HolderSyncStrategy(ISyncStrategy):
         stk_holdertrade is event-driven. Sync a window of
         [today - 90 days, today] to capture recent 增减持 events.
 
-        Returns (row_count, actual_date) on success, (-1, None) on error.
+        Returns (row_count, actual_date) on success, (-1, None) on error,
+        (-2, None) when Tushare permission is unavailable.
         """
         try:
             today = await self._get_effective_trade_date()
@@ -1038,7 +1107,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 )
                 if severity == "system":
                     raise
-            return -1, None
+            return _SUB_SYNC_SKIPPED_PERMISSION, None
         except Exception as e:
             severity = classify_severity(e, context="general")
             log_classified(

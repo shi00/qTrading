@@ -18,6 +18,7 @@ from data.sync.holder import (
     _MAX_ERRORS,
     _PROGRESS_LOG_INTERVAL,
     _CHECKPOINT_INTERVAL,
+    _SUB_SYNC_SKIPPED_PERMISSION,
 )
 from data.sync.base import SyncContext, SyncResult, SyncStatus
 
@@ -1446,13 +1447,10 @@ class TestR5EngineDisposedReraises:
 
     @pytest.mark.asyncio
     async def test_sync_pledge_stat_permission_recording_engine_disposed(self):
-        """_sync_pledge_stat 在 TushareAPIPermissionError 后返回 -1。
+        """D2-03：inner 循环不再吞权限异常 → outer handler 记录状态时 R5 必须传播。
 
-        注：TushareAPIPermissionError 被 inner except 捕获（classify_severity 归为
-        "recoverable"），走 continue 路径，4 次 retry 失败后 all_api_failed=True
-        返回 (-1, None)。outer `except TushareAPIPermissionError` 块不会触发，
-        update_sync_status 从未被调用，EngineDisposedError 无传播机会。
-        此测试验证现状行为（非 R5 传播路径）。
+        权限拒绝立即从 retry 循环 raise，进入 outer `except TushareAPIPermissionError`
+        记录 skipped_permission；update_sync_status 抛 EngineDisposedError 时必须向上传播。
         """
         ctx = MagicMock()
         ctx.api = MagicMock()
@@ -1461,9 +1459,9 @@ class TestR5EngineDisposedReraises:
         ctx.cache.sync_dao.update_sync_status = AsyncMock(side_effect=EngineDisposedError("disposed"))
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
-        count, date = await strategy._sync_pledge_stat()
-        assert count == -1  # TushareAPIPermissionError 被 inner except 捕获后 continue，4 次 retry 失败后返回 -1
-        assert date is None
+        with pytest.raises(EngineDisposedError) as exc_info:
+            await strategy._sync_pledge_stat()
+        assert "disposed" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_sync_share_float_permission_recording_engine_disposed(self):
@@ -1622,7 +1620,7 @@ class TestTushareAPIPermissionPaths:
 
     @pytest.mark.asyncio
     async def test_sync_stk_holdernumber_permission_denied(self):
-        """_sync_stk_holdernumber 在 TushareAPIPermissionError 时记录 skipped_permission 并返回 -1。"""
+        """_sync_stk_holdernumber 在 TushareAPIPermissionError 时记录 skipped_permission 并返回权限跳过码。"""
         ctx = MagicMock()
         ctx.api = MagicMock()
         ctx.api.get_stk_holdernumber = AsyncMock(side_effect=TushareAPIPermissionError("test_api", "no perm"))
@@ -1630,7 +1628,7 @@ class TestTushareAPIPermissionPaths:
         ctx.cache.sync_dao.update_sync_status = AsyncMock()
         strategy = HolderSyncStrategy(ctx)
         result = await strategy._sync_stk_holdernumber("20240331")
-        assert result == -1
+        assert result == _SUB_SYNC_SKIPPED_PERMISSION
         ctx.cache.sync_dao.update_sync_status.assert_awaited_once()
         args = ctx.cache.sync_dao.update_sync_status.await_args
         assert args is not None
@@ -1638,7 +1636,7 @@ class TestTushareAPIPermissionPaths:
 
     @pytest.mark.asyncio
     async def test_sync_one_table_permission_denied(self):
-        """_sync_one_table 在 TushareAPIPermissionError 时记录 skipped_permission 并返回 -1。"""
+        """_sync_one_table 在 TushareAPIPermissionError 时记录 skipped_permission 并返回权限跳过码。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.sync_dao.update_sync_status = AsyncMock()
@@ -1646,7 +1644,7 @@ class TestTushareAPIPermissionPaths:
         api_func = AsyncMock(side_effect=TushareAPIPermissionError("test_api", "no perm"))
         strategy = HolderSyncStrategy(ctx)
         result = await strategy._sync_one_table(api_func, save_func, "test_table", "20240331")
-        assert result == -1
+        assert result == _SUB_SYNC_SKIPPED_PERMISSION
         ctx.cache.sync_dao.update_sync_status.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -1659,16 +1657,14 @@ class TestTushareAPIPermissionPaths:
         api_func = AsyncMock(side_effect=TushareAPIPermissionError("test_api", "no perm"))
         strategy = HolderSyncStrategy(ctx)
         result = await strategy._sync_one_table(api_func, save_func, "test_table", None)
-        assert result == -1
+        assert result == _SUB_SYNC_SKIPPED_PERMISSION
         ctx.cache.sync_dao.update_sync_status.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_sync_pledge_stat_permission_denied(self):
-        """_sync_pledge_stat 在 TushareAPIPermissionError 时（被 inner except 捕获）返回 -1。
+        """D2-03：权限拒绝立即从 retry 循环传播 → outer handler 记录 skipped_permission。
 
-        注：源码中 TushareAPIPermissionError 在 retry loop 内被 `except Exception as api_err` 捕获，
-        连续 4 次失败后 `all_api_failed=True`，返回 (-1, None)。outer `except TushareAPIPermissionError`
-        仅在 save_pledge_stat 抛出时触发（见 test_sync_pledge_stat_outer_permission_denied）。
+        仅发起一次 API 调用（不再 4 次无效重试），返回 (权限跳过码, None)。
         """
         ctx = MagicMock()
         ctx.api = MagicMock()
@@ -1678,9 +1674,10 @@ class TestTushareAPIPermissionPaths:
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         count, date = await strategy._sync_pledge_stat()
-        assert count == -1
-        # inner except 捕获，不走 outer TushareAPIPermissionError handler
-        ctx.cache.sync_dao.update_sync_status.assert_not_awaited()
+        assert count == _SUB_SYNC_SKIPPED_PERMISSION
+        assert date is None
+        ctx.api.get_pledge_stat.assert_awaited_once()
+        ctx.cache.sync_dao.update_sync_status.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_sync_pledge_stat_outer_permission_denied(self):
@@ -1702,12 +1699,12 @@ class TestTushareAPIPermissionPaths:
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         count, date = await strategy._sync_pledge_stat()
-        assert count == -1
+        assert count == _SUB_SYNC_SKIPPED_PERMISSION
         ctx.cache.sync_dao.update_sync_status.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_sync_share_float_permission_denied(self):
-        """_sync_share_float 在 TushareAPIPermissionError 时记录 skipped_permission 并返回 -1。"""
+        """_sync_share_float 在 TushareAPIPermissionError 时记录 skipped_permission 并返回权限跳过码。"""
         ctx = MagicMock()
         ctx.api = MagicMock()
         ctx.api.get_share_float = AsyncMock(side_effect=TushareAPIPermissionError("test_api", "no perm"))
@@ -1716,12 +1713,12 @@ class TestTushareAPIPermissionPaths:
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         count, date = await strategy._sync_share_float()
-        assert count == -1
+        assert count == _SUB_SYNC_SKIPPED_PERMISSION
         ctx.cache.sync_dao.update_sync_status.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_sync_stk_holdertrade_permission_denied(self):
-        """_sync_stk_holdertrade 在 TushareAPIPermissionError 时记录 skipped_permission 并返回 -1。"""
+        """_sync_stk_holdertrade 在 TushareAPIPermissionError 时记录 skipped_permission 并返回权限跳过码。"""
         ctx = MagicMock()
         ctx.api = MagicMock()
         ctx.api.get_stk_holdertrade = AsyncMock(side_effect=TushareAPIPermissionError("test_api", "no perm"))
@@ -1730,7 +1727,7 @@ class TestTushareAPIPermissionPaths:
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         count, date = await strategy._sync_stk_holdertrade()
-        assert count == -1
+        assert count == _SUB_SYNC_SKIPPED_PERMISSION
         ctx.cache.sync_dao.update_sync_status.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -1753,11 +1750,11 @@ class TestTushareAPIPermissionPaths:
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         count, date = await strategy._sync_pledge_stat()
-        assert count == -1  # 不二次 raise
+        assert count == _SUB_SYNC_SKIPPED_PERMISSION  # 不二次 raise
 
     @pytest.mark.asyncio
     async def test_sync_share_float_permission_recording_failure(self):
-        """_sync_share_float 在 TushareAPIPermissionError 后 update_sync_status 抛异常时仍返回 -1。"""
+        """_sync_share_float 在 TushareAPIPermissionError 后 update_sync_status 抛异常时仍返回权限跳过码。"""
         ctx = MagicMock()
         ctx.api = MagicMock()
         ctx.api.get_share_float = AsyncMock(side_effect=TushareAPIPermissionError("test_api", "no perm"))
@@ -1766,11 +1763,11 @@ class TestTushareAPIPermissionPaths:
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         count, date = await strategy._sync_share_float()
-        assert count == -1
+        assert count == _SUB_SYNC_SKIPPED_PERMISSION
 
     @pytest.mark.asyncio
     async def test_sync_stk_holdertrade_permission_recording_failure(self):
-        """_sync_stk_holdertrade 在 TushareAPIPermissionError 后 update_sync_status 抛异常时仍返回 -1。"""
+        """_sync_stk_holdertrade 在 TushareAPIPermissionError 后 update_sync_status 抛异常时仍返回权限跳过码。"""
         ctx = MagicMock()
         ctx.api = MagicMock()
         ctx.api.get_stk_holdertrade = AsyncMock(side_effect=TushareAPIPermissionError("test_api", "no perm"))
@@ -1779,7 +1776,98 @@ class TestTushareAPIPermissionPaths:
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         count, date = await strategy._sync_stk_holdertrade()
-        assert count == -1
+        assert count == _SUB_SYNC_SKIPPED_PERMISSION
+
+
+class TestD2PermissionPropagation:
+    """D2-03：权限拒绝必须在首次请求即向外传播，不得在内外层循环中重复无效请求。"""
+
+    @pytest.mark.asyncio
+    async def test_top10_holders_permission_aborts_single_request(self):
+        """权限拒绝时 top10_holders 仅发起一次请求，不再遍历全部股票。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": [f"{i:06d}.SZ" for i in range(10)]})
+        )
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_top10_holders = AsyncMock(side_effect=TushareAPIPermissionError("top10_holders", "no perm"))
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
+        result = await strategy._sync_top10_holders("20240331")
+        assert result == _SUB_SYNC_SKIPPED_PERMISSION
+        ctx.api.get_top10_holders.assert_awaited_once()
+        ctx.cache.sync_dao.update_sync_status.assert_awaited_once()
+        assert ctx.cache.sync_dao.update_sync_status.await_args.kwargs["status"] == "skipped_permission"
+
+    @pytest.mark.asyncio
+    async def test_pledge_detail_permission_aborts_single_day(self):
+        """权限拒绝时 pledge_detail 仅发起一次请求，不再逐日无效请求。"""
+        ctx = MagicMock()
+        ctx.api = MagicMock()
+        ctx.api.get_pledge_detail = AsyncMock(side_effect=TushareAPIPermissionError("pledge_detail", "no perm"))
+        ctx.cache = MagicMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
+        ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
+            return_value=[datetime.date(2024, 6, d) for d in range(3, 8)]
+        )
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        count, date = await strategy._sync_pledge_detail()
+        assert count == _SUB_SYNC_SKIPPED_PERMISSION
+        assert date is None
+        ctx.api.get_pledge_detail.assert_awaited_once()
+        assert ctx.cache.sync_dao.update_sync_status.await_args.kwargs["status"] == "skipped_permission"
+
+    @pytest.mark.asyncio
+    async def test_top10_holders_cancelled_error_propagates(self):
+        """R2：per-stock 循环内的 CancelledError 必须原样传播。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        ctx.api = MagicMock()
+        ctx.api.get_top10_holders = AsyncMock(side_effect=asyncio.CancelledError())
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
+        with pytest.raises(asyncio.CancelledError):
+            await strategy._sync_top10_holders("20240331")
+
+    @pytest.mark.asyncio
+    async def test_run_permission_skips_do_not_trip_error_breaker(self):
+        """权限跳过不进 errors / 不触发 _MAX_ERRORS 熔断，后续子表仍全部尝试。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
+        strategy = HolderSyncStrategy(ctx)
+        calls: list[str] = []
+
+        async def _skip(name: str):
+            calls.append(name)
+            return _SUB_SYNC_SKIPPED_PERMISSION
+
+        async def _skip_pair(name: str):
+            calls.append(name)
+            return _SUB_SYNC_SKIPPED_PERMISSION, None
+
+        strategy._get_recent_quarter_ends = MagicMock(return_value=["20240331", "20231231", "20230930"])
+        strategy._sync_stk_holdernumber = lambda qe: _skip("stk_holdernumber")
+        strategy._sync_top10_holders = lambda qe, result=None: _skip("top10_holders")
+        strategy._sync_pledge_stat = lambda: _skip_pair("pledge_stat")
+        strategy._sync_share_float = lambda: _skip_pair("share_float")
+        strategy._sync_pledge_detail = lambda: _skip_pair("pledge_detail")
+        strategy._sync_stk_holdertrade = lambda: _skip_pair("stk_holdertrade")
+
+        result = await strategy._run_impl()
+
+        # 3 个季度 × 2 张季报表 + 4 张事件表 = 10 次权限跳过，全部尝试（未被 5 次熔断截断）
+        assert calls.count("stk_holdernumber") == 3
+        assert calls.count("top10_holders") == 3
+        for table in ("pledge_stat", "share_float", "pledge_detail", "stk_holdertrade"):
+            assert calls.count(table) == 1
+        assert result.errors == []
+        assert len(result.warnings) == 10
+        assert result.status == SyncStatus.PARTIAL.value
 
 
 class TestLogSyncErrorSeverityBranches:
