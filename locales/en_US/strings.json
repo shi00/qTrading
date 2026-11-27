@@ -1064,6 +1064,8 @@
     "agent_research_control_disabled_retry_root": "Execution is not in a retryable state",
     "agent_research_control_unavailable": "Control entry not wired (read-only observation)",
     "agent_research_control_native_not_wired": "By design: in-flight calls are not aborted; only the dispatch gate closes and state is recorded (in-flight results are still saved)",
+    "agent_research_control_retry_dispatch_failed": "Retry command saved, but the workflow was not dispatched (see dispatch state)",
+    "agent_research_control_retry_dispatch_unknown": "Retry command saved; workflow delivery state is unknown (it may have been accepted—refresh to verify)",
     "agent_research_artifacts": "Artifacts",
     "agent_research_no_artifacts": "This session has no artifacts yet",
     "agent_research_artifact_body_unloaded": "Artifact body not loaded (read on demand)",

@@ -935,6 +935,8 @@
     "agent_research_control_disabled_retry_root": "执行不在可重试状态",
     "agent_research_control_unavailable": "控制入口未接线（只读观察）",
     "agent_research_control_native_not_wired": "设计取向：不中止在途调用，仅关闭派发门并记录状态（在途成果照常保存）",
+    "agent_research_control_retry_dispatch_failed": "重试命令已保存，但工作流未派发（原因见派发状态）",
+    "agent_research_control_retry_dispatch_unknown": "重试命令已保存，工作流投递状态未知（可能已受理，请刷新核对）",
     "agent_research_artifacts": "成果",
     "agent_research_no_artifacts": "当前会话还没有成果",
     "agent_research_artifact_body_unloaded": "成果正文未载入（可按需读取）",

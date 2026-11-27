@@ -21,6 +21,7 @@ from app.agent_wiring import (
     _LaunchedCloseFactSink,
     _LaunchedWorkflowLedger,
     _NativeAnswerSender,
+    _NativeRetryLauncher,
     _PendingCloseFactSink,
     _ProcessDispatchGate,
     wire_agent_runtime,
@@ -197,6 +198,8 @@ async def test_facade_reuses_shared_engine_and_ledger(monkeypatch: pytest.Monkey
 
     assert isinstance(wiring.service, AgentService)
     assert wiring.service._dao is cache.agent_dao  # 共享引擎/账本，不另起连接池
+    # 宿主就绪后注入重试投递端口：落库的重试命令有工作流执行器接单。
+    assert isinstance(wiring.service._retry_launcher, _NativeRetryLauncher)
     assert isinstance(wiring.bridge, OwnerLoopBridge)
     # 角色目录与会话模型选择已接线（复用共享 app_state 配置域）。
     assert wiring.role_catalog is not None

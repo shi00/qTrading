@@ -21,7 +21,11 @@ import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models import ModelRequestParameters
 
-from app.agent_wiring import AGENT_RUNTIME_LAUNCH_ALLOWED_ENV, agent_runtime_launch_allowed
+from app.agent_wiring import (
+    AGENT_RUNTIME_LAUNCH_ALLOWED_ENV,
+    _NativeRetryLauncher,
+    agent_runtime_launch_allowed,
+)
 from core.agent_types import (
     CommandRef,
     CommitState,
@@ -32,6 +36,7 @@ from core.agent_types import (
     derive_round_id,
     json_doc,
     plan_spec_digest,
+    stable_id,
 )
 from core.model_management_types import ChatTurnOutcome, ChatTurnResponse, ExecutionSnapshot
 from services.agent_service.dispatch import (
@@ -156,6 +161,9 @@ class _FakeExecutor:
 class _FakeGate:
     def __init__(self, *, closed: bool) -> None:
         self._closed = closed
+
+    def close_dispatch(self) -> bool:
+        return self._closed
 
     def dispatch_closed(self) -> bool:
         return self._closed
@@ -768,6 +776,104 @@ def test_accept_commits_without_dispatching() -> None:
     assert dao.accept_calls == 1
     assert receipt.execution_id == _EXECUTION_ID
     assert submit.calls == []
+
+
+# --- 单任务重试投递端口（W-01 / D7-06） ---------------------------------------
+
+_RETRY_ROUND_ID = "round-retry-2"
+_RETRY_PAYLOAD: dict[str, Any] = {
+    "payload_version": 1,
+    "execution_id": _EXECUTION_ID,
+    "round_id": _RETRY_ROUND_ID,
+    "plan_digest": "d" * 64,
+    "nodes": [],
+    "preserved_outcomes": [],
+}
+
+
+def test_retry_launcher_submits_with_stable_new_round_identity() -> None:
+    submit = _RecordingSubmitter()
+    launcher = _NativeRetryLauncher(gate=_FakeGate(closed=False), submit=submit)
+
+    submitted, reason = asyncio.run(
+        launcher.launch(
+            _RETRY_PAYLOAD,
+            user_scope=_USER_SCOPE,
+            execution_id=_EXECUTION_ID,
+            round_id=_RETRY_ROUND_ID,
+        )
+    )
+
+    assert (submitted, reason) == (True, None)
+    expected_workflow_id = stable_id("retry_workflow", [_USER_SCOPE, _EXECUTION_ID, _RETRY_ROUND_ID])
+    assert submit.calls == [(expected_workflow_id, _RETRY_PAYLOAD)]
+
+
+def test_retry_launcher_reuses_workflow_identity_on_reentry() -> None:
+    """同轮重投命中同一 workflow 身份（宿主 return-existing 去重，不重复研究）。"""
+
+    submit = _RecordingSubmitter()
+    launcher = _NativeRetryLauncher(gate=_FakeGate(closed=False), submit=submit)
+
+    async def _twice() -> None:
+        for _ in range(2):
+            await launcher.launch(
+                _RETRY_PAYLOAD,
+                user_scope=_USER_SCOPE,
+                execution_id=_EXECUTION_ID,
+                round_id=_RETRY_ROUND_ID,
+            )
+
+    asyncio.run(_twice())
+
+    assert [workflow_id for workflow_id, _ in submit.calls] == [
+        stable_id("retry_workflow", [_USER_SCOPE, _EXECUTION_ID, _RETRY_ROUND_ID])
+    ] * 2
+
+
+def test_retry_launcher_refuses_when_dispatch_closed() -> None:
+    submit = _RecordingSubmitter()
+    launcher = _NativeRetryLauncher(gate=_FakeGate(closed=True), submit=submit)
+
+    submitted, reason = asyncio.run(
+        launcher.launch(
+            _RETRY_PAYLOAD,
+            user_scope=_USER_SCOPE,
+            execution_id=_EXECUTION_ID,
+            round_id=_RETRY_ROUND_ID,
+        )
+    )
+
+    assert (submitted, reason) == (False, "dispatch_closed")
+    assert submit.calls == []
+
+
+def test_retry_launcher_propagates_submit_failure_and_cancellation() -> None:
+    failing = _NativeRetryLauncher(
+        gate=_FakeGate(closed=False), submit=_RecordingSubmitter(error=RuntimeError("dbos down"))
+    )
+    with pytest.raises(RuntimeError):
+        asyncio.run(
+            failing.launch(
+                _RETRY_PAYLOAD,
+                user_scope=_USER_SCOPE,
+                execution_id=_EXECUTION_ID,
+                round_id=_RETRY_ROUND_ID,
+            )
+        )
+
+    cancelled = _NativeRetryLauncher(
+        gate=_FakeGate(closed=False), submit=_RecordingSubmitter(error=asyncio.CancelledError())
+    )
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            cancelled.launch(
+                _RETRY_PAYLOAD,
+                user_scope=_USER_SCOPE,
+                execution_id=_EXECUTION_ID,
+                round_id=_RETRY_ROUND_ID,
+            )
+        )
 
 
 def test_submit_and_dispatch_without_dispatcher_is_zero_dispatch() -> None:
