@@ -88,13 +88,11 @@ def _check_tier(
         )
         return
     current_tier = getattr(processor, "_quality_tier", None)
+    # DS-03/D2-04: 全局等级未初始化（未完成评估）时强制 CRITICAL，且不得被陈旧的
+    # per-table 缓存抬升——否则 required_tables 全命中旧 by_table 会绕过 0 级拦截。
     if current_tier is None:
-        current_tier = 0  # Treat uninitialized as CRITICAL
-    # DS-03: per-table 门控。策略声明 required_tables 时，effective 为各表自身等级的
-    # 最小值（避免全局等级退化到 SILVER 恰等于基本面策略默认要求的放行漏洞）。
-    # 未登记的 required 表回退全局等级；未声明 required_tables 或 processor 无
-    # per-table 表（如回测 DataProvider 仅单 int）时保持原全局判定，兼容既有行为。
-    if required_tables:
+        current_tier = 0
+    elif required_tables:
         by_table = getattr(processor, "_quality_tier_by_table", None)
         if isinstance(by_table, dict):
             current_tier = min(by_table.get(_t, current_tier) for _t in required_tables)

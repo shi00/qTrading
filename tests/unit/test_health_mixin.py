@@ -199,14 +199,15 @@ class TestAssignBasicTier:
 
     @pytest.mark.asyncio
     async def test_exception_fallback(self):
+        """D2-04: 质量证据读取异常 → 质量未知，按 CRITICAL(0) fail-closed，不得降为 BRONZE 放行。"""
         proc = FakeProcessor()
         proc.cache.sync_dao.get_sync_status = AsyncMock(side_effect=Exception("DB error"))
         await proc._assign_basic_tier()
-        assert proc._quality_tier == 1
+        assert proc._quality_tier == 0
 
     @pytest.mark.asyncio
     async def test_latest_quote_date_none_string(self):
-        """When last_data_date is 'None' string, to_yyyymmdd_str returns None and tier degrades."""
+        """D2-04: last_data_date 为 'None' 且真实表不可核验 → 质量未知，CRITICAL(0)。"""
         proc = FakeProcessor()
         sync_df = pd.DataFrame(
             {
@@ -218,14 +219,15 @@ class TestAssignBasicTier:
             }
         )
         proc.cache.sync_dao.get_sync_status = AsyncMock(return_value=sync_df)
+        proc.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value=None)
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             await proc._assign_basic_tier()
-            assert proc._quality_tier == 1
+            assert proc._quality_tier == 0
 
     @pytest.mark.asyncio
     async def test_last_date_nan_string(self):
-        """When last_data_date is 'nan' string, to_yyyymmdd_str returns None and table is marked stale."""
+        """D2-04: last_data_date 为 'nan' 且真实表空 → 空表按 CRITICAL(0)，不得放行为 BRONZE。"""
         proc = FakeProcessor()
         sync_df = pd.DataFrame(
             {
@@ -237,11 +239,11 @@ class TestAssignBasicTier:
             }
         )
         proc.cache.sync_dao.get_sync_status = AsyncMock(return_value=sync_df)
+        proc.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value=None)
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             await proc._assign_basic_tier()
-            # nan date should degrade tier
-            assert proc._quality_tier == 1
+            assert proc._quality_tier == 0
 
     @pytest.mark.asyncio
     async def test_fin_date_nat_string(self):
@@ -962,6 +964,7 @@ class TestAssignBasicTierExtended:
 
     @pytest.mark.asyncio
     async def test_no_latest_quote_date_no_fallback(self):
+        """D2-04: 元数据无日期且真实表查询异常 → 质量未知，CRITICAL(0) fail-closed。"""
         proc = FakeProcessor()
         sync_df = pd.DataFrame(
             {
@@ -975,7 +978,7 @@ class TestAssignBasicTierExtended:
         proc.cache.sync_dao.get_sync_status = AsyncMock(return_value=sync_df)
         proc.cache.quote_dao.get_latest_trade_date = AsyncMock(side_effect=Exception("DB error"))
         await proc._assign_basic_tier()
-        assert proc._quality_tier == 1
+        assert proc._quality_tier == 0
 
     @pytest.mark.asyncio
     async def test_stale_quotes_with_db_fallback(self):
@@ -1043,6 +1046,7 @@ class TestAssignBasicTierExtended:
 
     @pytest.mark.asyncio
     async def test_parse_date_error(self):
+        """D2-04: 日期字段不可解析且真实表不可核验 → 质量未知，CRITICAL(0)。"""
         proc = FakeProcessor()
         sync_df = pd.DataFrame(
             {
@@ -1054,12 +1058,13 @@ class TestAssignBasicTierExtended:
             }
         )
         proc.cache.sync_dao.get_sync_status = AsyncMock(return_value=sync_df)
+        proc.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value=None)
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             with patch("data.mixins.health_mixin.parse_date") as mock_parse:
                 mock_parse.side_effect = ValueError("bad date")
                 await proc._assign_basic_tier()
-                assert proc._quality_tier == 1
+                assert proc._quality_tier == 0
 
 
 class TestCheckDataHealthExtended:
@@ -2619,3 +2624,153 @@ class TestTierByTableCoverageIsolation:
         assert proc._quality_tier_by_table["financial_reports"] == 1
         assert proc._quality_tier_by_table["daily_quotes"] == 3
         assert proc._quality_tier_by_table["daily_indicators"] == 2
+
+
+class TestAssignBasicTierFailClosed:
+    """D2-04: fast-path 未知/异常一律 fail-closed，financial 逐表等级按真实记录核算。"""
+
+    _NOW = datetime.datetime(2024, 6, 14)
+
+    @staticmethod
+    def _proc_with_rows(rows: list[dict]) -> FakeProcessor:
+        proc = FakeProcessor()
+        proc.cache.sync_dao.get_sync_status = AsyncMock(return_value=pd.DataFrame(rows))
+        return proc
+
+    @staticmethod
+    def _row(table: str, last_date, record_count: int = 5000) -> dict:
+        return {
+            "table_name": table,
+            "last_data_date": last_date,
+            "status": "success",
+            "last_result_status": "success",
+            "record_count": record_count,
+        }
+
+    @pytest.mark.asyncio
+    async def test_nat_quote_date_is_critical(self):
+        """latest_quote_date 为 pd.NaT 且真实表为空 → CRITICAL(0)，不得落 BRONZE。"""
+        proc = self._proc_with_rows([self._row("daily_quotes", pd.NaT)])
+        proc.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value=None)
+        await proc._assign_basic_tier()
+        assert proc._quality_tier == 0
+        assert proc._quality_tier_by_table == {}
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_propagates(self):
+        """R5: EngineDisposedError 必须原样传播，不得被 fail-closed 分支吞没。"""
+        proc = FakeProcessor()
+        proc.cache.sync_dao.get_sync_status = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await proc._assign_basic_tier()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_propagates(self):
+        """R2: asyncio.CancelledError 必须原样传播。"""
+        proc = FakeProcessor()
+        proc.cache.sync_dao.get_sync_status = AsyncMock(side_effect=asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError):
+            await proc._assign_basic_tier()
+
+    @pytest.mark.asyncio
+    async def test_quote_date_lookup_disposed_propagates(self):
+        """R5: 报价日期回查阶段 EngineDisposedError 同样原样传播。"""
+        proc = self._proc_with_rows([self._row("daily_quotes", "")])
+        proc.cache.quote_dao.get_latest_trade_date = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await proc._assign_basic_tier()
+
+    def _stale_quote_proc(self, fin_row: dict | None) -> FakeProcessor:
+        rows = [self._row("daily_quotes", "20240101")]
+        if fin_row is not None:
+            rows.append(fin_row)
+        proc = self._proc_with_rows(rows)
+        proc.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240101")
+        return proc
+
+    @pytest.mark.asyncio
+    async def test_stale_quotes_financial_stale_is_bronze(self):
+        """报价陈旧分支：financial_reports 记录真实存在但滞后 > 100 天 → 逐表 BRONZE(1)。"""
+        proc = self._stale_quote_proc(self._row("financial_reports", "20230101", 100))
+        with patch("data.mixins.health_mixin.get_now", return_value=self._NOW):
+            with patch("data.mixins.health_mixin.parse_date") as mock_parse:
+                mock_parse.side_effect = lambda s, fmt="%Y%m%d": datetime.datetime.strptime(str(s), "%Y%m%d")
+                await proc._assign_basic_tier()
+        assert proc._quality_tier == 1
+        assert proc._quality_tier_by_table["daily_quotes"] == 1
+        assert proc._quality_tier_by_table["financial_reports"] == 1
+
+    @pytest.mark.asyncio
+    async def test_stale_quotes_financial_fresh_is_silver(self):
+        """报价陈旧分支：financial_reports 记录新鲜（<100 天）→ 逐表 SILVER(2)，非恒 2 的偶然。"""
+        proc = self._stale_quote_proc(self._row("financial_reports", "20240601", 100))
+        with patch("data.mixins.health_mixin.get_now", return_value=self._NOW):
+            with patch("data.mixins.health_mixin.parse_date") as mock_parse:
+                mock_parse.side_effect = lambda s, fmt="%Y%m%d": datetime.datetime.strptime(str(s), "%Y%m%d")
+                await proc._assign_basic_tier()
+        assert proc._quality_tier_by_table["financial_reports"] == 2
+
+    @pytest.mark.asyncio
+    async def test_stale_quotes_financial_missing_is_critical(self):
+        """报价陈旧分支：financial_reports 无同步记录（存在性未核实）→ 逐表 CRITICAL(0)。"""
+        proc = self._stale_quote_proc(None)
+        with patch("data.mixins.health_mixin.get_now", return_value=self._NOW):
+            with patch("data.mixins.health_mixin.parse_date") as mock_parse:
+                mock_parse.side_effect = lambda s, fmt="%Y%m%d": datetime.datetime.strptime(str(s), "%Y%m%d")
+                await proc._assign_basic_tier()
+        assert proc._quality_tier_by_table["financial_reports"] == 0
+
+
+class TestRunQualityScanRebuildsTierByTable:
+    """D2-04: run_quality_scan 必须按本轮深扫实测证据重建 _quality_tier_by_table。"""
+
+    @pytest.mark.asyncio
+    async def test_scan_rebuilds_per_table_tiers(self):
+        proc = FakeProcessor()
+        proc._quality_tier_by_table = {"stale_table": 3}
+        proc.cache.stock_dao.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "list_status": ["L"]})
+        )
+        proc.cache.check_comprehensive_health = AsyncMock(
+            return_value={
+                "tables": {
+                    "daily_quotes": {"ratio": 0.9},
+                    "financial_reports": {"ratio": 0.9},
+                },
+                "global_trade_days": 500,
+            }
+        )
+        proc.cache.quote_dao.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240614"],
+                    "close": [10.0],
+                    "vol": [1000],
+                }
+            )
+        )
+        proc.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240614")
+        proc.cache.get_field_completeness = AsyncMock(return_value={"eps": 0.9})
+        proc.cache.sync_dao.get_sync_status = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "table_name": ["financial_reports"],
+                    "last_data_date": ["20240610"],
+                }
+            )
+        )
+        proc.trade_calendar.get_trade_cal_df = AsyncMock(
+            return_value=pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
+        )
+
+        result = await proc.run_quality_scan(sample_size=1)
+
+        assert "stale_table" not in proc._quality_tier_by_table
+        assert proc._quality_tier_by_table["daily_quotes"] == 3
+        # financial：本轮实测 fin_lag=4 天 + 字段完整性 0.9 → GOLD
+        assert proc._quality_tier_by_table["financial_reports"] == 3
+        # 本轮深扫实测缺失的 critical 表 → CRITICAL(0)
+        assert proc._quality_tier_by_table["daily_indicators"] == 0
+        assert proc._quality_tier_by_table["moneyflow_daily"] == 0
+        assert result["tier"] == 0

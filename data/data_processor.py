@@ -212,6 +212,17 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
         return get_loop_local("processor_cancel_evt", _factory)
 
+    def _invalidate_quality_cache(self) -> None:
+        """原子失效质量等级与健康缓存（D2-04）。
+
+        三处状态必须同步清空：仅重置 ``_quality_tier`` 会残留旧 ``_quality_tier_by_table``，
+        使 per-table 门控在未完成评估时用旧等级绕过 CRITICAL 拦截。赋值顺序先全局
+        （置 None）后逐表，即使被并发观察也已保证 fail-closed。
+        """
+        self._quality_tier = None
+        self._quality_tier_by_table = {}
+        self._health_cache = {"time": 0, "data": None}
+
     async def request_cancel(self):
         """
         Request cancellation of current operation.
@@ -225,7 +236,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         # threading.Event），非类属性，R11 合规。
         if self.context.cancel_event is not None:
             self.context.cancel_event.set()
-        self._quality_tier = None  # Reset to uninitialized; will re-evaluate on next strategy run
+        self._invalidate_quality_cache()  # Reset to uninitialized; will re-evaluate on next strategy run
 
         # Propagate to all strategies
         for name, strategy in self.strategies.items():
@@ -322,8 +333,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             days=days,
             progress_callback=progress_callback,
         )
-        self._quality_tier = None
-        self._health_cache = {"time": 0, "data": None}
+        self._invalidate_quality_cache()
         return result
 
     @log_async_operation(
@@ -342,8 +352,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             force=force,
             progress_callback=progress_callback,
         )
-        self._quality_tier = None
-        self._health_cache = {"time": 0, "data": None}
+        self._invalidate_quality_cache()
         return result.added
 
     async def sync_comprehensive_fundamentals(
@@ -360,8 +369,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             force=force,
             progress_callback=progress_callback,
         )
-        self._quality_tier = None
-        self._health_cache = {"time": 0, "data": None}
+        self._invalidate_quality_cache()
         return result
 
     async def repair_financial_data(self, ts_codes, progress_callback=None):
@@ -395,8 +403,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             sync_result=sync_result,
         )
 
-        self._quality_tier = None
-        self._health_cache = {"time": 0, "data": None}
+        self._invalidate_quality_cache()
 
         # Clear caches to ensure fresh data visibility
         if hasattr(self, "_trade_date_cache"):
@@ -729,8 +736,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                     get_now().date(),  # type: ignore[arg-type]
                     total_count,
                 )
-                self._quality_tier = None
-                self._health_cache = {"time": 0, "data": None}
+                self._invalidate_quality_cache()
                 logger.info(
                     "[DataProcessor] Sync Basic | ✅ %s active + %s delisted = %s total stocks",
                     active_count,
@@ -892,8 +898,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             else:
                 # Atomic overwrite (refresh)
                 count = await self.cache.stock_dao.overwrite_concepts(full_df)
-            self._quality_tier = None
-            self._health_cache = {"time": 0, "data": None}
+            self._invalidate_quality_cache()
             logger.info(
                 "[DataProcessor] Sync Concepts | ✅ Saved %s structured mappings",
                 count,

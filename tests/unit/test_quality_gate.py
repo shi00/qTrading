@@ -879,3 +879,57 @@ class TestComputeTier:
         assert fast_tier <= deep_tier
         assert fast_tier == 2
         assert deep_tier == 3
+
+
+class TestQualityGateFailClosedUninitialized:
+    """D2-04: 全局等级未初始化时禁止逐表缓存覆盖，必须 fail-closed 拦截。"""
+
+    @patch("core.i18n.I18n")
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_uninitialized_global_not_overridden_by_stale_by_table(self, mock_i18n):
+        mock_i18n.get.return_value = "quality_err_too_low"
+        processor = MagicMock()
+        processor._quality_tier = None
+        # 上一轮残留的全 GOLD 逐表缓存：不得据此放行
+        processor._quality_tier_by_table = {"daily_quotes": QualityTier.GOLD, "financial_reports": QualityTier.GOLD}
+        with pytest.raises(QualityGateError):
+            _check_tier(
+                processor,
+                QualityTier.BRONZE,
+                "test_func",
+                required_tables=("daily_quotes", "financial_reports"),
+            )
+
+    @patch("core.i18n.I18n")
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_initialized_global_still_applies_per_table_min(self, mock_i18n):
+        """对照：全局已初始化时逐表下限仍然生效（修复未削弱原 per-table 门控）。"""
+        mock_i18n.get.return_value = "quality_err_too_low"
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.SILVER
+        processor._quality_tier_by_table = {"daily_quotes": QualityTier.GOLD, "financial_reports": QualityTier.SILVER}
+        with pytest.raises(QualityGateError):
+            _check_tier(
+                processor,
+                QualityTier.GOLD,
+                "test_func",
+                required_tables=("daily_quotes", "financial_reports"),
+            )
+
+
+class TestInvalidateQualityCache:
+    """D2-04: 同步/取消后必须原子清空全局等级、逐表等级与健康缓存。"""
+
+    def test_clears_global_per_table_and_health_cache(self):
+        from data.data_processor import DataProcessor
+
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.GOLD
+        processor._quality_tier_by_table = {"daily_quotes": QualityTier.GOLD}
+        processor._health_cache = {"time": 1.0, "data": {"status": "green"}}
+
+        DataProcessor._invalidate_quality_cache(processor)
+
+        assert processor._quality_tier is None
+        assert processor._quality_tier_by_table == {}
+        assert processor._health_cache == {"time": 0, "data": None}

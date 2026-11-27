@@ -186,6 +186,29 @@ def _classify_table_tier(
     return 3
 
 
+def _parse_sync_date(value: object) -> datetime.datetime | None:
+    """将 sync_status 的日期样值解析为 datetime；空/NaT/不可解析一律返回 None。
+
+    D2-04：pd.isna 显式判空（覆盖 None/NaN/NaT），不可解析视为「质量未知」，
+    由调用方按 fail-closed 处理，不得据此臆断为新鲜或陈旧。
+    """
+    if value is None:
+        return None
+    try:
+        if bool(pd.isna(value)):
+            return None
+    except (TypeError, ValueError):
+        # 非标量（列表/数组）无法判空，交由 to_yyyymmdd_str 归一
+        pass
+    normalized = to_yyyymmdd_str(value)
+    if not normalized:
+        return None
+    try:
+        return parse_date(normalized, "%Y%m%d")
+    except (ValueError, TypeError):
+        return None
+
+
 class HealthCheckMixin:
     """
     Mixin providing data health check and quality scanning capabilities.
@@ -215,17 +238,20 @@ class HealthCheckMixin:
         Used primarily during silent startup.
 
         Tier Logic:
-          - CRITICAL (0): No sync_status records at all, or daily_quotes never synced.
+          - CRITICAL (0): No sync_status records, daily_quotes never synced/不可核验,
+                          或质量证据读取失败（D2-04 fail-closed）。
           - BRONZE  (1): daily_quotes exists but is stale (> TIER_QUOTE_FRESHNESS_DAYS lag).
           - SILVER  (2): All critical tables are fresh. Sufficient for MA/RSI strategies.
                          (GOLD is unreachable in fast-path because field-level fundamental
                           completeness is unavailable; use check_data_health for GOLD.)
+
+        D2-04: 本轮开始即清空全局/逐表等级，任何失败/未知均按 CRITICAL(0) 拦截，
+        不得复用上一轮残留等级放行（fail-closed）。
         """
+        self._quality_tier = None
+        self._quality_tier_by_table = {}
         try:
             sync_records = await self.cache.sync_dao.get_sync_status()
-
-            # DS-03: 重置 per-table 门控表，避免复用上次运行残留的陈旧等级
-            self._quality_tier_by_table = {}
 
             # _read_db returns a pandas DataFrame
             if sync_records is None or not isinstance(sync_records, pd.DataFrame) or sync_records.empty:
@@ -244,83 +270,76 @@ class HealthCheckMixin:
                 name for name, meta in TABLE_DEFINITIONS.items() if meta.get("quality_config", {}).get("critical")
             ]
 
-            # Check daily_quotes first (primary gate)
-            latest_quote_date = sync_dict.get("daily_quotes", {}).get(
-                "last_data_date",
-                "",
-            )
-
-            # Fast verification: if sync_status is missing or stale, double check actual table MAX(date)
-            try:
-                if not latest_quote_date:
+            # D2-04: 报价最新日期优先取元数据；缺失/不可解析时回查真实表（核实存在性）。
+            latest_quote_date = sync_dict.get("daily_quotes", {}).get("last_data_date", "")
+            latest_dt = _parse_sync_date(latest_quote_date)
+            if latest_dt is None:
+                try:
                     db_max_date = await self.cache.quote_dao.get_latest_trade_date()
-                    if db_max_date:
-                        latest_quote_date = str(db_max_date)
-            except Exception as e:
-                logger.error(
-                    "[DataProcessor] FastCheck | ❌ Deep DB fallback totally failed: %s",
-                    DataSanitizer.sanitize_error(e),
-                    exc_info=True,
-                )
-
-            if not latest_quote_date:
-                self._quality_tier = 1
-                logger.debug(
-                    "[DataProcessor] FastCheck | No last quote explicitly set in stats. Attempting verify...",
-                )
-                return
-
-            try:
-                normalized = to_yyyymmdd_str(latest_quote_date)
-                if not normalized:
-                    self._quality_tier = 1
-                    logger.warning(
-                        "[DataProcessor] FastCheck | ⚠️ Invalid quote date '%s'. Degrading to BRONZE.",
-                        latest_quote_date,
+                except asyncio.CancelledError:
+                    raise
+                except EngineDisposedError:
+                    raise
+                except Exception as e:
+                    logger.error(
+                        "[DataProcessor] FastCheck | ❌ Quote date verification failed; quality unknown. "
+                        "Fail-closed to CRITICAL (0): %s",
+                        DataSanitizer.sanitize_error(e),
+                        exc_info=True,
                     )
+                    self._quality_tier = 0
                     return
-                latest_dt = parse_date(normalized, "%Y%m%d")
-                days_lag = (get_now() - latest_dt).days
-                logger.debug(
-                    "[DataProcessor] FastCheck | Quote Lag measured as %sd",
-                    days_lag,
-                )
+                latest_dt = _parse_sync_date(db_max_date)
 
-                # Double check actual table if sync_status claims it's stale (sync_status could be out of sync with DB)
-                if days_lag > TIER_QUOTE_FRESHNESS_DAYS:
-                    logger.debug(
-                        "[DataProcessor] FastCheck | Metadata points to stale, fallback to deep sweep...",
-                    )
-                    try:
-                        db_max_date = await self.cache.quote_dao.get_latest_trade_date()
-                        if db_max_date:
-                            latest_dt = parse_date(str(db_max_date), "%Y%m%d")
-                            days_lag = (get_now() - latest_dt).days
-                            logger.debug(
-                                "[DataProcessor] FastCheck | DB MAX swept. Lag settled as %sd",
-                                days_lag,
-                            )
-                    except Exception as e:
-                        logger.warning(
-                            "[DataProcessor] FastCheck | ⚠️ Fallback DB query aborted: %s",
-                            DataSanitizer.sanitize_error(e),
-                        )
-
-            except (ValueError, TypeError):
-                self._quality_tier = 1
+            if latest_dt is None:
+                # 元数据与真实表均无可解析日期：daily_quotes 从未同步/为空 → CRITICAL
+                self._quality_tier = 0
                 logger.warning(
-                    "[DataProcessor] FastCheck | ⚠️ Malformed date '%s'. Degrading to BRONZE.",
-                    latest_quote_date,
+                    "[DataProcessor] FastCheck | ⚠️ daily_quotes has no verifiable data. Degrading Tier to CRITICAL (0)",
                 )
                 return
+
+            days_lag = (get_now() - latest_dt).days
+            logger.debug("[DataProcessor] FastCheck | Quote Lag measured as %sd", days_lag)
+
+            # Double check actual table if sync_status claims it's stale (sync_status could be out of sync with DB)
+            if days_lag > TIER_QUOTE_FRESHNESS_DAYS:
+                logger.debug(
+                    "[DataProcessor] FastCheck | Metadata points to stale, fallback to deep sweep...",
+                )
+                try:
+                    db_max_date = await self.cache.quote_dao.get_latest_trade_date()
+                    verified_dt = _parse_sync_date(db_max_date)
+                    if verified_dt is not None:
+                        latest_dt = verified_dt
+                        days_lag = (get_now() - latest_dt).days
+                        logger.debug(
+                            "[DataProcessor] FastCheck | DB MAX swept. Lag settled as %sd",
+                            days_lag,
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except EngineDisposedError:
+                    raise
+                except Exception as e:
+                    # 无法核对时保留元数据的陈旧结论（不升级为新鲜），仍属保守判定。
+                    logger.warning(
+                        "[DataProcessor] FastCheck | ⚠️ Fallback DB query aborted: %s",
+                        DataSanitizer.sanitize_error(e),
+                    )
+
+            # D2-04: financial_reports 的存在性与滞后天数在所有分支统一核算（不恒赋 SILVER）。
+            fin_info = sync_dict.get("financial_reports", {})
+            fin_dt = _parse_sync_date(fin_info.get("last_data_date", "")) if fin_info else None
+            fin_lag_days = (get_now() - fin_dt).days if fin_dt is not None else None
 
             if days_lag <= TIER_QUOTE_FRESHNESS_DAYS:
                 stale_critical = []
-                empty_critical = []
+                blocked_critical = []  # 空表/无同步记录/日期不可核验 → 质量未知，fail-closed
                 for table in critical_tables:
                     info = sync_dict.get(table, {})
                     if not info:
-                        stale_critical.append(table)
+                        blocked_critical.append(table)
                         continue
 
                     last_date = info.get("last_data_date", "")
@@ -333,57 +352,38 @@ class HealthCheckMixin:
                             or info.get("status") == "empty"
                             or (record_count is not None and record_count == 0)
                         ):
-                            empty_critical.append(table)
+                            blocked_critical.append(table)
                             continue
 
-                    normalized = to_yyyymmdd_str(last_date)
-                    if normalized:
-                        try:
-                            table_lag = (get_now() - parse_date(normalized, "%Y%m%d")).days
-                            if table_lag > TIER_QUOTE_FRESHNESS_DAYS:
-                                stale_critical.append(table)
-                        except (ValueError, TypeError):
-                            stale_critical.append(table)
-                    else:
+                    table_dt = _parse_sync_date(last_date)
+                    if table_dt is None:
+                        # 有同步记录但日期不可核验：不得臆断新鲜，按质量未知 CRITICAL 处理
+                        blocked_critical.append(table)
+                        continue
+                    if (get_now() - table_dt).days > TIER_QUOTE_FRESHNESS_DAYS:
                         stale_critical.append(table)
 
-                if empty_critical:
-                    self._quality_tier = 0
-                    # DS-03: 空表按 CRITICAL 显式登记，供 per-table 门控直接拦截
-                    for _t in empty_critical:
-                        self._quality_tier_by_table[_t] = 0
+                if blocked_critical:
                     logger.warning(
-                        "[DataProcessor] FastCheck | ⚠️ Critical tables with EMPTY data: %s. "
+                        "[DataProcessor] FastCheck | ⚠️ Critical tables without verifiable data: %s. "
                         "Tier forced to CRITICAL (0)",
-                        empty_critical,
+                        blocked_critical,
                     )
-                    return
 
-                missing_critical = bool(stale_critical)
+                missing_critical = bool(stale_critical or blocked_critical)
 
-                fin_lag_days = None
-                fin_info = sync_dict.get("financial_reports", {})
-                fin_date = fin_info.get("last_data_date", "") if fin_info else ""
-                normalized = to_yyyymmdd_str(fin_date)
-                if normalized:
-                    try:
-                        fin_lag_days = (get_now() - parse_date(normalized, "%Y%m%d")).days
-                    except (ValueError, TypeError):
-                        pass
-
-                # DS-03: 逐表登记等级（financial 在 fast-path 无字段完整性 → 最高 SILVER）。
-                # 其余 critical 表按新鲜度归类；缺失/陈旧的 critical 表由上方列表驱动。
+                # DS-03: 逐表登记等级（空表/未知 → CRITICAL，陈旧 → BRONZE，其余按新鲜度）。
                 for _t in critical_tables:
-                    if _t in empty_critical:
+                    if _t in blocked_critical:
                         self._quality_tier_by_table[_t] = 0
                     elif _t in stale_critical:
                         self._quality_tier_by_table[_t] = 1
                     else:
                         self._quality_tier_by_table[_t] = 2
-                # F01: 新鲜度分类只补充普通表；已被判 empty/stale 的表不得被同轮重算覆盖。
-                if "daily_quotes" not in empty_critical and "daily_quotes" not in stale_critical:
+                # F01: 新鲜度分类只补充可核验表；已判 blocked/stale 的表不得被同轮重算覆盖。
+                if "daily_quotes" not in blocked_critical and "daily_quotes" not in stale_critical:
                     self._quality_tier_by_table["daily_quotes"] = _classify_table_tier(lag_days=days_lag)
-                if "financial_reports" not in empty_critical and "financial_reports" not in stale_critical:
+                if "financial_reports" not in blocked_critical and "financial_reports" not in stale_critical:
                     self._quality_tier_by_table["financial_reports"] = _classify_table_tier(
                         fin_lag_days=fin_lag_days,
                         is_financial=True,
@@ -397,9 +397,16 @@ class HealthCheckMixin:
                     fin_lag_days=fin_lag_days,
                 )
             else:
-                # DS-03: 报价陈旧 → 快速登记 per-table（financial 用已算出的 fin_lag_days）
+                # DS-03: 报价陈旧 → 逐表登记；financial 依据真实记录与滞后天数，未知则 fail-closed。
                 self._quality_tier_by_table["daily_quotes"] = _classify_table_tier(lag_days=days_lag)
-                self._quality_tier_by_table["financial_reports"] = _classify_table_tier(is_financial=True)
+                if fin_lag_days is None:
+                    self._quality_tier_by_table["financial_reports"] = 0
+                else:
+                    self._quality_tier_by_table["financial_reports"] = _classify_table_tier(
+                        fin_lag_days=fin_lag_days,
+                        is_financial=True,
+                        avg_fundamental=None,
+                    )
                 self._quality_tier = _compute_tier(
                     lag_days=days_lag,
                     fin_fresh_ratio=None,
@@ -410,14 +417,19 @@ class HealthCheckMixin:
                 "[DataProcessor] FastCheck | Derived fast Tier parameter = %s",
                 self._quality_tier,
             )
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.error(
                 "[DataProcessor] FastCheck | ❌ Critical crash during evaluate: %s",
                 DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
-            # If we can't even read metadata, be conservative but don't block everything
-            self._quality_tier = 1
+            # 质量证据不可得 → 质量未知，fail-closed 拦截（不得降级为 BRONZE 放行）
+            self._quality_tier = 0
+            self._quality_tier_by_table = {}
 
     @log_async_operation(
         operation_name="probe_api_trade_calendar",
@@ -1002,6 +1014,9 @@ class HealthCheckMixin:
             # 1. Select Sample
             basics = await self.cache.stock_dao.get_stock_basic()
             if basics is None or basics.empty:
+                # D2-04: 无样本即无法评估 → fail-closed，全局与逐表等级同步清空
+                self._quality_tier = 0
+                self._quality_tier_by_table = {}
                 return {"score": 0, "tier": 0, "details": {}}
 
             active_stocks = basics[basics["list_status"].isin(["L", "D"])]["ts_code"].tolist()
@@ -1015,6 +1030,8 @@ class HealthCheckMixin:
             deep_health = {}
             fin_fresh_ratio = 0.0
             missing_critical = False
+            # D2-04: 记录本轮深扫实测为缺失的 critical 表，用于重建逐表等级（证据不足不臆断）。
+            missing_critical_tables: list[str] = []
             try:
                 deep_health = await self.cache.check_comprehensive_health(cancel_event=self._get_cancel_event())  # type: ignore[attr-defined]  # mixin 依赖宿主 DataProcessor 提供 _get_cancel_event
                 tables = deep_health.get("tables", {}) if isinstance(deep_health, dict) else {}
@@ -1022,7 +1039,8 @@ class HealthCheckMixin:
                 critical_tables = [
                     name for name, meta in TABLE_DEFINITIONS.items() if meta.get("quality_config", {}).get("critical")
                 ]
-                missing_critical = any(tables.get(t, {}).get("ratio", 0.0) < 0.1 for t in critical_tables)
+                missing_critical_tables = [t for t in critical_tables if tables.get(t, {}).get("ratio", 0.0) < 0.1]
+                missing_critical = bool(missing_critical_tables)
             except Exception as e:
                 logger.debug("[DataProcessor] QualityScan | Coverage snapshot skipped: %s", e)
 
@@ -1199,6 +1217,18 @@ class HealthCheckMixin:
             )
 
             self._quality_tier = tier
+            # D2-04: 依据本轮深扫实测证据重建逐表等级（整体替换，杜绝旧 by_table 绕过全局降级）。
+            # 实测缺失的 critical 表记 CRITICAL(0)；报价/财务按本轮实测滞后与字段完整性归类。
+            by_table: dict[str, int] = {t: 0 for t in missing_critical_tables}
+            if "daily_quotes" not in by_table:
+                by_table["daily_quotes"] = _classify_table_tier(lag_days=int(avg_recency))
+            if "financial_reports" not in by_table:
+                by_table["financial_reports"] = _classify_table_tier(
+                    fin_lag_days=fin_lag_days,
+                    is_financial=True,
+                    avg_fundamental=avg_fundamental if fundamental_completeness else None,
+                )
+            self._quality_tier_by_table = by_table
             fin_score_str = f"{fundamental_score:.0f}" if fundamental_score is not None else "N/A"
             logger.info(
                 "[DataProcessor] QualityScan | ✅ Thorough evaluation complete. "
@@ -1234,6 +1264,9 @@ class HealthCheckMixin:
                 safe,
                 exc_info=True,
             )
+            # D2-04: 深扫失败 → 质量未知，全局与逐表等级同步 fail-closed，避免残留旧等级放行。
+            self._quality_tier = 0
+            self._quality_tier_by_table = {}
             return {"score": 0, "tier": 0, "error": safe}
         finally:
             # Ensure cancel state doesn't leak into subsequent operations

@@ -501,9 +501,10 @@ class TestDataProcessor(unittest.TestCase):
 
         await self.processor._assign_basic_tier()
         self.assertEqual(self.processor._quality_tier, 1)
-        # DS-03: 报价陈旧 → daily_quotes 为 BRONZE，financial 仍保守 SILVER
+        # D2-04: 报价陈旧 → daily_quotes 为 BRONZE；financial_reports 无同步记录（存在性未核实）
+        # 不得恒赋 SILVER，按质量未知 fail-closed 记 CRITICAL(0)。
         self.assertEqual(self.processor._quality_tier_by_table["daily_quotes"], 1)
-        self.assertEqual(self.processor._quality_tier_by_table["financial_reports"], 2)
+        self.assertEqual(self.processor._quality_tier_by_table["financial_reports"], 0)
 
     def test_assign_basic_tier_bronze(self):
         asyncio.run(self.async_test_assign_basic_tier_bronze())
