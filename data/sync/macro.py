@@ -224,6 +224,11 @@ class MacroSyncStrategy(ISyncStrategy):
     )
     async def _run_impl(self, **kwargs: typing.Any) -> SyncResult:
         result = SyncResult()
+        # D2-08：宿主注入的轮次 cancel_event 已置位时不得复位 _cancelled 后继续发请求。
+        if self._host_cancelled():
+            result.status = SyncStatus.CANCELLED.value
+            logger.info("[MacroSync] Run | ⏹️ 轮次取消信号已置位，跳过本轮同步。")
+            return result
         self._cancelled = False
 
         try:
