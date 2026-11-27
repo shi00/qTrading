@@ -295,14 +295,20 @@ def _leaf_instructions(context: LeafExecutionContext, prompt: RolePromptIdentity
     return f"{prompt.text}\n节点角色：{context.node.role_key}；节点目标：{context.node.target}"
 
 
-async def _resolve_role_prompt(reader: RolePromptReader | None) -> RolePromptIdentity:
-    """解析并冻结本次运行的角色 Prompt（同步配置读取经 IO 线程池，R16）。"""
+async def _resolve_role_prompt(context: LeafExecutionContext, reader: RolePromptReader | None) -> RolePromptIdentity:
+    """按节点冻结角色解析并冻结本次运行的 Prompt（同步配置读取经 IO 线程池，R16）。
 
+    角色键取自计划节点受理时冻结的 ``node.role_key``，不再固定为预置 ``"sub"``：
+    自定义角色缺冻结定义时由 :func:`_read_saved_role_prompt` 显式失败（不静默
+    降级为子角色正文）。
+    """
+
+    role_key = context.node.role_key
     if reader is not None:
-        return reader(LEAF_ROLE_PROMPT_KEY)
+        return reader(role_key)
     from utils.thread_pool import TaskType, ThreadPoolManager
 
-    return await ThreadPoolManager().run_async(TaskType.IO, _read_saved_role_prompt, LEAF_ROLE_PROMPT_KEY)
+    return await ThreadPoolManager().run_async(TaskType.IO, _read_saved_role_prompt, role_key)
 
 
 def _leaf_prompt(context: LeafExecutionContext, predecessor_summaries: tuple[str, ...] = ()) -> str:
@@ -548,7 +554,7 @@ async def run_leaf_agent(
         return _failed(context, LEAF_DEADLINE_EXHAUSTED)
 
     try:
-        role_prompt = await _resolve_role_prompt(role_prompt_reader)
+        role_prompt = await _resolve_role_prompt(context, role_prompt_reader)
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -570,7 +576,7 @@ async def run_leaf_agent(
         return _failed(context, LEAF_ROLE_PROMPT_UNAVAILABLE)
     logger.debug(
         "[LeafAgent] role prompt frozen (role=%s version=%s execution=%s node=%s)",
-        LEAF_ROLE_PROMPT_KEY,
+        context.node.role_key,
         role_prompt.version,
         context.execution_id,
         context.node.node_id,

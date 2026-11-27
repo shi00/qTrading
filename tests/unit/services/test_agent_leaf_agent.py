@@ -101,12 +101,13 @@ def _context(
     source_refs: tuple[Any, ...] = (),
     input_revision: int | None = 2,
     predecessor_artifacts: tuple[tuple[str, str], ...] = (),
+    role_key: str = "analyst",
 ) -> LeafExecutionContext:
     return LeafExecutionContext(
         execution_id="execution-1",
         round_id="round-1",
         plan_digest="b" * 64,
-        node=PlanNodeSpec(node_id="n1", target="梳理公司业务", role_key="analyst", source_refs=source_refs),
+        node=PlanNodeSpec(node_id="n1", target="梳理公司业务", role_key=role_key, source_refs=source_refs),
         input_digest=input_digest,
         input_revision=input_revision,
         predecessor_artifacts=predecessor_artifacts,
@@ -316,7 +317,7 @@ class TestRunLeafAgentSuccess:
         assert agent.kwargs["retries"] == 0
         assert agent.kwargs["tools"] == ()
         assert agent.kwargs["name"] == "qtrading_research"
-        assert "saved-sub-prompt" in agent.kwargs["instructions"]
+        assert "saved-analyst-prompt" in agent.kwargs["instructions"]
         assert "analyst" in agent.kwargs["instructions"]
         assert agent.deps.session_id == "session-1"
 
@@ -336,6 +337,32 @@ class TestRunLeafAgentSuccess:
         instructions = _fake_agent.instances[0].kwargs["instructions"]
         assert "默认子角色正文" in instructions
         assert "优先解释行业景气度" in instructions
+
+    async def test_role_prompt_reader_receives_frozen_node_role_key(self, _fake_agent: type[_FakeAgent]) -> None:
+        """角色 Prompt 按节点冻结的 ``role_key`` 解析，不固定为预置 ``"sub"``。"""
+
+        seen: list[str] = []
+
+        def _reader(role_key: str) -> leaf_agent.RolePromptIdentity:
+            seen.append(role_key)
+            return leaf_agent.RolePromptIdentity(text="冻结正文", version="v1")
+
+        await run_leaf_agent(_model(), _context(role_key="main"), _binding(), dao=_Dao(), role_prompt_reader=_reader)
+
+        assert seen == ["main"]
+
+    async def test_custom_role_without_frozen_definition_fails_not_sub(
+        self, _fake_agent: type[_FakeAgent], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """自定义角色缺冻结定义时显式失败，不静默降级为子角色正文。"""
+
+        monkeypatch.setattr(leaf_agent, "_read_saved_role_prompt", _ORIGINAL_READ_SAVED_ROLE_PROMPT)
+
+        outcome = await run_leaf_agent(_model(), _context(role_key="analyst"), _binding(), dao=_Dao())
+
+        assert outcome.state == "failed"
+        assert outcome.error_code == LEAF_ROLE_PROMPT_UNAVAILABLE
+        assert _fake_agent.instances == []
 
     async def test_role_prompt_unavailable_fails_without_outbound(self, _fake_agent: type[_FakeAgent]) -> None:
         dao = _Dao()
