@@ -281,6 +281,12 @@ EARNINGS_SEASON_MONTHS = [1, 4, 7, 10]
 SAFE_LIVE_LEARNING_OFFSET_DAYS = 10
 SAFE_BACKTEST_LEARNING_OFFSET_DAYS = 15
 
+# --- Data sync windows ---
+# 限售解禁（share_float）前瞻窗口（天）：同步端按此窗口拉取未来解禁事件，
+# 读取端（ShareFloatDao.get_share_float_upcoming_batch）默认按同一窗口查询。
+# 二者必须一致，否则查询区间尾部（+31~+90 天）会出现无数据断层（D2-07）。
+SHARE_FLOAT_UPCOMING_DAYS = 90
+
 # --- Unified Financial Tables Configuration (Single Source of Truth) ---
 
 # Group A: Batch Sync (O(Time))

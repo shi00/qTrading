@@ -21,6 +21,8 @@ from data.sync.holder import (
     _SUB_SYNC_SKIPPED_PERMISSION,
 )
 from data.sync.base import SyncContext, SyncResult, SyncStatus
+from data.constants import SHARE_FLOAT_UPCOMING_DAYS
+from utils.time_utils import get_now
 
 pytestmark = pytest.mark.unit
 
@@ -598,8 +600,9 @@ class TestHolderSyncSyncPledgeStat:
 class TestHolderSyncShareFloat:
     """Phase 3D：_sync_share_float 单元测试。
 
-    share_float 是事件驱动数据，sync 窗口 [today-90, today+30]，
-    单次 API 调用全市场查询，无 pledge_stat 的循环重试逻辑。
+    share_float 的 start_date/end_date 是解禁日期（float_date）范围（官方 doc_id=160）。
+    D2-07：前瞻窗口统一为 SHARE_FLOAT_UPCOMING_DAYS（90 天），对齐
+    ShareFloatDao.get_share_float_upcoming_batch 的默认查询窗口。
     """
 
     @pytest.mark.asyncio
@@ -658,6 +661,54 @@ class TestHolderSyncShareFloat:
         count, date = await strategy._sync_share_float()
         assert count == -1
         assert date is None
+
+    @pytest.mark.asyncio
+    async def test_window_covers_query_horizon(self):
+        """D2-07：同步窗口必须覆盖 DAO 默认前瞻窗口 [today, today+90]。
+
+        start_date/end_date 传的是解禁日期；前瞻上界取「交易日」与「自然日」较晚者，
+        避免在非交易日运行时窗口尾部短于 DAO 以自然日计算的查询区间。
+        """
+        ctx = MagicMock()
+        ctx.api = MagicMock()
+        ctx.api.get_share_float = AsyncMock(return_value=pd.DataFrame())
+        strategy = HolderSyncStrategy(ctx)
+        effective = datetime.date(2024, 6, 14)
+        strategy._get_effective_trade_date = AsyncMock(return_value=effective)
+        await strategy._sync_share_float()
+
+        kwargs = ctx.api.get_share_float.call_args.kwargs
+        anchor = max(effective, get_now().date())
+        assert kwargs["end_date"] == (anchor + datetime.timedelta(days=SHARE_FLOAT_UPCOMING_DAYS)).strftime("%Y%m%d")
+        assert kwargs["start_date"] == "20240316"  # effective - 90 天回看
+
+    @pytest.mark.asyncio
+    async def test_truncated_saves_partial_but_reports_failure(self):
+        """D2-07：分页截断时保存已取部分，但返回 -1（不推进水位、上报 partial）。"""
+        ctx = MagicMock()
+        ctx.api = MagicMock()
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "ann_date": [datetime.date(2024, 6, 1)],
+                "float_date": [datetime.date(2024, 8, 15)],
+                "float_share": [1000.0],
+                "float_ratio": [5.2],
+                "share_type": ["定向增发"],
+            }
+        )
+        df.attrs["truncated"] = True
+        ctx.api.get_share_float = AsyncMock(return_value=df)
+        ctx.cache = MagicMock()
+        ctx.cache.save_share_float = AsyncMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+
+        count, date = await strategy._sync_share_float()
+
+        assert count == -1
+        assert date == datetime.date(2024, 6, 14)
+        ctx.cache.save_share_float.assert_awaited_once()
 
 
 class TestHolderSyncPledgeDetail:

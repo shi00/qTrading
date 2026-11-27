@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from data.constants import SHARE_FLOAT_UPCOMING_DAYS
 from data.persistence.daos.share_float_dao import ShareFloatDao
 from utils.time_utils import get_now
 
@@ -132,6 +133,19 @@ class TestGetShareFloatUpcomingBatch:
         assert start_date == today
         assert end_date == today + datetime.timedelta(days=90)
         assert ann_upper_bound == today
+
+    @pytest.mark.asyncio
+    async def test_default_days_aligned_with_sync_constant(self):
+        """D2-07：省略 days 时默认前瞻窗口与同步端 SHARE_FLOAT_UPCOMING_DAYS 一致。"""
+        dao = _make_dao()
+        dao.chunked_in_query = AsyncMock(return_value=pd.DataFrame())
+
+        await dao.get_share_float_upcoming_batch(["000001.SZ"], as_of_date="20240601")
+
+        params_fn = dao.chunked_in_query.call_args.kwargs["params_fn"]
+        start_date, end_date, _ = params_fn(["000001.SZ"])
+        assert start_date == datetime.date(2024, 6, 1)
+        assert end_date == start_date + datetime.timedelta(days=SHARE_FLOAT_UPCOMING_DAYS)
 
     @pytest.mark.asyncio
     async def test_exception_returns_empty_df(self):

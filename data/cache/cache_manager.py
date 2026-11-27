@@ -9,7 +9,7 @@ import pandas as pd
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from data.constants import get_health_depth_full_trade_days
+from data.constants import SHARE_FLOAT_UPCOMING_DAYS, get_health_depth_full_trade_days
 from data.data_dictionary import TABLE_DEFINITIONS, columns_of
 from data.persistence import engine_provider
 
@@ -944,7 +944,9 @@ class CacheManager:
         """Phase 3B：获取股权质押明细"""
         return await self.pledge_detail_dao.get_pledge_detail_batch([ts_code], as_of_date=as_of_date)
 
-    async def get_share_float_upcoming(self, ts_code: str, as_of_date=None, days: int = 90) -> pd.DataFrame:
+    async def get_share_float_upcoming(
+        self, ts_code: str, as_of_date=None, days: int = SHARE_FLOAT_UPCOMING_DAYS
+    ) -> pd.DataFrame:
         """Phase 3D：获取未来解禁记录"""
         return await self.share_float_dao.get_share_float_upcoming_batch([ts_code], as_of_date=as_of_date, days=days)
 

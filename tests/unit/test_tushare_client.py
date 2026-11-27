@@ -1048,6 +1048,25 @@ class TestTushareClientApiMethods:
         assert "start_date" not in call_args.kwargs  # 不传日期区间作为入参过滤
         assert "end_date" not in call_args.kwargs
 
+    @pytest.mark.asyncio
+    async def test_get_share_float_uses_pagination(self, tushare_client_mocks):
+        """D2-07：share_float 单次上限 6000 条，须经分页拉取并透传解禁日期范围。"""
+        client, _, _ = tushare_client_mocks
+        expected_df = pd.DataFrame({"ts_code": ["000001.SZ"]})
+        client._handle_api_call_paginated = AsyncMock(return_value=expected_df)
+
+        result = await client.get_share_float(start_date="20240601", end_date="20240930")
+
+        assert result is expected_df
+        client._handle_api_call_paginated.assert_awaited_once()
+        call_args = client._handle_api_call_paginated.call_args
+        assert callable(call_args.args[0])
+        assert call_args.kwargs["start_date"] == "20240601"
+        assert call_args.kwargs["end_date"] == "20240930"
+        fields_str = call_args.kwargs["fields"]
+        for col in ("ts_code", "ann_date", "float_date", "float_share", "float_ratio", "holder_name", "share_type"):
+            assert col in fields_str
+
 
 class TestTushareClientBuildRateLimiters:
     def test_with_limit(self, tushare_client_mocks):

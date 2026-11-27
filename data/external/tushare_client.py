@@ -1451,10 +1451,14 @@ class TushareClient:
     ):
         """Get share float (unlock) data.
 
-        Phase 3D §3.2：限售解禁，挂 @log_async_operation（由 _handle_api_call 提供）
-        + 显式 fields。DAT-09：fields 改为官方契约（doc_id=160，含 holder_name/share_type）。
+        Phase 3D §3.2：限售解禁，显式 fields。DAT-09：fields 改为官方契约
+        （doc_id=160，含 holder_name/share_type）。
+
+        D2-07：官方契约为 ts_code/ann_date 二选一必填，``start_date`` / ``end_date``
+        是**解禁日期**（float_date）范围；单次最大 6000 条、总量不限制。多年/长窗口
+        全市场拉取可能超单次上限，故改经分页拉取（截断经 ``df.attrs["truncated"]`` 告知调用方）。
         """
-        return await self._handle_api_call(
+        return await self._handle_api_call_paginated(
             self.pro.share_float,
             ts_code=ts_code,
             start_date=start_date,

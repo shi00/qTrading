@@ -9,14 +9,12 @@ import logging
 import pandas as pd
 
 from utils.time_utils import get_now
+from data.constants import SHARE_FLOAT_UPCOMING_DAYS
 from data.persistence.models import ShareFloat, get_model_columns, get_model_pk_columns
 
 from .base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
-
-# 默认前瞻天数：读取未来 90 天内的解禁记录
-_DEFAULT_UPCOMING_DAYS = 90
 
 
 class ShareFloatDao(BaseDao):
@@ -42,7 +40,7 @@ class ShareFloatDao(BaseDao):
         self,
         ts_codes: list[str],
         as_of_date=None,
-        days: int = _DEFAULT_UPCOMING_DAYS,
+        days: int = SHARE_FLOAT_UPCOMING_DAYS,
     ) -> pd.DataFrame:
         """批量查询股票的未来解禁记录。
 

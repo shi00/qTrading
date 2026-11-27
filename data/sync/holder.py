@@ -14,11 +14,15 @@ from utils.time_utils import get_now
 from .base import ISyncStrategy, SyncResult, SyncStatus, safe_error
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.external.tushare_client import TushareAPIPermissionError
-from data.constants import SYNC_RESULT_SKIPPED_PERMISSION
+from data.constants import SHARE_FLOAT_UPCOMING_DAYS, SYNC_RESULT_SKIPPED_PERMISSION
 
 logger = logging.getLogger(__name__)
 
 _MAX_ERRORS = 5
+
+# 限售解禁回看窗口（天）：保留近期已解禁事件，覆盖以历史决策日为 as_of 的查询
+# （ShareFloatDao 以 float_date >= as_of 过滤）。与前瞻窗口 SHARE_FLOAT_UPCOMING_DAYS 语义独立。
+_SHARE_FLOAT_LOOKBACK_DAYS = 90
 
 _PROGRESS_LOG_INTERVAL = 200
 
@@ -834,19 +838,29 @@ class HolderSyncStrategy(ISyncStrategy):
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _sync_share_float(self):
         """
-        Fetch recent + upcoming share_float (限售解禁) by ann_date range.
+        Fetch share_float (限售解禁) events covering the query horizon.
 
-        share_float is event-driven: announcements are published ahead of the
-        actual float_date. Sync a window of [today - 90 days, today + 30 days]
-        to capture both recent and upcoming 解禁 events.
+        官方契约（doc_id=160）：``start_date`` / ``end_date`` 是**解禁日期**（float_date）
+        范围，而非公告日期；单次最大 6000 条、总量不限制。D2-07：此前窗口仅到
+        today + 30 天，而 ShareFloatDao.get_share_float_upcoming_batch 默认查询
+        [today, today + SHARE_FLOAT_UPCOMING_DAYS]，导致 +31~+90 天解禁事件无数据、
+        AI 辅助段静默省略限售解禁风险。现前瞻窗口统一为 SHARE_FLOAT_UPCOMING_DAYS，
+        并保留 _SHARE_FLOAT_LOOKBACK_DAYS 回看以覆盖历史 as_of 查询。
 
-        Returns (row_count, actual_date) on success, (-1, None) on error,
-        (-2, None) when Tushare permission is unavailable.
+        分页截断（``df.attrs["truncated"]``）时保存已取部分（UPSERT 幂等，重跑收敛），
+        但返回 -1 拒绝标记成功、不推进水位，由 _run_impl 聚合为 partial。
+
+        Returns (row_count, actual_date) on success, (-1, today) when paginated results
+        are truncated（partial）, (-1, None) on error, (-2, None) when Tushare permission
+        is unavailable.
         """
         try:
             today = await self._get_effective_trade_date()
-            start_date = (today - datetime.timedelta(days=90)).strftime("%Y%m%d")
-            end_date = (today + datetime.timedelta(days=30)).strftime("%Y%m%d")
+            # 前瞻上界取「最后交易日」与「自然日」较晚者：DAO 默认以自然日 today 为起点，
+            # 调用方也可能以最后交易日为 as_of，取较晚者保证两种窗口均被同步覆盖。
+            lookahead_anchor = max(today, get_now().date())
+            start_date = (today - datetime.timedelta(days=_SHARE_FLOAT_LOOKBACK_DAYS)).strftime("%Y%m%d")
+            end_date = (lookahead_anchor + datetime.timedelta(days=SHARE_FLOAT_UPCOMING_DAYS)).strftime("%Y%m%d")
 
             if self._cancelled:
                 logger.debug("[HolderSync] share_float | Cancelled before API call.")
@@ -857,15 +871,26 @@ class HolderSyncStrategy(ISyncStrategy):
             if df is not None and not df.empty:
                 await self.context.cache.save_share_float(df)
                 logger.debug(
-                    "[HolderSync] Table | share_float ann_date %s~%s: %s records",
+                    "[HolderSync] Table | share_float float_date %s~%s: %s records",
                     start_date,
                     end_date,
                     len(df),
                 )
+                if df.attrs.get("truncated") is True:
+                    # MAJOR-07 / D2-07：分页截断仅返回部分数据。已保存部分但返回 -1，
+                    # 不推进水位并上报 partial（R21：不得把覆盖不完整伪装为成功）。
+                    logger.warning(
+                        "[HolderSync] share_float float_date %s~%s: 分页截断仅得 %s 行（不完整），"
+                        "不推进水位，等待下次重跑。",
+                        start_date,
+                        end_date,
+                        len(df),
+                    )
+                    return -1, today
                 return len(df), today
 
             logger.debug(
-                "[HolderSync] Table | share_float ann_date %s~%s: no data",
+                "[HolderSync] Table | share_float float_date %s~%s: no data",
                 start_date,
                 end_date,
             )
