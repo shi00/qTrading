@@ -17,7 +17,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import flet as ft
@@ -568,6 +568,32 @@ class TestSharedWiring:
         assert vm_mod.resolve_tool_grant_revoker(wiring) is revoker
         assert vm_mod.resolve_tool_grant_revoker(None) is None
         assert vm_mod.resolve_tool_grant_revoker(SimpleNamespace(service=object())) is None
+
+    def test_resolver_reaches_real_agent_service_through_agent_wiring(self) -> None:
+        """生产接线：AgentWiring.service 的真实撤销 facade 可被解析为 revoker（非未接线）。"""
+
+        from app.agent_wiring import AgentWiring
+        from services.agent_service.service import AgentService
+
+        class _Dao:
+            async def revoke_tool_grant(self, request: Any) -> Any:
+                return SimpleNamespace(grant_state="revoked", grant_revision=5)
+
+        service = AgentService(cast(Any, _Dao()))
+        wiring = AgentWiring(service=service, bridge=cast(Any, object()))
+
+        resolved = vm_mod.resolve_tool_grant_revoker(wiring)
+        assert resolved is service
+        assert wiring.tool_grant_revoker is service
+        vm = DecisionCenterViewModel(_FakeService(), revoker=resolved)
+        assert vm.state.revoke_available is True
+
+    def test_resolver_returns_none_for_unwired_agent_wiring(self) -> None:
+        from app.agent_wiring import AgentWiring
+
+        wiring = AgentWiring(service=None, bridge=cast(Any, object()))
+        assert wiring.tool_grant_revoker is None
+        assert vm_mod.resolve_tool_grant_revoker(wiring) is None
 
 
 # ---------------------------------------------------------------------------

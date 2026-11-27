@@ -5842,7 +5842,13 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             changes["last_dispatch_reason"] = self._dispatch_reason(result)
         else:
             loop_outcome = getattr(main_turn, "outcome", None)
-            answer = getattr(getattr(loop_outcome, "result", None), "body_text", "")
+            result = getattr(loop_outcome, "result", None)
+            if result is not None:
+                answer = getattr(result, "body_text", "")
+            else:
+                # 讨论直答不产出轮绑定成果：取循环已确认落库的答复文本；其余无答复
+                # 终态（澄清/计划）该字段为 None，结论区保持空，不伪造（R21）。
+                answer = getattr(loop_outcome, "discussion_answer_text", "")
             changes["last_answer_text"] = answer if isinstance(answer, str) else ""
             changes["last_dispatch_reason"] = None
             reference = getattr(main_turn, "plan_reference", None)
