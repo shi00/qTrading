@@ -915,6 +915,18 @@ class TestCustomRolePrompt:
 
         assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
 
+    def test_custom_role_role_id_mismatch_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """定义 ``role_id`` 与读取键不一致 → 与版本不一致同路径显式失败。"""
+
+        monkeypatch.setattr(leaf_agent, "_read_saved_role_prompt", _ORIGINAL_READ_SAVED_ROLE_PROMPT)
+        definition = decode_role_definition(_wire(role_id="other_role"))
+
+        with pytest.raises(AgentServiceError) as exc:
+            leaf_agent._read_saved_role_prompt("risk_reviewer", definition=definition)
+
+        assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+        assert "risk_reviewer" in str(exc.value)
+
     def test_custom_role_does_not_read_saved_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from utils.config_handler import ConfigHandler
 
