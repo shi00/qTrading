@@ -10,18 +10,21 @@ View 渲染时 I18n.get(msg.key, **msg.params)。动态错误消息用 _RAW_MSG_
 + default=params 传递，I18n.get 对不存在的 key 返回 default。
 
 线程模型：
-- verify_token/update_tier 是 async，在 Flet 事件循环中执行
-- ts.pro_api/trade_cal/ConfigHandler.save_token 等同步 IO
+- load_config_async/verify_token/update_tier 是 async，在 Flet 事件循环中执行
+- ts.pro_api/trade_cal/ConfigHandler.get_token/save_token 等同步 IO
   通过 ThreadPoolManager.run_async(TaskType.IO, ...) offload（R16 合规）
+- __init__ 不做任何配置 IO：keyring IPC 与旧凭据迁移写盘由消费方在挂载 effect
+  中 await load_config_async() 触发
 - token 不经 tushare SDK 全局状态（~/tk.csv）传递，全程显式传参 ts.pro_api(token=...)
 """
 
 import asyncio
 import logging
 import os
+import threading
 import webbrowser
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -41,6 +44,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _TUSHARE_REGISTER_URL = "https://tushare.pro/register?reg=728426"
+
+# 配置加载串行化锁：ConfigHandler.get_token() 命中旧版加密配置时会同步写 keyring
+# 并持久化迁移结果。加载在 IO 线程池执行，重复/迟到加载（例如调用方超时后重试）
+# 可能由不同 worker 线程并发触发迁移写，故以进程级锁串行化「读配置 + 迁移写」。
+_CONFIG_LOAD_LOCK = threading.Lock()
+
+
+def _load_config_sync() -> tuple[str, str]:
+    """同步加载 Tushare token/tier（仅允许在 IO 线程池中执行，R16）。"""
+    with _CONFIG_LOAD_LOCK:
+        token = ConfigHandler.get_token() or ""
+        tier = ConfigHandler.get_tushare_point_tier()
+    return token, tier
+
 
 # E2E 假验证边界（D21-OTHER-003）：Flet 子进程独立于 pytest 进程，
 # Playwright page.route 只能拦截浏览器请求，无法拦截 Python 侧 Tushare 调用。
@@ -121,8 +138,11 @@ class TushareConfigPanelViewModel(ConfigPanelViewModelBase[TushareConfigState]):
         self._show_internal_loading = show_internal_loading
         self._state = TushareConfigState()
         self._init_mixin_fields()
-        # 同步初始化 state（从 ConfigHandler 加载配置）
-        self._load_config_to_state()
+        # 加载代次：每次 load_config_async 及用户输入命令均推进，用于丢弃迟到的
+        # 后台加载结果（防止覆盖用户正在编辑的新输入）。
+        self._load_generation = 0
+        # 不在 __init__ 同步加载配置（R16）：keyring IPC 与旧凭据迁移写盘由消费方
+        # 在挂载 effect 中 await load_config_async() 触发。
 
     @cached_property
     def _tushare_client(self) -> "TushareClient":
@@ -137,15 +157,60 @@ class TushareConfigPanelViewModel(ConfigPanelViewModelBase[TushareConfigState]):
 
     # --- Config loading ---
 
-    def _load_config_to_state(self) -> None:
-        """从 ConfigHandler 加载配置到 state（同步）。"""
-        token = ConfigHandler.get_token() or ""
-        tier = ConfigHandler.get_tushare_point_tier()
-        self._state = replace(self._state, token=token, tier=tier)
+    async def load_config_async(self) -> None:
+        """异步加载 token/tier（R16：keyring IPC 与配置文件 IO 经 IO 线程池 offload）。
+
+        迟到结果守卫：
+        - 代次：每次调用推进 ``_load_generation``（用户输入/换档/验证同样推进），
+          仅最新代次的结果可写回 state，避免后台加载覆盖用户正在编辑的新输入；
+        - ``_disposed``：VM 卸载后丢弃迟到结果。
+
+        旧凭据迁移写盘与读取在 ``_load_config_sync`` 内共用进程级锁，串行化重复/
+        迟到加载触发的并发写。
+
+        Raises:
+            asyncio.CancelledError: 取消时显式传播 (R2).
+        """
+        if self._disposed:
+            return
+        self._load_generation += 1
+        generation = self._load_generation
+
+        try:
+            token, tier = await ThreadPoolManager().run_async(TaskType.IO, _load_config_sync)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[TushareConfigVM] Failed to load tushare config: %s",
+                DataSanitizer.sanitize_error(exc),
+                exc_info=True,
+            )
+            return
+
+        if self._disposed or generation != self._load_generation:
+            return
+        self._set_state(token=token, tier=tier)
+
+    def reload_config(self) -> None:
+        """同步重载入口已被禁用（R16）。
+
+        基类 ``reload_config`` 会同步调用 ``_load_config_to_state()``（keyring IPC +
+        配置文件读写），在 UI 主线程调用即阻塞主循环；消费方必须改用
+        ``await load_config_async()``。
+
+        Raises:
+            RuntimeError: 总是抛出，防止意外回退到同步加载。
+        """
+        raise RuntimeError(
+            "TushareConfigPanelViewModel.reload_config() is disabled; use 'await load_config_async()' instead"
+        )
 
     # --- Update commands ---
 
     def update_token(self, value: str) -> None:
+        # 用户输入优先：推进代次，丢弃在途配置加载的迟到结果。
+        self._load_generation += 1
         self._set_state(token=value)
         self._notify_on_change()
 
@@ -157,6 +222,7 @@ class TushareConfigPanelViewModel(ConfigPanelViewModelBase[TushareConfigState]):
 
     def set_config(self, config: dict) -> None:
         """批量更新配置字段。"""
+        self._load_generation += 1
         if "token" in config:
             self._set_state(token=config["token"])
 
@@ -198,6 +264,9 @@ class TushareConfigPanelViewModel(ConfigPanelViewModelBase[TushareConfigState]):
         """
         if value == self._state.tier:
             return True
+
+        # 用户换档优先：推进代次，丢弃在途配置加载的迟到结果（避免回填旧档位）。
+        self._load_generation += 1
 
         try:
             success = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_tushare_point_tier, value)
@@ -250,6 +319,10 @@ class TushareConfigPanelViewModel(ConfigPanelViewModelBase[TushareConfigState]):
         边界，不触达真实 Tushare 网络/配额；生产默认行为不变。
         """
         token = self._state.token.strip()
+
+        # 用户验证优先：推进代次，丢弃在途配置加载的迟到结果（避免把刚输入的
+        # token 回退为加载时的旧值）。
+        self._load_generation += 1
 
         if not token:
             self._show_error(Message("tushare_token_required"))

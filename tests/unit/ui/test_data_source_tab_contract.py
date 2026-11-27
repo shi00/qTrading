@@ -767,8 +767,8 @@ class _FakeTushareConfigPanelViewModel:
         self.dispose_called = True
         self._subscribers.clear()
 
-    def reload_config(self) -> None:
-        self.method_calls.append(("reload_config", {}))
+    async def load_config_async(self) -> None:
+        self.method_calls.append(("load_config_async", {}))
 
     async def verify_token(self) -> bool:
         """Task 5.1: 模拟 tushare_vm.verify_token() 命令。"""
@@ -1037,17 +1037,17 @@ class TestDataSourceTabComponentBody:
         calls = [c[0] for c in fake_vm.method_calls]
         assert "recover_stale_state" in calls
 
-    def test_mount_calls_tushare_reload_config(
+    def test_mount_calls_tushare_load_config(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
-        """挂载后 tushare_vm.reload_config 被调用 (_on_mount effect)。"""
+        """挂载后 tushare_vm.load_config_async 被调度 (_on_mount effect, R16 异步加载)。"""
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
         _, fake_tushare_vm = _patch_data_source_vms(monkeypatch)
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         _mount(component)
         calls = [c[0] for c in fake_tushare_vm.method_calls]
-        assert "reload_config" in calls
+        assert "load_config_async" in calls
 
     def test_mount_calls_refresh_scheduler_status(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch

@@ -1209,7 +1209,11 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         vm.recover_stale_state()
         # D7-6: 首帧拉取调度状态快照 (纯内存读, 不阻塞主循环)。
         vm.refresh_scheduler_status()
-        tushare_vm.reload_config()
+        # R16: Tushare 配置加载触碰 keyring IPC 与配置文件 IO, 必须异步执行;
+        # VM.__init__ 不再同步加载, 由本 effect 调度 load_config_async。
+        page = _get_page()
+        if page is not None:
+            page.run_task(tushare_vm.load_config_async)
 
     ft.use_effect(_on_mount, dependencies=[])
 

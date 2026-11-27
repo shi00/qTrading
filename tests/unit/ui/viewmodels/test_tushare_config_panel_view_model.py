@@ -4,7 +4,10 @@
 VM 是独立类，消费方直接实例化以调用 commands。
 """
 
+import asyncio
 import sys
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,6 +17,7 @@ import pytest
 from ui.viewmodels.tushare_config_panel_view_model import (
     TushareConfigPanelViewModel,
     TushareConfigState,
+    _load_config_sync,
 )
 from utils.config.secrets import SaveOutcome
 
@@ -91,19 +95,164 @@ class TestStateImmutability:
 
 
 class TestConfigLoading:
-    def test_load_config_populates_state(self, mock_config_handler):
+    def test_init_does_not_load_config(self, mock_config_handler):
+        """R16: 构造不得同步触达 keyring / 配置文件。"""
+        vm = _make_vm(mock_config_handler)
+        mock_config_handler.get_token.assert_not_called()
+        mock_config_handler.get_tushare_point_tier.assert_not_called()
+        assert vm.state.token == ""
+
+    @pytest.mark.asyncio
+    async def test_load_config_populates_state(self, mock_config_handler, mock_thread_pool):
         mock_config_handler.get_token.return_value = "my_token_123"
         mock_config_handler.get_tushare_point_tier.return_value = "points_2000"
         vm = _make_vm(mock_config_handler)
+        await vm.load_config_async()
         assert vm.state.token == "my_token_123"
         assert vm.state.tier == "points_2000"
 
-    def test_load_config_defaults_when_empty(self, mock_config_handler):
+    @pytest.mark.asyncio
+    async def test_load_config_defaults_when_empty(self, mock_config_handler, mock_thread_pool):
         mock_config_handler.get_token.return_value = ""
         mock_config_handler.get_tushare_point_tier.return_value = "points_5000"
         vm = _make_vm(mock_config_handler)
+        await vm.load_config_async()
         assert vm.state.token == ""
         assert vm.state.tier == "points_5000"
+
+    @pytest.mark.asyncio
+    async def test_load_config_offloads_to_io_pool(self, mock_config_handler, mock_thread_pool):
+        """R16: 加载经 ThreadPoolManager.run_async(TaskType.IO, ...) offload。"""
+        vm = _make_vm(mock_config_handler)
+        await vm.load_config_async()
+
+        mock_thread_pool.run_async.assert_awaited_once()
+        call_args = mock_thread_pool.run_async.call_args
+        assert call_args.args[0].name == "IO"
+        assert call_args.args[1] is _load_config_sync
+
+    @pytest.mark.asyncio
+    async def test_load_config_failure_keeps_state(self, mock_config_handler, mock_thread_pool):
+        """加载失败只记录日志，不抛异常、不改写 state。"""
+        mock_config_handler.get_token.side_effect = RuntimeError("keyring unavailable")
+        vm = _make_vm(mock_config_handler)
+        await vm.load_config_async()
+        assert vm.state.token == ""
+        assert vm.state.tier == "points_5000"
+
+
+class TestLoadResultGuards:
+    """迟到后台结果守卫：代次 + _disposed，且并发加载串行化迁移写。"""
+
+    @pytest.mark.asyncio
+    async def test_late_load_does_not_overwrite_user_edit(self, mock_config_handler):
+        """加载在途时用户输入新 token，迟到结果必须被丢弃。"""
+        mock_config_handler.get_token.return_value = "stored_token"
+        release = asyncio.Event()
+
+        async def _delayed_run_async(task_type, func, *args, **kwargs):
+            await release.wait()
+            return func(*args, **kwargs)
+
+        mock_tpm = MagicMock()
+        mock_tpm.run_async = AsyncMock(side_effect=_delayed_run_async)
+        with patch(
+            "ui.viewmodels.tushare_config_panel_view_model.ThreadPoolManager",
+            return_value=mock_tpm,
+        ):
+            vm = _make_vm(mock_config_handler)
+            task = asyncio.create_task(vm.load_config_async())
+            await asyncio.sleep(0)
+            vm.update_token("user_typed")
+            release.set()
+            await task
+
+        assert vm.state.token == "user_typed"
+
+    @pytest.mark.asyncio
+    async def test_dispose_discards_late_load_result(self, mock_config_handler):
+        """VM dispose 后迟到的加载结果不得写回 state。"""
+        mock_config_handler.get_token.return_value = "stored_token"
+        release = asyncio.Event()
+
+        async def _delayed_run_async(task_type, func, *args, **kwargs):
+            await release.wait()
+            return func(*args, **kwargs)
+
+        mock_tpm = MagicMock()
+        mock_tpm.run_async = AsyncMock(side_effect=_delayed_run_async)
+        with patch(
+            "ui.viewmodels.tushare_config_panel_view_model.ThreadPoolManager",
+            return_value=mock_tpm,
+        ):
+            vm = _make_vm(mock_config_handler)
+            task = asyncio.create_task(vm.load_config_async())
+            await asyncio.sleep(0)
+            vm.dispose()
+            release.set()
+            await task
+
+        assert vm.state.token == ""
+
+    @pytest.mark.asyncio
+    async def test_newer_load_supersedes_older(self, mock_config_handler):
+        """并发加载只有最新代次的结果可写回，旧代次结果丢弃。"""
+        events = [asyncio.Event(), asyncio.Event()]
+        results = [("first_token", "points_2000"), ("second_token", "points_10000")]
+        call_index = 0
+
+        async def _sequenced_run_async(task_type, func, *args, **kwargs):
+            nonlocal call_index
+            idx = call_index
+            call_index += 1
+            await events[idx].wait()
+            return results[idx]
+
+        mock_tpm = MagicMock()
+        mock_tpm.run_async = AsyncMock(side_effect=_sequenced_run_async)
+        with patch(
+            "ui.viewmodels.tushare_config_panel_view_model.ThreadPoolManager",
+            return_value=mock_tpm,
+        ):
+            vm = _make_vm(mock_config_handler)
+            first = asyncio.create_task(vm.load_config_async())
+            await asyncio.sleep(0)
+            second = asyncio.create_task(vm.load_config_async())
+            await asyncio.sleep(0)
+            events[1].set()
+            await second
+            events[0].set()
+            await first
+
+        assert vm.state.token == "second_token"
+        assert vm.state.tier == "points_10000"
+
+    def test_load_config_sync_serializes_concurrent_migration(self, mock_config_handler):
+        """并发加载（可能来自超时重试的 worker 线程）必须串行化读+迁移写。"""
+        active = 0
+        max_active = 0
+        guard = threading.Lock()
+
+        def _fake_get_token():
+            nonlocal active, max_active
+            with guard:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.02)
+            with guard:
+                active -= 1
+            return "token"
+
+        mock_config_handler.get_token.side_effect = _fake_get_token
+        mock_config_handler.get_tushare_point_tier.return_value = "points_5000"
+
+        threads = [threading.Thread(target=_load_config_sync) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert max_active == 1
 
 
 # --- Update commands ---
@@ -160,26 +309,34 @@ class TestGetSetConfig:
         assert received[0].token == "new"
 
 
-# --- reload_config ---
+# --- load_config_async / reload_config ---
 
 
-class TestReloadConfig:
-    def test_reload_config_reloads_from_config_handler(self, mock_config_handler):
+class TestAsyncConfigLoad:
+    @pytest.mark.asyncio
+    async def test_load_config_reloads_from_config_handler(self, mock_config_handler, mock_thread_pool):
         vm = _make_vm(mock_config_handler)
         vm.update_token("modified")
         assert vm.state.token == "modified"
         mock_config_handler.get_token.return_value = "reloaded_token"
         mock_config_handler.get_tushare_point_tier.return_value = "points_10000"
-        vm.reload_config()
+        await vm.load_config_async()
         assert vm.state.token == "reloaded_token"
         assert vm.state.tier == "points_10000"
 
-    def test_reload_config_notifies_subscribers(self, mock_config_handler):
+    @pytest.mark.asyncio
+    async def test_load_config_notifies_subscribers(self, mock_config_handler, mock_thread_pool):
         vm = _make_vm(mock_config_handler)
         received: list[TushareConfigState] = []
         vm.subscribe(lambda s: received.append(s))
-        vm.reload_config()
+        await vm.load_config_async()
         assert len(received) == 1
+
+    def test_sync_reload_config_is_disabled(self, mock_config_handler):
+        """R16: 同步 reload_config 入口必须显式拒绝，防止回退到主线程 IO。"""
+        vm = _make_vm(mock_config_handler)
+        with pytest.raises(RuntimeError, match="load_config_async"):
+            vm.reload_config()
 
 
 # --- Subscribe / notify ---
