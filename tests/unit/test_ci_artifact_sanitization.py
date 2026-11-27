@@ -64,7 +64,7 @@ EXPECTED_SANITIZE_IDS = {
 # 上传工件名称/保留策略快照（脱敏改造不得改变这些值）
 EXPECTED_UPLOADS = {
     "ci-checks": (
-        "test-reports-unit-${{ runner.os }}-${{ matrix.python-version }}",
+        "test-reports-unit-${{ runner.os }}-${{ matrix.python-version }}-${{ matrix.shard }}",
         14,
         ("junit-*.xml",),
     ),

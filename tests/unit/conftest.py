@@ -1,4 +1,35 @@
+from pathlib import Path
+
 import pytest
+
+from tests.unit._unit_test_sharding import parse_shard_env, shard_bucket
+
+_UNIT_TEST_DIR = Path(__file__).resolve().parent
+
+
+def pytest_ignore_collect(collection_path, config):
+    """CI 分片：只收集属于当前分片的 ``tests/unit/test_*.py``。
+
+    由环境变量 ``UNIT_TEST_SHARD_INDEX`` / ``UNIT_TEST_SHARD_COUNT`` 控制（见
+    ``.github/workflows/ci_cd.yml`` 的 ``ci-checks`` matrix 与
+    ``tests/unit/_unit_test_sharding.py``）；未设置时完全不干预收集。只过滤测试文件，
+    ``conftest.py``、测试辅助模块与 ``tests/unit`` 之外的路径一律放行。
+    """
+    try:
+        shard = parse_shard_env()
+    except ValueError as exc:
+        raise pytest.UsageError(str(exc)) from exc
+    if shard is None:
+        return None
+    index, count = shard
+    path = Path(collection_path)
+    if path.suffix != ".py" or not path.name.startswith("test_"):
+        return None
+    try:
+        relative = path.resolve().relative_to(_UNIT_TEST_DIR).as_posix()
+    except ValueError:
+        return None
+    return shard_bucket(relative, count) != index
 
 
 def pytest_collection_modifyitems(items):
