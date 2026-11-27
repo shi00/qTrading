@@ -231,6 +231,140 @@ def _dedup_financial_df(df: pd.DataFrame) -> pd.DataFrame:
     return df.sort_values("end_date").drop_duplicates(subset=["end_date"], keep="last")
 
 
+_CORE_SOURCE_ORDER: tuple[str, ...] = ("income", "balance", "indicator", "cashflow")
+_MERGE_KEYS: tuple[str, ...] = ("ts_code", "end_date")
+
+
+def _normalize_report_type(df: pd.DataFrame, source: str) -> pd.DataFrame:
+    """统一财报口径：仅保留合并报表（``report_type == '1'``）。
+
+    Tushare income / balancesheet / cashflow 会同时返回合并报表与母公司报表
+    （report_type 1/2 等）。若按 ``(ts_code, end_date, ann_date)`` 直接合并，同一
+    公告日会出现两个口径叠加。fina_indicator payload 无该列时原样保留。
+
+    若过滤后为空（mock / 特殊 payload 仅有非合并口径），回退原表并告警，
+    避免静默丢数据。
+    """
+    if "report_type" not in df.columns:
+        return df
+    normalized = df["report_type"].astype("string").str.strip()
+    keep = normalized.isna() | normalized.eq("") | normalized.eq("1")
+    filtered = df[keep]
+    if filtered.empty and not df.empty:
+        logger.warning(
+            "[FinancialSync] Merge | %s payload has no report_type=='1' row; keeping original rows to avoid data loss.",
+            source,
+        )
+        return df
+    return filtered
+
+
+def _ann_date_sort_key(series: pd.Series) -> pd.Series:
+    """把 ann_date 统一为可比较的 datetime key（支持 YYYYMMDD 字符串与 date/Timestamp）。"""
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return pd.to_datetime(series, errors="coerce")
+    text = series.astype("string").str.strip().str.replace("-", "", regex=False).str.slice(0, 8)
+    return pd.to_datetime(text, format="%Y%m%d", errors="coerce")
+
+
+def _source_aware_asof_merge(source_frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """按来源级 PIT（as-of）规则合并 4 张财报源表。
+
+    对同一 ``(ts_code, end_date)`` 分组内的每个 ann_date=t 快照：
+
+    - 每个来源表取自身 ``ann_date_src <= t`` 的最新一行；
+    - 仅当该来源在 t 当日**无行**（``_has_* == False``）时才沿用其早期版本；
+    - 该来源在 t 当日**有行**时严格保留该行显式 NULL / 0（as-of 精确匹配优先）；
+    - 禁止跨报告期（end_date）回填（R24）。
+
+    旧实现按 ``(ts_code, end_date, ann_date)`` 精确 outer merge，当 fina_indicator
+    的 ann_date 晚主表一天或单表更正时，会产生一行其余字段全 NULL 的“半空”版本，
+    下游按 ``ann_date DESC`` 取 rn=1 时把已披露指标静默变 NULL。本函数以来源存在性
+    列（_has_income/_has_bs/_has_fi/_has_cf）驱动来源级继承修复该缺陷。
+    """
+    keys = list(_MERGE_KEYS)
+    sources = [src for src in _CORE_SOURCE_ORDER if src in source_frames]
+    prepared: dict[str, pd.DataFrame] = {}
+    for src in sources:
+        d = source_frames[src]
+        if d is None or d.empty or "ann_date" not in d.columns:
+            continue
+        d = d.copy()
+        d["_ann_key"] = _ann_date_sort_key(d["ann_date"])
+        d = d[d["_ann_key"].notna()]
+        if d.empty:
+            continue
+        prepared[src] = d
+
+    if not prepared:
+        return pd.DataFrame()
+    if len(prepared) == 1:
+        only = next(iter(prepared.values()))
+        return only.drop(columns=["_ann_key"], errors="ignore")
+
+    # 统一时间线：同一 (ts_code, end_date) 内所有来源 ann_date 的并集。
+    timeline_cols = [*keys, "ann_date", "_ann_key"]
+    timeline = pd.concat(
+        [d[timeline_cols] for d in prepared.values()],
+        ignore_index=True,
+    ).drop_duplicates(subset=timeline_cols)
+    timeline = timeline.sort_values([*keys, "_ann_key"], na_position="last").reset_index(drop=True)
+
+    result = timeline.copy()
+    for src, d in prepared.items():
+        fields = [c for c in d.columns if c not in timeline_cols]
+        # 源表 ann_date 仅用于 as-of 比较，不参与输出（避免与时间线 ann_date 重名后缀化）。
+        src_rows = (
+            d[[*keys, "_ann_key", *fields]]
+            .rename(columns={c: f"__{src}__{c}" for c in fields})
+            .rename(columns={"_ann_key": "_src_ann_key"})
+        )
+        # 交叉对齐后只保留 ann_date_src <= t，取每个快照下最新来源行。
+        candidates = result[timeline_cols].merge(src_rows, on=keys, how="left")
+        candidates = candidates[candidates["_src_ann_key"].notna()]
+        candidates = candidates[candidates["_src_ann_key"] <= candidates["_ann_key"]]
+        candidates = (
+            candidates.sort_values([*keys, "_ann_key", "_src_ann_key"])
+            .groupby([*keys, "ann_date"], as_index=False, sort=False)
+            .tail(1)
+        )
+        result = result.merge(
+            candidates.drop(columns=["_ann_key", "_src_ann_key"], errors="ignore"),
+            on=[*keys, "ann_date"],
+            how="left",
+        )
+        # 来源存在列：标记该来源在 t 当日是否有精确行（驱动来源级继承语义）。
+        exact = d[[*keys, "ann_date"]].drop_duplicates().assign(**{f"_has_{src}": True})
+        result = result.merge(exact, on=[*keys, "ann_date"], how="left")
+        result[f"_has_{src}"] = result[f"_has_{src}"].eq(True)
+
+    ordered_fields: list[str] = []
+    for src in sources:
+        if src not in prepared:
+            continue
+        for col in prepared[src].columns:
+            if col in keys or col == "ann_date" or col == "_ann_key":
+                continue
+            if col not in ordered_fields:
+                ordered_fields.append(col)
+
+    for field in ordered_fields:
+        prefixed = [f"__{src}__{field}" for src in sources if f"__{src}__{field}" in result.columns]
+        if not prefixed:
+            continue
+        if len(prefixed) == 1:
+            result[field] = result[prefixed[0]]
+        else:
+            # 仅报告元数据类字段（report_type/update_flag 等）可能跨来源重名；
+            # 业务字段各归其来源，显式 NULL 不会被其它来源覆盖。
+            result[field] = result[prefixed].bfill(axis=1).iloc[:, 0]
+        result = result.drop(columns=prefixed)
+
+    helper_cols = [c for c in result.columns if c.startswith("_has_") or c == "_ann_key"]
+    result = result.drop(columns=helper_cols, errors="ignore")
+    return result
+
+
 class FinancialSyncStrategy(ISyncStrategy):
     """
     Strategy for syncing financial reports and fundamental data.
@@ -1555,37 +1689,56 @@ class FinancialSyncStrategy(ISyncStrategy):
                         results[aux_idx],
                     )
 
-            # 2. Proceed with Core Financial Merging (Income/Balance/Indicator)
-            dfs = []
-            if isinstance(df_inc, pd.DataFrame) and not df_inc.empty:
-                dfs.append(_dedup_financial_df(df_inc))
-            if isinstance(df_bal, pd.DataFrame) and not df_bal.empty:
-                dfs.append(_dedup_financial_df(df_bal))
-            if isinstance(df_fina, pd.DataFrame) and not df_fina.empty:
-                dfs.append(_dedup_financial_df(df_fina))
-            if isinstance(df_cf, pd.DataFrame) and not df_cf.empty:
-                dfs.append(_dedup_financial_df(df_cf))
+            # 2. Proceed with Core Financial Merging (Income/Balance/Indicator/Cashflow)
+            raw_frames = {
+                "income": df_inc,
+                "balance": df_bal,
+                "indicator": df_fina,
+                "cashflow": df_cf,
+            }
+            source_frames: dict[str, pd.DataFrame] = {}
+            for name, frame in raw_frames.items():
+                if isinstance(frame, pd.DataFrame) and not frame.empty:
+                    source_frames[name] = _dedup_financial_df(_normalize_report_type(frame, name))
 
-            if not dfs:
+            if not source_frames:
                 return None, aux_counts
 
-            # DATA-05: 仅当全部 core 表都携带 ann_date 版本维度时按 (ts_code, end_date,
-            # ann_date) 对齐，避免同一报告期多版本合并产生笛卡尔积；否则回退到
-            # (ts_code, end_date) 合并，兼容无版本维度的 payload（测试 mock / 特殊 API）。
-            has_ann_dimension = all("ann_date" in df.columns for df in dfs)
-            merge_on = ["ts_code", "end_date", "ann_date"] if has_ann_dimension else ["ts_code", "end_date"]
+            # R24/D2-05: 增量按单日/单报告期抓取时，若某来源整表缺失（仅单表更正
+            # 或权限空返回），本地无同报告期早期同来源基准可继承；禁止跨报告期前视
+            # 回填（R24），保留未知并以告警暴露，交由后续全量/repair 补齐。
+            if period is not None:
+                missing_sources = [name for name in _CORE_SOURCE_ORDER if name not in source_frames]
+                if missing_sources:
+                    logger.warning(
+                        "[FinancialSync] Merge | %s period=%s missing source(s) %s; "
+                        "no same-period baseline to inherit (cross-period backfill forbidden by R24), "
+                        "missing fields stay unknown.",
+                        ts_code,
+                        period,
+                        ",".join(missing_sources),
+                    )
 
-            df_merged = dfs[0]
-            for i in range(1, len(dfs)):
-                df_merged = pd.merge(
-                    df_merged,
-                    dfs[i],
-                    on=merge_on,
-                    how="outer",
-                    suffixes=("", "_drop"),
-                )
-                # Immediately remove _drop columns to prevent duplicate suffixes in subsequent merges
-                df_merged = df_merged[[c for c in df_merged.columns if not c.endswith("_drop")]]
+            # DATA-05: 仅当全部 core 表都携带 ann_date 版本维度时使用来源级 PIT
+            # as-of 合并（D2-05），避免同一报告期多版本 exact outer merge 产生半空行；
+            # 否则回退到 (ts_code, end_date) 合并，兼容无版本维度的 payload
+            # （测试 mock / 特殊 API）。
+            has_ann_dimension = all("ann_date" in df.columns for df in source_frames.values())
+            if has_ann_dimension:
+                df_merged = _source_aware_asof_merge(source_frames)
+            else:
+                frames = list(source_frames.values())
+                df_merged = frames[0]
+                for frame in frames[1:]:
+                    df_merged = pd.merge(
+                        df_merged,
+                        frame,
+                        on=["ts_code", "end_date"],
+                        how="outer",
+                        suffixes=("", "_drop"),
+                    )
+                    # Immediately remove _drop columns to prevent duplicate suffixes in subsequent merges
+                    df_merged = df_merged[[c for c in df_merged.columns if not c.endswith("_drop")]]
 
             # DATA-05: 主键含 ann_date 且 NOT NULL。缺失公告日的行无法落库
             # （与 0022 迁移/DAT-06 语义一致），在返回前过滤，避免约束冲突。

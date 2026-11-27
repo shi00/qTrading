@@ -1114,6 +1114,150 @@ class TestFinancialDedupWithAnnDate:
         assert versions.iloc[1]["revenue"] == 250.0
 
 
+class TestSourceAwarePitMerge:
+    """D2-05: 来源级 PIT as-of 合并，消除 fina_indicator 晚公告 / 单表更正导致的半空行。"""
+
+    @staticmethod
+    def _frame(**overrides) -> pd.DataFrame:
+        base = {
+            "ts_code": ["000001.SZ"],
+            "end_date": ["20240331"],
+            "ann_date": ["20240425"],
+            "report_type": ["1"],
+        }
+        base.update(overrides)
+        return pd.DataFrame(base)
+
+    @pytest.mark.asyncio
+    async def test_indicator_late_one_day_inherits_main_values(self):
+        """fina_indicator ann_date 晚主表 1 天：后一天快照必须继承主表已披露值，
+        不得生成 roe/revenue 互斥的半空行；且早一天快照不得前视到指标。"""
+        ctx = make_ctx()
+        ctx.api.get_income = AsyncMock(return_value=self._frame(revenue=[100.0], n_income=[10.0]))
+        ctx.api.get_fina_indicator = AsyncMock(return_value=self._frame(ann_date=["20240426"], roe=[12.0]))
+        ctx.api.get_balancesheet = AsyncMock(return_value=None)
+        ctx.api.get_cashflow = AsyncMock(return_value=None)
+        strategy = FinancialSyncStrategy(ctx)
+
+        df, _aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
+
+        assert set(df["ann_date"]) == {"20240425", "20240426"}
+        later = df[df["ann_date"] == "20240426"].iloc[0]
+        assert later["revenue"] == 100.0
+        assert later["n_income"] == 10.0
+        assert later["roe"] == 12.0
+        earlier = df[df["ann_date"] == "20240425"].iloc[0]
+        assert pd.isna(earlier["roe"])  # 指标尚未公告，禁止前视
+        assert not any(str(c).startswith("_has_") for c in df.columns)
+
+    @pytest.mark.asyncio
+    async def test_same_table_correction_explicit_null_and_zero_preserved(self):
+        """同表更正：t2 显式 NULL / 0.0 必须保留，不得被 t1 旧值回填。"""
+        ctx = make_ctx()
+        ctx.api.get_income = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000001.SZ"],
+                    "end_date": ["20240331", "20240331"],
+                    "ann_date": ["20240425", "20240430"],
+                    "report_type": ["1", "1"],
+                    "revenue": [100.0, None],
+                    "n_income": [50.0, 0.0],
+                }
+            )
+        )
+        ctx.api.get_balancesheet = AsyncMock(return_value=None)
+        ctx.api.get_fina_indicator = AsyncMock(return_value=None)
+        ctx.api.get_cashflow = AsyncMock(return_value=None)
+        strategy = FinancialSyncStrategy(ctx)
+
+        df, _aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
+
+        assert len(df) == 2
+        corrected = df[df["ann_date"] == "20240430"].iloc[0]
+        assert pd.isna(corrected["revenue"])
+        assert corrected["n_income"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_report_type_filter_keeps_consolidated_only(self):
+        """report_type 混填：同公告日仅保留合并报表口径（'1'），避免口径叠加。"""
+        ctx = make_ctx()
+        ctx.api.get_income = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000001.SZ"],
+                    "end_date": ["20240331", "20240331"],
+                    "ann_date": ["20240425", "20240425"],
+                    "report_type": ["1", "2"],
+                    "revenue": [100.0, 900.0],
+                }
+            )
+        )
+        ctx.api.get_balancesheet = AsyncMock(return_value=None)
+        ctx.api.get_fina_indicator = AsyncMock(return_value=None)
+        ctx.api.get_cashflow = AsyncMock(return_value=None)
+        strategy = FinancialSyncStrategy(ctx)
+
+        df, _aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
+
+        assert len(df) == 1
+        assert df.iloc[0]["revenue"] == 100.0
+
+    @pytest.mark.asyncio
+    async def test_no_cross_period_backfill(self):
+        """不同报告期之间禁止互相继承（R24）：20240630 快照不得继承 20240331 的 revenue。"""
+        ctx = make_ctx()
+        ctx.api.get_income = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "end_date": ["20240331"],
+                    "ann_date": ["20240425"],
+                    "report_type": ["1"],
+                    "revenue": [100.0],
+                }
+            )
+        )
+        ctx.api.get_fina_indicator = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "end_date": ["20240630"],
+                    "ann_date": ["20240825"],
+                    "report_type": ["1"],
+                    "roe": [12.0],
+                }
+            )
+        )
+        ctx.api.get_balancesheet = AsyncMock(return_value=None)
+        ctx.api.get_cashflow = AsyncMock(return_value=None)
+        strategy = FinancialSyncStrategy(ctx)
+
+        df, _aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
+
+        q2 = df[df["end_date"] == "20240630"].iloc[0]
+        assert q2["roe"] == 12.0
+        assert pd.isna(q2["revenue"])
+
+    @pytest.mark.asyncio
+    async def test_period_scoped_missing_source_warns_without_backfill(self, caplog):
+        """增量按报告期抓取且来源缺失时：不跨期回填，保留未知并告警（R24）。"""
+        import logging
+
+        ctx = make_ctx()
+        ctx.api.get_income = AsyncMock(return_value=self._frame(revenue=[100.0]))
+        ctx.api.get_balancesheet = AsyncMock(return_value=None)
+        ctx.api.get_fina_indicator = AsyncMock(return_value=None)
+        ctx.api.get_cashflow = AsyncMock(return_value=None)
+        strategy = FinancialSyncStrategy(ctx)
+
+        with caplog.at_level(logging.WARNING, logger="data.sync.financial"):
+            df, _aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
+
+        assert len(df) == 1
+        assert any("missing source" in rec.message for rec in caplog.records)
+
+
 class TestPeakDisclosureSeason:
     """Tests for peak disclosure season detection and adjustments."""
 
