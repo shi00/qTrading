@@ -1830,8 +1830,9 @@ class TestD2PermissionPropagation:
         ctx.api.get_top10_holders = AsyncMock(side_effect=asyncio.CancelledError())
         strategy = HolderSyncStrategy(ctx)
         strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as ei:
             await strategy._sync_top10_holders("20240331")
+        assert ei.type is asyncio.CancelledError
 
     @pytest.mark.asyncio
     async def test_run_permission_skips_do_not_trip_error_breaker(self):
