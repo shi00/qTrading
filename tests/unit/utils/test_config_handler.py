@@ -445,9 +445,55 @@ class TestConfigHandlerSaveDbPassword:
         assert result is SaveOutcome.SAVED
         mock_set.assert_called_once()
 
-    def test_empty_password(self):
-        result = cfg_mod.ConfigHandler.save_db_password("")
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(cfg_mod.keyring, "delete_password")
+    def test_empty_password_clears_keyring_and_encrypted_field(self, mock_delete, mock_save):
+        """D1-05: 空密码必须清除残留 keyring 条目与加密字段（切库后旧库密码不得保留）。"""
+        env = {k: v for k, v in os.environ.items() if k != "DB_PASSWORD"}
+        with patch.dict(os.environ, env, clear=True):
+            result = cfg_mod.ConfigHandler.save_db_password("")
+        assert result is SaveOutcome.SAVED
+        mock_delete.assert_called_once_with(cfg_mod.KEYRING_SERVICE_NAME, "db_password")
+        mock_save.assert_called_once_with({"db_password_encrypted": ""})
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=False)
+    @patch.object(cfg_mod.keyring, "delete_password")
+    def test_empty_password_config_clear_failure_returns_failed(self, mock_delete, mock_save):
+        """D1-05: 加密字段清除失败不得返回成功（残留密文仍会被当作新连接密码）。"""
+        env = {k: v for k, v in os.environ.items() if k != "DB_PASSWORD"}
+        with patch.dict(os.environ, env, clear=True):
+            result = cfg_mod.ConfigHandler.save_db_password("")
         assert result is SaveOutcome.FAILED
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(cfg_mod.keyring, "delete_password", side_effect=RuntimeError("keyring locked"))
+    @patch("utils.config.secrets.is_keyring_available", return_value=True)
+    def test_empty_password_keyring_delete_failure_returns_failed(self, mock_probe, mock_delete, mock_save):
+        """D1-05: keyring 可用但删除失败 → 不得返回成功。"""
+        env = {k: v for k, v in os.environ.items() if k != "DB_PASSWORD"}
+        with patch.dict(os.environ, env, clear=True):
+            result = cfg_mod.ConfigHandler.save_db_password("")
+        assert result is SaveOutcome.FAILED
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(cfg_mod.keyring, "delete_password", side_effect=RuntimeError("no backend"))
+    @patch("utils.config.secrets.is_keyring_available", return_value=False)
+    def test_empty_password_keyring_unavailable_treated_as_cleared(self, mock_probe, mock_delete, mock_save):
+        """keyring 后端不可用 → 条目本就不可读，视为无残留（避免无 keyring 用户无法保存）。"""
+        env = {k: v for k, v in os.environ.items() if k != "DB_PASSWORD"}
+        with patch.dict(os.environ, env, clear=True):
+            result = cfg_mod.ConfigHandler.save_db_password("")
+        assert result is SaveOutcome.SAVED
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(cfg_mod.keyring, "delete_password")
+    def test_empty_password_env_override_still_clears_stale_copy(self, mock_delete, mock_save):
+        """D1-05: DB_PASSWORD 生效时返回 OVERRIDDEN_BY_ENV（非成功），但仍清除旧的持久化副本。"""
+        with patch.dict(os.environ, {**os.environ, "DB_PASSWORD": "env-pw"}):
+            result = cfg_mod.ConfigHandler.save_db_password("")
+        assert result is SaveOutcome.OVERRIDDEN_BY_ENV
+        mock_delete.assert_called_once_with(cfg_mod.KEYRING_SERVICE_NAME, "db_password")
+        mock_save.assert_called_once_with({"db_password_encrypted": ""})
 
 
 class TestConfigHandlerGetDbConfig:
@@ -2236,9 +2282,10 @@ class TestSaveDbConfig:
             result = cfg_mod.ConfigHandler.save_db_config("localhost", 5432, "user", "password", "mydb")
         assert result is True
 
-    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=True)
+    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=SaveOutcome.SAVED)
     @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
     def test_save_without_password(self, mock_save, mock_pw):
+        """D1-05: 空密码也必须调用 save_db_password 清理旧凭据（不得跳过）。"""
         from data.persistence.db_config_service import DatabaseConfigService
 
         with patch.object(
@@ -2248,9 +2295,9 @@ class TestSaveDbConfig:
         ):
             result = cfg_mod.ConfigHandler.save_db_config("localhost", 5432, "user", "", "mydb")
         assert result is True
-        mock_pw.assert_not_called()
+        mock_pw.assert_called_once_with("")
 
-    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=True)
+    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=SaveOutcome.SAVED)
     @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
     def test_syncs_config_db_url(self, mock_save, mock_pw):
         """save_db_config 必须保存 db 组件，get_db_url 从组件重建 URL"""
@@ -2267,7 +2314,7 @@ class TestSaveDbConfig:
         assert saved_data["db_user"] == "admin"
         assert saved_data["db_name"] == "testdb"
 
-    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=True)
+    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=SaveOutcome.SAVED)
     @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
     def test_password_masked_in_saved_url(self, mock_save, mock_pw):
         """保存到 user_settings.json 的 db_url 中密码必须被掩码"""
@@ -2280,7 +2327,7 @@ class TestSaveDbConfig:
         assert "secret" not in saved_data["db_url"]
         assert "****" in saved_data["db_url"]
 
-    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=True)
+    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=SaveOutcome.SAVED)
     @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
     def test_password_with_at_sign_masked_correctly(self, mock_save, mock_pw):
         """密码含 @ 时掩码正则仍能正确匹配"""
@@ -2292,6 +2339,34 @@ class TestSaveDbConfig:
         saved_data = mock_save.call_args[0][0]
         assert "p%40ssword" not in saved_data["db_url"]
         assert "****" in saved_data["db_url"]
+
+
+class TestDescribeDbEnvOverride:
+    """D1-05: UI 告警所需的「当前生效覆盖来源」判定（DATABASE_URL 优先）。"""
+
+    def test_returns_none_without_env(self):
+        from utils.config.db import describe_db_env_override
+
+        env = {k: v for k, v in os.environ.items() if k not in ("DATABASE_URL", "DB_PASSWORD")}
+        with patch.dict(os.environ, env, clear=True):
+            assert describe_db_env_override() is None
+
+    def test_returns_database_url_first(self):
+        from utils.config.db import describe_db_env_override
+
+        with patch.dict(
+            os.environ,
+            {**os.environ, "DATABASE_URL": "postgresql://u:p@h/d", "DB_PASSWORD": "x"},
+        ):
+            assert describe_db_env_override() == "DATABASE_URL"
+
+    def test_returns_db_password_when_only_password_set(self):
+        from utils.config.db import describe_db_env_override
+
+        env = {k: v for k, v in os.environ.items() if k != "DATABASE_URL"}
+        env["DB_PASSWORD"] = "env-pw"
+        with patch.dict(os.environ, env, clear=True):
+            assert describe_db_env_override() == "DB_PASSWORD"
 
 
 class TestGetLlmConfigForProviderWarning:
@@ -2377,8 +2452,9 @@ class TestConfigReviewFixes:
 
     # === F1: save_db_config 检查返回值 ===
 
+    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=SaveOutcome.SAVED)
     @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=False)
-    def test_save_db_config_returns_false_when_save_config_fails(self, mock_save):
+    def test_save_db_config_returns_false_when_save_config_fails(self, mock_save, mock_pw):
         """F1: save_config 失败时 save_db_config 返回 False"""
         result = cfg_mod.ConfigHandler.save_db_config(
             host="localhost", port=5432, user="postgres", password="secret", database="astock"
@@ -2394,6 +2470,26 @@ class TestConfigReviewFixes:
         )
         assert result is False
 
+    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=SaveOutcome.FAILED)
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_password_failure_does_not_persist_host_fields(self, mock_save, mock_pwd):
+        """D1-05: 凭据保存失败时不得先写主机字段（避免「新库地址 + 旧密码」的部分状态）。"""
+        result = cfg_mod.ConfigHandler.save_db_config(
+            host="newhost", port=5432, user="postgres", password="secret", database="newdb"
+        )
+        assert result is False
+        mock_save.assert_not_called()
+
+    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=SaveOutcome.OVERRIDDEN_BY_ENV)
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_env_override_persists_host_fields_and_returns_true(self, mock_save, mock_pwd):
+        """D1-05: 密码由环境变量提供时主机字段仍持久化；UI 负责警示生效来源。"""
+        result = cfg_mod.ConfigHandler.save_db_config(
+            host="localhost", port=5432, user="postgres", password="ignored", database="astock"
+        )
+        assert result is True
+        mock_save.assert_called_once()
+
     @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=SaveOutcome.SAVED)
     @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
     def test_save_db_config_returns_true_when_all_succeed(self, mock_save, mock_pwd):
@@ -2403,13 +2499,15 @@ class TestConfigReviewFixes:
         )
         assert result is True
 
+    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=SaveOutcome.SAVED)
     @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
-    def test_save_db_config_no_password_returns_true(self, mock_save):
-        """F1: 无密码时跳过 save_db_password，返回 True"""
+    def test_save_db_config_no_password_returns_true(self, mock_save, mock_pw):
+        """D1-05: 无密码时仍走 save_db_password（清除旧凭据），全部成功返回 True。"""
         result = cfg_mod.ConfigHandler.save_db_config(
             host="localhost", port=5432, user="postgres", password="", database="astock"
         )
         assert result is True
+        mock_pw.assert_called_once_with("")
 
     # === F2: save_db_password 传播 save_config 返回值 ===
 

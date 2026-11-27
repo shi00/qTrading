@@ -150,6 +150,67 @@ pub fn guard_data_dir(data_dir: &Path) -> Result<DataDirState, u8> {
     Ok(DataDirState::Existing)
 }
 
+/// initdb 临时明文 pwfile 路径：与 password 文件同目录、由 password 文件名派生。
+///
+/// 名称确定（无通配），使清理逻辑只可能命中本程序自己创建的临时文件，
+/// 不会误删同目录下的其它 `.pwinitdb*` 文件。
+pub fn initdb_pwfile_path(password_file: &Path) -> PathBuf {
+    password_file.with_extension("pwinitdb")
+}
+
+/// 写入 initdb 临时明文 pwfile（D1-05）。
+///
+/// - 以 `create_new` 打开：已存在同名文件即失败（避免覆盖/清理他人文件，也把
+///   「上次残留未清理」暴露为显式错误而非静默沿用陈旧密码）。
+/// - Unix 现场即 `0600`（不经过 `File::create` 的默认权限窗口）；Windows 继承
+///   runtime 目录（用户 AppData）受限 ACL，仅当前用户可访问。
+/// - `write_all` / `sync_all` 返回值必须检查：满盘导致的半截写入若被吞掉，会让
+///   PGDATA 与 password 文件永久失配。
+fn write_initdb_pwfile(path: &Path, password: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    if let Err(e) = file
+        .write_all(password.as_bytes())
+        .and_then(|()| file.sync_all())
+    {
+        // 文件由本次 create_new 创建，失败后删除半截内容；错误原样上抛给调用方。
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// 清理本实例 initdb 中断/强杀遗留的临时明文 pwfile（D1-05）。
+///
+/// 只在持维护锁的启动路径调用（`ensure_binaries` / `run_initdb` 前）：锁保证没有
+/// 并发 initdb 正在写同名文件。仅删除 `password_file` 派生出的确切路径且必须是
+/// 普通文件（符号链接/junction 一律不动），失败只告警不阻断启动。
+pub fn cleanup_stale_initdb_pwfile(password_file: &Path) {
+    let pwfile = initdb_pwfile_path(password_file);
+    match std::fs::symlink_metadata(&pwfile) {
+        Ok(meta) if meta.file_type().is_file() => match std::fs::remove_file(&pwfile) {
+            Ok(()) => tracing::warn!(
+                "removed stale initdb pwfile (previous initdb interrupted): {}",
+                pwfile.display()
+            ),
+            Err(e) => tracing::warn!(
+                "failed to remove stale initdb pwfile {}: {e}",
+                pwfile.display()
+            ),
+        },
+        _ => {}
+    }
+}
+
 /// 计算 7 个关键工具的 sha256（AI-39 完整性校验）。返回 (工具名, sha256) 列表。
 fn compute_tools_sha256(install_dir: &Path) -> Vec<(String, String)> {
     pgbin::REQUIRED_TOOLS
@@ -337,6 +398,10 @@ pub async fn ensure_binaries(layout: &Layout, progress: &dyn Fn(&str)) -> Result
         return Err(exit_codes::ARGUMENT_ERROR);
     }
 
+    // D1-05：此处调用方已持维护锁（run.rs / maint 均在锁内调用），清理上次 initdb
+    // 被强杀/断电遗留的临时明文 pwfile，避免明文长期残留（含已初始化不再跑 initdb 的场景）。
+    cleanup_stale_initdb_pwfile(&layout.password_file);
+
     let marker = layout.install_dir.join(SETUP_COMPLETE_MARKER);
     if marker.exists()
         && marker_valid(&marker, &layout.install_dir)
@@ -455,7 +520,10 @@ pub async fn ensure_binaries(layout: &Layout, progress: &dyn Fn(&str)) -> Result
 ///
 /// F5（检视 06）：persistent `password` 文件在 Windows 上以 DPAPI 加密（`PGPW2:` 前缀），
 /// 不可直接作为 initdb `--pwfile`。此处把明文密码写入同目录的临时 pwfile 供 initdb 使用，
-/// initdb 结束后删除（Unix 上临时 pwfile 同样强制 0600）。
+/// initdb 结束后删除（Unix 上临时 pwfile 以 `create_new` + 0600 创建，Windows 继承
+/// runtime 目录受限 ACL；`write_all`/`sync_all` 失败即报错，避免 PGDATA 与 password 失配）。
+/// D1-05：进程被强杀/断电时残留的明文 pwfile 由持维护锁的启动路径
+/// （`ensure_binaries` / 本函数入口）清理，doctor 负责只读上报。
 pub async fn run_initdb(layout: &Layout, username: &str, password: &str) -> Result<(), u8> {
     // 失败注入钩子（与 preflight FORCE_FS_KIND 同款语义；默认不激活）。
     // 集成测试通过 env var 触发 initdb failure 路径，避免实际破坏 PostgreSQL binaries（§17.6 #1）。
@@ -465,22 +533,15 @@ pub async fn run_initdb(layout: &Layout, username: &str, password: &str) -> Resu
     }
 
     // 临时明文 pwfile：与 password 文件同目录，initdb 后删除，避免明文残留。
-    let pwfile = layout.password_file.with_extension("pwinitdb");
+    // D1-05：先清理上次中断残留（本次 create_new 打开，残留存在会显式失败而非沿用）。
+    let pwfile = initdb_pwfile_path(&layout.password_file);
     if let Some(parent) = pwfile.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    {
-        let mut f = std::fs::File::create(&pwfile).map_err(|e| {
-            eprintln!("[sidecar] 临时 pwfile 写入失败 {}: {e}", pwfile.display());
-            exit_codes::INITDB_FAILED
-        })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
-        }
-        use std::io::Write;
-        let _ = f.write_all(password.as_bytes());
+    cleanup_stale_initdb_pwfile(&layout.password_file);
+    if let Err(e) = write_initdb_pwfile(&pwfile, password) {
+        eprintln!("[sidecar] 临时 pwfile 写入失败 {}: {e}", pwfile.display());
+        return Err(exit_codes::INITDB_FAILED);
     }
 
     let data = layout.data_dir.to_string_lossy().into_owned();
@@ -504,11 +565,11 @@ pub async fn run_initdb(layout: &Layout, username: &str, password: &str) -> Resu
     )
     .await
     .map_err(|e| {
-        let _ = std::fs::remove_file(&pwfile);
+        remove_initdb_pwfile(&pwfile);
         eprintln!("[sidecar] initdb exec failed: {e}");
         exit_codes::INITDB_FAILED
     })?;
-    let _ = std::fs::remove_file(&pwfile);
+    remove_initdb_pwfile(&pwfile);
     if !out.success() {
         eprintln!(
             "[sidecar] initdb failed (code {:?}): {}",
@@ -518,6 +579,16 @@ pub async fn run_initdb(layout: &Layout, username: &str, password: &str) -> Resu
         return Err(exit_codes::INITDB_FAILED);
     }
     Ok(())
+}
+
+/// initdb 结束后删除临时 pwfile；删除失败只告警——下次持维护锁启动由
+/// [`cleanup_stale_initdb_pwfile`] 兜底清理。
+fn remove_initdb_pwfile(pwfile: &Path) {
+    match std::fs::remove_file(pwfile) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!("failed to remove initdb pwfile {}: {e}", pwfile.display()),
+    }
 }
 
 /// 安全基线幂等写入（§7.4/§7.6）：pg_hba 整文件覆盖 + postgresql.conf 受管块替换。
@@ -899,6 +970,86 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn initdb_pwfile_path_derives_sibling_name() {
+        assert_eq!(
+            initdb_pwfile_path(Path::new("/x/runtime/password")),
+            PathBuf::from("/x/runtime/password.pwinitdb")
+        );
+    }
+
+    #[test]
+    fn write_initdb_pwfile_is_exclusive_and_complete() {
+        let dir = unique_tmp("initdb-pwfile");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("password.pwinitdb");
+        write_initdb_pwfile(&path, "TestPwd-1_2.3~").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "TestPwd-1_2.3~");
+        // create_new：已存在即失败，且不得覆盖既有内容
+        assert!(write_initdb_pwfile(&path, "other").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "TestPwd-1_2.3~");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_initdb_pwfile_is_0600_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = unique_tmp("initdb-pwfile-perms");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("password.pwinitdb");
+        write_initdb_pwfile(&path, "x").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cleanup_stale_initdb_pwfile_only_removes_derived_file() {
+        let dir = unique_tmp("initdb-cleanup");
+        std::fs::create_dir_all(&dir).unwrap();
+        let password_file = dir.join("password");
+        std::fs::write(&password_file, b"persistent").unwrap();
+        let stale = initdb_pwfile_path(&password_file);
+        std::fs::write(&stale, b"plaintext").unwrap();
+        let unrelated = dir.join("other.pwinitdb");
+        std::fs::write(&unrelated, b"keep").unwrap();
+
+        cleanup_stale_initdb_pwfile(&password_file);
+
+        assert!(!stale.exists(), "派生名残留应被清理");
+        assert!(unrelated.exists(), "非派生文件名不得删除");
+        assert!(password_file.exists(), "persistent password 文件不得删除");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_stale_initdb_pwfile_refuses_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = unique_tmp("initdb-cleanup-symlink");
+        std::fs::create_dir_all(&dir).unwrap();
+        let password_file = dir.join("password");
+        std::fs::write(&password_file, b"persistent").unwrap();
+        let target = dir.join("user-file");
+        std::fs::write(&target, b"user data").unwrap();
+        let link = initdb_pwfile_path(&password_file);
+        symlink(&target, &link).unwrap();
+
+        cleanup_stale_initdb_pwfile(&password_file);
+
+        assert!(target.exists(), "符号链接目标内容不得删除");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "符号链接本身也不应被清理"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
