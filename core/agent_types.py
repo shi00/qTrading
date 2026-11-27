@@ -2878,6 +2878,11 @@ class OperationGrantScope:
 
     由 operation 身份反查其绑定的 grant 与决定行事实；任一环节缺失以 ``None``
     字段表达（调用方必须按「无法证明授权」拒绝，不得猜测或补默认值，R21）。
+
+    审批闭环（D7-01）另带：决定的有界有效期、答复消费时刻与已消费答复的
+    批准值（``approval=False`` 才是用户明确拒绝；``None`` 表示未答/不可解释，
+    不得当作批准），以及 operation 的 phase/effect/io 三态——派发前据此确认
+    尚未出站/未入终态，避免重放二次外发。
     """
 
     user_scope: str
@@ -2890,6 +2895,16 @@ class OperationGrantScope:
     grant_state: ToolGrantState | None
     tool_call_id: str | None
     parameter_digest: str | None
+    #: 决定行 ``expires_at``（UTC 微秒 Z 文本）；``None`` = 无法核定有效期。
+    expires_at: str | None = None
+    #: 答复命令被消费的时刻（UTC 微秒 Z 文本）；``None`` = 尚未消费。
+    answer_consumed_at: str | None = None
+    #: 已消费答复的批准值；``None`` = 未答或答复不可解释（不得当作批准）。
+    approval: bool | None = None
+    #: operation 三态（只读提示；派发认领在事务内再次 CAS 复核）。
+    operation_phase: str | None = None
+    effect_state: str | None = None
+    io_state: str | None = None
 
 
 @dataclass(frozen=True)

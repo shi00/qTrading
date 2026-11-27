@@ -137,7 +137,7 @@ from services.agent_service.runtime import (
     OwnerLoopBridge,
 )
 from services.agent_service.skills import ManagedSkillStore, SkillCatalogService
-from services.agent_service.tool_runtime import build_tool_runtime_factory
+from services.agent_service.tool_runtime import ToolApprovalCoordinator, build_tool_runtime_factory
 from services.agent_service.units import UnitConversion
 from services.agent_service.workflows import (
     ANSWER_MESSAGE_TOPIC,
@@ -620,19 +620,27 @@ class _NativeAnswerSender:
             self._port_io.exit("answer_send")
 
 
-def _build_answer_consumer(dao: Any, user_scope: str) -> Callable[[str, str], Awaitable[ConsumptionFact]]:
+def _build_answer_consumer(
+    dao: Any, user_scope: str, *, on_consumed: Callable[[str], None] | None = None
+) -> Callable[[str, str], Awaitable[ConsumptionFact]]:
     """生产答复消费者（P1-05）：按保存时同一命令身份派生并走 DAO 幂等 CAS。
 
     命令身份派生与 ``AgentDao.save_answer`` 一致（``stable_id("command",
     [user_scope, decision_id, client_command_id])``），不新建答复、不改投递事实；
     已消费重放由 DAO 返回原事实（重复投递只消费一次）。
+
+    ``on_consumed`` 在消费事务提交后按 ``decision_id`` 唤醒审批等待者（D7-01）；
+    只做唤醒，不传递授权事实——等待方醒后仍读取持久 ``agent_decision``。
     """
 
     async def _consume(decision_id: str, client_command_id: str) -> ConsumptionFact:
         command_record_id = stable_id("command", [user_scope, decision_id, client_command_id])
-        return await dao.consume_answer(
+        fact = await dao.consume_answer(
             ConsumeAnswerRequest(user_scope=user_scope, command_record_id=command_record_id)
         )
+        if on_consumed is not None:
+            on_consumed(fact.decision_id)
+        return fact
 
     return _consume
 
@@ -1090,9 +1098,12 @@ async def wire_agent_runtime(
     usage_dao = getattr(cache_manager, "ai_usage_dao", None)
     skills = _build_skill_catalog(dao, skills_root)
     service = AgentService(dao, usage_dao, skills=skills)
+    #: 审批等待登记（D7-01）：工具 runtime 与答复消费侧共享同一实例；消费事务
+    #: 提交后按 decision_id 唤醒，醒后仍以持久决定事实重核。
+    approvals = ToolApprovalCoordinator()
     #: 答复消费（P1-05）：原生 workflow 的 recv 消费步骤按同一用户域 + 共享账本
     #: 消费（未 launch 时无 workflow，安装无副作用；步骤缺少消费者时明确拒绝）。
-    AnswerConsumerRegistry.install(_build_answer_consumer(dao, user_scope))
+    AnswerConsumerRegistry.install(_build_answer_consumer(dao, user_scope, on_consumed=approvals.notify_consumed))
     try:
         runtime_url = _agent_runtime_sync_url(engine)
     except Exception as e:
@@ -1119,7 +1130,9 @@ async def wire_agent_runtime(
             )
             lifecycle = None
     if leaf_runtime is None:
-        tool_factory = None if lifecycle is None else build_tool_runtime_factory(dao=dao, lifecycle=lifecycle)
+        tool_factory = (
+            None if lifecycle is None else build_tool_runtime_factory(dao=dao, lifecycle=lifecycle, approvals=approvals)
+        )
         leaf_runtime = default_leaf_runtime(dao, tool_runtime_factory=tool_factory)
     try:
         install_leaf_runtime(leaf_runtime)
