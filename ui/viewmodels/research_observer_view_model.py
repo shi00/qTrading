@@ -1144,6 +1144,8 @@ class ResearchObserverState:
     role_selection_error_key: str | None = None
     #: 当前待发送选择（未随首问发送前可改）。
     model_selection: str | None = None
+    #: 用户是否显式选择过模型（自动默认不写会话键；仅显式选择随首问落键）。
+    model_selection_explicit: bool = False
     role_selection: str | None = None
     #: 已随首问冻结的选择（首问成功后记录；同会话内不再静默改写）。
     model_selection_frozen: str | None = None
@@ -3899,6 +3901,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             durations=(),
             durations_execution_id=None,
             model_selection_frozen=None,
+            model_selection_explicit=False,
             role_selection_frozen=None,
             # 会话级模型选择随会话消失，避免旧会话残影（R21）。
             session_model_connection_id=None,
@@ -4043,6 +4046,8 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
                 "session_model_connection_id": None,
                 "session_model_source_key": SESSION_MODEL_SOURCE_DEFAULT,
                 "session_model_error_key": None,
+                # 换会话后工具栏选择回到「自动默认」，显式标记随旧会话消失。
+                "model_selection_explicit": False,
                 "last_answer_text": "",
                 "last_dispatch_reason": None,
                 "plan_steps": (),
@@ -5127,6 +5132,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
                 role_selection=role_selection,
                 role_selection_error_key=None,
                 model_selection_available=False,
+                model_selection_explicit=False,
             )
             return
         try:
@@ -5139,6 +5145,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
                 role_selection=role_selection,
                 role_selection_error_key=None,
                 model_selection_error_key="agent_research_model_selection_error",
+                model_selection_explicit=False,
             )
             return
         options = build_model_connection_options(snapshot)
@@ -5148,9 +5155,10 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         if model_selection is None:
             model_selection = next((option.connection_id for option in options if option.eligible), None)
         self._set_state(
+            model_selection=model_selection,
+            model_selection_explicit=False,
             model_selection_available=True,
             model_options=options,
-            model_selection=model_selection,
             model_selection_error_key=None if options else "agent_research_model_selection_route_unavailable",
             role_options=role_options,
             role_selection=role_selection,
@@ -5184,7 +5192,11 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         if option.reject_key is not None:
             self._set_state(model_selection_error_key=option.reject_key)
             return
-        self._set_state(model_selection=connection_id, model_selection_error_key=None)
+        self._set_state(
+            model_selection=connection_id,
+            model_selection_explicit=True,
+            model_selection_error_key=None,
+        )
         await self.refresh_budget_hint()
 
     async def select_session_model(self, connection_id: str) -> None:
@@ -5535,9 +5547,15 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             self._mcp_identities[key] for key in self._state.mcp_scope_selected if key in self._mcp_identities
         )
         try:
-            # 新会话没有会话键时，当前工具栏选择即用户所选项（真正写入会话键）；
-            # 两者皆无则保持继承（None，不伪造默认连接）。
-            model_connection_id = self._state.session_model_connection_id or self._state.model_selection
+            # 会话键优先；新会话仅当用户**显式**选择过模型才写键（自动默认不写，
+            # 读失败时也不覆盖已存键，如实保持继承）。
+            preferred = self._state.session_model_connection_id
+            if (
+                preferred is None
+                and self._state.model_selection_explicit
+                and self._state.session_model_error_key is None
+            ):
+                preferred = self._state.model_selection
             result = await intake.start_question(
                 text,
                 mode=Mode(self._state.composer_mode),
@@ -5545,7 +5563,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
                 expected_revision=(self._state.session_draft_revision if self._state.session_id is not None else 0),
                 role_prompt_refs=role_refs,
                 mcp_selection=selection,
-                model_connection_id=model_connection_id,
+                model_connection_id=preferred,
             )
         except asyncio.CancelledError:
             self._set_state(composer_pending=False)

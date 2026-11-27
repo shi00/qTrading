@@ -1312,6 +1312,22 @@ def test_request_rejects_blank_preferred_connection_id() -> None:
     assert str(excinfo.value) == "main turn preferred_connection_id must be non-empty text"
 
 
+@pytest.mark.parametrize("invalid", [True, 123])
+def test_request_rejects_non_text_preferred_connection_id(invalid: object) -> None:
+    """布尔/数字不得冒充连接 id（精确 ValueError，不做隐式字符串化）。"""
+
+    with pytest.raises(ValueError) as excinfo:
+        MainTurnRequest(
+            identity=_IDENTITY,
+            mode=Mode.DISCUSS,
+            prompt_text="问题",
+            preferred_connection_id=cast(Any, invalid),
+        )
+
+    assert type(excinfo.value) is ValueError
+    assert str(excinfo.value) == "main turn preferred_connection_id must be non-empty text"
+
+
 @pytest.mark.asyncio
 async def test_intake_execute_first_question_plans_then_dispatches_when_gate_open() -> None:
     """启门证据：门闩显式开启 + 假模型 + 假派发器 → 首问进入主回合并产生执行。"""

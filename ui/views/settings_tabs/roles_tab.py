@@ -52,6 +52,7 @@ _VM_MESSAGE_KEYS: tuple[str, ...] = (
     "agent_roles_preset_readonly",
     "agent_roles_conflict",
     "agent_roles_invalid",
+    "agent_roles_model_unavailable",
     "agent_roles_save_failed",
     "agent_roles_created",
     "agent_roles_saved",
@@ -401,26 +402,15 @@ def _RolesTabBody(show_snack: Callable[[str], None], catalog: Any) -> ft.Control
     ft.use_state(AppColors.get_observable_state)
 
     state, vm = use_viewmodel(factory=lambda: RolesSettingsViewModel(catalog))
-    load_done, set_load_done = ft.use_state(False)
-    load_failed, set_load_failed = ft.use_state(False)
-
-    async def _do_load() -> None:
-        await vm.load()
-        # 只记录「加载阶段」失败：后续保存/启停错误不应把整个目录标为不可用。
-        set_load_failed(vm.state.error_key is not None)
-        set_load_done(True)
 
     def _trigger_load() -> None:
         page = _get_page()
         if page is not None:
-            page.run_task(_do_load)
+            page.run_task(vm.load)
 
     ft.use_effect(_trigger_load, dependencies=[])
 
     def _announce() -> None:
-        if state.error_key is None and state.notice_key is not None:
-            # 保存/启停成功即复位加载失败标记，避免「已保存」与「目录不可用」并存。
-            set_load_failed(False)
         for key in (state.error_key, state.notice_key):
             text = _message_text(key)
             if text:
@@ -429,13 +419,13 @@ def _RolesTabBody(show_snack: Callable[[str], None], catalog: Any) -> ft.Control
     # 依赖键变化才弹一次；中间态（pending 置位清空键）不产生提示，重复失败可再次提示。
     ft.use_effect(_announce, dependencies=[(state.error_key, state.notice_key)])
 
-    if not load_done:
+    if not state.loaded:
         list_content: ft.Control = ft.Text(
             I18n.get("agent_roles_loading"),
             size=AppStyles.FONT_SIZE_BODY_SM,
             color=AppColors.TEXT_HINT,
         )
-    elif load_failed:
+    elif state.load_failed:
         # 加载失败持久展示不可用，而不是把「未知」渲染成空列表（R21）。
         list_content = ft.Text(
             I18n.get("agent_roles_unavailable"),

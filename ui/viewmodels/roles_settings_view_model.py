@@ -42,6 +42,7 @@ ERROR_KEYS: dict[AgentErrorCode, str] = {
     AgentErrorCode.REVISION_CONFLICT: "agent_roles_conflict",
     AgentErrorCode.CONFIG_UNAVAILABLE: "agent_roles_unavailable",
     AgentErrorCode.INPUT_INVALID: "agent_roles_invalid",
+    AgentErrorCode.POLICY_DENIED: "agent_roles_model_unavailable",
 }
 
 ERROR_PRESET_READONLY = "agent_roles_preset_readonly"
@@ -50,7 +51,6 @@ ERROR_SAVE_FAILED = "agent_roles_save_failed"
 
 #: 修订冲突的服务原因 → 更精确的页面错误键（未识别原因统一落到冲突）。
 CONFLICT_REASON_KEYS: dict[str, str] = {
-    "role_already_exists": "agent_roles_invalid",
     "role_not_found": "agent_roles_unavailable",
 }
 
@@ -65,7 +65,13 @@ class RoleCatalogPort(Protocol):
     """角色目录读写的端口（签名与 :class:`RoleCatalogService` 一致，便于替身注入）。"""
 
     async def create_new(
-        self, role_id: str, display_name: str, prompt_body: str, *, updated_by: str
+        self,
+        role_id: str,
+        display_name: str,
+        prompt_body: str,
+        *,
+        updated_by: str,
+        model_connection_id: str | None = None,
     ) -> RoleDefinition: ...
 
     async def update(
@@ -122,6 +128,10 @@ class RolesSettingsState:
     error_key: str | None = None
     notice_key: str | None = None
     pending: bool = False
+    #: 是否已完成至少一次目录加载（区分「加载中」与「已加载」）。
+    loaded: bool = False
+    #: 最近一次加载是否失败（保存/启停触发的内部 reload 同样更新；View 纯派生）。
+    load_failed: bool = False
 
 
 class RolesSettingsViewModel(ObservableViewModelMixin[RolesSettingsState]):
@@ -143,14 +153,27 @@ class RolesSettingsViewModel(ObservableViewModelMixin[RolesSettingsState]):
             definitions = await self._catalog.list_roles()
         except asyncio.CancelledError:
             self._set_state(pending=False)
-            raise  # R2: 取消必须原样传播
+            raise  # R2: 取消必须原样传播（不改 loaded/load_failed，保持上一次事实）
         except AgentServiceError as exc:
-            self._fail(exc, fallback_key=ERROR_UNAVAILABLE)
+            self._record_load_failure(exc)
             return
         except Exception as exc:
-            self._fail(exc, fallback_key=ERROR_UNAVAILABLE)
+            self._record_load_failure(exc)
             return
-        self._set_state(roles=self._rows(definitions), pending=False)
+        self._set_state(
+            roles=self._rows(definitions),
+            pending=False,
+            loaded=True,
+            load_failed=False,
+            error_key=None,
+        )
+
+    def _record_load_failure(self, exc: Exception) -> None:
+        """加载失败单次快照落地：loaded/load_failed 与错误键一起更新，避免中间态。"""
+
+        key = self._error_key_for(exc, ERROR_UNAVAILABLE) if isinstance(exc, AgentServiceError) else ERROR_UNAVAILABLE
+        self._record_failure(exc)
+        self._set_state(pending=False, error_key=key, loaded=True, load_failed=True)
 
     @staticmethod
     def _rows(definitions: tuple[RoleDefinition, ...]) -> tuple[RoleRow, ...]:
@@ -316,18 +339,14 @@ class RolesSettingsViewModel(ObservableViewModelMixin[RolesSettingsState]):
         self._set_state(pending=True, error_key=None, notice_key=None)
         try:
             if draft.is_new:
-                # 草稿即真相：复制不再重读来源，正文/名称按用户编辑值落库
+                # 草稿即真相：复制不再重读来源，正文/名称/模型覆盖按用户编辑值单次落库。
                 await self._catalog.create_new(
-                    draft.role_id, draft.display_name, draft.prompt_body, updated_by=self._updated_by
+                    draft.role_id,
+                    draft.display_name,
+                    draft.prompt_body,
+                    updated_by=self._updated_by,
+                    model_connection_id=draft.model_connection_id,
                 )
-                if draft.model_connection_id is not None:
-                    # 新建固定 r1；模型覆盖单独写入（不改提示词、不升版本）
-                    await self._catalog.update(
-                        draft.role_id,
-                        model_connection_id=draft.model_connection_id,
-                        expected_version="r1",
-                        updated_by=self._updated_by,
-                    )
                 notice_key = NOTICE_CREATED
             else:
                 if draft.role_version is None:
@@ -411,6 +430,12 @@ class RolesSettingsViewModel(ObservableViewModelMixin[RolesSettingsState]):
         """失败统一出口：错误码映射 + 分类记录 + 脱敏，不伪装成功（R9/R21）。"""
 
         key = self._error_key_for(exc, fallback_key) if isinstance(exc, AgentServiceError) else fallback_key
+        self._record_failure(exc)
+        self._set_state(pending=False, error_key=key)
+
+    def _record_failure(self, exc: Exception) -> None:
+        """分类严重度并记录脱敏日志（不改状态，供单快照失败路径复用）。"""
+
         sanitized = DataSanitizer.sanitize_error(exc)
         severity = classify_severity(exc, "agent_role")
         code = classify_error(exc, "agent_role").get("code", "unknown")
@@ -418,7 +443,6 @@ class RolesSettingsViewModel(ObservableViewModelMixin[RolesSettingsState]):
             logger.error("[RolesSettingsVM] operation failed code=%s: %s", code, sanitized)
         else:
             logger.warning("[RolesSettingsVM] operation failed code=%s: %s", code, sanitized)
-        self._set_state(pending=False, error_key=key)
 
 
 __all__ = [
