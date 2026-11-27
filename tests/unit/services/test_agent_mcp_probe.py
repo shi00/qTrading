@@ -73,6 +73,25 @@ class TestStdioImplementationProbe:
 
         assert await probe.probe(base) != await probe.probe(with_env)
 
+    async def test_secret_env_keys_change_fingerprint(self, tmp_path) -> None:
+        """敏感引用与普通字面量分属两个字段，其键名变化同样改变实现指纹。"""
+
+        script = tmp_path / "server.py"
+        script.write_text("print('v1')", encoding="utf-8")
+        probe = StdioImplementationProbe()
+        base = _stdio_config(command=sys.executable, cwd=str(tmp_path), args=(str(script),))
+        with_secret = _config(
+            MCPTransportConfig(
+                kind=MCPTransportKind.STDIO,
+                command=sys.executable,
+                args=(str(script),),
+                secret_env=(("MCP_TOKEN", "keyring:mcp-token"),),
+                cwd=str(tmp_path),
+            )
+        )
+
+        assert await probe.probe(base) != await probe.probe(with_secret)
+
     async def test_unreadable_command_returns_none(self, tmp_path) -> None:
         probe = StdioImplementationProbe()
         config = _stdio_config(command=str(tmp_path / "missing"), cwd=str(tmp_path))

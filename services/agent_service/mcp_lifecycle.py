@@ -34,6 +34,7 @@ from services.agent_service.mcp import (
     SharedMCPConnectionManager,
     catalog_digest,
     config_snapshot_digest,
+    is_secure_reference,
 )
 from services.agent_service.mcp_config_store import AppStateMCPConfigStore, MCPConfigListEntry
 from services.agent_service.mcp_grant import AppStateMCPGrantStore, MCPConnectGrant, MCPToolSets
@@ -57,9 +58,16 @@ def _utc_now() -> str:
 
 
 def _credential_references(config: MCPServerConfig) -> tuple[str, ...]:
-    """配置中引用的外部凭据（仅安全引用名，不含秘密值；供删除后人工撤销，QAC13）。"""
+    """配置中引用的外部凭据（仅安全引用名，不含秘密值；供删除后人工撤销，QAC13）。
 
-    return tuple(sorted({value for _name, value in config.transport.headers if value.startswith(("env:", "keyring:"))}))
+    覆盖 HTTP Header 与 stdio ``secret_env`` 两处：删除 stdio 服务时同样要盘点其
+    凭据引用，否则用户会漏撤销仍留在 keyring/环境中的条目。只回显引用名（``env:``
+    / ``keyring:``），非引用值一律不输出，避免把明文秘密写进删除回执（R9）。
+    """
+
+    references = {value for _name, value in config.transport.headers if is_secure_reference(value)}
+    references.update(value for _name, value in config.transport.secret_env if is_secure_reference(value))
+    return tuple(sorted(references))
 
 
 @dataclass(frozen=True, slots=True)
