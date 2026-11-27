@@ -906,6 +906,17 @@ class TestCustomRolePrompt:
 
         assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
 
+    def test_custom_role_error_identity_carries_frozen_version(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """失败身份带冻结版本，区分同一角色的不同版本事实。"""
+
+        monkeypatch.setattr(leaf_agent, "_read_saved_role_prompt", _ORIGINAL_READ_SAVED_ROLE_PROMPT)
+        definition = decode_role_definition(_wire(status="disabled", role_version="r7"))
+
+        with pytest.raises(AgentServiceError) as exc:
+            leaf_agent._read_saved_role_prompt("risk_reviewer", definition=definition)
+
+        assert exc.value.identity == "risk_reviewer@r7"
+
     def test_custom_role_version_mismatch_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(leaf_agent, "_read_saved_role_prompt", _ORIGINAL_READ_SAVED_ROLE_PROMPT)
         definition = decode_role_definition(_wire(role_version="r2"))

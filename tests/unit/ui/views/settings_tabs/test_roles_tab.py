@@ -36,6 +36,7 @@ from tests.unit.ui.component_renderer import (
     run_mount_effects,
     run_render_effects,
 )
+from ui.viewmodels import roles_settings_view_model as vm_mod
 from ui.viewmodels.roles_settings_view_model import (
     STATUS_ACTIVE,
     STATUS_DISABLED,
@@ -813,6 +814,27 @@ def test_new_i18n_keys_are_referenced_in_view_source() -> None:
         )
 
     assert literals >= _NEW_I18N_KEYS
+
+
+def test_vm_message_keys_cover_every_vm_produced_key() -> None:
+    """View 锚点须覆盖 VM 实际产出的全部错误/提示键（新增键必须登记，防漂移）。"""
+
+    produced: set[str] = set(vm_mod.ERROR_KEYS.values())
+    produced.update(vm_mod.CONFLICT_REASON_KEYS.values())
+    produced.update(
+        {
+            vm_mod.ERROR_UNAVAILABLE,
+            vm_mod.ERROR_SAVE_FAILED,
+            vm_mod.ERROR_PRESET_READONLY,
+            vm_mod.NOTICE_CREATED,
+            vm_mod.NOTICE_SAVED,
+            vm_mod.NOTICE_VERSION_BUMPED,
+            vm_mod.NOTICE_DISABLED,
+            vm_mod.NOTICE_ENABLED,
+        }
+    )
+
+    assert set(mod._VM_MESSAGE_KEYS) == produced
 
 
 def test_new_i18n_keys_exist_in_both_locales() -> None:

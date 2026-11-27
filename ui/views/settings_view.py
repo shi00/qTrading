@@ -8,7 +8,7 @@
 - Tab 切换由 ``use_state(current_tabs)`` 驱动，条件渲染当前激活 tab
 - i18n 通过 ``ft.use_state(get_observable_state)`` 订阅自动重渲染
 - 移除所有命令式生命周期回调与手动刷新方法
-- 6 个 tab 均已声明式化 (``@ft.component`` + ``use_viewmodel``), 直接函数调用
+- 全部 tab 均已声明式化 (``@ft.component`` + ``use_viewmodel``), 直接函数调用
 - ``show_snack`` 用 ``ft.context.page`` 访问 page（try/except 守卫 RuntimeError）
 - Issue #438: visited_tabs 跟踪已访问 Tab, 已访问 Tab 始终在 ``ft.Stack`` 中
   (``visible`` prop 控制显隐), 状态跨 Tab 切换保持 (与 ``app_layout._build_pages_stack``

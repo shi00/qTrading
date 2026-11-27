@@ -149,7 +149,7 @@ Flet 使用 Flutter 渲染，但 Flet Python API 不等同于 Flutter Widget API
 | `"<其他 tab>:<subtab>"` | warning + 子页段忽略（仅 settings/screener 定义 subtab 语义） |
 | `"a:b:c"` / 空段 | warning + 整体忽略 |
 
-- 合法 settings 子页 key：`data` / `database` / `ai` / `tasks` / `notify` / `system`（单一事实源：`ui/views/settings_view.py` 的 `SETTINGS_SUBTAB_INDEX`，从 `_TAB_CONFIG` 派生，与 `EIDS.SETTINGS.tab` role 对齐）。
+- 合法 settings 子页 key：`data` / `database` / `ai` / `mcp` / `tasks` / `notify` / `system` / `skills` / `roles`（单一事实源：`ui/views/settings_view.py` 的 `SETTINGS_SUBTAB_INDEX`，从 `_TAB_CONFIG` 派生，与 `EIDS.SETTINGS.tab` role 对齐）。
 - subtab 段语义由目标 tab 定义：settings 段为白名单子页 key；screener 段为股票代码（任意非空字符串，无白名单）。解析层不感知语义差异，仅按 tab 分派。
 - 发送方示例：`page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "settings:data")`（见 `home_view._navigate_to_data_source`）、`send_all_on_topic(TOPIC_NAVIGATE, "screener:600000")`（见 `home_view._on_view_stock` / `watchlist_view._on_view_stock`）。
 - 实现约束（Flet hooks 语义）：订阅 handler 是订阅时闭包，内部 state 读取是 stale 的——`AppLayout._on_navigate` 内禁止读取 state 当前值做逻辑判断，state 写入必须用函数式更新（seq 递增防重复深链失效）；子页激活经 `SettingsView` 的 `target_subtab=(key, seq)` prop + `use_effect(dependencies=[target_subtab])` 应用；screener 过滤填充经 `ScreenerView` 的 `stock_filter_request=(code, seq)` prop + 同构 `use_effect` 应用。
