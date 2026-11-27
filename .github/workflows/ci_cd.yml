@@ -346,7 +346,7 @@ jobs:
   # 静态检查与 DB 迁移校验已拆到 ci-checks-static / ci-checks-db 并行执行，
   # Linux 侧关键路径由「静态 + DB + 测试串行」变为最长分支（见 docs/guides/ci-cd.md「CI Job 矩阵」）。
   ci-checks:
-    name: Unit Tests (Linux, Python ${{ matrix.python-version }})
+    name: Unit Tests (Linux, Python ${{ matrix.python-version }}, shard ${{ matrix.shard }})
     needs: [lint-fast, changes]
     # 锁定 Ubuntu 24.04（同 embedded-tests L1067）：ubuntu-latest 已迁至 26.04，其 libxml2
     # 为 2.15（soname libxml2.so.16），而 sidecar 下载的 PostgreSQL 二进制动态链接
@@ -368,6 +368,12 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ['3.14']
+        # 单测分片（P3-CI-Unit-Suite-Shard-Required）：tests/unit/ 按测试文件路径哈希稳定
+        # 分配到 4 个独立 job 并行执行（见 tests/unit/_unit_test_sharding.py 与
+        # tests/unit/conftest.py 的 pytest_ignore_collect）。原单 job 下
+        # test_pollution_detection 约 440s 且 xdist 偶发 node down 会整步重跑，wall clock
+        # 逼近超时；分片后单 job 只承载约 1/4 文件，且单分片失败不致整步全量重跑。
+        shard: [0, 1, 2, 3]
     env:
       UV_CACHE_DIR: /tmp/uv-cache
 
@@ -450,7 +456,13 @@ jobs:
           # 覆盖率片段：本 job 只采集数据（--cov-report= 关闭报告，--cov-fail-under=0 关闭
           # 从 pyproject 继承的 fail_under；pytest-cov 即使无报告也会按配置判阈值）。
           # 阈值判定与最终 coverage.xml/json 由 ci-coverage 合并后统一产出。
-          COVERAGE_FILE: cov/unit.data
+          # 分片后片段名必须含 shard：ci-coverage 以 merge-multiple 下载全部 cov-* 工件，
+          # 同名文件会相互覆盖，导致合并数据丢失部分分片的覆盖记录。
+          COVERAGE_FILE: cov/unit-${{ matrix.shard }}.data
+          # 分片选择由 tests/unit/conftest.py 的 pytest_ignore_collect 读取；
+          # 两个变量必须同时设置，否则该钩子显式报错（避免静默全量执行）。
+          UNIT_TEST_SHARD_INDEX: ${{ matrix.shard }}
+          UNIT_TEST_SHARD_COUNT: "4"
         run: |
           set -e
           # 污染探测（3 次串行排列，约 2 分钟）不随 PR 执行：改由 nightly flaky-detection 的专用 step 承担，
@@ -458,7 +470,7 @@ jobs:
           mkdir -p cov
           python -m pytest tests/unit/ -v --tb=short \
             --deselect tests/unit/test_pollution_detection.py::test_no_cross_test_pollution_in_core_subset \
-            --cov --cov-report= --cov-fail-under=0 --junitxml=junit-unit.xml
+            --cov --cov-report= --cov-fail-under=0 --junitxml=junit-unit-${{ matrix.shard }}.xml
 
       # R9: 上传 junit 前脱敏可能含 DB 连接串（含密码）的文本工件（D18-R03）。
       # 上传仅在本步骤成功时执行：脱敏失败/cancel 时不得回退上传未脱敏原始工件。
@@ -474,7 +486,8 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           # 覆盖率报告由 ci-coverage 统一产出并上传；本 job 只上传 junit。
-          name: test-reports-unit-${{ runner.os }}-${{ matrix.python-version }}
+          # 名称含 shard：upload-artifact 不允许同一 run 内重名工件（4 个分片并行上传）。
+          name: test-reports-unit-${{ runner.os }}-${{ matrix.python-version }}-${{ matrix.shard }}
           path: junit-*.xml
           retention-days: 14
 
@@ -483,8 +496,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: cov-unit-py${{ matrix.python-version }}
-          path: cov/unit.data
+          name: cov-unit-py${{ matrix.python-version }}-${{ matrix.shard }}
+          path: cov/unit-${{ matrix.shard }}.data
           retention-days: 7
           if-no-files-found: error
 

@@ -40,7 +40,6 @@
 | P3-M4-AppStateService-BroadExcept | `app_state_service.py:21,38,63` broad except 未接入 classify\_error（合理降级，一致性建议） | P3 | ① app state 升级为关键路径时；② 或该文件再次出现未分类 broad except 的新实例时 |
 | P3-M6-NewsFetcher-Lazy-ProxyManager-Import | `news_fetcher.py:618/:785/:951` 三处函数内部 import ProxyManager（合理避免循环依赖，建议保留） | P3 | ① `proxy_manager.py` 循环依赖被解除时；② 或该文件再次出现函数内 import 的新实例时 |
 | P3-Windows-Unit-Test-Timeout-Tight | Windows 单测 step `timeout-minutes` 余量不足（main 成功 run 13 分 41 秒 / 原 15 分钟 = 91% 占用） | P3 | ① Windows 单测实际运行时间 ≥ 18 分钟（90% 占用 20 分钟 timeout）；② 或连续 3 次 PR 触发 Windows 单测超时；③ 或单测总数增长 ≥ 20%（如新增 2000 个测试） |
-| P3-CI-Unit-Suite-Shard-Required | 全量单测单进程/单 job 运行接近超时：`test_pollution_detection` 约 440s，xdist 偶发 node down | P3 | ① CI 单次 unit 步骤 > 15 分钟；② 或出现超时失败（含 xdist node down 导致的重跑） |
 | P3-M9-NewsSubscription-EngineDisposed-Swallowed | #M9-010 R5: news\_subscription\_service.py L520/752/1059 EngineDisposedError 吞没（当前状态：已登记 R5 例外 EX-0017） | P3 | ① R5 红线适用范围扩展至应用服务层轮询循环时；② 或该文件再次出现 EngineDisposedError 吞没的新实例时 |
 | P3-M9-Backtest-EngineDisposed-Warning-Return | #M9-011 R5: backtest\_service.py L132-158 EngineDisposedError 被捕获返回带警告结果（当前状态：已登记 R5 例外 EX-0018） | P3 | ① R5 红线适用范围扩展至回测持久化路径时；② 或该文件再次出现 system 级异常不 raise 的新实例时 |
 | P3-CON04-Subprocess-Cancel | review02 CON-04：subprocess 不可取消长任务停机交互——terminate 仅终止 sidecar 包装 / dump 中断残留不自动清理 / restore 拒绝取消 / run\_async 无可中断变体 | P3 | ① 用户报告停机后 `.partial` 残留或孤儿 pg\_dump 占用磁盘/连接；② restore 取消成为产品需求；③ ThreadPoolManager 重构时 |
@@ -397,20 +396,6 @@ PR #291 触发 Windows 单测 CI 超时调查发现：main 分支最近一次成
 **期望的最终解法**
 
 长期优化方案（任选其一或组合）：① 用 `pytest --durations=20` 识别 main 分支最慢的 20 个测试并优化（如 mock 重型 IO、减少 fixture 重复初始化）；② 将 `tests/unit/` 拆分为 2-3 个并行 job（如按 `tests/unit/data/`、`tests/unit/ui/`、`tests/unit/strategies/` 等目录拆分），缩短 wall clock；③ 将 `pyproject.toml` 中 `--dist=loadgroup` 切换为 `--dist=loadscope` 减少跨 worker fixture 重复初始化开销。验收标准：① main 分支 Windows 单测实际运行时间 ≤ 12 分钟（余量 ≥ 8 分钟 / \~40%）；② 拆分 job 后各 job wall clock ≤ 8 分钟；③ 现有测试全过且无新增 flaky。upgrade 触发条件：① Windows 单测实际运行时间 ≥ 18 分钟（90% 占用 20 分钟 timeout）；② 或连续 3 次 PR 触发 Windows 单测超时；③ 或单测总数增长 ≥ 20%（如新增 2000 个测试）。
-
-#### P3-CI-Unit-Suite-Shard-Required：全量单测需分片执行（慢用例与 xdist 偶发 node down）
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-CI-Unit-Suite-Shard-Required** | 全量单测中 `test_pollution_detection` 约 440s，xdist 偶发 node down，CI 单次全量运行接近超时 | ① CI 单次 unit 步骤 > 15 分钟；② 或出现超时失败（含 xdist node down 导致的重跑） |
-
-**产生背景与现状**
-
-全量 `tests/unit/` 由单一 job 承载，内部虽有 xdist 并行，但 `test_pollution_detection` 单文件约 440s 成为关键路径；xdist 偶发 node down 会触发整步重跑，wall clock 与稳定性余量同时被压缩，CI 单次运行已接近超时阈值。
-
-**建议与触发条件**
-
-按目录分片执行（如 data / ui / strategies / services 分别独立 job），或将 `test_pollution_detection` 等慢用例拆分/优化（减少重复初始化、隔离重型 fixture）。触发条件：CI 单次 unit 步骤 > 15 分钟，或出现超时失败。
 
 ### E2E 测试资产供应链
 #### P3-E2E-MockAssets-Provenance-Blocked：E2E 离线资产（`tests/e2e/mock_assets`，138 文件）来源、版本配套与许可证未闭合（blocked）

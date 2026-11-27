@@ -42,11 +42,13 @@ GATE_DOWNSTREAM_STEPS = (
     "Upload coverage reports",
 )
 
-# 采集 job → (测试步骤名, 片段名)
+# 采集 job → (测试步骤名, 覆盖率片段路径)
+# 单测 job 以 4 个 matrix 分片并行，片段名必须含 shard（merge-multiple 会覆盖同名文件）；
+# 集成 / embedded 仍为单 job。
 COLLECTORS = {
-    "ci-checks": ("Run Unit Tests", "unit"),
-    "ci-checks-integration": ("Run Integration Tests", "integration"),
-    "ci-checks-embedded": ("Run agent embedded integration tests (serial, sidecar)", "embedded"),
+    "ci-checks": ("Run Unit Tests", "cov/unit-${{ matrix.shard }}.data"),
+    "ci-checks-integration": ("Run Integration Tests", "cov/integration.data"),
+    "ci-checks-embedded": ("Run agent embedded integration tests (serial, sidecar)", "cov/embedded.data"),
 }
 LINUX_JOBS = (*COLLECTORS, GATE_JOB)
 
@@ -90,7 +92,7 @@ def _flag_values(tokens: list[str], flag: str) -> list[str]:
     return [token[len(prefix) :] for token in tokens if token.startswith(prefix)]
 
 
-def _assert_collector(job: str, steps: list[dict[str, Any]], step_name: str, fragment: str) -> None:
+def _assert_collector(job: str, steps: list[dict[str, Any]], step_name: str, coverage_file: str) -> None:
     step = _step(steps, step_name)
     tokens = _tokens(step)
     assert _has_flag(tokens, "--cov"), f"{job} 采集阶段缺少 --cov"
@@ -105,8 +107,8 @@ def _assert_collector(job: str, steps: list[dict[str, Any]], step_name: str, fra
         f"{_flag_values(tokens, '--cov-fail-under')}"
     )
     env = step.get("env", {})
-    assert env.get("COVERAGE_FILE") == f"cov/{fragment}.data", (
-        f"{job} 必须使用独立覆盖率片段文件 cov/{fragment}.data，实际: {env.get('COVERAGE_FILE')}"
+    assert env.get("COVERAGE_FILE") == coverage_file, (
+        f"{job} 必须使用独立覆盖率片段文件 {coverage_file}，实际: {env.get('COVERAGE_FILE')}"
     )
 
     upload = _step(steps, "Upload test reports")
@@ -117,7 +119,7 @@ def _assert_collector(job: str, steps: list[dict[str, Any]], step_name: str, fra
 
     fragment_upload = _step(steps, "Upload coverage fragment")
     with_ = fragment_upload.get("with", {})
-    assert with_.get("path") == f"cov/{fragment}.data", (
+    assert with_.get("path") == coverage_file, (
         f"{job} 覆盖率片段上传路径应与 COVERAGE_FILE 一致，实际: {with_.get('path')}"
     )
     assert with_.get("if-no-files-found") == "error", f"{job} 片段上传须在缺失时失败（避免静默丢数据）"
@@ -151,8 +153,29 @@ def _cov_fail_under_values(workflow: dict[str, Any]) -> list[float]:
 
 @pytest.mark.parametrize("job", sorted(COLLECTORS))
 def test_collectors_emit_fragments_only(workflow: dict[str, Any], job: str) -> None:
-    step_name, fragment = COLLECTORS[job]
-    _assert_collector(job, _steps(workflow, job), step_name, fragment)
+    step_name, coverage_file = COLLECTORS[job]
+    _assert_collector(job, _steps(workflow, job), step_name, coverage_file)
+
+
+def test_unit_job_shards_emit_distinct_artifacts(workflow: dict[str, Any]) -> None:
+    """单测分片后片段 / 工件名必须唯一，且分片数与钩子 env 一致（P3-CI-Unit-Suite-Shard-Required）。"""
+    job = workflow["jobs"]["ci-checks"]
+    shards = job["strategy"]["matrix"]["shard"]
+    assert len(shards) >= 2, "单测 job 未按 matrix 分片"
+    assert len(set(shards)) == len(shards), f"分片取值重复: {shards}"
+
+    step = _step(job["steps"], "Run Unit Tests")
+    env = step.get("env", {})
+    assert env.get("UNIT_TEST_SHARD_INDEX") == "${{ matrix.shard }}", "分片下标未接入 tests/unit 分片钩子"
+    assert env.get("UNIT_TEST_SHARD_COUNT") == str(len(shards)), "分片总数必须与 matrix 分片数一致"
+    assert "${{ matrix.shard }}" in str(env.get("COVERAGE_FILE")), "覆盖率片段名须含 shard，避免 merge-multiple 覆盖"
+    assert "${{ matrix.shard }}" in str(step.get("run")), "junit 文件名须含 shard，避免同名覆盖"
+
+    upload = _step(job["steps"], "Upload test reports").get("with", {})
+    assert "${{ matrix.shard }}" in str(upload.get("name")), "upload-artifact 名称须唯一（分片并行上传）"
+    fragment = _step(job["steps"], "Upload coverage fragment").get("with", {})
+    assert "${{ matrix.shard }}" in str(fragment.get("name"))
+    assert fragment.get("path") == env.get("COVERAGE_FILE")
 
 
 def test_gate_combines_then_reports(workflow: dict[str, Any]) -> None:
@@ -235,7 +258,7 @@ def test_mutation_local_report_in_collector_is_detected(workflow: dict[str, Any]
     step = _step(steps, "Run Unit Tests")
     step["run"] = step["run"].replace("--cov-report=", "--cov-report=xml")
     with pytest.raises(AssertionError, match="cov-report"):
-        _assert_collector("ci-checks", steps, "Run Unit Tests", "unit")
+        _assert_collector("ci-checks", steps, "Run Unit Tests", COLLECTORS["ci-checks"][1])
 
 
 def test_mutation_gate_threshold_override_is_detected(workflow: dict[str, Any]) -> None:
@@ -251,4 +274,4 @@ def test_mutation_collector_threshold_reintroduced_is_detected(workflow: dict[st
     step = _step(steps, "Run Unit Tests")
     step["run"] = step["run"].replace("--cov-fail-under=0", "--cov-fail-under=85")
     with pytest.raises(AssertionError, match="cov-fail-under"):
-        _assert_collector("ci-checks", steps, "Run Unit Tests", "unit")
+        _assert_collector("ci-checks", steps, "Run Unit Tests", COLLECTORS["ci-checks"][1])
