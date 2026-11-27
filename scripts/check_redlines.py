@@ -1452,6 +1452,7 @@ _R16_SINGLETON_CLASSES = frozenset(
         "ActualInputBinderRegistry",
         "LeafTicketGateRegistry",
         "AnswerConsumerRegistry",
+        "TerminalStateDaoRegistry",
     }
 )
 
