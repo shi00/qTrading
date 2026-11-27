@@ -1256,6 +1256,22 @@ async def test_intake_explicit_selection_without_store_fails_closed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_intake_explicit_selection_without_store_does_not_create_orphan_session() -> None:
+    """新会话 + 模型存储未接线：必须在 CREATE 之前失败，不留下孤儿会话。"""
+
+    facade = _IntakeFacade(_intake_receipt())
+    intake = MainTurnIntake(facade, manifest_reader=_ManifestDao(None), user_scope="u1")
+
+    with pytest.raises(AgentServiceError) as excinfo:
+        await intake.start_question("研究银行股", mode=Mode.DISCUSS, session_id=None, model_connection_id="conn-x")
+
+    assert excinfo.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+    assert excinfo.value.sanitized_message == "session model store not wired"
+    assert facade.sessions == []
+    assert facade.requests == []
+
+
+@pytest.mark.asyncio
 async def test_intake_session_model_read_failure_propagates() -> None:
     facade = _IntakeFacade(_intake_receipt())
     runner = _MainTurnRunnerStub()

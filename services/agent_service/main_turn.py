@@ -721,6 +721,14 @@ class MainTurnIntake:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "question text is empty", self._user_scope)
         if mode not in (Mode.DISCUSS, Mode.PLAN, Mode.EXECUTE):
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "unsupported mode", self._user_scope)
+        # fail-closed 前移：模型存储未接线时不得先建会话再失败（避免孤儿会话）。
+        # ``_resolve_preferred_connection`` 内保留同一守卫，防御其他调用路径。
+        if model_connection_id is not None and self._session_models is None:
+            raise AgentServiceError(
+                AgentErrorCode.CONFIG_UNAVAILABLE,
+                "session model store not wired",
+                self._user_scope,
+            )
         target_session = session_id
         revision = 0 if expected_revision is None else expected_revision
         if target_session is None:

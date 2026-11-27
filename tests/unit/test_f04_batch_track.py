@@ -187,6 +187,39 @@ class TestF04BatchTrackFreeze:
         assert any(getattr(m, "key", None) == "ai_legacy_dispatch_stopped" for m in progress_messages)
 
     @pytest.mark.asyncio
+    async def test_route_incomplete_uses_specific_progress_key(self):
+        """路由配置不完整（route_incomplete）使用专用进度文案，语义区别于排水/读取失败。"""
+        s = _ConcreteStrategy()
+        dp = _make_mock_dp()
+        on_progress = MagicMock()
+        context = {"data_processor": dp, "on_progress": on_progress}
+
+        async def fake_resolve_analysis_track():
+            raise LegacyDispatchBlockedError("route_incomplete", message="route policy incomplete: x")
+
+        with (
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("strategies.ai_mixin.NewsFetcher.get_stock_news", new=AsyncMock(return_value=[])),
+            patch("strategies.ai_mixin.NewsFetcher.get_us_major_moves", new=AsyncMock(return_value="")),
+            patch(
+                "services.ai_service.scenario_dispatch.resolve_analysis_track",
+                new=fake_resolve_analysis_track,
+            ),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock()
+            mock_ai.return_value = mock_ai_instance
+            result = await s.run_ai_analysis(_make_candidates(2), context)
+
+        mock_ai_instance.analyze_stock.assert_not_awaited()
+
+        assert (result["ai_status"] == "legacy_stopped").all()
+        keys = [getattr(call.args[2], "key", None) for call in on_progress.call_args_list]
+        assert "ai_dispatch_route_incomplete" in keys
+        assert "ai_legacy_dispatch_stopped" not in keys
+
+    @pytest.mark.asyncio
     async def test_legacy_track_cloud_unavailable_unchanged(self):
         """旧轨回归：pending（分派未命中）+ 旧云端不可用 → 维持 math-only 返回，
         轨道判定不破坏既有「未配置」语义。"""
