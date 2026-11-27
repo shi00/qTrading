@@ -6,12 +6,15 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from core.agent_types import (
     AgentValidationError,
     RoleDefinition,
     decode_role_definition,
+    validate_role_definition,
 )
 
 
@@ -115,4 +118,26 @@ def test_rejects_invalid_field(overrides: dict[str, object], code: str, field_pa
         decode_role_definition(_wire(**overrides))
     assert type(exc.value) is AgentValidationError
     assert exc.value.code == code
+    assert exc.value.field_path == field_path
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "field_path"),
+    [
+        ("display_name", 123, "$.role_definition.display_name"),
+        ("model_connection_id", 123, "$.role_definition.model_connection_id"),
+        ("schema_version", True, "$.role_definition.schema_version"),
+    ],
+)
+def test_validate_rejects_invalid_types_on_direct_construction(field_name: str, value: object, field_path: str) -> None:
+    """绕过 ``decode`` 直接构造的非法类型 → ``invalid_type``，而非 ``TypeError``。"""
+
+    definition = decode_role_definition(_wire())
+    broken = replace(definition, **{field_name: value})
+
+    with pytest.raises(AgentValidationError) as exc:
+        validate_role_definition(broken)
+
+    assert type(exc.value) is AgentValidationError
+    assert exc.value.code == "invalid_type"
     assert exc.value.field_path == field_path

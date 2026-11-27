@@ -122,6 +122,24 @@ def test_role_fields_default_to_none_without_side_effects(monkeypatch: pytest.Mo
     assert wiring.session_models is None
 
 
+def test_build_role_services_constructs_without_touching_app_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_build_role_services`` 只做端口绑定：构造期不读 / 写 / 扫 ``app_state``。"""
+
+    def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("构造期不得访问 app_state")
+
+    monkeypatch.setattr(wiring_mod, "get_app_state", _boom)
+    monkeypatch.setattr(wiring_mod, "set_app_state", _boom)
+    monkeypatch.setattr(wiring_mod, "delete_app_state", _boom)
+    monkeypatch.setattr(wiring_mod, "list_app_state", _boom)
+    monkeypatch.setattr(wiring_mod, "set_app_state_if", _boom)
+
+    catalog, session_models = _build_role_services(object())
+
+    assert isinstance(catalog, RoleCatalogService)
+    assert isinstance(session_models, SessionModelStore)
+
+
 async def test_model_connection_validator_requires_research_route_and_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     """角色模型覆盖校验：只接受 ``agent_research`` 路由候选且已启用的连接。"""
 

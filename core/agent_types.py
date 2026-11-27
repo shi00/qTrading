@@ -8473,6 +8473,24 @@ class RoleDefinition:
 def validate_role_definition(definition: RoleDefinition) -> None:
     """校验角色定义：结构版本、role_id 语法与预置 id、基类、状态、版本与能力模式。"""
 
+    if isinstance(definition.schema_version, bool) or not isinstance(definition.schema_version, int):
+        _fail("invalid_type", "$.role_definition.schema_version")
+    for field_name in (
+        "role_id",
+        "display_name",
+        "base",
+        "status",
+        "role_version",
+        "prompt_body",
+        "capability_mode",
+        "created_at",
+        "updated_at",
+        "updated_by",
+    ):
+        if not isinstance(getattr(definition, field_name), str):
+            _fail("invalid_type", f"$.role_definition.{field_name}")
+    if definition.model_connection_id is not None and not isinstance(definition.model_connection_id, str):
+        _fail("invalid_type", "$.role_definition.model_connection_id")
     if definition.schema_version != ROLE_DEFINITION_VERSION:
         _fail("unsupported_schema_version", "$.role_definition.schema_version")
     if not _ROLE_ID_PATTERN.fullmatch(definition.role_id) or definition.role_id in _PRESET_ROLE_IDS:

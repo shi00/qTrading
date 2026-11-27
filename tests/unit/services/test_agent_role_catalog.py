@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import replace
 
 import pytest
 
@@ -405,3 +406,92 @@ async def test_validator_none_keeps_existing_behavior(store: tuple[RoleCatalogSt
         "risk_reviewer", model_connection_id="model-1", expected_version="r1", updated_by="tester"
     )
     assert updated.model_connection_id == "model-1"
+
+
+# ---------------------------------------------------------------------------
+# store 级 CAS：条件写语义直接钉住（不经服务层的版本推断）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_store_create_returns_false_when_key_already_exists(
+    store: tuple[RoleCatalogStore, dict[str, str]],
+) -> None:
+    """``create`` 只在键不存在时插入；已存在返回 ``False`` 且不覆盖原值。"""
+
+    catalog, data = store
+    service = RoleCatalogService(catalog)
+    created = await service.create_new("risk_reviewer", "风险复核", "v1", updated_by="tester")
+    before = data["agent.role.def.risk_reviewer"]
+
+    duplicate = replace(created, prompt_body="v2")
+
+    assert await catalog.create(duplicate) is False
+    assert data["agent.role.def.risk_reviewer"] == before
+
+
+@pytest.mark.asyncio
+async def test_store_replace_requires_current_version(
+    store: tuple[RoleCatalogStore, dict[str, str]],
+) -> None:
+    """版本匹配时覆盖写成功；版本已推进后旧版本条件写被拒绝。"""
+
+    catalog, _ = store
+    created = await RoleCatalogService(catalog).create_new("risk_reviewer", "风险复核", "v1", updated_by="tester")
+    bumped = replace(created, prompt_body="v2", role_version="r2")
+
+    assert await catalog.replace(bumped, expected_version="r1") is True
+    reloaded = await catalog.load("risk_reviewer")
+    assert reloaded is not None
+    assert reloaded.prompt_body == "v2"
+    assert reloaded.role_version == "r2"
+
+    stale = replace(bumped, prompt_body="v3", role_version="r3")
+    assert await catalog.replace(stale, expected_version="r1") is False
+    current = await catalog.load("risk_reviewer")
+    assert current is not None
+    assert current.prompt_body == "v2"
+    assert current.role_version == "r2"
+
+
+@pytest.mark.asyncio
+async def test_store_replace_missing_key_returns_false(
+    store: tuple[RoleCatalogStore, dict[str, str]],
+) -> None:
+    """目标键不存在时 ``replace`` 返回 ``False`` 且不新建键。"""
+
+    catalog, data = store
+    service = RoleCatalogService(catalog)
+    created = await service.create_new("risk_reviewer", "风险复核", "v1", updated_by="tester")
+
+    assert await catalog.replace(replace(created, role_id="ghost_role"), expected_version="r1") is False
+    assert "agent.role.def.ghost_role" not in data
+
+
+@pytest.mark.asyncio
+async def test_store_mark_disabled_requires_current_version(
+    store: tuple[RoleCatalogStore, dict[str, str]],
+) -> None:
+    """版本不匹配的停用被拒绝；匹配时只改状态、不改变 ``role_version``。"""
+
+    catalog, _ = store
+    await RoleCatalogService(catalog).create_new("risk_reviewer", "风险复核", "v1", updated_by="tester")
+
+    assert await catalog.mark_disabled("risk_reviewer", expected_version="r2") is False
+    assert await catalog.mark_disabled("risk_reviewer", expected_version="r1") is True
+
+    reloaded = await catalog.load("risk_reviewer")
+    assert reloaded is not None
+    assert reloaded.status == "disabled"
+    assert reloaded.role_version == "r1"
+
+
+@pytest.mark.asyncio
+async def test_store_mark_disabled_missing_key_returns_false(
+    store: tuple[RoleCatalogStore, dict[str, str]],
+) -> None:
+    """目标键不存在时 ``mark_disabled`` 返回 ``False``，不伪造停用。"""
+
+    catalog, _ = store
+
+    assert await catalog.mark_disabled("risk_reviewer", expected_version="r1") is False

@@ -234,28 +234,28 @@ async def resolve_executor(scenario_id: str, *, preferred_connection_id: str | N
     # 首选连接收窄（会话 / 角色模型选择作用于执行链）：候选必须包含该连接且连接
     # 存在并启用，否则显式失败——按原候选继续执行会把「指定的连接未生效」伪装
     # 成成功（R21）。连接缺 ``enabled`` 键按启用处理（与 UI 连接可用性判定一致）。
+    # 连接元数据单次遍历：首选连接校验（启用）与 F01 分派授权（外发目标）共用，
+    # 避免对同一快照重复映射。连接缺 ``enabled`` 键按启用处理（与 UI 连接可用性
+    # 判定一致）；本地连接 / 非法 api_base → None，诚实表示「无外发目标」（R21）。
+    # F01 分派授权身份：候选携带规范化外发目标与场景用途（purpose 域即 scenario_id，
+    # §4.3「新闻专用情绪使用 news_annotation」）；Executor 按连接 adapter_kind 决定
+    # 是否要求 egress grant。授权范围版本取安全状态自身 scope_version（独立于
+    # security_revision，F01）。
+    enabled_by_connection: dict[str, bool] = {}
+    connection_targets: dict[str, str | None] = {}
+    for connection in mm_snapshot.connections:
+        if not isinstance(connection, Mapping) or connection.get("connection_id") is None:
+            continue
+        connection_id = str(connection["connection_id"])
+        enabled_by_connection[connection_id] = bool(connection.get("enabled", True))
+        connection_targets[connection_id] = normalize_egress_target(connection.get("api_base"))
+
     if preferred_connection_id is not None:
         if preferred_connection_id not in tuple(str(c) for c in route["candidates"]):
             raise RoutePolicyIncompleteError("preferred_candidate_unavailable")
-        enabled_by_connection = {
-            str(c["connection_id"]): bool(c.get("enabled", True))
-            for c in mm_snapshot.connections
-            if isinstance(c, Mapping) and c.get("connection_id") is not None
-        }
         if not enabled_by_connection.get(preferred_connection_id, False):
             raise RoutePolicyIncompleteError("preferred_candidate_unavailable")
         route = {**route, "candidates": [preferred_connection_id]}
-
-    # F01 分派授权身份：候选携带规范化外发目标（本地连接 / 非法 api_base → None，
-    # 诚实表示「无外发目标」，R21）与场景用途（purpose 域即 scenario_id，§4.3
-    # 「新闻专用情绪使用 news_annotation」）；Executor 按连接 adapter_kind 决定
-    # 是否要求 egress grant。授权范围版本取安全状态自身 scope_version（独立于
-    # security_revision，F01）。
-    connection_targets = {
-        str(c["connection_id"]): normalize_egress_target(c.get("api_base"))
-        for c in mm_snapshot.connections
-        if isinstance(c, Mapping) and c.get("connection_id") is not None
-    }
 
     # scenario_routes.candidates 为有序 connection_id 列表，转 Executor 契约形态。
     # F16 预算身份在此冻结（快照语义：普通保存只影响后续请求）：usage_policy

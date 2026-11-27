@@ -288,6 +288,16 @@ async def test_preferred_connection_empty_candidates_fails(monkeypatch):
     assert str(exc.value) == "preferred_candidate_unavailable"
 
 
+async def test_preferred_connection_missing_scenario_fails(monkeypatch):
+    """场景路由缺失（``route is None``）+ 显式首选 → 显式失败，不静默走旧链（R21）。"""
+    _patch_env(monkeypatch, _mm_snapshot(), None)
+
+    with pytest.raises(scenario_dispatch.RoutePolicyIncompleteError) as exc:
+        await scenario_dispatch.resolve_executor("stock_analysis", preferred_connection_id="conn-local")
+
+    assert str(exc.value) == "preferred_candidate_unavailable"
+
+
 async def test_preferred_connection_not_applied_when_system_unavailable(monkeypatch):
     """系统级不可用（executor 缺失 / 迁移未激活）→ 返回 None，首选连接不生效。"""
     scenario_dispatch.set_scheduling_services_provider(lambda: {"recorder": MagicMock()})

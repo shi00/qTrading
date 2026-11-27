@@ -46,7 +46,8 @@ _PRESET_LABEL_KEYS: dict[str, str] = {
 }
 
 #: VM 产出并在 snackbar 展示的错误/提示键（模块级字面量，供 i18n 死键门禁 AST 检出）。
-#: 运行时直接 ``I18n.get(key)``，未知键原样展示，不静默吞掉提示。
+#: 与 VM 实际产出键的集合一致性由 ``test_vm_message_keys_cover_every_vm_produced_key``
+#: 守护；运行时直接 ``I18n.get(key)``，未知键原样展示，不静默吞掉提示。
 _VM_MESSAGE_KEYS: tuple[str, ...] = (
     "agent_roles_unavailable",
     "agent_roles_preset_readonly",

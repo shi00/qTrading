@@ -206,17 +206,18 @@ def _read_saved_role_prompt(
     if role_key not in RESEARCH_ROLE_KEYS:
         if definition is None:
             raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "custom role definition missing", role_key)
+        identity = f"{role_key}@{definition.role_version}"
         if definition.status != "active":
-            raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "custom role definition not active", role_key)
+            raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "custom role definition not active", identity)
         if expected_version is not None and definition.role_version != expected_version:
             raise AgentServiceError(
-                AgentErrorCode.CONFIG_UNAVAILABLE, "custom role definition version mismatch", role_key
+                AgentErrorCode.CONFIG_UNAVAILABLE, "custom role definition version mismatch", identity
             )
         if definition.role_id != role_key:
             raise AgentServiceError(
                 AgentErrorCode.CONFIG_UNAVAILABLE,
                 f"custom role definition role_id mismatch: {role_key} vs {definition.role_id}",
-                role_key,
+                identity,
             )
         return RolePromptIdentity(text=definition.prompt_body, version=definition.role_version)
 
