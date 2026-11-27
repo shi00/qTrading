@@ -168,6 +168,22 @@ class TestListAppState:
         assert result == {"agent.mcp.role.main@1": "{}", "agent.mcp.role.sub@1": "{}"}
 
     @pytest.mark.asyncio
+    async def test_prefix_wildcards_are_escaped(self):
+        """D2-16：前缀中的 ``_`` / ``%`` 必须按字面量匹配，不得越过自身命名空间。"""
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(return_value=[])
+        engine = _make_connect_engine(mock_conn)
+
+        await list_app_state(engine, "agent.comparison.lane_note.100%")
+
+        stmt = mock_conn.execute.call_args[0][0]
+        sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "lane/_note." in sql
+        assert "100/%" in sql
+        assert "ESCAPE '/'" in sql
+        assert "lane_note." not in sql
+
+    @pytest.mark.asyncio
     async def test_query_failure_propagates_instead_of_empty(self, caplog):
         """R21：读取失败不得伪装成「没有任何配置」。"""
         mock_conn = MagicMock()
