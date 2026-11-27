@@ -1444,6 +1444,9 @@ class AgentDao(BaseDao):
                 ) from exc
 
             # 6. command（保存=committed，待投递=not_delivered，未消费，§9.8）。
+            #    受理输入版恒为 1（新 execution 的首个权威输入版）；回执与落库
+            #    共用同一变量，避免主回合身份另算（D7-03）。
+            input_revision = 1
             await conn.execute(
                 sa.insert(AgentCommand).values(
                     user_scope=request.user_scope,
@@ -1454,7 +1457,7 @@ class AgentDao(BaseDao):
                     session_id=request.session_id,
                     execution_id=execution_id,
                     expected_revision=request.expected_revision,
-                    input_revision=1,
+                    input_revision=input_revision,
                     input_digest=command_input_digest,
                     request_payload=json.loads(request.manifest_payload),
                     commit_state=CommitState.COMMITTED.value,
@@ -1567,6 +1570,7 @@ class AgentDao(BaseDao):
                 verified_at=occurred_wire,
                 next_action="await workflow dispatch; query read_command for delivery facts",
                 mode=request.mode,
+                input_revision=input_revision,
             )
             await conn.execute(
                 sa.update(AgentCommand)

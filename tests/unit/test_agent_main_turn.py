@@ -597,7 +597,7 @@ async def _binding(user_scope: str, execution_id: str) -> ParentBindIdentity:
     )
 
 
-def _receipt() -> SubmissionReceipt:
+def _receipt(*, input_revision: int = 1) -> SubmissionReceipt:
     command = CommandRef(
         user_scope="u1",
         source_module="ui",
@@ -615,6 +615,7 @@ def _receipt() -> SubmissionReceipt:
         commit_state=CommitState.COMMITTED,
         verified_at="2026-01-01T00:00:00.000000Z",
         next_action=None,
+        input_revision=input_revision,
     )
 
 
@@ -944,6 +945,64 @@ async def test_intake_plan_runs_production_main_turn_and_returns_reference() -> 
     assert len(request.identity.actual_input_digest) == 64
     assert result.main_turn is not None
     assert result.plan_reference == PlanReference(execution_id="execution-1", plan_revision=1)
+
+
+@pytest.mark.asyncio
+async def test_intake_main_turn_identity_uses_authoritative_input_revision_not_session_revision() -> None:
+    """新受理的权威输入版恒为 1：会话草稿版（expected_revision）不得混入回合身份。"""
+
+    facade = _IntakeFacade(_intake_receipt())
+    runner = _MainTurnRunnerStub(plan_reference=PlanReference(execution_id="execution-1", plan_revision=1))
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+    )
+
+    await intake.start_question("研究银行股", mode=Mode.PLAN, session_id="s1", expected_revision=7)
+
+    assert facade.requests[0].expected_revision == 7
+    assert runner.requests[0].identity.input_revision == 1
+
+
+@pytest.mark.asyncio
+async def test_intake_main_turn_identity_consumes_authoritative_revised_input_revision() -> None:
+    """同执行排队修订后的权威输入版（回执携带 N）必须原样进入回合身份。"""
+
+    facade = _IntakeFacade(_receipt(input_revision=2))
+    runner = _MainTurnRunnerStub(plan_reference=PlanReference(execution_id="execution-1", plan_revision=1))
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+    )
+
+    await intake.start_question("修订后的问题", mode=Mode.PLAN, session_id="s1", expected_revision=1)
+
+    assert runner.requests[0].identity.input_revision == 2
+
+
+@pytest.mark.asyncio
+async def test_intake_main_turn_identity_is_stable_across_replay() -> None:
+    """重放同一受理事实得出同一输入版与轮身份（不随会话稿版漂移）。"""
+
+    facade = _IntakeFacade(_intake_receipt())
+    runner = _MainTurnRunnerStub(plan_reference=PlanReference(execution_id="execution-1", plan_revision=1))
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+    )
+
+    await intake.start_question("继续分析", mode=Mode.PLAN, session_id="s1", expected_revision=3)
+    await intake.start_question("继续分析", mode=Mode.PLAN, session_id="s1", expected_revision=4)
+
+    identities = [request.identity for request in runner.requests]
+    assert [identity.input_revision for identity in identities] == [1, 1]
+    assert identities[0].round_id == identities[1].round_id
 
 
 @pytest.mark.asyncio
