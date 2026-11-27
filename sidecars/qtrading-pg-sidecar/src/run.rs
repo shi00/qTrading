@@ -17,7 +17,8 @@ use crate::protocol::{self, EventJson, ReadyJson};
 use crate::setup::{self, DataDirState};
 use crate::state::{self};
 use crate::{cli, logging};
-use postgresql_embedded::{PostgreSQL, SettingsBuilder};
+use postgresql_embedded::{PostgreSQL, Settings, SettingsBuilder};
+use std::mem::ManuallyDrop;
 use std::net::TcpListener;
 use std::time::Duration;
 
@@ -28,6 +29,47 @@ pub(crate) fn pick_free_port(listen: &str) -> std::io::Result<u16> {
     listener.local_addr().map(|a| a.port())
 }
 
+/// 受管 postgres 句柄：统一禁用 `postgresql_embedded::PostgreSQL` 的隐式 Drop。
+///
+/// 上游 `impl Drop for PostgreSQL`（crate 0.22）只检查 `data_dir/postmaster.pid` 是否存在，
+/// 存在即无条件执行 `pg_ctl stop -m fast -w`，不做任何集群身份校验。于是当 pid 文件残留/
+/// 被换成复用 PID（无关进程），或 `pgbin::graded_stop` 因身份失配按设计拒绝发信号时，
+/// 作用域结束/显式 drop 仍会绕过 `ClusterIdentity` 向该 PID 发终止信号。
+///
+/// 因此所有实例句柄都以本类型持有：内部 `ManuallyDrop` 保证永不触发上游 Drop，停止的
+/// 唯一路径是带身份校验的 [`pgbin::graded_stop`]。有意不提供 `into_inner`——把裸
+/// `PostgreSQL` 交回调用方即重新打开该缺口。
+///
+/// 代价：`Settings` 随实例有意泄漏（每进程至多数个，随进程退出回收），以换取「绝无隐式
+/// 信号」这一安全不变量。取消（future 被 drop）时实例可能残留，由下次 `run` 的活实例
+/// 守卫或 `stop` 命令带身份清理，绝不隐式终止。
+pub(crate) struct ManagedPg {
+    inner: ManuallyDrop<PostgreSQL>,
+}
+
+impl ManagedPg {
+    pub(crate) fn new(pg: PostgreSQL) -> Self {
+        Self {
+            inner: ManuallyDrop::new(pg),
+        }
+    }
+
+    /// 启动实例（转发上游 `start`）。
+    pub(crate) async fn start(&mut self) -> postgresql_embedded::Result<()> {
+        self.inner.start().await
+    }
+
+    /// 仅解压/安装（转发上游 `setup`；`ensure_binaries` 使用）。
+    pub(crate) async fn setup(&mut self) -> postgresql_embedded::Result<()> {
+        self.inner.setup().await
+    }
+
+    /// 读取上游 settings（`setup` 后 `installation_dir` 可能被重写）。
+    pub(crate) fn settings(&self) -> &Settings {
+        self.inner.settings()
+    }
+}
+
 /// crate 实例构造（run 与维护命令共用）：fsync 兜底（AI-21）+ trust_installation_dir
 /// （install dir 已由 ensure_binaries 原子就绪；禁止 crate 再拼 `<dir>/<version>` 子目录）。
 pub(crate) fn build_postgresql(
@@ -36,7 +78,7 @@ pub(crate) fn build_postgresql(
     username: &str,
     password: &str,
     port: u16,
-) -> PostgreSQL {
+) -> ManagedPg {
     let mut configuration = std::collections::HashMap::new();
     configuration.insert("fsync".to_string(), "on".to_string());
     let settings = SettingsBuilder::new()
@@ -52,7 +94,7 @@ pub(crate) fn build_postgresql(
         .trust_installation_dir(true)
         .temporary(false)
         .build();
-    PostgreSQL::new(settings)
+    ManagedPg::new(PostgreSQL::new(settings))
 }
 
 /// sidecar 运行期 UTC 时间戳（marker/state 用）。Howard Hinnant civil-from-days，与 build.rs 同款。
@@ -193,9 +235,10 @@ pub async fn run(args: cli::RunArgs) -> Result<(), u8> {
     }
 
     // 8. 启动（端口冲突重试 ≤3；crash recovery → exit 40；其余 exit 12）
-    let (_postgresql, port) = start_with_retry(&layout, &args, &password).await?;
-    // 实例句柄仅用于 start()；drop 会触发 crate 内部 stop（见 postgresql.rs `impl Drop`），
-    // 必须在分级停止之后才离开作用域，故保留绑定。
+    let (_instance, port) = start_with_retry(&layout, &args, &password).await?;
+    // 句柄为 ManagedPg：离开作用域**不会**触发任何隐式 pg_ctl stop；本函数的停止唯一
+    // 路径是第 14 步（及失败路径的 stop_after_failed_start）的 graded_stop。句柄绑定
+    // 仅表示持有已启动实例的所有权。
     // 同时捕获可验证集群身份：后续所有信号调用前都会复核 PID 归属。
     let (pg_pid, pg_identity) = match pgbin::read_postmaster_pid(&layout.data_dir) {
         Some(info) => (Some(info.pid), capture_pg_identity(&layout, &info)),
@@ -316,7 +359,13 @@ pub async fn run(args: cli::RunArgs) -> Result<(), u8> {
         }
         SuperviseEnd::Shutdown(reason) => {
             if !stop_outcome.stopped {
-                eprintln!("[sidecar] postgres 未能停止（kill fallback 失败）");
+                let why = stop_outcome
+                    .failure
+                    .as_ref()
+                    .map_or_else(String::new, |f| f.to_string());
+                eprintln!(
+                    "[sidecar] postgres 未能停止（{why}）；不报告停止成功，请人工确认残留 postgres"
+                );
                 emit_event(EventJson::exit("stop_failed", exit_codes::STOP_FAILED));
                 return Err(exit_codes::STOP_FAILED);
             }
@@ -422,7 +471,7 @@ async fn start_with_retry(
     layout: &Layout,
     args: &cli::RunArgs,
     password: &str,
-) -> Result<(PostgreSQL, u16), u8> {
+) -> Result<(ManagedPg, u16), u8> {
     let mut attempt = 0u8;
     loop {
         attempt += 1;
@@ -444,6 +493,16 @@ async fn start_with_retry(
                 return Ok((postgresql, port));
             }
             Err(e) => {
+                // ManagedPg 不执行隐式停止：启动失败（如等待超时后 postgres 仍在 init）
+                // 必须在这里按身份核验清理，且只有证明已停止才允许在同一 PGDATA 上重试。
+                let stopped = stop_starting_instance(layout).await;
+                if !stopped {
+                    eprintln!(
+                        "[sidecar] postgres start failed 且残留实例停止不可证明；\
+                         禁止在同一 PGDATA 上重试或继续（避免叠加实例）：{}",
+                        layout.data_dir.display()
+                    );
+                }
                 if pgbin::start_log_indicates_recovery_failure(&layout.data_dir) {
                     eprintln!(
                         "[sidecar] crash recovery 失败（pg_control/WAL 损坏嫌疑，§13.7.36）：\
@@ -452,7 +511,8 @@ async fn start_with_retry(
                     record_start_failure(layout, "crash recovery failed");
                     return Err(exit_codes::DATA_DIR_ABNORMAL);
                 }
-                if pgbin::start_log_indicates_port_conflict(&layout.data_dir)
+                if stopped
+                    && pgbin::start_log_indicates_port_conflict(&layout.data_dir)
                     && args.port == 0
                     && attempt < MAX_PORT_ATTEMPTS
                 {
@@ -649,20 +709,54 @@ async fn ensure_database(
     Ok(())
 }
 
-/// 启动后阶段失败（健康检查/建库/stdout 断裂）的清理：尽力停止，避免留下无主 postgres。
+/// 启动后阶段失败（健康检查/建库/stdout 断裂）的清理：仅经带身份校验的
+/// [`pgbin::graded_stop`] 停止，停止结果不可证明时明确上报（绝不隐式发信号）。
 /// 同时记录 start failure 到 state.json，供 doctor/用户排查（OBS-1）。
 async fn stop_after_failed_start(layout: &Layout, err: &str) {
+    if !stop_starting_instance(layout).await {
+        tracing::error!("postgres stop after failed start not proven: {err}");
+        eprintln!(
+            "[sidecar] {err} 后 postgres 停止不可证明（身份校验未通过或进程仍存活）；\
+             数据目录可能仍被占用，请运行 `qtrading-pg-sidecar stop --data-dir {}` 或 doctor 排查",
+            layout.data_dir.display()
+        );
+    }
+    record_start_failure(layout, err);
+}
+
+/// 启动过程可能遗留 postgres 时（启动失败/启动后阶段失败），仅经身份核验停止。
+///
+/// 返回 `true` 表示已证明停止（含「无存活 postgres 可停」）。`ManagedPg` 禁用了上游
+/// 的隐式 `pg_ctl stop`，因此所有这类路径都必须显式经过本函数。
+/// 身份无法证明但 PID 仍存活时 fail closed（不发送任何信号）并返回 `false`。
+async fn stop_starting_instance(layout: &Layout) -> bool {
     let identity =
         match process_identity::capture_cluster_identity(&layout.data_dir, &layout.install_dir) {
             Ok(identity) => Some(identity),
             Err(e) => {
-                // 无 pid 文件或进程已退出 → 无需发送信号；其余原因由 graded_stop fail closed 兜底。
-                tracing::warn!("postgres identity capture failed before stop: {e}");
-                None
+                // 无 pid 文件 / 进程已退出 → 无需发送信号。
+                let no_live_pid = pgbin::read_postmaster_pid(&layout.data_dir)
+                    .map(|info| !pgbin::process_alive(info.pid))
+                    .unwrap_or(true);
+                if no_live_pid {
+                    tracing::warn!("no live postgres to stop ({e})");
+                    return true;
+                }
+                // PID 存活却无法证明归属 → 绝不发送信号。
+                tracing::error!("postgres identity unavailable while stopping instance: {e}");
+                return false;
             }
         };
-    let _ = pgbin::graded_stop(&layout.install_dir, &layout.data_dir, identity.as_ref()).await;
-    record_start_failure(layout, err);
+    let outcome =
+        pgbin::graded_stop(&layout.install_dir, &layout.data_dir, identity.as_ref()).await;
+    if !outcome.stopped {
+        tracing::error!(
+            "graded_stop could not prove postgres stopped: failure={:?}, mode={:?}",
+            outcome.failure,
+            outcome.mode
+        );
+    }
+    outcome.stopped
 }
 
 /// 捕获启动后 postmaster 的可验证身份；失败时仅告警，后续 graded_stop 会 fail closed。
@@ -725,5 +819,59 @@ mod tests {
         assert_eq!(sql_identifier("qtrading"), "\"qtrading\"");
         assert_eq!(sql_identifier("a\"b"), "\"a\"\"b\"");
         assert_eq!(sql_identifier("a;drop"), "\"a;drop\"");
+    }
+
+    /// D1-02 回归：`ManagedPg` 离开作用域不得触发上游隐式 `pg_ctl stop`。
+    ///
+    /// 上游 `impl Drop for PostgreSQL` 只要 `postmaster.pid` 存在就会调用 `pg_ctl stop`
+    /// （无身份校验）。这里用受控假 pg_ctl（把每次调用写入 marker）证明：即使 pid 文件
+    /// 存在，ManagedPg 的 drop 也完全不碰 pg_ctl，停止只能走 graded_stop。
+    #[cfg(unix)]
+    #[test]
+    fn managed_pg_drop_does_not_invoke_pg_ctl() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("qts-managedpg-{}", std::process::id()));
+        let data_dir = dir.join("data");
+        let install_dir = dir.join("install");
+        let bin = install_dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let marker = dir.join("pg_ctl-invoked");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{marker}'\n",
+            marker = marker.display()
+        );
+        let pg_ctl = bin.join("pg_ctl");
+        std::fs::write(&pg_ctl, script).unwrap();
+        std::fs::set_permissions(&pg_ctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        std::fs::write(
+            data_dir.join("postmaster.pid"),
+            format!(
+                "{}\n{}\n{now}\n55432\n/tmp\n127.0.0.1\n",
+                std::process::id(),
+                data_dir.display()
+            ),
+        )
+        .unwrap();
+
+        let layout = Layout::from_data_dir(&data_dir, Some(&install_dir), None, None);
+        drop(build_postgresql(
+            &layout,
+            "127.0.0.1",
+            "postgres",
+            "dummy-password",
+            55432,
+        ));
+        assert!(
+            !marker.exists(),
+            "ManagedPg drop 不得调用 pg_ctl（隐式停止）；实际被调用"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
