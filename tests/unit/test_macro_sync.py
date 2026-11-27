@@ -2171,3 +2171,29 @@ class TestIndexWeightPerIndexResumeWindow:
         assert result.status == SyncStatus.SUCCESS.value
         assert result.errors == []
         assert ctx.cache.sync_dao.update_sync_status.call_args.kwargs["status"] == "success"
+
+
+class TestMacroRunEntryHostCancelGuard:
+    """D2-08：macro 入口须先读宿主注入的轮次 cancel_event，不得复位后继续发请求。"""
+
+    @pytest.mark.asyncio
+    async def test_entry_host_cancel_returns_cancelled_without_sub_syncs(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.macro_dao = MagicMock()
+        ctx.api = MagicMock()
+        ctx.cancel_event = asyncio.Event()
+        ctx.cancel_event.set()
+        strategy = MacroSyncStrategy(ctx)
+        strategy._sync_macro_monthly = AsyncMock()
+        strategy._sync_shibor_daily = AsyncMock()
+        strategy._sync_index_weights = AsyncMock()
+
+        result = await strategy.run()
+
+        assert result.status == SyncStatus.CANCELLED.value
+        strategy._sync_macro_monthly.assert_not_awaited()
+        strategy._sync_shibor_daily.assert_not_awaited()
+        strategy._sync_index_weights.assert_not_awaited()
+        # 宿主注入的轮次事件不得被子策略清除
+        assert ctx.cancel_event.is_set() is True

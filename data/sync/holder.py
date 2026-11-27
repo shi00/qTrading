@@ -112,6 +112,12 @@ class HolderSyncStrategy(ISyncStrategy):
     )
     async def _run_impl(self, **kwargs: typing.Any) -> SyncResult:
         result = SyncResult()
+        # D2-08：宿主注入的轮次 cancel_event 已置位（上一阶段/本轮已取消）时直接以
+        # cancelled 终态返回，不得先复位 _cancelled/_shutdown_event 再继续发请求。
+        if self._host_cancelled():
+            result.status = SyncStatus.CANCELLED.value
+            logger.info("[HolderSync] Run | ⏹️ 轮次取消信号已置位，跳过本轮同步。")
+            return result
         self._cancelled = False
         self._shutdown_event.clear()
         errors = 0
