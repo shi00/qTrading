@@ -209,6 +209,33 @@ def _source_refs(section: Mapping[str, Any]) -> tuple[SourceVersionRef, ...]:
     )
 
 
+def _capture_frozen_role_prompt_snapshots(
+    role_prompt_refs: Sequence[tuple[str, str]], *, user_scope: str
+) -> tuple[dict[str, str], ...]:
+    """受理时冻结内置研究角色的正文快照（默认正文 + 已保存追加）。
+
+    仅内置角色（``main`` / ``sub``）可在此读取同源正文；自定义角色正文由角色目录
+    冻结定义承载（不经设置页）。若本次读取的正文版本与调用方手选版本不一致，
+    说明受理前设置已被改过，显式失败而不冻结「名不副实」的快照（R21）。
+    """
+
+    from utils.config.llm import RESEARCH_ROLE_KEYS, read_research_role_prompt
+
+    snapshots: list[dict[str, str]] = []
+    for role_id, version in role_prompt_refs:
+        if role_id not in RESEARCH_ROLE_KEYS:
+            continue
+        text, current_version = read_research_role_prompt(role_id)
+        if current_version != version:
+            raise AgentServiceError(
+                AgentErrorCode.CONFIG_UNAVAILABLE,
+                f"role prompt version changed before acceptance: {current_version} != {version}",
+                user_scope,
+            )
+        snapshots.append({"role_id": role_id, "version": version, "text": text})
+    return tuple(snapshots)
+
+
 def derive_frozen_selection_policy(manifest_payload: str) -> FrozenSelectionPolicy | None:
     """冻结 manifest → 角色能力策略；不可判定/空手选集合返回 ``None``（fail-closed）。
 
@@ -750,11 +777,18 @@ class MainTurnIntake:
                 )
             )
         preferred_connection_id = await self._resolve_preferred_connection(target_session, model_connection_id)
+        # 同步配置读取经 IO 线程池（R16）：与版本绑定同一来源冻结正文快照。
+        from utils.thread_pool import TaskType, ThreadPoolManager
+
+        role_prompt_snapshots = await ThreadPoolManager().run_async(
+            TaskType.IO, _capture_frozen_role_prompt_snapshots, role_prompt_refs, user_scope=self._user_scope
+        )
         manifest = self._base_manifest(
             text=question,
             mode=mode,
             purpose=Purpose.CONCEPT,
             role_prompt_refs=role_prompt_refs,
+            role_prompt_snapshots=role_prompt_snapshots,
             skill_refs=skill_refs,
             mcp_selection=mcp_selection,
         )
@@ -1211,6 +1245,7 @@ class MainTurnIntake:
         mode: Mode,
         purpose: Purpose,
         role_prompt_refs: Sequence[tuple[str, str]] = (),
+        role_prompt_snapshots: Sequence[Mapping[str, str]] = (),
         skill_refs: Sequence[tuple[str, str]] = (),
         mcp_selection: Sequence[MCPServiceIdentity] = (),
     ) -> CanonicalJson:
@@ -1221,7 +1256,8 @@ class MainTurnIntake:
         计划由主回合产出并经严格校验保存，派发侧只读取该已保存计划版。
         ``mcp_selection`` 为空表示未选择（不解释为全部允许，§6 默认拒绝）；非空时
         按服务身份排序冻结并写入规范摘要 ``mcp_scope_digest``，供能力策略派生
-        ``mcp_scope:<digest>``。
+        ``mcp_scope:<digest>``。``role_prompt_snapshots`` 为受理时捕获的内置角色
+        正文快照（版本 + 正文），叶执行据此还原受理时 Prompt，不读改后的设置值。
         """
 
         selected = {identity.stable_key(): identity for identity in mcp_selection}
@@ -1250,6 +1286,11 @@ class MainTurnIntake:
             "mcp_scope_digest": digest,
             "output_requirements": {},
         }
+        if role_prompt_snapshots:
+            manifest["role_prompt_snapshots"] = [
+                {"role_id": item["role_id"], "version": item["version"], "text": item["text"]}
+                for item in role_prompt_snapshots
+            ]
         if mode is Mode.EXECUTE:
             manifest[PLAN_SOURCE_KEY] = PLAN_SOURCE_AUTO
         return json_doc(manifest)

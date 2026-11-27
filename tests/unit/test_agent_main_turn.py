@@ -60,6 +60,7 @@ from services.agent_service.loop import (
 from services.agent_service.main_turn import (
     FrozenSelectionPolicy,
     MainTurnIntake,
+    _capture_frozen_role_prompt_snapshots,
     MainTurnRequest,
     MainTurnRunner,
     PlanReference,
@@ -145,6 +146,55 @@ def test_base_manifest_empty_mcp_selection_keeps_digest_none() -> None:
 
     assert manifest["mcp_selection"] == []
     assert manifest["mcp_scope_digest"] is None
+
+
+def test_base_manifest_freezes_builtin_role_prompt_snapshot() -> None:
+    intake = object.__new__(MainTurnIntake)
+
+    manifest = json.loads(
+        intake._base_manifest(
+            text="研究问题",
+            mode=Mode.DISCUSS,
+            purpose=Purpose.CONCEPT,
+            role_prompt_refs=(("main", "v-1"),),
+            role_prompt_snapshots=({"role_id": "main", "version": "v-1", "text": "冻结正文"},),
+        )
+    )
+
+    assert manifest["role_prompt_refs"] == [["main", "v-1"]]
+    assert manifest["role_prompt_snapshots"] == [{"role_id": "main", "version": "v-1", "text": "冻结正文"}]
+
+
+def test_capture_role_prompt_snapshot_only_builtin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("utils.config.llm.read_research_role_prompt", lambda role_key: (f"正文-{role_key}", "v-1"))
+
+    snapshots = _capture_frozen_role_prompt_snapshots((("main", "v-1"), ("researcher", "v-1")), user_scope="u1")
+
+    assert snapshots == ({"role_id": "main", "version": "v-1", "text": "正文-main"},)
+
+
+def test_capture_role_prompt_snapshot_version_mismatch_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("utils.config.llm.read_research_role_prompt", lambda role_key: ("正文", "v-2"))
+
+    with pytest.raises(AgentServiceError) as excinfo:
+        _capture_frozen_role_prompt_snapshots((("main", "v-1"),), user_scope="u1")
+
+    assert excinfo.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_intake_freezes_builtin_role_prompt_snapshot_into_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("utils.config.llm.read_research_role_prompt", lambda role_key: ("受理时正文", "v-1"))
+    facade = _IntakeFacade(_intake_receipt())
+    intake = MainTurnIntake(facade, manifest_reader=_ManifestDao(None), user_scope="u1")
+
+    await intake.start_question("执行研究", mode=Mode.EXECUTE, role_prompt_refs=(("main", "v-1"),))
+
+    manifest = json.loads(facade.accepts[0].manifest_payload)
+    assert manifest["role_prompt_refs"] == [["main", "v-1"]]
+    assert manifest["role_prompt_snapshots"] == [{"role_id": "main", "version": "v-1", "text": "受理时正文"}]
 
 
 def test_policy_empty_selection_is_fail_closed() -> None:
