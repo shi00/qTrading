@@ -627,6 +627,7 @@ class TestServiceRetryDispatch:
         assert receipt.dispatch_reason is None
         assert dao.recorded[0].targets == ("step-1",)
         assert len(launcher.calls) == 1
+        assert launcher.calls[0]["round_id"] == receipt.new_round_id
         call = launcher.calls[0]
         assert call["user_scope"] == _USER_SCOPE
         assert call["execution_id"] == _EXECUTION_ID
@@ -696,9 +697,10 @@ class TestServiceRetryDispatch:
         launcher = _RetryLauncherStub(error=asyncio.CancelledError())
         service = _service(dao, launcher)
 
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             await service.retry_execution(_retry_request())
 
+        assert isinstance(exc_info.value, asyncio.CancelledError)
         # R2：取消不吞；落库事实保留，供重放时按同一命令键重投。
         assert len(dao.recorded) == 1
 
