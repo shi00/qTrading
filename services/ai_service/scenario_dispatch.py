@@ -319,6 +319,9 @@ async def resolve_analysis_track() -> ScenarioDispatch | None:
       调用方应用旧云端 / 旧链准入 guard）；
     - 未命中且准入为 ``draining_stop`` / ``refused`` → raise :class:`LegacyDispatchBlockedError`
       （AI 功能明确不可用必须传出，不得降级伪装成功，R21）；
+    - 路由策略不完整 / 首选候选不可用（D13-001 / 会话模型选择）→ raise
+      ``LegacyDispatchBlockedError("route_incomplete")``，原因保留在 message（与
+      「读取失败」区分：配置不完整 ≠ 授权状态未知）；
     - 分派 / 准入读取过程异常（F05 fail-closed）→ raise ``LegacyDispatchBlockedError("read_failed")``
       ——读取失败等于授权状态未知，降级旧链即把「未知」伪装成「允许」（R21）。
 
@@ -334,6 +337,10 @@ async def resolve_analysis_track() -> ScenarioDispatch | None:
         admission = await evaluate_legacy_admission()
     except asyncio.CancelledError:
         raise
+    except RoutePolicyIncompleteError as e:
+        # D13-001：路由策略不完整 / 首选候选不可用是「配置明确不可用」，
+        # 不是读取失败——保留原因码，供调用方区分提示（R21）。
+        raise LegacyDispatchBlockedError("route_incomplete", message=f"route policy incomplete: {e}") from e
     except Exception as e:
         # F05 fail-closed：读取失败不得降级旧链授权语义（原 fail-open 行为已移除）。
         log_classified(

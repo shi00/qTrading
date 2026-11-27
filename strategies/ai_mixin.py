@@ -499,7 +499,12 @@ class AIStrategyMixin:
             # SC-02: AI 未运行，向 warnings 声明风险检查缺失。
             self._note_ai_risk_check_skipped(context)
             if on_progress:
-                on_progress(0, 0, Message("ai_legacy_dispatch_stopped"))
+                progress_key = (
+                    "ai_dispatch_route_incomplete"
+                    if e.admission == "route_incomplete"
+                    else "ai_legacy_dispatch_stopped"
+                )
+                on_progress(0, 0, Message(progress_key))
             return candidates_df.assign(
                 ai_score=None,
                 ai_status="legacy_stopped",

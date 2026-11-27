@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from core.model_management_types import ExecutionSnapshot
+from core.model_management_types import ExecutionSnapshot, LegacyDispatchBlockedError
 from services.ai_service import scenario_dispatch
 
 pytestmark = pytest.mark.unit
@@ -553,6 +553,22 @@ def test_build_route_snapshot_accepts_frozen_route_for_subroute():
     with pytest.raises(TypeError, match="read-only"):
         sub["candidates"][0]["budget_policy_snapshot"]["monthly_cny_limit"] = "0.00"
     assert base["candidates"][0]["budget_policy_snapshot"]["monthly_cny_limit"] == "50.00"
+
+
+async def test_resolve_analysis_track_preserves_route_incomplete_reason(monkeypatch):
+    """路由策略不完整 → route_incomplete 阻断并保留原始原因（不吞成 read_failed）。"""
+
+    async def _raise_route_incomplete(_scenario_id: str) -> None:
+        raise scenario_dispatch.RoutePolicyIncompleteError("preferred_candidate_unavailable")
+
+    monkeypatch.setattr(scenario_dispatch, "resolve_executor", _raise_route_incomplete)
+
+    with pytest.raises(LegacyDispatchBlockedError) as excinfo:
+        await scenario_dispatch.resolve_analysis_track()
+
+    assert excinfo.value.admission == "route_incomplete"
+    assert "preferred_candidate_unavailable" in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, scenario_dispatch.RoutePolicyIncompleteError)
 
 
 async def test_provider_injection_roundtrip():

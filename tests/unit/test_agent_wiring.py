@@ -1049,6 +1049,9 @@ async def test_unresolvable_runtime_url_degrades_zero_dispatch() -> None:
     assert wiring.failure == "runtime_url_unresolved"
     assert isinstance(wiring.service, AgentService)
     assert wiring.runtime is None
+    # 早退仍保留配置侧服务：运行时就绪失败不应让角色目录/会话模型不可用。
+    assert wiring.role_catalog is not None
+    assert wiring.session_models is not None
 
 
 async def test_startup_exception_degrades_zero_dispatch(

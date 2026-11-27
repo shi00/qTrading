@@ -284,22 +284,18 @@ async def run_governed_turn(
     request: MainTurnRequest,
     context: TurnContext,
     *,
-    preferred_connection_id: str | None = None,
     resolve_route: RouteResolver = _resolve_route,
     build_model: ModelFactory | None = None,
     invoke_agent: AgentInvoker = _invoke_agent,
 ) -> TurnDecision:
     """一次主回合的受治理模型调用（讨论/计划零研究动作，fail-closed）。
 
-    ``preferred_connection_id`` 显式优先；缺省取请求上冻结的会话模型选择
-    （``None`` 即继承场景路由默认顺序），确保受理入口解析出的选择真正进入
-    路由解析、不被静默忽略。
+    生效模型选择唯一取受理入口冻结在 ``request.preferred_connection_id`` 上的值
+    （``None`` 即继承场景路由默认顺序），避免双来源覆盖导致选择被静默忽略。
     """
 
     identity = request.identity
-    effective_connection_id = (
-        preferred_connection_id if preferred_connection_id is not None else request.preferred_connection_id
-    )
+    effective_connection_id = request.preferred_connection_id
     prompt = _turn_prompt(request)
     if context.observations:
         # 讨论/计划只有可达的读资料观测；如实带入提示，不当作新的行动许可。
