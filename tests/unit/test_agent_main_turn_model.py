@@ -640,20 +640,21 @@ async def test_request_preferred_connection_is_threaded_to_route_resolution() ->
 
 
 @pytest.mark.asyncio
-async def test_explicit_preferred_connection_overrides_request_value() -> None:
+async def test_request_preferred_connection_is_single_source_of_truth() -> None:
+    """生效模型选择唯一取请求冻结值（无第二个关键字来源可覆盖）。"""
+
     route = _PreferredRouteRecorder(_ROUTE)
     invoker = _Invoker(_TurnEnvelope(answer=_AnswerDraft(answer="答")))
     request = MainTurnRequest(
         identity=_IDENTITY,
         mode=Mode.DISCUSS,
         prompt_text="问题",
-        preferred_connection_id="conn-local",
+        preferred_connection_id="conn-override",
     )
 
     await run_governed_turn(
         request,
         _CONTEXT,
-        preferred_connection_id="conn-override",
         resolve_route=cast(Any, route),
         build_model=_ModelFactory(),
         invoke_agent=invoker,

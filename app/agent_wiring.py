@@ -1097,7 +1097,13 @@ async def wire_agent_runtime(
         runtime_url = _agent_runtime_sync_url(engine)
     except Exception as e:
         logger.warning("[AgentWiring] agent runtime url unresolved: %s (zero dispatch)", type(e).__name__)
-        return AgentWiring(service=service, bridge=bridge, failure="runtime_url_unresolved")
+        return AgentWiring(
+            service=service,
+            bridge=bridge,
+            failure="runtime_url_unresolved",
+            role_catalog=role_catalog,
+            session_models=session_models,
+        )
 
     lifecycle = mcp_lifecycle
     if lifecycle is None:
@@ -1126,6 +1132,8 @@ async def wire_agent_runtime(
             bridge=bridge,
             failure=f"leaf_runtime_install_failed:{type(e).__name__}",
             mcp_lifecycle=lifecycle,
+            role_catalog=role_catalog,
+            session_models=session_models,
         )
 
     allow_launch = agent_runtime_launch_allowed() if launch_allowed is None else launch_allowed
@@ -1140,6 +1148,8 @@ async def wire_agent_runtime(
             bridge=bridge,
             failure="application_version_unavailable",
             mcp_lifecycle=lifecycle,
+            role_catalog=role_catalog,
+            session_models=session_models,
         )
     migration_url, share_migration_credentials = _migration_credentials(get_agent_migration_db_url())
     if migration_url is None and not share_migration_credentials:
@@ -1148,6 +1158,8 @@ async def wire_agent_runtime(
             bridge=bridge,
             failure="migration_credentials_missing",
             mcp_lifecycle=lifecycle,
+            role_catalog=role_catalog,
+            session_models=session_models,
         )
     settings = AgentRuntimeSettings(
         system_database_url=runtime_url,
@@ -1175,6 +1187,8 @@ async def wire_agent_runtime(
             bridge=bridge,
             failure=f"startup_failed:{type(e).__name__}",
             mcp_lifecycle=lifecycle,
+            role_catalog=role_catalog,
+            session_models=session_models,
         )
 
     if outcome.handle is None:
@@ -1194,6 +1208,8 @@ async def wire_agent_runtime(
             mcp_lifecycle=lifecycle,
             unclosed_handle=outcome.unclosed_handle,
             instance_guard=outcome.instance_guard,
+            role_catalog=role_catalog,
+            session_models=session_models,
         )
 
     handle = outcome.handle
