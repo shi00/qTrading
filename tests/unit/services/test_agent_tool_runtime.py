@@ -497,9 +497,10 @@ class TestToolApprovalWait:
         dao = _ApprovalDao()
         runtime = _runtime(dispatcher, dao, approvals=_CancellingCoordinator())  # type: ignore[arg-type]
 
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as excinfo:
             await runtime.execute(tool_name="search", arguments={"query": "x"}, tool_call_id="call-1")
 
+        assert excinfo.type is asyncio.CancelledError
         assert dispatcher.requests == []
         assert dao.results == []
 
