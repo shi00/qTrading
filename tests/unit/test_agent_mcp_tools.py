@@ -1,8 +1,8 @@
 """E-02 显式工具调用门单元测试（静态可验证部分）。
 
 覆盖 DoD：缺参/空工具集 0 调用、撤销先胜 0 效果、派发后超时/断线记 unknown
-且不自动重试、取消继续传播并释放在途归属、后效未知的归属保留到会话退出确认、
-结果留存超限明示失败。
+且不自动重试、取消继续传播且出站等待期取消按后效未知保留归属到会话退出确认、
+结果留存超限明示失败并释放连接级归属。
 完整 jsonschema 校验经端口注入（真实适配器仍 needs-spike/待依赖批准）。
 """
 
@@ -157,6 +157,21 @@ class _Session:
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class _HangingSession(_Session):
+    """``call_tool`` 进入等待后不返回：模拟已出站但取消/断连尚未确认的调用。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.never = asyncio.Event()
+
+    async def call_tool(self, name: str, arguments: dict[str, Any], *, deadline_s: int) -> dict[str, Any]:
+        self.calls.append((name, arguments, deadline_s))
+        self.entered.set()
+        await self.never.wait()
+        return {}
 
 
 class _Factory:
@@ -570,22 +585,61 @@ class TestDispatchEffects:
         assert [call[0] for call in session.calls] == ["read_file"]
 
     @pytest.mark.asyncio
-    async def test_cancellation_propagates_and_releases_in_flight(self) -> None:
-        session = _Session(raises=asyncio.CancelledError())
+    async def test_cancellation_during_call_retains_unconfirmed_ownership_until_close(self) -> None:
+        """出站等待期取消：效果无法确证，不得立即释放在途归属（I17/I53）；取消继续传播（R2）。
+
+        归属保留但不得让 ``disconnect`` 永久阻塞：会话真实关闭确认后统一回收。
+        """
+
+        session = _HangingSession()
         dispatcher, session, _grants, manager = await _dispatcher(session=session)
+
+        task = asyncio.create_task(dispatcher.call(_request()))
+        await session.entered.wait()
+        task.cancel()
         with pytest.raises(asyncio.CancelledError) as excinfo:
-            await dispatcher.call(_request())
+            await task
         assert isinstance(excinfo.value, asyncio.CancelledError)
         assert [call[0] for call in session.calls] == ["read_file"]
+        # 已出站、后效未知：在途归属保留，不被取消抹除。
+        assert manager.in_flight_operations(_IDENTITY) == ("op-1",)
+
+        await manager.disconnect(_IDENTITY)
+
+        assert session.closed is True
         assert manager.in_flight_operations(_IDENTITY) == ()
 
     @pytest.mark.asyncio
+    async def test_unconfirmed_ownership_survives_unconfirmed_close(self) -> None:
+        """关闭未确认（aclose 失败）：归属仍保留，不伪装该 operation 已结束（I17/I53）。"""
+
+        class _UnclosableSession(_HangingSession):
+            async def aclose(self) -> None:
+                raise RuntimeError("close failed")
+
+        session = _UnclosableSession()
+        dispatcher, session, _grants, manager = await _dispatcher(session=session)
+        task = asyncio.create_task(dispatcher.call(_request()))
+        await session.entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        with pytest.raises(RuntimeError):
+            await manager.disconnect(_IDENTITY)
+
+        assert manager.in_flight_operations(_IDENTITY) == ("op-1",)
+
+    @pytest.mark.asyncio
     async def test_retention_over_budget_fails_explicitly_after_effect(self) -> None:
-        dispatcher, session, _grants, _manager = await _dispatcher(budget=_budget(retention_bytes=5))
+        """传输已完成、仅结果不可留存：连接级在途归属释放（不按后效未知保留）。"""
+
+        dispatcher, session, _grants, manager = await _dispatcher(budget=_budget(retention_bytes=5))
         with pytest.raises(MCPBudgetExceeded) as exc:
             await dispatcher.call(_request())
         assert exc.value.family == "retention_bytes"
         assert [call[0] for call in session.calls] == ["read_file"]
+        assert manager.in_flight_operations(_IDENTITY) == ()
 
     @pytest.mark.asyncio
     async def test_budget_guard_is_shared_per_connection(self) -> None:
