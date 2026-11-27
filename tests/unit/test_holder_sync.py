@@ -3001,3 +3001,52 @@ class TestRunImplPartialStatus:
         # 取消产生的 -1 仍登记，但终态不得被 partial 覆盖
         assert result.errors == ["stk_holdernumber period=20240331"]
         strategy._sync_pledge_stat.assert_not_awaited()
+
+
+class TestRunEntryHostCancelGuard:
+    """D2-08：子策略入口须先读宿主注入的轮次 cancel_event，不得复位后继续发请求。"""
+
+    @pytest.mark.asyncio
+    async def test_entry_host_cancel_returns_cancelled_without_api_calls(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cancel_event = asyncio.Event()
+        ctx.cancel_event.set()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._sync_stk_holdernumber = AsyncMock(return_value=10)
+        strategy._sync_top10_holders = AsyncMock(return_value=20)
+        strategy._sync_pledge_stat = AsyncMock(return_value=(5, datetime.date(2024, 6, 14)))
+        strategy._sync_share_float = AsyncMock(return_value=(0, None))
+        strategy._sync_pledge_detail = AsyncMock(return_value=(0, None))
+        strategy._sync_stk_holdertrade = AsyncMock(return_value=(0, None))
+
+        result = await strategy.run()
+
+        assert result.status == SyncStatus.CANCELLED.value
+        # 已取消轮次不得再发起任何子表请求
+        strategy._sync_stk_holdernumber.assert_not_awaited()
+        strategy._sync_top10_holders.assert_not_awaited()
+        # 宿主注入的轮次事件不得被子策略清除
+        assert ctx.cancel_event.is_set() is True
+
+    @pytest.mark.asyncio
+    async def test_entry_host_event_clear_resets_stale_flag(self):
+        """宿主事件未置位时仍复位上一轮残留的 _cancelled（正常重入）。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
+        ctx.cancel_event = asyncio.Event()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._cancelled = True
+        strategy._get_recent_quarter_ends = MagicMock(return_value=["20240331"])
+        strategy._sync_stk_holdernumber = AsyncMock(return_value=10)
+        strategy._sync_top10_holders = AsyncMock(return_value=20)
+        strategy._sync_pledge_stat = AsyncMock(return_value=(0, None))
+        strategy._sync_share_float = AsyncMock(return_value=(0, None))
+        strategy._sync_pledge_detail = AsyncMock(return_value=(0, None))
+        strategy._sync_stk_holdertrade = AsyncMock(return_value=(0, None))
+
+        result = await strategy.run()
+
+        assert result.status == SyncStatus.SUCCESS.value
+        strategy._sync_stk_holdernumber.assert_awaited()

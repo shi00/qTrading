@@ -2312,6 +2312,97 @@ class TestDataProcessorInitializeSystem:
 
         assert result is None
 
+    @pytest.mark.asyncio
+    async def test_initialize_injects_per_run_cancel_event_and_restores(self):
+        """D2-08：初始化每轮向 context 注入共享轮次取消事件，结束后还原宿主原值。"""
+        dp = _make_dp()
+        previous_event = MagicMock()
+        dp.context.cancel_event = previous_event
+        captured: dict = {}
+
+        async def _concepts():
+            captured["event"] = dp.context.cancel_event
+            return 3
+
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(side_effect=_concepts)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
+        dp.strategies["macro"].run = AsyncMock(return_value=SyncResult())
+        dp.strategies["holder"].run = AsyncMock(return_value=SyncResult())
+        dp.check_data_health = AsyncMock(return_value={"tier": 3})
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            result = await dp.initialize_system(quick=True)
+
+        assert result == {"tier": 3}
+        assert isinstance(captured["event"], asyncio.Event)
+        assert captured["event"].is_set() is False
+        # 轮次结束后还原宿主原事件，避免污染后续操作
+        assert dp.context.cancel_event is previous_event
+
+    @pytest.mark.asyncio
+    async def test_cancel_requested_after_concepts_skips_dimensions(self):
+        """D2-08：concepts 阶段收到取消（正常返回 0）后不得继续启动基础维度/后续阶段。"""
+        dp = _make_dp()
+        injected: dict = {}
+
+        async def _concepts_then_cancel():
+            injected["event"] = dp.context.cancel_event
+            await dp.request_cancel()
+            return 0
+
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(side_effect=_concepts_then_cancel)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            result = await dp.initialize_system()
+
+        assert result is None
+        # request_cancel 同步置位宿主注入的轮次事件
+        assert injected["event"].is_set() is True
+        dp.strategies["sw_industry"].run.assert_not_awaited()
+        dp.strategies["name_change"].run.assert_not_awaited()
+        dp.trade_calendar.ensure_calendar_range.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_macro_cancelled_aborts_before_holder(self):
+        """D2-08：macro 返回 cancelled 时不得继续启动 holder，也不上报完成。"""
+        dp = _make_dp()
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
+        dp.strategies["macro"].run = AsyncMock(return_value=SyncResult(status="cancelled"))
+        dp.strategies["holder"].run = AsyncMock(return_value=SyncResult())
+        dp.check_data_health = AsyncMock(return_value={"tier": 3})
+        progress: list = []
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            result = await dp.initialize_system(
+                quick=True,
+                progress_callback=lambda c, t, m: progress.append((c, t, m)),
+            )
+
+        assert result is None
+        dp.strategies["holder"].run.assert_not_awaited()
+        dp.check_data_health.assert_not_awaited()
+        assert not any(m.key == "init_step_complete" for _, _, m in progress)
+
     def test_base_dimension_strategies_bind_cache_registered_daos(self):
         """UIR-F14-002：DAO 取自 CacheManager 注册实例（引擎重建时 sync_engines 可同步），
         不得自建（R13/R5 同一路径）。"""

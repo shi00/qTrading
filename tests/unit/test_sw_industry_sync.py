@@ -690,3 +690,23 @@ class TestSyncMembersCheckpoint:
 
         with pytest.raises(EngineDisposedError):
             await strategy._save_members_checkpoint(dfs)
+
+
+class TestSwIndustryRunEntryHostCancelGuard:
+    """D2-08：sw_industry 入口须先读宿主注入的轮次 cancel_event，不得复位后继续发请求。"""
+
+    @pytest.mark.asyncio
+    async def test_entry_host_cancel_returns_cancelled_without_api_calls(self):
+        ctx = _make_ctx()
+        ctx.cancel_event = asyncio.Event()
+        ctx.cancel_event.set()
+        strategy = SwIndustrySyncStrategy(ctx)
+        strategy._sync_classify = AsyncMock(return_value=pd.DataFrame())
+        strategy._sync_members = AsyncMock()
+
+        result = await strategy.run()
+
+        assert result.status == SyncStatus.CANCELLED.value
+        strategy._sync_classify.assert_not_awaited()
+        strategy._sync_members.assert_not_awaited()
+        assert ctx.cancel_event.is_set() is True
