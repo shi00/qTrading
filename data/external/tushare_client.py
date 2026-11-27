@@ -734,9 +734,14 @@ class TushareClient:
         return self._capability_probe.get_capability_generation()
 
     def clear_capability_cache(self) -> None:
-        """委托 CapabilityProbeService.clear_capability_cache（保留显式签名）。"""
+        """清空内存 capability 缓存并递增代次（失效在途探测）。（保留显式签名）"""
         self._ensure_subservices()
         return self._capability_probe.clear_capability_cache()
+
+    async def invalidate_capability_cache_for_tier_change(self) -> None:
+        """档位切换：失效内存/代次并落库空载荷，覆盖旧档位持久缓存（D2-10）。"""
+        self._ensure_subservices()
+        await self._capability_probe.invalidate_capability_cache_for_tier_change()
 
     def get_capability_cache(self) -> dict[str, bool | None]:
         """委托 CapabilityProbeService.get_capability_cache（保留显式签名）。"""
@@ -778,10 +783,21 @@ class TushareClient:
         self._ensure_subservices()
         return self._capability_probe.get_effective_synced_tables(all_tables)
 
-    async def persist_capabilities_to_app_state(self) -> None:
-        """委托 CapabilityProbeService.persist_capabilities_to_app_state（保留显式签名）。"""
+    async def persist_capabilities_to_app_state(
+        self,
+        *,
+        expected_generation: int | None = None,
+        expected_tier: str | None = None,
+    ) -> None:
+        """委托 CapabilityProbeService.persist_capabilities_to_app_state（保留显式签名）。
+
+        expected_generation/expected_tier 透传供 probe 校验上下文，过时上下文拒绝落库（D2-10）。
+        """
         self._ensure_subservices()
-        await self._capability_probe.persist_capabilities_to_app_state()
+        await self._capability_probe.persist_capabilities_to_app_state(
+            expected_generation=expected_generation,
+            expected_tier=expected_tier,
+        )
 
     async def load_capabilities_from_app_state(self) -> None:
         """委托 CapabilityProbeService.load_capabilities_from_app_state（保留显式签名）。"""

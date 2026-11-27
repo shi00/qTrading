@@ -1124,15 +1124,14 @@ class TestDataSourceViewModelSaveToken:
             # 与 verify_token 对齐契约，避免 tier 预筛基于空 cache 降级。
             mock_tc.return_value.probe_api_capabilities.assert_awaited_once()
 
-    async def test_overridden_by_env_still_applies_session(self, bound_vm):
-        """D8-2: OVERRIDDEN_BY_ENV 时会话内仍生效 (set_token_async), outcome 透传给 View。"""
+    async def test_overridden_by_env_does_not_activate_input(self, bound_vm):
+        """D2-10/D8-2: OVERRIDDEN_BY_ENV 时输入未持久化, 不得替换共享 client。"""
         with (
             patch("ui.viewmodels.data_source_view_model.TushareClient") as mock_tc,
             patch("ui.viewmodels.data_source_view_model.ThreadPoolManager") as mock_tpm,
             patch("ui.viewmodels.data_source_view_model.ConfigHandler") as mock_ch,
         ):
             mock_ch.save_token.return_value = SaveOutcome.OVERRIDDEN_BY_ENV
-            mock_tc.return_value.set_token_async = AsyncMock(return_value=False)
 
             async def _fake_run_async(task_type, func, *args, **kwargs):
                 return func(*args, **kwargs)
@@ -1140,7 +1139,28 @@ class TestDataSourceViewModelSaveToken:
             mock_tpm.return_value.run_async = _fake_run_async
             outcome = await bound_vm.save_tushare_token("abc123")
             assert outcome is SaveOutcome.OVERRIDDEN_BY_ENV
-            mock_tc.return_value.set_token_async.assert_awaited_once_with("abc123")
+            mock_tc.assert_not_called()
+            mock_tc.return_value.set_token_async.assert_not_called()
+            mock_tc.return_value.probe_api_capabilities.assert_not_called()
+
+    async def test_failed_does_not_activate_input(self, bound_vm):
+        """D2-10: SaveOutcome.FAILED 时不得更新运行时 TushareClient。"""
+        with (
+            patch("ui.viewmodels.data_source_view_model.TushareClient") as mock_tc,
+            patch("ui.viewmodels.data_source_view_model.ThreadPoolManager") as mock_tpm,
+            patch("ui.viewmodels.data_source_view_model.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.save_token.return_value = SaveOutcome.FAILED
+
+            async def _fake_run_async(task_type, func, *args, **kwargs):
+                return func(*args, **kwargs)
+
+            mock_tpm.return_value.run_async = _fake_run_async
+            outcome = await bound_vm.save_tushare_token("abc123")
+            assert outcome is SaveOutcome.FAILED
+            mock_tc.assert_not_called()
+            mock_tc.return_value.set_token_async.assert_not_called()
+            mock_tc.return_value.probe_api_capabilities.assert_not_called()
 
     async def test_no_secure_store_aborts_session_update(self, bound_vm):
         """D8-3: FAILED_NO_SECURE_STORE 时中止会话内更新 (不调 set_token_async)。"""

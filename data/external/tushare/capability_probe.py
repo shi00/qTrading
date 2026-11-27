@@ -199,28 +199,34 @@ class CapabilityProbeService:
         """读取代次原始值（调用方须已持有 ``_capability_cache_lock``）。"""
         return getattr(self.client, "_capability_generation", 0)
 
-    def _is_stale_generation(self, generation: int) -> bool:
-        """判断入口代次是否已被替换（调用方须已持有 ``_capability_cache_lock``）。"""
-        return generation != self._current_capability_generation()
+    def _is_stale_probe_context(self, generation: int, tier: str) -> bool:
+        """判断 probe 入口上下文是否已失效（调用方须已持有 ``_capability_cache_lock``）。
+
+        代次（token 替换 / 显式失效时递增）与档位共同构成探测归属：任一变化都说明
+        入口快照属于旧上下文，结论不得写入当前缓存或持久化载荷（D2-10）。
+        """
+        return generation != self._current_capability_generation() or tier != self.client._get_tushare_point_tier()
 
     def _rollback_capability_cache_to(
         self,
         generation: int,
+        tier: str,
         cache_snapshot: dict[str, bool | None],
         runtime_marks_snapshot: dict[str, datetime.datetime],
     ) -> bool:
-        """回滚到 probe 入口快照，仅在代次未变时执行。
+        """回滚到 probe 入口快照，仅在代次与档位均未变时执行。
 
         Args:
-            generation: probe 入口快照的 token 代次。
+            generation: probe 入口快照的代次（token + 显式失效）。
+            tier: probe 入口快照的积分档位。
             cache_snapshot: 入口 ``_capability_cache`` 快照。
             runtime_marks_snapshot: 入口 ``_capability_runtime_marks`` 快照。
         Returns:
-            True 表示已回滚；False 表示代次已变（token 已被替换，入口快照属于旧代次，
-            不得写回已清空的新代次缓存）。
+            True 表示已回滚；False 表示上下文已变（token / 档位已被替换，入口快照
+            属于旧上下文，不得写回已失效的新缓存）。
         """
         with self._capability_cache_lock:
-            if self._is_stale_generation(generation):
+            if self._is_stale_probe_context(generation, tier):
                 return False
             self._capability_cache.clear()
             self._capability_cache.update(cache_snapshot)
@@ -228,25 +234,42 @@ class CapabilityProbeService:
             self._capability_runtime_marks.update(runtime_marks_snapshot)
             return True
 
-    def _mark_probe_completed(self, generation: int) -> bool:
-        """记录 probe 完成时间，仅在代次未变时执行。
+    def _mark_probe_completed(self, generation: int, tier: str) -> bool:
+        """记录 probe 完成时间，仅在代次与档位均未变时执行。
 
         Returns:
-            True 表示已记录；False 表示代次已变（过时代次不得写 ``_last_probe_time``，
-            否则新代次会以旧代次的探测时间冒充「已探测」）。
+            True 表示已记录；False 表示上下文已变（过时上下文不得写
+            ``_last_probe_time``，否则新上下文会以旧上下文的探测时间冒充「已探测」）。
         """
         with self._capability_cache_lock:
-            if self._is_stale_generation(generation):
+            if self._is_stale_probe_context(generation, tier):
                 return False
             self.client._last_probe_time = get_now()
             return True
 
     def clear_capability_cache(self) -> None:
-        """Clear all cached capabilities. Call after token change."""
+        """清空全部 capability 缓存并失效在途探测。
+
+        与 token 替换同语义：清空缓存、运行时标记与 ``_last_probe_time``，并在同一
+        锁内递增代次。这样显式重探 / 切档前的清理会丢弃在途旧上下文探测结果，
+        避免其回填覆盖新上下文（D2-10）。调用方负责按需持久化新载荷。
+        """
         with self._capability_cache_lock:
+            cache_size = len(self._capability_cache)
             self._capability_cache.clear()
             self._capability_runtime_marks.clear()
-            logger.info("[API] Capability cache cleared")
+            self.client._last_probe_time = None
+            self.client._capability_generation += 1
+            logger.info("[API] Capability cache cleared (%d entries), generation bumped", cache_size)
+
+    async def invalidate_capability_cache_for_tier_change(self) -> None:
+        """档位切换：原子失效内存缓存/代次，并落库空载荷覆盖旧档位持久缓存。
+
+        载荷携带当前 ``point_tier``，重启加载时档位不匹配即跳过，避免旧档位负缓存
+        跨重启复辟；落库属 best-effort，失败不阻断档位切换（能力状态已在内存中置为未知）。
+        """
+        self.clear_capability_cache()
+        await self.client._persist_capability_safely()
 
     def get_capability_cache(self) -> dict[str, bool | None]:
         """Get a copy of the capability cache.
@@ -348,15 +371,25 @@ class CapabilityProbeService:
         operation_name="TushareClient.persist_capabilities_to_app_state",
         threshold_ms=PerfThreshold.DB_SINGLE_QUERY,
     )
-    async def persist_capabilities_to_app_state(self) -> None:
+    async def persist_capabilities_to_app_state(
+        self,
+        *,
+        expected_generation: int | None = None,
+        expected_tier: str | None = None,
+    ) -> None:
         """
         Persist capability cache to AppState for cross-session durability.
 
         Writes a JSON payload containing:
         - token_hash: SHA256 hash of current token (first 16 chars)
+        - point_tier: 当前积分档位（与 token_hash 共同构成缓存归属）
         - capabilities: dict of api_name -> bool
+        - last_probe_time: ISO 8601
 
-        Called after probe_api_capabilities or when capabilities change.
+        Args:
+            expected_generation: probe 调用方入口快照的代次；写入前若代次或档位已变，
+                放弃落库，避免在途旧上下文探测覆盖新档位/新 token 的持久缓存（D2-10）。
+            expected_tier: probe 调用方入口快照的档位。
         Safe to call when engine is not ready (no-op).
         """
         import hashlib
@@ -370,8 +403,20 @@ class CapabilityProbeService:
             logger.debug("[TushareClient] Engine not ready, skipping capability persist")
             return
 
-        token_hash = hashlib.sha256(self.token.encode()).hexdigest()[:16] if self.token else None
         with self._capability_cache_lock:
+            if (
+                expected_generation is not None
+                and expected_tier is not None
+                and self._is_stale_probe_context(expected_generation, expected_tier)
+            ):
+                logger.info(
+                    "[TushareClient] Skip stale capability persist (entry generation=%s, current=%s)",
+                    expected_generation,
+                    self._current_capability_generation(),
+                )
+                return
+            token = self.client.token
+            point_tier = self.client._get_tushare_point_tier()
             # 排除运行时负缓存：临时信号不落库，避免"升格"为跨重启存活的权威负缓存
             # （review09-24/05 MINOR-02）。
             capabilities = {
@@ -379,16 +424,17 @@ class CapabilityProbeService:
                 for api, value in self._capability_cache.items()
                 if not (value is False and api in self._capability_runtime_marks)
             }
+            last_probe_iso = self.client._last_probe_time.isoformat() if self.client._last_probe_time else None
 
-        # Phase 2A.1 §3.2.10：追加 last_probe_time ISO 8601 字符串，用于启动时自动 probe 判断
-        last_probe_iso = self._last_probe_time.isoformat() if self._last_probe_time else None
+        token_hash = hashlib.sha256(token.encode()).hexdigest()[:16] if token else None
         payload = {
             "token_hash": token_hash,
+            "point_tier": point_tier,
             "capabilities": capabilities,
             "last_probe_time": last_probe_iso,
         }
         await set_app_state(engine, "tushare_capabilities", json.dumps(payload))
-        logger.info("[TushareClient] Persisted %s capabilities to AppState", len(capabilities))
+        logger.info("[TushareClient] Persisted %s capabilities to AppState (tier=%s)", len(capabilities), point_tier)
 
     @log_async_operation(
         operation_name="TushareClient.load_capabilities_from_app_state",
@@ -418,8 +464,11 @@ class CapabilityProbeService:
         try:
             payload = json.loads(stored)
             token_hash = hashlib.sha256(self.token.encode()).hexdigest()[:16] if self.token else None
+            current_tier = self.client._get_tushare_point_tier()
 
-            if payload.get("token_hash") == token_hash:
+            # (token_hash, point_tier) 共同构成持久缓存归属：任一不匹配（含旧版无
+            # point_tier 的载荷）均视为不同上下文，跳过加载，避免旧档位负缓存复辟。
+            if payload.get("token_hash") == token_hash and payload.get("point_tier") == current_tier:
                 with self._capability_cache_lock:
                     self._capability_cache.update(payload.get("capabilities", {}))
                 # Phase 2A.1 §3.2.10：同步读取 last_probe_time（ISO 8601）
@@ -434,7 +483,7 @@ class CapabilityProbeService:
                     self.client._last_probe_time = None
                 logger.info("[TushareClient] Loaded %s capabilities from AppState", len(self._capability_cache))
             else:
-                logger.debug("[TushareClient] Token hash mismatch, skipping capability load")
+                logger.debug("[TushareClient] Token hash or point tier mismatch, skipping capability load")
         except Exception as e:
             logger.warning("[TushareClient] Failed to load capabilities: %s", DataSanitizer.sanitize_error(e))
 
@@ -490,10 +539,12 @@ class CapabilityProbeService:
         # （代次 0→1→2 而字符串相同），把已清空的旧代次权限写回新代次缓存。
         # 快照同时覆盖运行时标记字典：否则回滚只还原 cache、残留的运行时时间戳会把
         # 权威负缓存误判为可 TTL 过期（review09-24/05 MINOR-02）。
+        # D2-10：档位与代次共同构成探测归属；切档会递增代次，外部改档也由档位比对识别。
         with self._capability_cache_lock:
             cache_snapshot = dict(self._capability_cache)
             runtime_marks_snapshot = dict(self._capability_runtime_marks)
             entry_generation = self._current_capability_generation()
+            entry_tier = self.client._get_tushare_point_tier()
 
         try:
             recent_date = get_now().strftime("%Y%m%d")
@@ -540,8 +591,8 @@ class CapabilityProbeService:
                 ("forecast_eps", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
             ]
 
-            # 档位预筛：仅 probe 当前档位覆盖内的 API
-            current_tier = self.client._get_tushare_point_tier()
+            # 档位预筛：仅 probe 入口档位覆盖内的 API
+            current_tier = entry_tier
             filtered_configs = [
                 (api, params) for api, params in probe_configs if self.client.is_api_covered_by_tier(api, current_tier)
             ]
@@ -557,8 +608,10 @@ class CapabilityProbeService:
 
             total = len(filtered_configs)
             if total == 0:
-                if self._mark_probe_completed(entry_generation):
-                    await self.client.persist_capabilities_to_app_state()
+                if self._mark_probe_completed(entry_generation, entry_tier):
+                    await self.client.persist_capabilities_to_app_state(
+                        expected_generation=entry_generation, expected_tier=entry_tier
+                    )
                 return {}
 
             # 并行探测过滤后的候选（semaphore=4 + gather 传播 CancelledError）
@@ -605,15 +658,17 @@ class CapabilityProbeService:
                     total,
                 )
                 # 保留旧缓存，仅更新 last_probe_time 标记本次 probe 尝试过
-                # D08-001：过时代次不得写 last_probe_time，也不得以新代次 token_hash 落库
-                if not self._mark_probe_completed(entry_generation):
+                # D08-001/D2-10：过时上下文不得写 last_probe_time，也不得落库
+                if not self._mark_probe_completed(entry_generation, entry_tier):
                     logger.info(
-                        "[TushareClient] Token generation changed during probe (entry=%d), "
+                        "[TushareClient] Probe context changed during probe (entry=%d), "
                         "skip last_probe_time update on degraded run",
                         entry_generation,
                     )
                     return self.client.get_capability_cache()
-                await self.client.persist_capabilities_to_app_state()
+                await self.client.persist_capabilities_to_app_state(
+                    expected_generation=entry_generation, expected_tier=entry_tier
+                )
                 return self.client.get_capability_cache()
 
             # Token 无效检测（False 比例 >90% 记 error 日志）
@@ -625,14 +680,14 @@ class CapabilityProbeService:
                     total,
                 )
 
-            # D08-001：写入前按代次校验，set_token 后旧 probe 持有的结果丢弃，
-            # 避免旧代次结果覆盖新代次 cache。代次在 set_token 内与清空缓存原子递增，
-            # A→B→A（token 字符串相同）也能识别。
+            # D08-001/D2-10：写入前按 (代次, 档位) 校验，token 或档位变化后旧 probe
+            # 持有的结果丢弃，避免旧上下文结果覆盖新上下文 cache。代次在 set_token /
+            # 显式失效内与清空缓存原子递增，A→B→A（token 字符串相同）也能识别。
             with self._capability_cache_lock:
-                stale_generation = self._is_stale_generation(entry_generation)
-            if stale_generation:
+                stale_context = self._is_stale_probe_context(entry_generation, entry_tier)
+            if stale_context:
                 logger.info(
-                    "[TushareClient] Token generation changed during probe (entry=%d, current=%d), "
+                    "[TushareClient] Probe context changed during probe (entry=%d, current=%d), "
                     "discarding probe results to avoid cache pollution",
                     entry_generation,
                     self.get_capability_generation(),
@@ -648,22 +703,25 @@ class CapabilityProbeService:
                     self.client.mark_api_unavailable(api_name, generation=entry_generation)
                 # None 不写入 _capability_cache（保持原值或不存在）
 
-            if not self._mark_probe_completed(entry_generation):
+            if not self._mark_probe_completed(entry_generation, entry_tier):
                 logger.info(
-                    "[TushareClient] Token generation changed during probe commit (entry=%d), "
-                    "skip last_probe_time update",
+                    "[TushareClient] Probe context changed during probe commit (entry=%d), skip last_probe_time update",
                     entry_generation,
                 )
                 return self.client.get_capability_cache()
-            await self.client.persist_capabilities_to_app_state()
+            await self.client.persist_capabilities_to_app_state(
+                expected_generation=entry_generation, expected_tier=entry_tier
+            )
             return results
         except asyncio.CancelledError:
             # 取消时回滚 _capability_cache 到入口快照（R2 红线：raise 传播）
             # D08-001：回滚按代次判定，token 已被替换时入口快照属于旧代次，不得写回
             logger.info("[TushareClient] Probe cancelled, rolling back _capability_cache to entry snapshot")
-            if not self._rollback_capability_cache_to(entry_generation, cache_snapshot, runtime_marks_snapshot):
+            if not self._rollback_capability_cache_to(
+                entry_generation, entry_tier, cache_snapshot, runtime_marks_snapshot
+            ):
                 logger.info(
-                    "[TushareClient] Token generation changed during probe, skip rollback to avoid cache pollution"
+                    "[TushareClient] Probe context changed during probe, skip rollback to avoid cache pollution"
                 )
             raise
         except Exception as exc:
@@ -673,9 +731,11 @@ class CapabilityProbeService:
                 "[TushareClient] Probe failed, rolling back _capability_cache to entry snapshot: %s",
                 DataSanitizer.sanitize_error(exc),
             )
-            if not self._rollback_capability_cache_to(entry_generation, cache_snapshot, runtime_marks_snapshot):
+            if not self._rollback_capability_cache_to(
+                entry_generation, entry_tier, cache_snapshot, runtime_marks_snapshot
+            ):
                 logger.info(
-                    "[TushareClient] Token generation changed during probe, skip rollback to avoid cache pollution"
+                    "[TushareClient] Probe context changed during probe, skip rollback to avoid cache pollution"
                 )
             return self.client.get_capability_cache()
         finally:

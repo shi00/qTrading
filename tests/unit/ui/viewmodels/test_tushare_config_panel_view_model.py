@@ -251,16 +251,21 @@ class TestUpdateTier:
         mock_config_handler.get_tushare_point_tier.return_value = "points_5000"
         mock_client = MagicMock()
         mock_client.reload_rate_limiters = MagicMock(return_value=None)
-        mock_client.clear_capability_cache = MagicMock()
+        mock_client.invalidate_capability_cache_for_tier_change = AsyncMock()
+        mock_strategy_manager = MagicMock()
 
-        with patch("data.external.tushare_client.TushareClient", return_value=mock_client):
+        with (
+            patch("data.external.tushare_client.TushareClient", return_value=mock_client),
+            patch("strategies.all_strategies.StrategyManager", return_value=mock_strategy_manager),
+        ):
             vm = _make_vm(mock_config_handler)
             result = await vm.update_tier("points_2000")
 
         assert result is True
         mock_config_handler.set_tushare_point_tier.assert_called_once_with("points_2000")
         mock_client.reload_rate_limiters.assert_called_once()
-        mock_client.clear_capability_cache.assert_called_once()
+        mock_client.invalidate_capability_cache_for_tier_change.assert_awaited_once()
+        mock_strategy_manager.invalidate_dependency_cache.assert_called_once()
         assert vm.state.tier == "points_2000"
         assert vm.state.status_type == "success"
         assert vm.state.status_message is not None
@@ -341,6 +346,7 @@ class TestVerifyToken:
         mock_pro = _make_mock_pro_api()
         mock_client = MagicMock()
         mock_client.set_token_async = AsyncMock(return_value=False)  # needs_probe = False
+        mock_client.probe_api_capabilities = AsyncMock(return_value={"daily": True})
         with (
             patch("tushare.set_token"),
             patch("tushare.pro_api", return_value=mock_pro),
@@ -369,10 +375,12 @@ class TestVerifyToken:
         assert vm.state.is_verifying is False
 
     @pytest.mark.asyncio
-    async def test_verify_token_success_no_probe(self, mock_config_handler, mock_thread_pool):
+    async def test_verify_token_success_forces_probe_when_token_unchanged(self, mock_config_handler, mock_thread_pool):
+        """D2-10：token 字符串未变（set_token_async=False）也必须强制重探。"""
         mock_pro = _make_mock_pro_api()
         mock_client = MagicMock()
         mock_client.set_token_async = AsyncMock(return_value=False)  # needs_probe = False
+        mock_client.probe_api_capabilities = AsyncMock(return_value={"daily": True})
 
         with (
             patch("tushare.set_token") as mock_ts_set_token,
@@ -392,6 +400,9 @@ class TestVerifyToken:
         # _loop 未捕获时会抛 RuntimeError），不得调用客户端同步 set_token。
         mock_client.set_token_async.assert_awaited_once_with("valid_token")
         mock_client.set_token.assert_not_called()
+        # 回归：即便 token 未变也必须失效旧缓存并强制探测（充值积分后重探场景）。
+        mock_client.clear_capability_cache.assert_called_once()
+        mock_client.probe_api_capabilities.assert_awaited_once()
         assert vm.state.status_type == "success"
         assert vm.state.status_message is not None
         assert vm.state.status_message.key == "tushare_verify_success"
@@ -407,6 +418,7 @@ class TestVerifyToken:
         mock_pro = _make_mock_pro_api()
         mock_client = MagicMock()
         mock_client.set_token_async = AsyncMock(return_value=False)
+        mock_client.probe_api_capabilities = AsyncMock(return_value={"daily": True})
 
         # 用 mock 模块替换 tushare，捕获所有属性访问
         mock_tushare = MagicMock()
@@ -434,6 +446,7 @@ class TestVerifyToken:
         mock_pro = _make_mock_pro_api()
         mock_client = MagicMock()
         mock_client.set_token_async = AsyncMock(return_value=False)
+        mock_client.probe_api_capabilities = AsyncMock(return_value={"daily": True})
         on_verify_success = MagicMock()
 
         with (
@@ -537,7 +550,8 @@ class TestVerifyToken:
             result = await vm.verify_token()
 
         assert result is True
-        assert vm.state.status_type == "success"
+        # D2-10：探测失败只能展示「未知」（warning），不得以 success 冒充成功。
+        assert vm.state.status_type == "warning"
         assert vm.state.status_message is not None
         assert vm.state.status_message.key == "tushare_verify_unknown_status"
 
@@ -565,6 +579,7 @@ class TestVerifyToken:
         mock_pro = _make_mock_pro_api()
         mock_client = MagicMock()
         mock_client.set_token_async = AsyncMock(return_value=False)
+        mock_client.probe_api_capabilities = AsyncMock(return_value={"daily": True})
         on_loading_change = MagicMock()
 
         with (
@@ -590,6 +605,7 @@ class TestVerifyToken:
         mock_pro = _make_mock_pro_api()
         mock_client = MagicMock()
         mock_client.set_token_async = AsyncMock(return_value=False)
+        mock_client.probe_api_capabilities = AsyncMock(return_value={"daily": True})
         on_loading_change = MagicMock()
 
         with (
@@ -701,6 +717,7 @@ class TestE2EFakeVerifyBoundary:
         mock_pro = _make_mock_pro_api()
         mock_client = MagicMock()
         mock_client.set_token_async = AsyncMock(return_value=False)
+        mock_client.probe_api_capabilities = AsyncMock(return_value={"daily": True})
 
         with (
             patch("tushare.pro_api", return_value=mock_pro),
@@ -745,6 +762,7 @@ class TestVerifyTokenSaveOutcome:
         mock_pro = _make_mock_pro_api()
         mock_client = MagicMock()
         mock_client.set_token_async = AsyncMock(return_value=False)
+        mock_client.probe_api_capabilities = AsyncMock(return_value={"daily": True})
         on_verify_success = MagicMock()
 
         with (
@@ -787,6 +805,7 @@ class TestVerifyTokenSaveOutcome:
         mock_pro = _make_mock_pro_api()
         mock_client = MagicMock()
         mock_client.set_token_async = AsyncMock(return_value=False)
+        mock_client.probe_api_capabilities = AsyncMock(return_value={"daily": True})
         on_verify_success = MagicMock()
 
         with (
@@ -844,6 +863,7 @@ class TestVerifyTokenOnboardingIntegration:
         mock_pro = _make_mock_pro_api()
         mock_client = MagicMock()
         mock_client.set_token_async = AsyncMock(return_value=False)
+        mock_client.probe_api_capabilities = AsyncMock(return_value={"daily": True})
 
         with (
             patch("tushare.set_token"),
@@ -865,6 +885,7 @@ class TestVerifyTokenOnboardingIntegration:
         mock_pro = _make_mock_pro_api()
         mock_client = MagicMock()
         mock_client.set_token_async = AsyncMock(return_value=False)
+        mock_client.probe_api_capabilities = AsyncMock(return_value={"daily": True})
 
         with (
             patch("tushare.set_token"),

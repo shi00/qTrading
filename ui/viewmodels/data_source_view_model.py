@@ -734,11 +734,13 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
         Phase 3.1: 从 View 下沉 (原 View 用 ThreadPoolManager.run_async 包 sync VM 方法).
 
         D8-2/D8-3 语义透传 (与 TushareConfigPanelViewModel.verify_token 对齐):
-        - OVERRIDDEN_BY_ENV: TS_TOKEN 环境变量存在, 持久化不生效 (重启后回退),
-          会话内仍经 set_token_async 生效; View 须以 warning 提示而非「保存成功」。
+        - OVERRIDDEN_BY_ENV: TS_TOKEN 环境变量存在, 持久化不生效 (重启后回退)。
+          运行时保持既有环境变量凭据，不得用未持久化的输入替换共享 client；
+          View 须以 warning 提示而非「保存成功」。
         - FAILED_NO_SECURE_STORE: 本机无 keyring/加密环境, token 未持久化,
           中止会话内更新 (与 verify_token 一致: 未安全持久化的 token 继续更新无意义)。
-        View 按 SaveOutcome 区分反馈, 不得将后两者渲染为「保存成功」。
+        - FAILED: 其他持久化失败, 同样不得激活未保存输入。
+        View 按 SaveOutcome 区分反馈, 不得将上述失败态渲染为「保存成功」。
         """
         token = token.strip()
         if not token:
@@ -748,7 +750,9 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
             ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_token, token),
             timeout=15,
         )
-        if outcome is SaveOutcome.FAILED_NO_SECURE_STORE:
+        # 仅 SAVED 才代表输入已持久化并实际生效；其余三态不得激活运行时 client。
+        if outcome is not SaveOutcome.SAVED:
+            logger.warning("[DataSourceVM] Tushare token not activated (save outcome=%s)", outcome.value)
             return outcome
         # TushareClient 在事件循环线程构造并 await set_token_async：同步包装器 set_token
         # 依赖已捕获的 _loop，若在工作线程构造（_loop=None）会抛 RuntimeError。

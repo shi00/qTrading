@@ -1090,9 +1090,10 @@ class TestTushareClientApiMethods:
         """D2-15：误导性形参 start_date/end_date 已移除，误用即 TypeError（不再静默丢弃）。"""
         client, _, _ = tushare_client_mocks
 
-        with pytest.raises(TypeError):
+        # TypeError 即完整契约（误用旧形参必须失败），无额外状态可断言
+        with pytest.raises(TypeError):  # noqa: weak-assertion 契约即异常类型
             client.get_dividend(ts_code="000001.SZ", start_date="20240101")
-        with pytest.raises(TypeError):
+        with pytest.raises(TypeError):  # noqa: weak-assertion 契约即异常类型
             client.get_dividend(ts_code="000001.SZ", end_date="20241231")
 
 
@@ -2470,7 +2471,93 @@ class TestTushareClientProbeAndEffectiveTables:
         assert "last_probe_time" in payload
         assert payload["last_probe_time"] == "2024-06-15T10:30:00"
         assert "token_hash" in payload
+        assert payload["point_tier"] == "points_5000"
         assert "capabilities" in payload
+
+    @pytest.mark.asyncio
+    async def test_persist_forwards_expected_context_and_skips_stale(self):
+        """D2-10：persist 接受并透传 (代次, 档位)；过时上下文拒绝落库。"""
+        client = self._make_probed_client(tier="points_5000")
+        captured: list[str] = []
+
+        async def fake_set_app_state(engine, key, value):
+            captured.append(value)
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.app_state_service.set_app_state", new=fake_set_app_state),
+        ):
+            mock_cm.return_value.engine = MagicMock()
+            generation = client.get_capability_generation()
+            await client.persist_capabilities_to_app_state(expected_generation=generation, expected_tier="points_5000")
+            assert len(captured) == 1
+            # 代次已前进 → 旧上下文拒绝覆盖持久缓存
+            await client.persist_capabilities_to_app_state(
+                expected_generation=generation + 1, expected_tier="points_5000"
+            )
+
+        assert len(captured) == 1
+
+    @pytest.mark.asyncio
+    async def test_load_skips_when_point_tier_mismatch(self):
+        """D2-10：持久缓存以 (token_hash, point_tier) 为键，档位不匹配不得加载。"""
+        import hashlib
+        import json
+
+        client = self._make_probed_client(tier="points_5000")
+        token_hash = hashlib.sha256(b"test_token").hexdigest()[:16]
+        stored = json.dumps(
+            {
+                "token_hash": token_hash,
+                "point_tier": "points_2000",
+                "capabilities": {"daily": False},
+            }
+        )
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.app_state_service.get_app_state", new_callable=AsyncMock) as mock_get,
+        ):
+            mock_cm.return_value.engine = MagicMock()
+            mock_get.return_value = stored
+            await client.load_capabilities_from_app_state()
+
+        assert client.is_api_available("daily") is None
+
+    @pytest.mark.asyncio
+    async def test_invalidate_for_tier_change_bumps_generation_and_persists(self):
+        """D2-10：切档失效内存缓存/代次，并落库空载荷覆盖旧档位持久缓存。"""
+        client = self._make_probed_client(tier="points_5000")
+        client.persist_capabilities_to_app_state = AsyncMock()
+        client.mark_api_unavailable("daily")
+        generation = client.get_capability_generation()
+
+        await client.invalidate_capability_cache_for_tier_change()
+
+        assert client.get_capability_cache() == {}
+        assert client.get_last_probe_time() is None
+        assert client.get_capability_generation() == generation + 1
+        client.persist_capabilities_to_app_state.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_probe_discards_results_when_tier_changed(self):
+        """D2-10：在途探测期间档位变化时，旧档位结果不得回填缓存/落库。"""
+        tier = ["points_5000"]
+        client = self._make_probed_client(tier="points_5000")
+        client._get_tushare_point_tier = lambda: tier[0]
+        client.persist_capabilities_to_app_state = AsyncMock()
+        switched = [False]
+
+        async def fake_probe_call(api_name, func, **params):
+            if not switched[0]:
+                switched[0] = True
+                tier[0] = "points_2000"
+            return None  # probe 成功 → 若未识别档位变化会写 True
+
+        client._handle_probe_call = fake_probe_call
+        await client.probe_api_capabilities()
+
+        assert client.is_api_available("daily") is None
+        client.persist_capabilities_to_app_state.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_probe_in_progress_concurrent_protection(self):

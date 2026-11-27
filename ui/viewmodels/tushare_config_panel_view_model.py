@@ -189,9 +189,12 @@ class TushareConfigPanelViewModel(ConfigPanelViewModelBase[TushareConfigState]):
         threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
     )
     async def update_tier(self, value: str) -> bool:
-        """档位变更：持久化 + 重建限速器 + 清除旧 probe 缓存。
+        """档位变更：持久化 + 重建限速器 + 原子失效探测上下文与依赖缓存。
 
         R16：set_tier/reload_limiters 是同步 IO，必须 offload 到 io_pool。
+        D2-10：仅清内存字典不足以防止「在途旧档位探测回填」与「重启后旧档位
+        负缓存复辟」；须同时递增探测代次、落库以新档位为键的空载荷，并失效
+        StrategyManager 依赖缓存。
         """
         if value == self._state.tier:
             return True
@@ -205,7 +208,19 @@ class TushareConfigPanelViewModel(ConfigPanelViewModelBase[TushareConfigState]):
 
             client = self._tushare_client
             await ThreadPoolManager().run_async(TaskType.IO, client.reload_rate_limiters)
-            client.clear_capability_cache()
+            await client.invalidate_capability_cache_for_tier_change()
+
+            try:
+                from strategies.all_strategies import StrategyManager
+
+                StrategyManager().invalidate_dependency_cache()
+            except Exception as strategy_exc:
+                # 依赖缓存失效失败不应回滚已持久化的档位；下次读取前仍会因缓存为空重算。
+                logger.warning(
+                    "[TushareConfigVM] Failed to invalidate strategy dependency cache: %s",
+                    DataSanitizer.sanitize_error(strategy_exc),
+                    exc_info=True,
+                )
 
             self._set_state(tier=value)
             self._show_success(Message("sys_tier_saved_success"))
@@ -315,35 +330,36 @@ class TushareConfigPanelViewModel(ConfigPanelViewModelBase[TushareConfigState]):
             # set_token_async 内部仅重建 pro_api 引用与限流器（无网络 IO，不违反 R16），
             # 与 bootstrap 的 _warmup_tushare_capabilities 同模式。
             client = self._tushare_client
-            needs_probe = await client.set_token_async(token)
+            # 显式验证命令必须强制重探：token 字符串未变时 set_token_async 返回 False，
+            # 但不能据此跳过能力探测（用户充值积分后 token 不变，需要重新判定档位权限）。
+            await client.set_token_async(token)
+            client.clear_capability_cache()
 
-            if needs_probe:
-                try:
-                    logger.info("[TushareConfigVM] Probing API capabilities...")
-                    probe_results = await client.probe_api_capabilities()
+            try:
+                logger.info("[TushareConfigVM] Probing API capabilities (forced)...")
+                probe_results = await client.probe_api_capabilities()
 
-                    StrategyManager().invalidate_dependency_cache()
+                StrategyManager().invalidate_dependency_cache()
 
-                    available_apis = [api for api, status in probe_results.items() if status is True]
-                    unavailable_apis = [api for api, status in probe_results.items() if status is False]
+                available_apis = [api for api, status in probe_results.items() if status is True]
+                unavailable_apis = [api for api, status in probe_results.items() if status is False]
 
-                    if unavailable_apis:
-                        self._show_warning(Message("tushare_verify_restricted", {"apis": ", ".join(unavailable_apis)}))
-                        logger.warning("[TushareConfigVM] Restricted APIs: %s", unavailable_apis)
-                    elif available_apis:
-                        self._show_success(Message("tushare_verify_success"))
-                        logger.info("[TushareConfigVM] All probed APIs available: %s", len(available_apis))
-                    else:
-                        self._show_warning(Message("tushare_verify_unknown_status"))
-                except Exception as probe_exc:
-                    logger.warning(
-                        "[TushareConfigVM] Capability probe failed (non-critical): %s",
-                        DataSanitizer.sanitize_error(probe_exc),
-                        exc_info=True,
-                    )
-                    self._show_success(Message("tushare_verify_unknown_status"))
-            else:
-                self._show_success(Message("tushare_verify_success"))
+                if unavailable_apis:
+                    self._show_warning(Message("tushare_verify_restricted", {"apis": ", ".join(unavailable_apis)}))
+                    logger.warning("[TushareConfigVM] Restricted APIs: %s", unavailable_apis)
+                elif available_apis:
+                    self._show_success(Message("tushare_verify_success"))
+                    logger.info("[TushareConfigVM] All probed APIs available: %s", len(available_apis))
+                else:
+                    self._show_warning(Message("tushare_verify_unknown_status"))
+            except Exception as probe_exc:
+                logger.warning(
+                    "[TushareConfigVM] Capability probe failed (non-critical): %s",
+                    DataSanitizer.sanitize_error(probe_exc),
+                    exc_info=True,
+                )
+                # 探测失败只能展示「未知」，不得以 success 冒充探测成功。
+                self._show_warning(Message("tushare_verify_unknown_status"))
 
             if self._on_verify_success:
                 self._on_verify_success(token)

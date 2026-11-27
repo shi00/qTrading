@@ -204,7 +204,10 @@ class TestLoadCapabilitiesFromAppState:
         client, _, _ = tushare_client_mocks
 
         token_hash = hashlib.sha256(b"test_token").hexdigest()[:16]
-        stored_payload = f'{{"token_hash": "{token_hash}", "capabilities": {{"api1": true, "api2": false}}}}'
+        stored_payload = (
+            f'{{"token_hash": "{token_hash}", "point_tier": "points_5000", '
+            f'"capabilities": {{"api1": true, "api2": false}}}}'
+        )
 
         mock_engine = MagicMock()
         with (
@@ -225,7 +228,7 @@ class TestLoadCapabilitiesFromAppState:
     async def test_skips_when_token_hash_mismatch(self, tushare_client_mocks):
         client, _, _ = tushare_client_mocks
 
-        stored_payload = '{"token_hash": "different_hash", "capabilities": {"api1": true}}'
+        stored_payload = '{"token_hash": "different_hash", "point_tier": "points_5000", "capabilities": {"api1": true}}'
 
         mock_engine = MagicMock()
         with (
@@ -685,7 +688,7 @@ class TestProbeTokenConsistency:
         client = self._make_client(tier="points_120")
         client.mark_api_unavailable("daily")  # 预设 daily=False
 
-        async def persist_with_token_change():
+        async def persist_with_token_change(*, expected_generation=None, expected_tier=None):
             # 模拟 persist 期间 set_token_async 改变 token + 清空 cache
             await client.set_token_async("new_token_after_exception")
             raise RuntimeError("persist failed")
@@ -810,7 +813,7 @@ class TestProbeCapabilityGenerationIsolation:
 
         persist_calls: list[bool] = []
 
-        async def persist_with_round_trip_then_fail():
+        async def persist_with_round_trip_then_fail(*, expected_generation=None, expected_tier=None):
             persist_calls.append(True)
             await self._switch_token_round_trip(client)
             raise RuntimeError("persist failed")
@@ -1144,7 +1147,7 @@ class TestRuntimeUnavailableCacheTTL:
         # precheck_passed 不会置位，事后断言即可暴露。
         persist_precheck_passed: list[bool] = []
 
-        async def persist_then_fail():
+        async def persist_then_fail(*, expected_generation=None, expected_tier=None):
             assert client.is_api_available("daily") is True
             # moneyflow_hsgt 自身探测成功 → 其运行时标记已被 mark_api_available 清除，
             # 此处仅剩 top_list 的刷新后时间戳（回滚后需还原为 old_ts）
