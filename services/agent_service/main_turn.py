@@ -778,7 +778,7 @@ class MainTurnIntake:
         if self._main_turn is None:
             return result
         # 讨论/计划：受理后由生产主回合产出直答/可读计划；零研究动作由回合端口保证。
-        identity = self._main_turn_identity(target_session, result.receipt, revision=revision, manifest=manifest)
+        identity = self._main_turn_identity(target_session, result.receipt, manifest=manifest)
         clarification_answers = await self._consume_clarification(target_session)
         try:
             turn_outcome = await self._main_turn.run(
@@ -864,7 +864,7 @@ class MainTurnIntake:
         if derive_frozen_selection_policy(manifest) is None:
             # 未手选角色/Skills/MCP：无派发准入判据，先如实零派发（不耗模型、不猜授权）。
             return replace(result, dispatch=self._plan_unavailable(result, cause="role_policy_missing"))
-        identity = self._main_turn_identity(session_id, result.receipt, revision=expected_revision, manifest=manifest)
+        identity = self._main_turn_identity(session_id, result.receipt, manifest=manifest)
         clarification_answers: tuple[ClarificationAnswerFact, ...] = ()
         try:
             clarification_answers = await self._consume_clarification(session_id)
@@ -1013,10 +1013,14 @@ class MainTurnIntake:
         session_id: str,
         receipt: SubmissionReceipt,
         *,
-        revision: int,
         manifest: CanonicalJson,
     ) -> LoopIdentity:
-        """由受理事实派生回合身份（digest 缺失时取冻结 manifest 摘要，不造假）。"""
+        """由受理事实派生回合身份（digest 缺失时取冻结 manifest 摘要，不造假）。
+
+        输入版直接消费回执承载的权威 ``input_revision``（受理事务内实际落库值）：
+        新受理恒为 1、同执行排队修订为 2、3…；不得用会话草稿版 ``+1`` 派生——
+        草稿版是元数据 CAS 令牌，与执行输入版无关（D7-03）。
+        """
 
         digest = receipt.intent_digest
         if not is_digest(digest):
@@ -1031,7 +1035,7 @@ class MainTurnIntake:
                 workflow_id=receipt.workflow_id,
             ),
             node_id="root",
-            input_revision=revision + 1,
+            input_revision=receipt.input_revision,
             actual_input_digest=digest,
             actual_model_ref=MAIN_TURN_MODEL_REF,
         )
