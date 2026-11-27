@@ -33,6 +33,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from data.persistence.db_config_service import DatabaseConfigService
 from data.persistence.embedded_postgres.protocol import ConnectionInfo
 from data.persistence.embedded_postgres.version import resolve_pg_major_version
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -744,7 +745,17 @@ class EmbeddedPostgresService:
             self._cleanup_failed_start()
             raise EmbeddedPostgresStartError(f"password_file read failed: {exc}") from exc
 
-        url = f"postgresql+asyncpg://{self._username}:{password}@{self._listen}:{port}/{self._database}"
+        # 监听地址 ≠ 可连接的单目标客户端地址：0.0.0.0/::/* 必须映射为回环，
+        # IPv6 需在 URL 中包 []（由 build_url 统一处理），否则 create_async_engine 解析崩溃。
+        connect_host = DatabaseConfigService.host_for_client(str(ready.get("host", "")) or self._listen)
+        url = DatabaseConfigService.build_url(
+            host=connect_host,
+            port=port,
+            user=self._username,
+            password=password,
+            database=self._database,
+            async_driver=True,
+        )
         # R9: 注册完整 URL 为 secret，确保日志/异常中带密码的 URL 被 sanitize_error 精确脱敏
         DataSanitizer.register_secret(url)
         # R9: 单独注册裸密码为 secret，防止 sidecar stderr 中裸密码（非完整 URL）未被脱敏（spec.md §1.5）

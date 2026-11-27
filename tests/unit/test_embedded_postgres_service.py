@@ -545,6 +545,54 @@ class TestEmbeddedPostgresServiceStart:
             await service.stop()
 
     @pytest.mark.asyncio(loop_scope="function")
+    async def test_start_ipv6_listen_url_is_bracketed(self, fake_paths) -> None:
+        """IPv6 监听地址必须渲染为 `@[::1]:port`，否则 create_async_engine 解析崩溃。"""
+        from data.persistence.embedded_postgres import service as svc_module
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        EmbeddedPostgresService._reset_singleton()
+        service = svc_module.EmbeddedPostgresService(**fake_paths, listen="::1")
+        try:
+
+            def popen_factory(cmd, **kwargs):
+                inst = _FakePopen(cmd, **kwargs)
+                inst.set_stdout_line(json.dumps({**FAKE_READY, "host": "::1"}) + "\n")
+                runtime_dir = fake_paths["data_dir"].parent / "runtime"
+                runtime_dir.mkdir(parents=True, exist_ok=True)
+                (runtime_dir / "password").write_text("mock_pg_password_55432", encoding="utf-8")
+                return inst
+
+            with patch.object(svc_module.subprocess, "Popen", popen_factory):
+                info = await service.start()
+                assert "@[::1]:55432/" in info.url
+        finally:
+            await service.stop()
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_start_wildcard_listen_uses_loopback_for_client_url(self, fake_paths) -> None:
+        """通配监听地址（0.0.0.0）不是可连接的单目标地址，URL 必须改用回环地址。"""
+        from data.persistence.embedded_postgres import service as svc_module
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        EmbeddedPostgresService._reset_singleton()
+        service = svc_module.EmbeddedPostgresService(**fake_paths, listen="0.0.0.0")
+        try:
+
+            def popen_factory(cmd, **kwargs):
+                inst = _FakePopen(cmd, **kwargs)
+                inst.set_stdout_line(json.dumps({**FAKE_READY, "host": "0.0.0.0"}) + "\n")
+                runtime_dir = fake_paths["data_dir"].parent / "runtime"
+                runtime_dir.mkdir(parents=True, exist_ok=True)
+                (runtime_dir / "password").write_text("mock_pg_password_55432", encoding="utf-8")
+                return inst
+
+            with patch.object(svc_module.subprocess, "Popen", popen_factory):
+                info = await service.start()
+                assert "@127.0.0.1:55432/" in info.url
+        finally:
+            await service.stop()
+
+    @pytest.mark.asyncio(loop_scope="function")
     async def test_start_stores_connection_info(self, fake_paths) -> None:
         """start 后 _connection_info 非 None 且 port 匹配。"""
         from data.persistence.embedded_postgres import service as svc_module

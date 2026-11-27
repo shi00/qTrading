@@ -102,6 +102,10 @@ pub async fn run(args: cli::RunArgs) -> Result<(), u8> {
         eprintln!("[sidecar] 路径配置冲突：{conflict}");
         return Err(exit_codes::ARGUMENT_ERROR);
     }
+    // 标识符契约：新建集群（无 PG_VERSION）前置校验库名/超级用户名，保证后续
+    // dump/restore/reset-password 的维护命令白名单一致；既有集群一律放行，
+    // 避免存量非标名称被一刀切拒绝启动（数据仍可用，doctor 提示迁移路径）。
+    validate_cluster_identifiers(&layout, &args.database, &args.username)?;
     logging::init(Some(&layout.sidecar_log));
     tracing::info!(
         "sidecar run starting, data_dir={}",
@@ -649,6 +653,18 @@ async fn ensure_database(
     Ok(())
 }
 
+/// 新集群（`PG_VERSION` 不存在）前置校验库名/用户名标识符白名单。
+///
+/// 只有新建集群需要契约保证；既有集群可能由旧版 run 以非标名称创建（当时仅做
+/// SQL 标识符转义），此时拒绝启动会锁死用户数据，故一律放行。
+fn validate_cluster_identifiers(layout: &Layout, database: &str, username: &str) -> Result<(), u8> {
+    if layout.data_dir.join("PG_VERSION").exists() {
+        return Ok(());
+    }
+    crate::maint::validate_identifier(database, "数据库名")?;
+    crate::maint::validate_identifier(username, "用户名")
+}
+
 /// 启动后阶段失败（健康检查/建库/stdout 断裂）的清理：尽力停止，避免留下无主 postgres。
 /// 同时记录 start failure 到 state.json，供 doctor/用户排查（OBS-1）。
 async fn stop_after_failed_start(layout: &Layout, err: &str) {
@@ -725,5 +741,37 @@ mod tests {
         assert_eq!(sql_identifier("qtrading"), "\"qtrading\"");
         assert_eq!(sql_identifier("a\"b"), "\"a\"\"b\"");
         assert_eq!(sql_identifier("a;drop"), "\"a;drop\"");
+    }
+
+    /// 新集群前置校验标识符白名单；既有集群（PG_VERSION 存在）不得锁死用户数据。
+    #[test]
+    fn validate_cluster_identifiers_scope() {
+        let root = std::env::temp_dir().join(format!("qts-run-ident-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let data_dir = root.join("postgres/16/data");
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+
+        // 新初始化集群（无 PG_VERSION）：非标名称拒绝
+        assert_eq!(
+            validate_cluster_identifiers(&layout, "my-db", "postgres"),
+            Err(exit_codes::ARGUMENT_ERROR)
+        );
+        assert_eq!(
+            validate_cluster_identifiers(&layout, "qtrading", "my-admin"),
+            Err(exit_codes::ARGUMENT_ERROR)
+        );
+        assert_eq!(
+            validate_cluster_identifiers(&layout, "qtrading", "postgres"),
+            Ok(())
+        );
+
+        // 存量集群（PG_VERSION 存在）：放行，避免旧版创建的集群被一刀切拒绝启动
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("PG_VERSION"), "16\n").unwrap();
+        assert_eq!(
+            validate_cluster_identifiers(&layout, "my-db", "my-admin"),
+            Ok(())
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
