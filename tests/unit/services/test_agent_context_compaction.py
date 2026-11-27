@@ -983,17 +983,19 @@ class TestCapabilityBudgetUnknown:
 class TestSummarySegmentWindow:
     def test_segment_within_window_is_accepted(self) -> None:
         messages = _long_history()
-        cutoff = plan_compaction(messages, keep_messages=6).cutoff
-        assert cutoff is not None
+        plan = plan_compaction(messages, keep_messages=6)
+        assert plan.reason is None
+        assert plan.cutoff == 4  # 历史共 10 条、保留尾部 6 条，摘要区间恰为前 4 条
 
-        assert summarize_segment_within_window(messages, cutoff, _budget()) is True
+        assert summarize_segment_within_window(messages, 4, _budget()) is True
 
     def test_segment_over_window_is_rejected(self) -> None:
         messages = _long_history(padding=40_000)
-        cutoff = plan_compaction(messages, keep_messages=6).cutoff
-        assert cutoff is not None
+        plan = plan_compaction(messages, keep_messages=6)
+        assert plan.reason is None
+        assert plan.cutoff == 4  # 同一历史结构，边界不随填充长度变化
 
-        assert summarize_segment_within_window(messages, cutoff, _budget()) is False
+        assert summarize_segment_within_window(messages, 4, _budget()) is False
 
     def test_unknown_window_segment_is_not_claimed_safe(self) -> None:
         messages = _long_history()
