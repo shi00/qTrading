@@ -868,7 +868,7 @@ class TestFilterValidationFeedback:
         mock_db.query_table.side_effect = FilterValidationError(
             "Invalid filter value 'abc' for column 'close' (BIGINT), expected an integer."
         )
-        with pytest.raises(FilterValidationError):
+        with pytest.raises(FilterValidationError, match="Invalid filter value"):
             await vm.export_data()
 
 

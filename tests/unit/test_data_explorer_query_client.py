@@ -605,7 +605,8 @@ class TestReadOnlyGuards:
         ):
             dm.query_table("stock_basic", filters=[("c", "LIKE", "x")], sort_col="c")
 
-        schema_mock.assert_called_once()
+        assert schema_mock.call_count == 1
+        assert schema_mock.call_args.args[0] == "stock_basic"
 
 
 class TestQueryTable:
