@@ -5,6 +5,8 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.bootstrap import (
+    FATAL_STARTUP_POLICY_ERROR,
+    FatalStartupPolicyError,
     _validate_quality_gate_strictness,
     check_onboarding_needed,
     initialize_services,
@@ -63,6 +65,14 @@ class TestValidateQualityGateStrictness:
         with patch("data.persistence.quality_gate.is_strict_quality_gate_enabled", return_value=False):
             with pytest.raises(RuntimeError, match="STRICT_QUALITY_GATE=false"):
                 _validate_quality_gate_strictness()
+
+    def test_non_strict_non_dev_raises_fatal_policy_error(self):
+        """D1-01: 必须抛不可跳过的 FatalStartupPolicyError，供上层标记 fatal。"""
+        with patch("data.persistence.quality_gate.is_strict_quality_gate_enabled", return_value=False):
+            with pytest.raises(FatalStartupPolicyError, match="STRICT_QUALITY_GATE=false") as exc_info:
+                _validate_quality_gate_strictness()
+        assert FATAL_STARTUP_POLICY_ERROR == "fatal_startup_policy"
+        assert isinstance(exc_info.value, RuntimeError)
 
     def test_non_strict_e2e_allowed(self, monkeypatch):
         monkeypatch.setenv("E2E_TESTING", "true")
@@ -212,6 +222,21 @@ class TestEmbeddedDbUrlRuntimeContract:
 
 
 class TestInitializeServices:
+    @pytest.mark.asyncio
+    async def test_fatal_quality_gate_policy_propagates(self, monkeypatch):
+        """D1-01: 质量门控拒绝在 initialize_services 顶层校验处原样传播（不被内部兜底吞掉）."""
+        monkeypatch.delenv("E2E_TESTING", raising=False)
+        monkeypatch.delenv("DEBUG", raising=False)
+        mock_cm = MagicMock()
+        mock_cm.init_db = AsyncMock()
+
+        with patch("data.persistence.quality_gate.is_strict_quality_gate_enabled", return_value=False):
+            with pytest.raises(FatalStartupPolicyError) as exc_info:
+                await initialize_services(mock_cm)
+
+        assert "STRICT_QUALITY_GATE=false" in str(exc_info.value)
+        mock_cm.init_db.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_success(self):
         mock_cm = MagicMock()

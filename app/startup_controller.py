@@ -7,7 +7,12 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from app.bootstrap import check_onboarding_needed, initialize_services
+from app.bootstrap import (
+    FATAL_STARTUP_POLICY_ERROR,
+    FatalStartupPolicyError,
+    check_onboarding_needed,
+    initialize_services,
+)
 from core.startup_types import EmbeddedPgStartupScenario, StartupContext, StartupState
 from utils.error_classifier import log_classified
 from utils.sanitizers import DataSanitizer
@@ -112,6 +117,22 @@ class StartupController:
                 result.get("success"),
                 result.get("error"),
             )
+        except FatalStartupPolicyError as e:
+            # D1-01：安全策略拒绝必须标记为不可跳过（fatal），UI 据此隐藏 Skip/Reconfigure，
+            # 本控制器 skip() 亦再次拦截，确保连接池存活时不得进入 READY。
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[Startup] fatal startup policy rejection (%s): %s",
+                exc_info=True,
+            )
+            self._transition(
+                StartupState.INIT_FAILED,
+                error=FATAL_STARTUP_POLICY_ERROR,
+                detail=DataSanitizer.sanitize_error(e),
+            )
+            return
         except Exception as e:
             log_classified(
                 logger,
@@ -298,11 +319,111 @@ class StartupController:
             return
         self._transition(StartupState.NEED_ONBOARDING)
 
-    def skip(self):
-        """User clicked Skip: enter main app without DB."""
+    async def skip(self):
+        """User clicked Skip: enter main app without database.
+
+        D1-01：进入 READY 前必须先关闭已启动 Agent、释放业务库所有权锁并关闭
+        连接池（置 disposed、清空全部 DAO.engine）。任一关闭失败都保持
+        INIT_FAILED 并展示错误，**严禁**在连接池存活时进入 READY。
+        ``state != INIT_FAILED`` 或 fatal 策略错误时拒绝（防重入 / 防绕过）。
+        """
+        if self._state != StartupState.INIT_FAILED:
+            logger.warning(
+                "[Startup] skip ignored in state %s (re-entry guard)",
+                self._state,
+            )
+            return
+        if self._context.error == FATAL_STARTUP_POLICY_ERROR:
+            logger.warning("[Startup] skip refused: fatal startup policy error requires exit or configuration fix")
+            return
+        # 同步段先切 LOADING：双击窗口内第二次调用被上方状态守卫拦截，
+        # 避免并发重入重复关闭 Agent / 引擎。事件循环单线程串行保证无竞态。
+        self._transition(StartupState.LOADING)
+
+        # 1. 关闭门：先停掉已启动的 Agent 派发入口并在途收敛。
+        # 未就绪即阻断后续释放并保留依赖（R2-I35），不得把「未收敛」当「已关闭」。
+        if self._agent_wiring is not None:
+            try:
+                await self._agent_wiring.prepare_close()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # 关闭前置失败：按未就绪阻断，保留依赖供重试
+                logger.warning(
+                    "[Startup] Agent close prelude failed during skip: %s",
+                    type(e).__name__,
+                    exc_info=True,
+                )
+                self._transition(
+                    StartupState.INIT_FAILED,
+                    error="agent_close_not_ready",
+                    detail="Agent close prelude failed; skip aborted to keep resources alive.",
+                )
+                return
+            close_ready = getattr(self._agent_wiring, "close_ready", None)
+            if close_ready is None or not close_ready():
+                logger.error(
+                    "[Startup] Agent close gate not ready during skip; engine close aborted, resources kept alive."
+                )
+                self._transition(
+                    StartupState.INIT_FAILED,
+                    error="agent_close_not_ready",
+                    detail="Agent runtime close gate is not ready; skip aborted to keep resources alive.",
+                )
+                return
+            self._agent_wiring = None
+
+        # 2. 释放业务库唯一所有权锁（D1-03 提供），避免跳过启动后仍冒充唯一执行者。
+        ownership_error: Exception | None = None
+        try:
+            from services.task_manager import TaskManager
+
+            await TaskManager().release_ownership_async()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            ownership_error = e
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[Startup] ownership lock release failed during skip (%s): %s",
+                exc_info=True,
+            )
+
+        # 3. 关闭连接池并置 disposed / 清空 DAO.engine。即便所有权释放失败也为安全
+        #    起见关闭引擎（由 PG 回收残留会话锁），但不因此进入 READY。
+        cache_error: Exception | None = None
+        try:
+            await self._cache_manager.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            cache_error = e
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[Startup] CacheManager.close failed during skip (%s): %s",
+                exc_info=True,
+            )
+
+        if ownership_error is not None or cache_error is not None:
+            parts: list[str] = []
+            if ownership_error is not None:
+                parts.append(f"ownership release failed: {DataSanitizer.sanitize_error(ownership_error)}")
+            if cache_error is not None:
+                parts.append(f"engine close failed: {DataSanitizer.sanitize_error(cache_error)}")
+            self._transition(StartupState.INIT_FAILED, error="skip_failed", detail="; ".join(parts))
+            return
+
         if self._on_show_toast:
             self._on_show_toast("warning_skip_db", "warning")
         self._transition(StartupState.READY)
+
+    def exit_app(self):
+        """User clicked Exit on a non-skippable startup error page (D1-01 fatal)."""
+        if self._on_exit:
+            self._on_exit()
 
     async def upgrade(self):
         """User clicked Upgrade: run DB migration."""
