@@ -49,6 +49,17 @@ def _render_message(msg: Message | None) -> str:
     return I18n.get(msg.key, **msg.params)
 
 
+def _dispatch_refresh(vm: EmbeddedStatusCardViewModel) -> None:
+    """提交 vm.refresh_status 到 page 任务队列（挂载期 use_effect 使用，R16）。"""
+    try:
+        page = ft.context.page
+    except RuntimeError:
+        logger.debug("[EmbeddedStatusCard] page not available for refresh_status")
+        return
+    if page is not None:
+        page.run_task(vm.refresh_status)
+
+
 @ft.component
 def EmbeddedStatusCard() -> ft.Container:
     """Embedded 模式只读状态卡片 (声明式)。
@@ -63,12 +74,15 @@ def EmbeddedStatusCard() -> ft.Container:
         ft.Container: 含 status icon + status text + info text 的只读卡片
     """
     # --- 内部 VM 模式: hook 实例化 + dispose on unmount ---
-    state, _ = use_viewmodel(factory=EmbeddedStatusCardViewModel)
+    state, vm = use_viewmodel(factory=EmbeddedStatusCardViewModel)
 
     # --- Subscribe to i18n changes (auto-rerender on locale switch) ---
     ft.use_state(get_observable_state)
     # F04: 订阅主题状态, 主题热切换时重渲染并取当期 AppColors 颜色.
     ft.use_state(AppColors.get_observable_state)
+
+    # --- 挂载期拉取一次真实状态 (D1-12 ①, R16: 副作用只在 use_effect 中触发) ---
+    ft.use_effect(lambda: _dispatch_refresh(vm), dependencies=[])
 
     # --- Status display (driven by state.status_message / status_type) ---
     status_text = _render_message(state.status_message)

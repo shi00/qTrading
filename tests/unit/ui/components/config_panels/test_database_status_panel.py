@@ -28,11 +28,12 @@ from tests.unit.ui.component_renderer import (
     make_component,
     render_once,
     run_mount_effects,
+    run_render_effects,
     run_unmount_effects,
 )
 from ui.components.config_panels import database_status_panel as panel_module
 from ui.components.config_panels.database_status_panel import DatabaseStatusPanel
-from ui.viewmodels.database_status_view_model import DatabaseStatusState
+from ui.viewmodels.database_status_view_model import DatabaseStatusState, DatabaseStatusViewModel
 
 pytestmark = pytest.mark.unit
 
@@ -95,10 +96,29 @@ def _text_values(root: Any) -> list[str]:
     return values
 
 
+def _patch_visuals(stack: contextlib.ExitStack) -> None:
+    """mock I18n / AppColors / AppStyles（渲染期 token 与文案）。"""
+    mock_i18n = stack.enter_context(patch.object(panel_module, "I18n"))
+    mock_i18n.get.side_effect = _fake_i18n_get
+    stack.enter_context(patch.object(panel_module, "AppColors"))
+    mock_styles = stack.enter_context(patch.object(panel_module, "AppStyles"))
+    from ui.theme import AppStyles as _RealAppStyles
+
+    for attr in dir(_RealAppStyles):
+        if not attr.startswith("_"):
+            val = getattr(_RealAppStyles, attr, None)
+            if isinstance(val, (str, int, float)):
+                setattr(mock_styles, attr, val)
+    mock_styles.primary_button = MagicMock(return_value=ft.ButtonStyle())
+    mock_styles.secondary_button = MagicMock(return_value=ft.ButtonStyle())
+
+
 def _render_panel(
     *,
     page: FakePage | None = None,
-) -> tuple[Any, FakePage, Any, Any]:
+    doctor_result: Any = None,
+    rerender: bool = False,
+) -> tuple[DatabaseStatusViewModel, FakePage, Any, Any]:
     """渲染 DatabaseStatusPanel, 返回 (vm, page, result, component)。
 
     Mock 外部依赖:
@@ -106,17 +126,25 @@ def _render_panel(
     - AppColors / AppStyles (颜色 / 样式 token)
     - EmbeddedPgMaintenanceService (doctor 返回 mock)
     - ConfigHandler.load_config
+
+    use_viewmodel 以真实 VM + DI mock service 替换，使挂载期 use_effect 触发的
+    refresh_status 走 mock doctor（不触碰真实 sidecar）。
     """
     if page is None:
         page = FakePage()
 
-    mock_doctor = MagicMock()
-    mock_doctor.data_dir = "/fake/data"
-    mock_doctor.pg_version = 16
-    mock_doctor.postgres_alive = True
+    if doctor_result is None:
+        doctor_result = MagicMock()
+        doctor_result.data_dir = "/fake/data"
+        doctor_result.pg_version = 16
+        doctor_result.postgres_alive = True
+        doctor_result.port = 55432
+        doctor_result.issues = []
+        doctor_result.restore_residuals = []
+        doctor_result.dump_partials = []
 
     mock_svc = MagicMock()
-    mock_svc.doctor = AsyncMock(return_value=mock_doctor)
+    mock_svc.doctor = AsyncMock(return_value=doctor_result)
 
     mock_config = {
         "embedded_pg_enabled": True,
@@ -125,33 +153,25 @@ def _render_panel(
         "db_port": 5432,
     }
 
+    vm = DatabaseStatusViewModel(maintenance_service=mock_svc)
+
     with contextlib.ExitStack() as stack:
-        mock_i18n = stack.enter_context(patch.object(panel_module, "I18n"))
-        mock_i18n.get.side_effect = _fake_i18n_get
-        stack.enter_context(patch.object(panel_module, "AppColors"))
-        mock_styles = stack.enter_context(patch.object(panel_module, "AppStyles"))
-        from ui.theme import AppStyles as _RealAppStyles
-
-        for attr in dir(_RealAppStyles):
-            if not attr.startswith("_"):
-                val = getattr(_RealAppStyles, attr, None)
-                if isinstance(val, (str, int, float)):
-                    setattr(mock_styles, attr, val)
-        mock_styles.primary_button = MagicMock(return_value=ft.ButtonStyle())
-        mock_styles.secondary_button = MagicMock(return_value=ft.ButtonStyle())
-
+        _patch_visuals(stack)
         stack.enter_context(
             patch(
                 "ui.viewmodels.database_status_view_model.ConfigHandler.load_config",
                 return_value=mock_config,
             )
         )
+        stack.enter_context(patch.object(panel_module, "use_viewmodel", return_value=(vm.state, vm)))
 
         component = make_component(DatabaseStatusPanel)
         run_mount_effects(component, page=page)
         result = render_once(component)
+        if rerender:
+            run_render_effects(component)
 
-    return None, page, result, component
+    return vm, page, result, component
 
 
 # ============================================================================
@@ -259,10 +279,59 @@ class TestDatabaseStatusPanelVMLifecycle:
 
     def test_unmount_disposes_internal_vm(self, mock_i18n_state, mock_app_colors_state) -> None:
         """DoD: 卸载时 dispose 内部 VM (use_viewmodel factory 模式默认 dispose_on_unmount=True)。"""
-        with patch("ui.components.config_panels.database_status_panel.DatabaseStatusViewModel.dispose") as mock_dispose:
-            _, _, _, component = _render_panel()
+        page = FakePage()
+        with contextlib.ExitStack() as stack:
+            _patch_visuals(stack)
+            stack.enter_context(
+                patch(
+                    "ui.viewmodels.database_status_view_model.ConfigHandler.load_config",
+                    return_value={
+                        "embedded_pg_enabled": True,
+                        "embedded_pg_data_root": "/fake/data_root",
+                        "embedded_pg_log_dir": "/fake/log_dir",
+                        "db_port": 5432,
+                    },
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "ui.viewmodels.database_status_view_model.DatabaseStatusViewModel.refresh_status",
+                    new_callable=AsyncMock,
+                )
+            )
+            mock_dispose = stack.enter_context(
+                patch("ui.components.config_panels.database_status_panel.DatabaseStatusViewModel.dispose")
+            )
+            component = make_component(DatabaseStatusPanel)
+            run_mount_effects(component, page=page)
             run_unmount_effects(component)
         mock_dispose.assert_called_once_with()
+
+
+# ============================================================================
+# 挂载期自动刷新 (D1-12 ②)
+# ============================================================================
+
+
+class TestDatabaseStatusPanelAutoRefresh:
+    """挂载期必须自动刷新一次状态，重渲染不得重复触发。"""
+
+    def test_mount_triggers_initial_refresh(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """use_effect(dependencies=[]) 在挂载后提交 vm.refresh_status。"""
+        vm, page, _, _ = _render_panel()
+
+        assert page.scheduled_tasks.count(vm.refresh_status) == 1, (
+            f"挂载应触发一次 vm.refresh_status，实际: {page.scheduled_tasks}"
+        )
+        # 刷新已执行：首次打开设置页即拿到真实状态（不再空白禁用）
+        assert vm.state.status_message is not None
+        assert vm.state.data_dir == "/fake/data"
+
+    def test_rerender_does_not_repeat_refresh(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """dependencies=[] 语义：重渲染不得重复调用 doctor。"""
+        vm, page, _, _ = _render_panel(rerender=True)
+
+        assert page.scheduled_tasks.count(vm.refresh_status) == 1, f"重渲染不应重复刷新，实际: {page.scheduled_tasks}"
 
 
 # ============================================================================
@@ -372,20 +441,7 @@ def _render_panel_with_state(
     mock_vm = MagicMock()
 
     with contextlib.ExitStack() as stack:
-        mock_i18n = stack.enter_context(patch.object(panel_module, "I18n"))
-        mock_i18n.get.side_effect = _fake_i18n_get
-        stack.enter_context(patch.object(panel_module, "AppColors"))
-        mock_styles = stack.enter_context(patch.object(panel_module, "AppStyles"))
-        from ui.theme import AppStyles as _RealAppStyles
-
-        for attr in dir(_RealAppStyles):
-            if not attr.startswith("_"):
-                val = getattr(_RealAppStyles, attr, None)
-                if isinstance(val, (str, int, float)):
-                    setattr(mock_styles, attr, val)
-        mock_styles.primary_button = MagicMock(return_value=ft.ButtonStyle())
-        mock_styles.secondary_button = MagicMock(return_value=ft.ButtonStyle())
-
+        _patch_visuals(stack)
         stack.enter_context(patch.object(panel_module, "use_viewmodel", return_value=(state, mock_vm)))
 
         component = make_component(DatabaseStatusPanel)
@@ -578,3 +634,87 @@ class TestDatabaseStatusPanelStateRendering:
         icons = [c for c in ctrls if isinstance(c, ft.Icon)]
         assert len(icons) >= 1
         assert all(not getattr(i, "visible", True) for i in icons)
+
+
+# ============================================================================
+# 诊断渠道渲染 (D1-12 ①, R21)
+# ============================================================================
+
+
+class TestDiagnosticsRendering:
+    """issues / restore_residuals / dump_partials 三态渲染：未知 / 无 / 有。"""
+
+    def test_unknown_when_fields_none(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """三项为 None 时渲染「未知」，不得渲染成「无」 (R21)。"""
+        state = DatabaseStatusState(status_message=Message("db_status_running"), status_type="success")
+        _, _, result, _ = _render_panel_with_state(state)
+        text_values = _text_values(result)
+
+        for label in (
+            "db_status_issues_label",
+            "db_status_restore_residuals_label",
+            "db_status_dump_partials_label",
+        ):
+            assert f"{label}[value='db_status_value_unknown']" in text_values
+            assert f"{label}[value='db_status_value_none']" not in text_values
+
+    def test_none_when_empty_lists(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """空列表表示 sidecar 已确认无异常，渲染「无」。"""
+        state = DatabaseStatusState(
+            status_message=Message("db_status_running"),
+            status_type="success",
+            issues=[],
+            restore_residuals=[],
+            dump_partials=[],
+        )
+        _, _, result, _ = _render_panel_with_state(state)
+        text_values = _text_values(result)
+
+        for label in (
+            "db_status_issues_label",
+            "db_status_restore_residuals_label",
+            "db_status_dump_partials_label",
+        ):
+            assert f"{label}[value='db_status_value_none']" in text_values
+
+    def test_issues_rendered_with_count_and_messages(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """非空 issues 渲染数量与逐条 message。"""
+        state = DatabaseStatusState(
+            status_message=Message("db_status_running"),
+            status_type="warning",
+            issues=[
+                {"code": "disk_low", "severity": "warning", "message": "剩余磁盘空间不足"},
+                {"code": "pg_control_unreadable", "severity": "error", "message": "pg_control 不可读"},
+            ],
+            restore_residuals=[],
+            dump_partials=[],
+        )
+        _, _, result, _ = _render_panel_with_state(state)
+        text_values = _text_values(result)
+
+        # 数量文案经 I18n.get("db_status_value_count", count=N) 产生，嵌入 label 值
+        assert any(v.startswith("db_status_issues_label[value='db_status_value_count[count=2]") for v in text_values)
+        assert "db_status_issue_item[message='剩余磁盘空间不足']" in text_values
+        assert "db_status_issue_item[message='pg_control 不可读']" in text_values
+
+    def test_residuals_rendered_with_paths_and_scope_note(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """残留物渲染路径明细，并注明扫描范围仅数据目录同级。"""
+        state = DatabaseStatusState(
+            status_message=Message("db_status_running"),
+            status_type="warning",
+            issues=[],
+            restore_residuals=["/fake/data.restore-20260101"],
+            dump_partials=["/fake/dump.partial"],
+        )
+        _, _, result, _ = _render_panel_with_state(state)
+        text_values = _text_values(result)
+
+        assert any(
+            v.startswith("db_status_restore_residuals_label[value='db_status_value_count[count=1]") for v in text_values
+        )
+        assert any(
+            v.startswith("db_status_dump_partials_label[value='db_status_value_count[count=1]") for v in text_values
+        )
+        assert "db_status_residual_item[path='/fake/data.restore-20260101']" in text_values
+        assert "db_status_residual_item[path='/fake/dump.partial']" in text_values
+        assert "db_status_residuals_scope_note" in text_values

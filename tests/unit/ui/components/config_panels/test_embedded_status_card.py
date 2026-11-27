@@ -13,20 +13,23 @@ import contextlib
 import inspect
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import flet as ft
 import pytest
 
+from core.i18n import Message
 from tests.unit.ui.component_renderer import (
     FakePage,
     make_component,
     render_once,
     run_mount_effects,
+    run_render_effects,
     run_unmount_effects,
 )
 from ui.components.config_panels import embedded_status_card as card_module
 from ui.components.config_panels.embedded_status_card import EmbeddedStatusCard
+from ui.viewmodels.embedded_status_card_view_model import EmbeddedStatusCardState
 
 pytestmark = pytest.mark.unit
 
@@ -34,6 +37,27 @@ pytestmark = pytest.mark.unit
 def _read_source() -> str:
     """读取 embedded_status_card.py 源码 (用 mod.__file__ 避免硬编码路径)."""
     return Path(card_module.__file__).read_text(encoding="utf-8")
+
+
+_READY_STATE = EmbeddedStatusCardState(
+    status_message=Message("embedded_pg_ready"),
+    status_type="success",
+    info_message=Message("embedded_pg_no_config_needed"),
+)
+
+
+def _patch_visuals(stack: contextlib.ExitStack) -> None:
+    """mock I18n / AppColors / AppStyles（渲染期 token 与文案）。"""
+    mock_i18n = stack.enter_context(patch.object(card_module, "I18n"))
+    mock_i18n.get.side_effect = lambda key, **kw: key
+    stack.enter_context(patch.object(card_module, "AppColors"))
+    mock_styles = stack.enter_context(patch.object(card_module, "AppStyles"))
+    from ui.theme import AppStyles as _RealAppStyles
+
+    mock_styles.FONT_SIZE_TITLE = _RealAppStyles.FONT_SIZE_TITLE
+    mock_styles.FONT_SIZE_BODY_SM = _RealAppStyles.FONT_SIZE_BODY_SM
+    mock_styles.FONT_SIZE_CAPTION = _RealAppStyles.FONT_SIZE_CAPTION
+    mock_styles.FONT_SIZE_LG = _RealAppStyles.FONT_SIZE_LG
 
 
 def _walk_controls(root: Any) -> list[Any]:
@@ -56,35 +80,29 @@ def _walk_controls(root: Any) -> list[Any]:
 def _render_card(
     *,
     page: FakePage | None = None,
+    state: EmbeddedStatusCardState | None = None,
 ) -> tuple[Any, FakePage, Any, Any]:
     """渲染 EmbeddedStatusCard, 返回 (vm, page, result, component)。
 
     Mock 外部依赖:
-    - I18n (模块级导入, get 返回 key)
-    - AppColors / AppStyles (颜色 / 样式 token)
+    - I18n / AppColors / AppStyles (模块级导入)
+    - use_viewmodel: 返回给定 state 与 mock vm（渲染分支测试不触发 doctor）
     """
     if page is None:
         page = FakePage()
+    if state is None:
+        state = _READY_STATE
+    mock_vm = MagicMock()
 
     with contextlib.ExitStack() as stack:
-        mock_i18n = stack.enter_context(patch.object(card_module, "I18n"))
-        mock_i18n.get.side_effect = lambda key, **kw: key
-        stack.enter_context(patch.object(card_module, "AppColors"))
-        mock_styles = stack.enter_context(patch.object(card_module, "AppStyles"))
-        from ui.theme import AppStyles as _RealAppStyles
-
-        mock_styles.FONT_SIZE_TITLE = _RealAppStyles.FONT_SIZE_TITLE
-        mock_styles.FONT_SIZE_BODY_SM = _RealAppStyles.FONT_SIZE_BODY_SM
-        mock_styles.FONT_SIZE_CAPTION = _RealAppStyles.FONT_SIZE_CAPTION
-        mock_styles.FONT_SIZE_LG = _RealAppStyles.FONT_SIZE_LG
+        _patch_visuals(stack)
+        stack.enter_context(patch.object(card_module, "use_viewmodel", return_value=(state, mock_vm)))
 
         component = make_component(EmbeddedStatusCard)
         run_mount_effects(component, page=page)
         result = render_once(component)
 
-    # 内部 VM 通过 hook 实例化, 从 component context 提取
-    # 测试断言基于渲染结果, 不直接访问 VM
-    return None, page, result, component
+    return mock_vm, page, result, component
 
 
 # ============================================================================
@@ -174,14 +192,29 @@ class TestEmbeddedStatusCardRendering:
         assert len(text_fields) == 0
         assert len(checkboxes) == 0
 
+    def test_renders_checking_before_state_known(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """未取得状态时渲染「检测中」而非绿色「已自动准备」（R21，D1-12 ①）。"""
+        checking_state = EmbeddedStatusCardState(
+            status_message=Message("embedded_pg_checking"),
+            status_type="info",
+            info_message=Message("embedded_pg_no_config_needed"),
+        )
+        _, _, result, _ = _render_card(state=checking_state)
+        ctrls = _walk_controls(result)
+        text_values = [getattr(c, "value", None) for c in ctrls if isinstance(c, ft.Text)]
+        assert "embedded_pg_checking" in text_values
+        assert "embedded_pg_ready" not in text_values
+        icons = [c for c in ctrls if isinstance(c, ft.Icon)]
+        assert not any(getattr(i, "icon", None) == ft.Icons.CHECK_CIRCLE for i in icons)
+
 
 # ============================================================================
-# VM 生命周期测试
+# 挂载期自动刷新 + VM 生命周期
 # ============================================================================
 
 
 class TestEmbeddedStatusCardVMLifecycle:
-    """EmbeddedStatusCard 内部 VM 生命周期测试 (use_viewmodel factory 模式)。"""
+    """EmbeddedStatusCard 内部 VM 生命周期与挂载期刷新测试。"""
 
     def test_mount_initializes_internal_vm(self, mock_i18n_state, mock_app_colors_state) -> None:
         """挂载后通过 use_viewmodel(factory=...) 实例化内部 VM。"""
@@ -190,11 +223,39 @@ class TestEmbeddedStatusCardVMLifecycle:
         assert component is not None
         assert hasattr(component, "fn"), "Component 应已实例化 (有 fn 属性)"
 
+    def test_mount_triggers_single_refresh(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """use_effect(dependencies=[]) 挂载时提交一次 refresh_status，重渲染不重复。"""
+        page = FakePage()
+        with contextlib.ExitStack() as stack:
+            _patch_visuals(stack)
+            refresh_mock = stack.enter_context(
+                patch(
+                    "ui.viewmodels.database_status_view_model.DatabaseStatusViewModel.refresh_status",
+                    new_callable=AsyncMock,
+                )
+            )
+            component = make_component(EmbeddedStatusCard)
+            run_mount_effects(component, page=page)
+            run_render_effects(component)
+
+        assert len(page.scheduled_tasks) == 1, f"挂载应触发一次 refresh_status，实际: {page.scheduled_tasks}"
+        refresh_mock.assert_awaited_once()
+
     def test_unmount_disposes_internal_vm(self, mock_i18n_state, mock_app_colors_state) -> None:
         """DoD: 卸载时 dispose 内部 VM (use_viewmodel factory 模式默认 dispose_on_unmount=True)。"""
-        with patch(
-            "ui.components.config_panels.embedded_status_card.EmbeddedStatusCardViewModel.dispose"
-        ) as mock_dispose:
-            _, _, _, component = _render_card()
+        page = FakePage()
+        with contextlib.ExitStack() as stack:
+            _patch_visuals(stack)
+            stack.enter_context(
+                patch(
+                    "ui.viewmodels.database_status_view_model.DatabaseStatusViewModel.refresh_status",
+                    new_callable=AsyncMock,
+                )
+            )
+            mock_dispose = stack.enter_context(
+                patch("ui.components.config_panels.embedded_status_card.EmbeddedStatusCardViewModel.dispose")
+            )
+            component = make_component(EmbeddedStatusCard)
+            run_mount_effects(component, page=page)
             run_unmount_effects(component)
         mock_dispose.assert_called_once_with()

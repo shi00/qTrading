@@ -86,11 +86,20 @@ class FakePage:
 
     session: FakeSession = field(default_factory=FakeSession, compare=False, hash=False)
     web: bool = False
+    # 记录 page.run_task 提交的任务（测试断言挂载期副作用只触发一次）
+    scheduled_tasks: list[Any] = field(default_factory=list, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         self._services = FakeServiceRegistry()
         self.services: list[Any] = []
         self._dialogs: _FakeDialogList = _FakeDialogList()
+
+    def run_task(self, handler: Any, *args: Any, **kwargs: Any) -> None:
+        """模拟 ``Page.run_task``：记录任务并同步执行协程（测试无事件循环时用 asyncio.run）。"""
+        self.scheduled_tasks.append(handler)
+        result = handler(*args, **kwargs)
+        if inspect.iscoroutine(result):
+            asyncio.run(result)
 
     def _prepare_dialog(self, *args: Any, **kwargs: Any) -> None:  # noqa: ARG002
         """吸收 ft.use_dialog 的 _prepare_dialog 调用 (声明式 dialog 测试支持)。"""
