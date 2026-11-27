@@ -134,6 +134,7 @@ from services.agent_service.runtime import (
     RUNTIME_DB_NAME,
     CloseCommandIdentity,
     CloseFactOutcome,
+    DispatchGate,
     OwnerLoopBridge,
 )
 from services.agent_service.skills import ManagedSkillStore, SkillCatalogService
@@ -544,6 +545,36 @@ class _ProcessDispatchGate:
 
     def dispatch_closed(self) -> bool:
         return self._closed or not self._launched
+
+
+class _NativeRetryLauncher:
+    """单任务重试的原生投递端口（W-01 / D7-06）。
+
+    - 门闩关闭（未 launch / 关闭链已关派发）→ ``(False, "dispatch_closed")``，
+      不提交任何 workflow；
+    - workflow 身份由 ``(user_scope, execution_id, 新轮 round_id)`` 稳定派生，
+      宿主入口以 ``return-existing`` 启动 → 同轮重投命中原执行，不重复研究
+      （幂等投递靠身份而非进程内缓存）；
+    - 成功仅表示「已交持久 workflow」，叶是否重跑由父 workflow 推进，不在此冒充。
+    """
+
+    def __init__(self, *, gate: DispatchGate, submit: RootWorkflowSubmitter) -> None:
+        self._gate = gate
+        self._submit = submit
+
+    async def launch(
+        self,
+        payload: dict[str, object],
+        *,
+        user_scope: str,
+        execution_id: str,
+        round_id: str,
+    ) -> tuple[bool, str | None]:
+        if self._gate.dispatch_closed():
+            return False, "dispatch_closed"
+        workflow_id = stable_id("retry_workflow", [user_scope, execution_id, round_id])
+        await self._submit(workflow_id, cast(dict[str, Any], payload))
+        return True, None
 
 
 class _InFlightPortIo:
@@ -1267,6 +1298,9 @@ async def wire_agent_runtime(
             residual.extend(ledger.residual_names())
         return tuple(residual)
 
+    #: 生产应用轮次绑定来源：冻结会话/输入版/执行代次，父 workflow 据此建轮次；
+    #: 首次派发与单任务重试共用同一权威快照（重试沿用原轮绑定，不自造身份）。
+    binding_identity_provider = build_binding_identity_provider(dao, application_version=settings.application_version)
     dispatcher = ResearchDispatcher(
         gate=gate,
         submit=_tracked_submit,
@@ -1275,10 +1309,7 @@ async def wire_agent_runtime(
         read_result=_tracked_read,
         # 生产角色能力来源：只取本次请求冻结的 Skill/MCP 显式手选集（未选择即零派发）。
         capability_provider=build_role_capability_provider(dao),
-        # 生产应用轮次绑定来源：冻结会话/输入版/执行代次，父 workflow 据此建轮次。
-        binding_identity_provider=build_binding_identity_provider(
-            dao, application_version=settings.application_version
-        ),
+        binding_identity_provider=binding_identity_provider,
     )
     fact_sink = (
         _LaunchedCloseFactSink(ledger=ledger, dao=dao, user_scope=user_scope)
@@ -1304,7 +1335,18 @@ async def wire_agent_runtime(
     #: 答复投递（P1-05）：已 launch 宿主复用同一 DBOS client 投递答复消息；
     #: 未 launch（零 workflow）不注入发送器 → facade 交付 fail-closed 拒绝。
     answer_sender = _NativeAnswerSender(client=handle.client, gate=gate, port_io=port_io) if launched else None
-    facade = AgentService(dao, usage_dao, dispatcher=dispatcher, skills=skills, answer_sender=answer_sender)
+    #: 单任务重试投递（W-01）：复用同一派发门闩与受管投递端口；未 launch 时门闩
+    #: 恒关，重试命令只落库并如实标零派发（不伪造已重跑）。
+    retry_launcher = _NativeRetryLauncher(gate=gate, submit=_tracked_submit)
+    facade = AgentService(
+        dao,
+        usage_dao,
+        dispatcher=dispatcher,
+        skills=skills,
+        answer_sender=answer_sender,
+        retry_launcher=retry_launcher,
+        retry_binding_identity_provider=binding_identity_provider,
+    )
     # 主回合生产构造：注入受治理模型回合工厂（复用 agent_research 场景路由/模型桥）；
     # 构造期零外发，路由不可用/缺配置时回合 fail-closed 并如实报错。
     turn_factory = (lambda _request: main_turn_turn) if main_turn_turn is not None else build_governed_turn_factory()
