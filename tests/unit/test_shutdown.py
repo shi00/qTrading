@@ -61,21 +61,22 @@ class TestCleanupSteps:
 
     def test_steps_defined(self):
         # D02-F02：processor worker 收敛（Step 3）与异步 engine dispose（Step 3b）拆分，
-        # 使 Recorder 最终落账可在两者之间执行；静态步骤由 10 项增至 11 项。
-        assert len(_CLEANUP_STEPS) == 11
+        # 使 Recorder 最终落账可在两者之间执行；D1-03 在两者之间加入 Step 3a 释放所有权锁。
+        assert len(_CLEANUP_STEPS) == 12
         assert _CLEANUP_STEPS[0][0] == "Step 0"
         assert _CLEANUP_STEPS[0][1] == "_step0_cancel_tasks"
         assert _CLEANUP_STEPS[0][2] is True
         assert _CLEANUP_STEPS[0][3] == 6.0
         assert _CLEANUP_STEPS[3] == ("Step 3", "_step3_stop_processor_workers", True, 1.0)
-        assert _CLEANUP_STEPS[4] == ("Step 3b", "_step3b_dispose_async_engine", True, 2.0)
-        # Step 4（清 Toast）非关键、预算 1.0s；拆分后索引由 4 后移至 5
-        assert _CLEANUP_STEPS[5][2] is False
-        assert _CLEANUP_STEPS[5][3] == 1.0
+        assert _CLEANUP_STEPS[4] == ("Step 3a", "_step3a_release_ownership", False, 1.0)
+        assert _CLEANUP_STEPS[5] == ("Step 3b", "_step3b_dispose_async_engine", True, 2.0)
+        # Step 4（清 Toast）非关键、预算 1.0s；拆分后索引由 4 后移至 6
+        assert _CLEANUP_STEPS[6][2] is False
+        assert _CLEANUP_STEPS[6][3] == 1.0
         # N3-3: Step 5b 紧跟 Step 5（新闻情绪打分子进程清理，预算 2.0s）
-        assert _CLEANUP_STEPS[7] == ("Step 5b", "_step5b_stop_sentiment_scorer", True, 2.0)
-        assert _CLEANUP_STEPS[8][0] == "Step 6"
-        assert _CLEANUP_STEPS[10][0] == "Step 8"
+        assert _CLEANUP_STEPS[8] == ("Step 5b", "_step5b_stop_sentiment_scorer", True, 2.0)
+        assert _CLEANUP_STEPS[9][0] == "Step 6"
+        assert _CLEANUP_STEPS[11][0] == "Step 8"
 
     def test_each_step_has_timeout(self):
         """ASYNC-004/005: Each cleanup step has its own timeout."""
@@ -482,6 +483,24 @@ class TestShutdownCoordinatorCleanupSteps:
             await coord._step3_stop_processor_workers()
             mock_instance.stop.assert_awaited_once()
             mock_instance.cache.close.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_step3a_release_ownership_no_instance(self):
+        """TaskManager 未初始化时无所有权锁可释放（不得为清理创建单例）。"""
+        coord = ShutdownCoordinator()
+        with patch("services.task_manager.TaskManager") as mock_tm:
+            mock_tm._instance = None
+            await coord._step3a_release_ownership()
+
+    @pytest.mark.asyncio
+    async def test_step3a_releases_ownership_async(self):
+        coord = ShutdownCoordinator()
+        instance = MagicMock()
+        instance.release_ownership_async = AsyncMock()
+        with patch("services.task_manager.TaskManager") as mock_tm:
+            mock_tm._instance = instance
+            await coord._step3a_release_ownership()
+        instance.release_ownership_async.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_step3b_dispose_async_engine_no_instance(self):
@@ -1213,15 +1232,17 @@ class TestShutdownStepOrdering:
     """验证 _CLEANUP_STEPS 中关键步骤的执行顺序约束 (防数据丢失)。"""
 
     def test_flush_db_before_stop_processor_before_engine_dispose(self):
-        """flush_db_writes → 停止 processor worker → dispose 异步 engine 的顺序约束。"""
+        """flush_db_writes → 停止 processor worker → 释放所有权 → dispose 异步 engine 的顺序约束。"""
         indices: dict[str, int] = {}
         for i, (_name, method_name, _critical, _timeout) in enumerate(_CLEANUP_STEPS):
             indices[method_name] = i
         assert "_step2_flush_db_writes" in indices
         assert "_step3_stop_processor_workers" in indices
+        assert "_step3a_release_ownership" in indices
         assert "_step3b_dispose_async_engine" in indices
         assert indices["_step2_flush_db_writes"] < indices["_step3_stop_processor_workers"]
-        assert indices["_step3_stop_processor_workers"] < indices["_step3b_dispose_async_engine"]
+        assert indices["_step3_stop_processor_workers"] < indices["_step3a_release_ownership"]
+        assert indices["_step3a_release_ownership"] < indices["_step3b_dispose_async_engine"]
 
     def test_cancel_tasks_is_first_step(self):
         assert _CLEANUP_STEPS[0][1] == "_step0_cancel_tasks"
@@ -1234,7 +1255,7 @@ class TestShutdownStepOrdering:
 
     def test_step3_stop_and_step3b_dispose_are_split(self):
         assert _CLEANUP_STEPS[3][1] == "_step3_stop_processor_workers"
-        assert _CLEANUP_STEPS[4][1] == "_step3b_dispose_async_engine"
+        assert _CLEANUP_STEPS[5][1] == "_step3b_dispose_async_engine"
 
 
 class TestUsageRecorderShutdownOrder:
@@ -1244,6 +1265,7 @@ class TestUsageRecorderShutdownOrder:
         "_step0_cancel_tasks",
         "_step1_stop_services",
         "_step2_flush_db_writes",
+        "_step3a_release_ownership",
         "_step4_clear_toast",
         "_step5_unload_ai_model",
         "_step5b_stop_sentiment_scorer",
@@ -1335,14 +1357,16 @@ class TestUsageRecorderShutdownOrder:
             mock_dp._instance = processor
             results = await coord._run_cleanup_steps(step_timeout_s=2.0)
 
-        assert len(results) == 12
+        assert len(results) == 13
         assert events.index("stop-processor") < events.index("dispose-engine")
         settle_indices = [i for i, event in enumerate(events) if event.startswith("settle:")]
         assert len(settle_indices) == 2
-        # 生产停止（Step 0~2 + processor worker stop）→ Recorder 落账 → engine dispose → 同步 engine/PG
+        # 生产停止（Step 0~2 + processor worker stop）→ Recorder 落账 → 释放所有权锁 →
+        # engine dispose → 同步 engine/PG
         assert events.index("_step2_flush_db_writes") < events.index("stop-processor")
         assert events.index("stop-processor") < min(settle_indices)
-        assert max(settle_indices) < events.index("dispose-engine")
+        assert max(settle_indices) < events.index("_step3a_release_ownership")
+        assert events.index("_step3a_release_ownership") < events.index("dispose-engine")
         assert events.index("dispose-engine") < events.index("_step7_close_database_managers")
         assert events.index("dispose-engine") < events.index("_step8_stop_embedded_postgres")
 
@@ -1503,8 +1527,8 @@ class TestRunCleanupStepsDeep:
         coord._step8_stop_embedded_postgres = step_ok
 
         results = await coord._run_cleanup_steps(step_timeout_s=2.0)
-        # 11 个静态步骤全部执行
-        assert len(results) == 11
+        # 12 个静态步骤全部执行
+        assert len(results) == 12
         # Step 0 失败但其余执行
         assert results[0].ok is False
         assert results[0].critical is True
@@ -1562,7 +1586,7 @@ class TestRunCleanupStepsDeep:
         # step_timeout_s=0.5 远小于各 step 的 default（1.0~35.0，Step 8=35.0）
         # M13: 更新注释 — Step 8 加入后 default 上限由 5.0 提升至 35.0
         results = await coord._run_cleanup_steps(step_timeout_s=0.5)
-        assert len(results) == 11
+        assert len(results) == 12
         # 全部成功（mock step 立即返回，不超时）
         for r in results:
             assert r.ok is True
@@ -1841,6 +1865,7 @@ class TestStep8FailureAggregation:
         "_step1_stop_services",
         "_step2_flush_db_writes",
         "_step3_stop_processor_workers",
+        "_step3a_release_ownership",
         "_step3b_dispose_async_engine",
         "_step4_clear_toast",
         "_step5_unload_ai_model",
@@ -1954,6 +1979,7 @@ class TestDynamicCleanupCallbacks:
         "_step1_stop_services",
         "_step2_flush_db_writes",
         "_step3_stop_processor_workers",
+        "_step3a_release_ownership",
         "_step3b_dispose_async_engine",
         "_step4_clear_toast",
         "_step5_unload_ai_model",
@@ -1985,10 +2011,12 @@ class TestDynamicCleanupCallbacks:
         coord.register_cleanup_callback("usage recorder final flush", recorder_close, critical=True, timeout_s=5.0)
 
         results = await coord._run_cleanup_steps(step_timeout_s=2.0)
-        # 11 个静态步骤 + 1 个动态回调
-        assert len(results) == 12
+        # 12 个静态步骤 + 1 个动态回调
+        assert len(results) == 13
         assert call_log.index("_step3_stop_processor_workers") < call_log.index("dyn-recorder-close")
-        assert call_log.index("dyn-recorder-close") < call_log.index("_step3b_dispose_async_engine")
+        # D1-03：最终落账仍持有所有权锁，释放发生在其后、engine dispose 之前
+        assert call_log.index("dyn-recorder-close") < call_log.index("_step3a_release_ownership")
+        assert call_log.index("_step3a_release_ownership") < call_log.index("_step3b_dispose_async_engine")
 
     @pytest.mark.asyncio
     async def test_dynamic_callbacks_execute_in_registration_order(self):
@@ -2019,7 +2047,7 @@ class TestDynamicCleanupCallbacks:
         coord.register_cleanup_callback("dyn-sync", lambda: call_log.append("dyn-sync"), critical=True, timeout_s=5.0)
 
         results = await coord._run_cleanup_steps(step_timeout_s=2.0)
-        assert len(results) == 12
+        assert len(results) == 13
         assert "dyn-sync" in call_log
         sync_result = next(r for r in results if r.name == "dyn-sync")
         assert sync_result.ok is True
@@ -2032,7 +2060,7 @@ class TestDynamicCleanupCallbacks:
         self._stub_steps(coord, call_log)
 
         results = await coord._run_cleanup_steps(step_timeout_s=2.0)
-        assert len(results) == 11
+        assert len(results) == 12
         assert coord._dynamic_cleanup_callbacks == []
 
     @pytest.mark.asyncio
@@ -2048,7 +2076,7 @@ class TestDynamicCleanupCallbacks:
         coord.register_cleanup_callback("usage recorder final flush", failing_close, critical=True, timeout_s=5.0)
 
         results = await coord._run_cleanup_steps(step_timeout_s=2.0)
-        assert len(results) == 12
+        assert len(results) == 13
         dyn_result = next(r for r in results if r.name == "usage recorder final flush")
         assert dyn_result.ok is False
         assert dyn_result.critical is True
