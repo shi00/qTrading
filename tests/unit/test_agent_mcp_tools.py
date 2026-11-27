@@ -622,12 +622,18 @@ class TestDispatchEffects:
         task = asyncio.create_task(dispatcher.call(_request()))
         await session.entered.wait()
         task.cancel()
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as cancelled:
             await task
+        assert cancelled.type is asyncio.CancelledError
+        # 取消即后效未知：归属保留，不被取消抹除（I53）；故不属于「执行中」，断开可继续。
+        assert manager.in_flight_operations(_IDENTITY) == ("op-1",)
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError) as close_error:
             await manager.disconnect(_IDENTITY)
+        assert type(close_error.value) is RuntimeError
+        assert str(close_error.value) == "close failed"
 
+        # 关闭未确认：归属仍保留，不得伪装该 operation 已结束（I17/I53）。
         assert manager.in_flight_operations(_IDENTITY) == ("op-1",)
 
     @pytest.mark.asyncio
