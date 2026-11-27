@@ -7,7 +7,7 @@ from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 import pandas as pd
 
 from core.i18n import Message
-from data.sync.financial import FinancialSyncStrategy
+from data.sync.financial import FinancialSyncStrategy, _status_data_date
 from data.sync.base import SyncResult, SyncStatus
 from data.persistence.daos.base_dao import EngineDisposedError
 from utils.time_utils import get_now
@@ -2467,7 +2467,7 @@ class TestFinancialSyncIncrementalWindowBasis:
 
     @pytest.mark.asyncio
     async def test_window_falls_back_to_last_sync_date_when_no_data_date(self):
-        """last_data_date 缺失（存量记录 / 旧版本写入）时回退 last_sync_date，保持旧行为。"""
+        """存量记录（旧版本未写 last_data_date、无状态判定字段）保留 last_sync_date 回退。"""
         ctx = make_ctx()
         now = get_now()
         ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": now})
@@ -2477,6 +2477,39 @@ class TestFinancialSyncIncrementalWindowBasis:
         assert result is not None
         # 回退 last_sync_date=今天 → 窗口为空（今天+1 > 今天）→ 早返回
         ctx.api.get_disclosure_date.assert_not_awaited()
+
+
+class TestStatusDataDateWatermark:
+    """D2-02：失败/取消/权限跳过/部分完成/未确认空返回不得回退 last_sync_date 当水位。"""
+
+    def test_reads_confirmed_last_data_date(self):
+        assert _status_data_date(
+            {"last_data_date": datetime.date(2024, 6, 1), "last_sync_date": datetime.date(2024, 6, 3)}
+        ) == datetime.date(2024, 6, 1)
+
+    def test_non_confirmed_status_does_not_fall_back_to_attempt_date(self):
+        for status in (
+            "failed",
+            "fetch_failed",
+            "save_failed",
+            "partial",
+            "cancelled",
+            "skipped_permission",
+            "empty",
+            "permission_denied",
+            "error",
+        ):
+            assert _status_data_date({"status": status, "last_sync_date": datetime.datetime(2024, 6, 1)}) is None, (
+                status
+            )
+
+    def test_missing_or_na_last_data_date_for_non_confirmed_status_returns_none(self):
+        assert (
+            _status_data_date({"status": "cancelled", "last_data_date": pd.NaT, "last_sync_date": "20240601"}) is None
+        )
+
+    def test_legacy_record_without_status_keeps_fallback(self):
+        assert _status_data_date({"last_sync_date": datetime.datetime(2024, 6, 1)}) == datetime.date(2024, 6, 1)
 
 
 class _FakeAppStateStore:
