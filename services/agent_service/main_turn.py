@@ -17,8 +17,9 @@
   :func:`plan_spec_from_proposal` 生成 ``PlanSpecProposal``（可执行节点表）。
   两者共用同一份步骤内容，不把可读步骤直接冒充可执行节点表。
 - **角色能力来源**：只复用本次请求已冻结的 Skill/MCP 显式手选集
-  （:func:`derive_frozen_selection_policy`），不新增角色能力配置表；未选择
-  视为空集并 fail-closed（``None``），不得解释为「全部允许」。
+  （:func:`derive_frozen_selection_policy`），不新增角色能力配置表；角色已选定但
+  未勾选 Skill/MCP 是**已核准的零能力集**（纯内部资料分析可执行），角色缺失/歧义
+  才是未知并 fail-closed（``None``），均不得解释为「全部允许」。
 - **如实拒绝**：计划来源/能力来源/受理事实任一不可得即零派发；``CancelledError``
   原样传播（R2），其余异常只记录脱敏原因，不伪造已派发（R21）。
 """
@@ -210,19 +211,27 @@ def _source_refs(section: Mapping[str, Any]) -> tuple[SourceVersionRef, ...]:
 
 
 def derive_frozen_selection_policy(manifest_payload: str) -> FrozenSelectionPolicy | None:
-    """冻结 manifest → 角色能力策略；不可判定/空手选集合返回 ``None``（fail-closed）。
+    """冻结 manifest → 角色能力策略；不可判定返回 ``None``（fail-closed）。
 
     - 角色：``role_prompt_refs`` 必须恰好一项（读计划步骤不含角色字段，多个角色
       无法无歧义映射，按不可判定处理）；
     - 能力：``skill_refs`` 每项生成 ``skill:<id>@<version>``，``mcp_scope_digest``
       非空时生成 ``mcp_scope:<digest>``；
-    - 能力集为空 = 用户未显式手选任何 Skill/MCP：返回 ``None``，**不得**把「未
-      选择」解释为全部允许（契约 §6 默认拒绝）。
+    - **显式零能力**：角色已选定且冻结段携带 ``skill_refs`` 键、其值为空（且无 MCP
+      摘要），是用户明确核准的「零外部能力集」（``frozenset()``），返回空能力策略
+      而非 ``None``——纯内部资料分析节点（``capabilities=()``）可执行，不得因未
+      勾选 Skill/MCP 阻断；
+    - **策略缺失未知**：缺少角色、角色歧义，或冻结段缺少 ``skill_refs`` 键（无法
+      区分「显式零选择」与「未填写」）时返回 ``None``，由调用方零派发；不得把未知
+      或空能力解释为全部允许（契约 §6 默认拒绝，R21）。
     """
 
     section = _frozen_section(_manifest_object(manifest_payload))
     roles = _ref_pairs(section.get("role_prompt_refs"), "$.manifest_payload.role_prompt_refs")
     if len(roles) != 1:
+        return None
+    if "skill_refs" not in section:
+        # 无法区分「用户显式未选择」与「该字段缺失」：按未知处理，不猜零能力。
         return None
     capabilities = {
         f"skill:{skill_id}@{version}"
@@ -231,8 +240,6 @@ def derive_frozen_selection_policy(manifest_payload: str) -> FrozenSelectionPoli
     digest = section.get("mcp_scope_digest")
     if isinstance(digest, str) and digest:
         capabilities.add(f"mcp_scope:{digest}")
-    if not capabilities:
-        return None
     return FrozenSelectionPolicy(
         role_key=roles[0][0],
         capabilities=frozenset(capabilities),
@@ -375,8 +382,9 @@ def build_plan_spec_provider(dao: _ManifestReader, proposals: _PlanProposalReade
     - 显式 ``plan_ref``（「开始这份计划」）→ 已确认计划版 → 可执行节点表；
     - ``plan_source=auto``（执行模式首问）→ 本执行当前计划版（主回合已保存且经
       ``decode_plan_proposal`` 严格校验）→ 可执行节点表；无保存版即不可得；
-    - 角色/能力仍只取冻结手选集（``derive_frozen_selection_policy``），未选择即
-      不可得；其余形状一律返回 ``None``（派发侧据此 ``PLAN_UNAVAILABLE`` 零派发）。
+    - 角色/能力仍只取冻结手选集（``derive_frozen_selection_policy``）：角色缺失/
+      歧义即不可得（``None``）；已选定角色的零能力是已核准空集，可映射纯分析节点；
+      其余形状一律返回 ``None``（派发侧据此 ``PLAN_UNAVAILABLE`` 零派发）。
     """
 
     reader: _PlanProposalReader = proposals if proposals is not None else cast(_PlanProposalReader, dao)
@@ -412,7 +420,7 @@ def build_plan_spec_provider(dao: _ManifestReader, proposals: _PlanProposalReade
 
 
 def build_role_capability_provider(dao: _ManifestReader) -> RoleCapabilityProvider:
-    """生产角色能力来源：只取本次请求冻结的 Skill/MCP 手选集合。"""
+    """生产角色能力来源：只取本次请求冻结的 Skill/MCP 手选集合（零能力即空集）。"""
 
     async def _provide(user_scope: str, execution_id: str) -> Mapping[str, frozenset[str]] | None:
         manifest = await dao.read_authoritative_manifest(user_scope=user_scope, execution_id=execution_id)
@@ -705,8 +713,9 @@ class MainTurnIntake:
         """首问：必要时新建会话，冻结本次手选集合后受理。
 
         讨论/计划零研究派发；执行模式受理后先产出计划再派发。``role_prompt_refs``
-        / ``skill_refs`` / ``mcp_selection`` 为本次显式手选集（未选择即空集，
-        能力来源据此 fail-closed；不由本入口补默认角色/能力）。``revise_*`` 为
+        / ``skill_refs`` / ``mcp_selection`` 为本次显式手选集。角色已选定且三者无
+        Skill/MCP 时是已核准的零能力集（纯分析可执行）；角色缺失/歧义才是未知，
+        由能力来源 fail-closed（``None``）；不由本入口补默认角色/能力。
         可选修订声明：仅编辑并重发旧问题时声明，随新意图在同一受理事务内原子
         切换因果头（不覆盖原消息历史）；缺省表示普通新问题。
 
@@ -862,7 +871,8 @@ class MainTurnIntake:
         if runner is None:
             return replace(result, dispatch=self._plan_unavailable(result, cause="main_turn_not_wired"))
         if derive_frozen_selection_policy(manifest) is None:
-            # 未手选角色/Skills/MCP：无派发准入判据，先如实零派发（不耗模型、不猜授权）。
+            # 角色缺失/歧义（策略未知）：无派发准入判据，先如实零派发（不耗模型、不猜授权）。
+            # 已选定角色但未勾选 Skill/MCP 是已核准空能力，不在此拦截（纯分析可执行）。
             return replace(result, dispatch=self._plan_unavailable(result, cause="role_policy_missing"))
         identity = self._main_turn_identity(session_id, result.receipt, manifest=manifest)
         clarification_answers: tuple[ClarificationAnswerFact, ...] = ()
