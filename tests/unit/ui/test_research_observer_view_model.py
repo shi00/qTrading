@@ -2806,6 +2806,20 @@ class _SkillAssignmentService(_FakeService):
         return self.assignment
 
 
+class _BlockingSkillService(_FakeService):
+    """授权读取可挂起的 facade 替身：用于验证授权读取窗口内的并发首问不重复受理。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def read_role_skill_assignment(self, *, user_scope: str, role_id: str, role_version: str) -> Any:
+        self.started.set()
+        await self.release.wait()
+        return None
+
+
 class _SkillIntake(_FakeIntake):
     """记录首问实际下发的 Skill 手选集合。"""
 
@@ -2866,7 +2880,10 @@ class TestRoleCatalogAndSkillScope:
         await vm.load_model_selection()
 
         assert vm.state.role_catalog_error_key == "agent_research_role_catalog_error"
-        assert vm.state.role_option("main") is not None
+        main_option = vm.state.role_option("main")
+        assert main_option is not None
+        assert (main_option.role_key, main_option.eligible, main_option.reject_key) == ("main", True, None)
+        assert main_option.version == _main_role_version()
 
     @pytest.mark.asyncio
     async def test_skill_selection_passes_through_and_intersects_role_authorization(self) -> None:
@@ -2968,3 +2985,22 @@ class TestRoleCatalogAndSkillScope:
 
         assert intake.skill_calls == [()]
         assert vm.state.composer_error_key is None
+
+    @pytest.mark.asyncio
+    async def test_concurrent_send_does_not_dispatch_twice_during_authorization_read(self) -> None:
+        """授权读取窗口内再次发送被 pending 拦住，不重复受理（重入保护）。"""
+
+        service = _BlockingSkillService()
+        intake = _SkillIntake()
+        vm = ResearchObserverViewModel(service, intake=intake)
+        await vm.load_model_selection()
+        vm.set_composer_text("研究银行股")
+
+        first = asyncio.create_task(vm.send_first_question())
+        await asyncio.wait_for(service.started.wait(), timeout=2)
+        second = asyncio.create_task(vm.send_first_question())
+        await second  # pending 已置位：第二次直接返回，不进入受理
+        service.release.set()
+        await first
+
+        assert intake.skill_calls == [()]
