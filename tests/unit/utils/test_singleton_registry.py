@@ -460,3 +460,50 @@ class TestAtexitCleanupAll:
         assert call_order == ["third", "second", "first"]
 
         self._cleanup(DummyFirst, DummySecond, DummyThird)
+
+    def test_flagged_last_singleton_cleans_up_after_all_others(self):
+        """D1-03：标记 ``_atexit_cleanup_last`` 的单例（PG sidecar）必须最后清理。
+
+        注册逆序会让「最后注册」最先清理；标记项固定排到末尾，保证停 PG 发生在
+        所有 DB 客户端 dispose 连接池之后（不依赖模块 import 顺序）。
+        """
+        from utils.singleton_registry import _atexit_cleanup_all, _registry, _lock
+
+        call_order = []
+
+        class DummyEarly:
+            @classmethod
+            def _atexit_cleanup(cls):
+                call_order.append("early")
+
+        class DummyLate:
+            _atexit_cleanup_last = True
+
+            @classmethod
+            def _atexit_cleanup(cls):
+                call_order.append("late")
+
+        class DummyLateSecond:
+            _atexit_cleanup_last = True
+
+            @classmethod
+            def _atexit_cleanup(cls):
+                call_order.append("late-second")
+
+        # 标记项先注册（逆序本应最先清理），未标记项后注册
+        with _lock:
+            _registry.append(DummyLate)
+            _registry.append(DummyLateSecond)
+            _registry.append(DummyEarly)
+
+        _atexit_cleanup_all()
+
+        assert call_order == ["early", "late-second", "late"]
+
+        self._cleanup(DummyEarly, DummyLate, DummyLateSecond)
+
+    def test_embedded_postgres_service_is_flagged_to_clean_up_last(self):
+        """D1-03：EmbeddedPostgresService 必须排在所有 DB 客户端单例之后关闭。"""
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        assert getattr(EmbeddedPostgresService, "_atexit_cleanup_last", False) is True

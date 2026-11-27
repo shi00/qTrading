@@ -8,7 +8,9 @@
 
 设计要点：
 - ``@register_singleton`` 协议：``_reset_singleton`` + ``_atexit_cleanup``
-- atexit 反序清理：本单例必须在 CacheManager 之后注册（先停 sidecar 再 dispose engine）
+- atexit 清理顺序：``_atexit_cleanup_last = True`` 使本单例排在所有 DB 客户端之后停止
+  （先 dispose 连接池/引擎，再停 sidecar/PG；D1-03 由 singleton_registry 显式分层保证，
+  不依赖模块 import 顺序）
 - ``asyncio.to_thread`` 包装同步 Popen/wait，避免阻塞事件循环（R16）
 - ``--parent-pid`` 传递：Python 崩溃时 sidecar 自走 graceful stop 兜底
 - stderr 重定向到 ``sidecar.stderr.log`` 二次归档（panic hook 输出在此）
@@ -381,6 +383,10 @@ class EmbeddedPostgresService:
 
     _instance: EmbeddedPostgresService | None = None
     _lock = threading.RLock()
+    # D1-03：atexit 兜底必须最后停 sidecar/PG——其余 DB 客户端（CacheManager 等）需要
+    # 先 dispose 自己的连接池；否则 PG 先停会让连接失效、dispose 报错。由
+    # ``utils.singleton_registry._atexit_cleanup_order`` 读取，不依赖 import 顺序。
+    _atexit_cleanup_last = True
 
     def __new__(cls, *args: object, **kwargs: object) -> EmbeddedPostgresService:
         with cls._lock:
