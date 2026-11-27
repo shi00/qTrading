@@ -308,18 +308,27 @@ async def _answer(
             expected_decision_revision=1,
             expected_execution_id=execution_id,
             expected_round_id=round_id,
-            answer_payload=json_doc({"schema_version": 1, "approve": approve}),
+            # 答复必须满足保存决定时的原问题 schema（仅 approve，无额外键）。
+            answer_payload=json_doc({"approve": approve}),
         )
     )
     await dao.consume_answer(ConsumeAnswerRequest(user_scope="u1", command_record_id=receipt.command_record_id))
     coordinator.notify_consumed(decision_id)
 
 
-async def _operation(dao: AgentDao, operation_id: str) -> AgentOperation:
+async def _operation(dao: AgentDao, operation_id: str) -> Any:
+    """按 operation_id 读三态列（显式列而非整行：Core 连接不返回 ORM 实体）。"""
+
     async with dao.engine.connect() as conn:  # type: ignore[union-attr]
         return (
-            await conn.execute(sa.select(AgentOperation).where(AgentOperation.operation_id == operation_id))
-        ).scalar_one()
+            await conn.execute(
+                sa.select(
+                    AgentOperation.phase,
+                    AgentOperation.effect_state,
+                    AgentOperation.io_state,
+                ).where(AgentOperation.operation_id == operation_id)
+            )
+        ).one()
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -398,7 +407,7 @@ async def test_approval_dispatches_once_and_replay_is_not_resent(real_embedded_p
     first = await asyncio.wait_for(task, timeout=5)
 
     assert first.state is ToolCallState.COMPLETED
-    assert len(session.calls) == 1
+    assert session.calls == [("search", {"query": "x"}, 5)]
     operation = await _operation(dao, first.operation_id or "")
     assert operation.phase == "result_saved"
 
@@ -408,7 +417,7 @@ async def test_approval_dispatches_once_and_replay_is_not_resent(real_embedded_p
     )
 
     assert replay.state is ToolCallState.UNKNOWN
-    assert len(session.calls) == 1
+    assert session.calls == [("search", {"query": "x"}, 5)]
     after = await _operation(dao, replay.operation_id or "")
     assert after.phase == "result_saved"
 
@@ -432,7 +441,7 @@ async def test_revocation_after_grant_denies_with_permission_revoked(real_embedd
             expected_decision_revision=1,
             expected_execution_id=execution_id,
             expected_round_id=round_id,
-            answer_payload=json_doc({"schema_version": 1, "approve": True}),
+            answer_payload=json_doc({"approve": True}),
         )
     )
     consumed = await dao.consume_answer(
