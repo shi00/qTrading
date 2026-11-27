@@ -16,12 +16,15 @@ import io
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import zipfile
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import IO, Any, Final
@@ -51,6 +54,7 @@ from services.agent_service.attachment_worker import (
     AttachmentParseError,
     validate_json_root,
 )
+from services.agent_service.subprocess_env import build_minimal_child_env
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
@@ -70,6 +74,8 @@ _READ_CHUNK_BYTES: Final = 64 * 1024
 _SUPERVISION_POLL_S: Final = 0.05
 #: 管道线程收尾 join 宽限（秒）：超时未退出的线程记为残留事实。
 _THREAD_JOIN_GRACE_S: Final = 2.0
+#: 附件 worker 专属空工作目录名前缀（``mkdtemp`` 追加随机后缀，天然唯一）。
+_ATTACHMENT_WORKSPACE_PREFIX: Final = "astock-attachment-worker-"
 
 _EXTENSION_KINDS: Final[dict[str, AttachmentKind]] = {
     ".txt": AttachmentKind.TXT,
@@ -195,6 +201,19 @@ def worker_command() -> tuple[str, ...]:
     if getattr(sys, "frozen", False):
         return (sys.executable, ATTACHMENT_WORKER_FLAG)
     return (sys.executable, "-m", "services.agent_service.attachment_worker")
+
+
+def _create_workspace() -> Path:
+    """本次提取专属的空临时工作目录（POSIX 权限收紧到 0o700）。
+
+    ``mkdtemp`` 天然唯一，调用方负责在提取结束（含失败/取消）后删除；目录创建失败
+    直接抛出，不静默回退到应用/用户目录。
+    """
+
+    workspace = Path(tempfile.mkdtemp(prefix=_ATTACHMENT_WORKSPACE_PREFIX))
+    with suppress(OSError):
+        os.chmod(workspace, 0o700)
+    return workspace
 
 
 @dataclass
@@ -394,56 +413,65 @@ class SubprocessAttachmentWorker:
 
         command = self._command or worker_command()
         root = Path(__file__).resolve().parents[2]
-        env = dict(os.environ)
-        env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(root), env.get("PYTHONPATH"))))
-        started = time.monotonic()
+        # 子进程不接受宿主环境副本：只给最小系统白名单 + 本模块显式决定的 PYTHONPATH，
+        # 业务/数据库/AI 凭据一律不继承（R9）。工作目录是本次提取专属的空临时目录，
+        # 解析库若要落盘也只落在受管位置，提取结束即删除。
         try:
-            process = subprocess.Popen(
-                list(command),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=str(root),
-                env=env,
-            )
+            workspace = _create_workspace()
         except OSError as exc:
-            raise AttachmentWorkerError("worker_unavailable", "attachment worker cannot be started") from exc
-        with self._lock:
-            run.process = process
-            self._active[process.pid] = process
-            cancelled_before_spawn = run.cancelled
-        if cancelled_before_spawn:
-            # 取消发生在登记之前：此处终止，避免留下无人等待的孤儿子进程。
-            self._terminate(process)
-            with self._lock:
-                self._active.pop(process.pid, None)
-            raise AttachmentWorkerError("attachment_cancelled", "attachment extraction was cancelled")
-        payload = header_bytes + b"\n" + request.data
-        # 父侧监督：worker 时限（``worker_timeout_s``）自其读完请求头起算，父侧计时含
-        # Popen/启动/回收开销，故以「worker 时限 + 余量」兜底，避免先杀仍在时限内、
-        # 已产出部分结果的 worker（I36）。
-        supervision_timeout = worker_timeout_s + self._supervision_margin_s
+            raise AttachmentWorkerError("worker_unavailable", "attachment worker workspace cannot be created") from exc
         try:
-            # 流式有界接收：超限/取消/超时立即终止子进程，不缓存完整输出后再判大小。
-            stdout = self._supervise(process, payload, worker_timeout_s, supervision_timeout, run)
-        finally:
+            env = build_minimal_child_env({"PYTHONPATH": str(root)}, temp_dir=workspace)
+            started = time.monotonic()
+            try:
+                process = subprocess.Popen(
+                    list(command),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=str(workspace),
+                    env=env,
+                )
+            except OSError as exc:
+                raise AttachmentWorkerError("worker_unavailable", "attachment worker cannot be started") from exc
             with self._lock:
-                self._active.pop(process.pid, None)
-        elapsed_s = time.monotonic() - started
-        exited = process.poll() is not None
-        if not exited:
-            self._terminate(process)
-            raise AttachmentWorkerError("worker_not_exited", "attachment worker did not exit")
-        if not stdout:
-            # 无输出时退出码才有意义：worker 正常路径恒以 0 退出（失败经 JSON ``ok:false``
-            # 上报），非 0 且无输出即启动/崩溃失败。
-            raise AttachmentWorkerError(
-                "worker_failed", f"attachment worker exited without result (exit={process.returncode})"
-            )
-        # 非 0 退出但 stdout 是完整合法结果时不额外拒绝：worker 恒以 0 退出，故本分支只
-        # 可能来自异常退出；「非 0 + 完整结果」无冻结合同，保持既有语义——以结果协议为
-        # 准，不新造错误码（I36）。
-        return self._decode_result(request, stdout, process.pid, elapsed_s)
+                run.process = process
+                self._active[process.pid] = process
+                cancelled_before_spawn = run.cancelled
+            if cancelled_before_spawn:
+                # 取消发生在登记之前：此处终止，避免留下无人等待的孤儿子进程。
+                self._terminate(process)
+                with self._lock:
+                    self._active.pop(process.pid, None)
+                raise AttachmentWorkerError("attachment_cancelled", "attachment extraction was cancelled")
+            payload = header_bytes + b"\n" + request.data
+            # 父侧监督：worker 时限（``worker_timeout_s``）自其读完请求头起算，父侧计时含
+            # Popen/启动/回收开销，故以「worker 时限 + 余量」兜底，避免先杀仍在时限内、
+            # 已产出部分结果的 worker（I36）。
+            supervision_timeout = worker_timeout_s + self._supervision_margin_s
+            try:
+                # 流式有界接收：超限/取消/超时立即终止子进程，不缓存完整输出后再判大小。
+                stdout = self._supervise(process, payload, worker_timeout_s, supervision_timeout, run)
+            finally:
+                with self._lock:
+                    self._active.pop(process.pid, None)
+            elapsed_s = time.monotonic() - started
+            exited = process.poll() is not None
+            if not exited:
+                self._terminate(process)
+                raise AttachmentWorkerError("worker_not_exited", "attachment worker did not exit")
+            if not stdout:
+                # 无输出时退出码才有意义：worker 正常路径恒以 0 退出（失败经 JSON ``ok:false``
+                # 上报），非 0 且无输出即启动/崩溃失败。
+                raise AttachmentWorkerError(
+                    "worker_failed", f"attachment worker exited without result (exit={process.returncode})"
+                )
+            # 非 0 退出但 stdout 是完整合法结果时不额外拒绝：worker 恒以 0 退出，故本分支只
+            # 可能来自异常退出；「非 0 + 完整结果」无冻结合同，保持既有语义——以结果协议为
+            # 准，不新造错误码（I36）。
+            return self._decode_result(request, stdout, process.pid, elapsed_s)
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
 
     def _build_worker_header(self, request: AttachmentExtractionRequest, worker_timeout_s: float) -> bytes:
         """构造 worker 请求头字节（不含 framing 换行与 payload）。
