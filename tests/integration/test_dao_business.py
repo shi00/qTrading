@@ -1686,8 +1686,8 @@ class TestSyncDao:
         result = await sync_dao.get_sync_status(table_name="daily_quotes")
         assert result["last_result_status"] == SYNC_RESULT_SAVE_FAILED
 
-    async def test_sync_status_empty_status_updates_date(self, sync_dao, clean_db):
-        """empty 状态应更新 last_data_date 和 record_count"""
+    async def test_sync_status_empty_status_does_not_advance_watermark(self, sync_dao, clean_db):
+        """D2-02: empty（收盘前未出数/无权限空返回）不得推进 last_data_date 或覆写历史 record_count。"""
         await sync_dao.update_sync_status(
             table_name="daily_quotes",
             last_data_date=_RECENT_DATE,
@@ -1703,9 +1703,23 @@ class TestSyncDao:
         )
 
         result = await sync_dao.get_sync_status(table_name="daily_quotes")
-        assert result["last_data_date"] == _TODAY
-        assert result["record_count"] == 0
+        assert result["last_data_date"] == _RECENT_DATE
+        assert result["record_count"] == 5000
         assert result["status"] == "empty"
+        assert result["last_sync_date"] == _TODAY
+
+    async def test_sync_status_failed_first_insert_has_null_watermark(self, sync_dao, clean_db):
+        """D2-02: 非成功态首插只记最近尝试日，last_data_date 为 NULL。"""
+        await sync_dao.update_sync_status(
+            table_name="moneyflow_daily",
+            last_data_date=_RECENT_DATE,
+            record_count=0,
+            status="fetch_failed",
+        )
+
+        result = await sync_dao.get_sync_status(table_name="moneyflow_daily")
+        assert result["last_data_date"] is pd.NaT or result["last_data_date"] is None
+        assert result["last_sync_date"] == _RECENT_DATE
 
 
 class TestScreenerDaoDynamicCols:

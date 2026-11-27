@@ -397,22 +397,36 @@ class DeliveryCommandService:
         try:
             await self._run_blocking(verify_delivery_readback, fields, rendered.content, command.format)
         except DeliveryRenderError as exc:
-            return self._failed(base, context, rendered=rendered, phase="staged", error_code=exc.code)
+            # 校验失败且仍是暂存阶段：发布未认领，writer 即将退出，安全清理本交付暂存。
+            cleaned = await self._discard(staged)
+            return self._failed(
+                base,
+                context,
+                rendered=rendered,
+                phase="staged",
+                error_code=exc.code,
+                staged_cleaned=cleaned,
+            )
 
-        validated = await self._save(
-            base.build(
-                phase="validated",
-                source_state=verification.aggregate,
-                verified_at=self._clock(),
-                output_digest=digest,
-                output_bytes=size,
-                staged_path=str(staged.path),
-                staged_identity=(staged.volume_serial, staged.file_id),
-            ),
-            user_scope=user_scope,
-            context=context,
-            expected_revision=revision,
-        )
+        try:
+            validated = await self._save(
+                base.build(
+                    phase="validated",
+                    source_state=verification.aggregate,
+                    verified_at=self._clock(),
+                    output_digest=digest,
+                    output_bytes=size,
+                    staged_path=str(staged.path),
+                    staged_identity=(staged.volume_serial, staged.file_id),
+                ),
+                user_scope=user_scope,
+                context=context,
+                expected_revision=revision,
+            )
+        except AgentServiceError:
+            # 推进到 validated 失败：确定尚未认领发布，清理暂存后原样上抛。
+            await self._discard(staged)
+            raise
         revision = validated.revision
 
         if cancel_requested is not None and cancel_requested():
@@ -445,21 +459,27 @@ class DeliveryCommandService:
         try:
             claimed_state = await self._read_current_source_state(read, context, user_scope=user_scope)
         except AgentServiceError as exc:
+            # 发布前新鲜核定失败：尚未认领发布，清理暂存后报告可确证失败。
+            cleaned = await self._discard(staged)
             return self._failed(
                 base,
                 context,
                 rendered=rendered,
                 phase="validated",
                 error_code=f"{_SOURCE_RECHECK_FAILED}:{exc.code}",
+                staged_cleaned=cleaned,
             )
         if claimed_state != verification:
             # 阶段机不允许 validated 后回写已验证输出摘要；发布旧状态文件即伪当前状态。
+            # 此时仍未认领发布，暂存不再有交付价值，安全清理。
+            cleaned = await self._discard(staged)
             return self._failed(
                 base,
                 context,
                 rendered=rendered,
                 phase="validated",
                 error_code=_SOURCE_STATE_CHANGED,
+                staged_cleaned=cleaned,
             )
 
         try:
@@ -694,10 +714,13 @@ class DeliveryCommandService:
         expected_revision: int,
         error_code: str,
     ) -> DeliveryOutcome:
-        """发布效果不可确证：落 ``unknown`` 并禁止重试，不用失败/取消伪装。
+        """发布效果不可确证（commit_unknown）：落 ``unknown`` 并禁止重试，不用失败/取消伪装。
 
         ``unknown`` 记录暂存路径与句柄身份：中断后只能按原 manifest 核对该暂存
         文件，不从当前表单重推、不盲目再覆盖；缺证时也不得改写成失败/成功。
+        提交结果未知时**保留暂存与恢复事实，严禁盲删**（与 known-technical-debt
+        的续接契约对齐）；只有「确定未提交 ``publish_claimed`` 且 writer 已退出」
+        的可确证失败才清理暂存。
         """
 
         await self._save(

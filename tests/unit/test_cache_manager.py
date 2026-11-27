@@ -917,6 +917,200 @@ class TestCacheManagerCheckComprehensiveHealth:
         assert stats["fresh_ratio"] == 0.0
 
     @pytest.mark.asyncio
+    async def test_health_check_sw_industry_classify_as_global(self):
+        """D2-12：sw_industry_classify 为无 ts_code 的全局快照，按 global 检查存在性，
+        不得执行 count(DISTINCT ts_code)（原实现会抛 UndefinedColumnError 并计为缺失表）。"""
+        mgr = _make_mgr()
+        mgr.stock_dao.get_active_stock_count = AsyncMock(return_value=100)
+        mgr.quote_dao.get_date_range = AsyncMock(return_value=(None, None))
+
+        mock_conn = self._make_health_conn()
+        mock_engine_ctx, _ = _make_async_engine_ctx(mock_conn)
+        mgr.engine = MagicMock()
+        mgr.engine.connect = MagicMock(return_value=mock_engine_ctx)
+
+        with (
+            patch.object(CacheManager, "wait_for_maintenance", new_callable=AsyncMock),
+            patch(
+                "data.cache.cache_manager.TABLE_DEFINITIONS",
+                {
+                    "sw_industry_classify": {
+                        "type": "global",
+                        "quality_config": {"monitor": True},
+                        "sync_config": {"keys": ["index_code", "sw_level"]},
+                    },
+                },
+            ),
+        ):
+            result = await mgr.check_comprehensive_health()
+
+        stats = result["tables"]["sw_industry_classify"]
+        assert stats["type"] == "global"
+        assert stats["covered"] == 50
+        assert stats["ratio"] == 1.0
+        assert stats["fresh_ratio"] is None
+        # 仅一条 count(*) 查询；不得触发 distinct(ts_code) 探测
+        assert mock_conn.execute.await_count == 1
+        sql = str(mock_conn.execute.await_args.args[0])
+        assert "ts_code" not in sql
+        assert "distinct" not in sql.lower()
+
+    @pytest.mark.asyncio
+    async def test_health_check_low_freq_dimension_uses_sync_status_freshness(self):
+        """D2-12：stock_name_history 的 ann_date 不是同步新鲜度日期，应按 sync_status
+        成功同步时点评估新鲜度（此处最近同步 → 1.0），且不探测 ann_date。"""
+        mgr = _make_mgr()
+        mgr.stock_dao.get_active_stock_count = AsyncMock(return_value=100)
+        mgr.quote_dao.get_date_range = AsyncMock(return_value=(None, None))
+
+        cnt_result = MagicMock()
+        cnt_result.scalar = MagicMock(return_value=50)
+        sync_result = MagicMock()
+        sync_result.first = MagicMock(return_value=(datetime.date.today(), "success"))
+
+        mock_conn = MagicMock()
+        mock_conn.execution_options = AsyncMock(return_value=mock_conn)
+        mock_conn.execute = AsyncMock(side_effect=[cnt_result, sync_result])
+        mock_engine_ctx, _ = _make_async_engine_ctx(mock_conn)
+        mgr.engine = MagicMock()
+        mgr.engine.connect = MagicMock(return_value=mock_engine_ctx)
+
+        with (
+            patch.object(CacheManager, "wait_for_maintenance", new_callable=AsyncMock),
+            patch(
+                "data.cache.cache_manager.TABLE_DEFINITIONS",
+                {
+                    "stock_name_history": {
+                        "quality_config": {"monitor": True, "freshness_source": "sync_status"},
+                        "sync_config": {"keys": ["ts_code", "start_date"]},
+                    },
+                },
+            ),
+        ):
+            result = await mgr.check_comprehensive_health()
+
+        stats = result["tables"]["stock_name_history"]
+        assert stats["fresh_ratio"] == 1.0
+        assert mock_conn.execute.await_count == 2
+        sqls = [str(c.args[0]) for c in mock_conn.execute.await_args_list]
+        assert any("sync_status" in s and "last_sync_date" in s for s in sqls)
+        # ann_date 不得被当作新鲜度探测列
+        assert all("ann_date" not in s for s in sqls)
+
+    @pytest.mark.asyncio
+    async def test_health_check_low_freq_dimension_without_success_reports_zero(self):
+        """D2-12：sync_status 无成功同步记录时，低频维度表新鲜度为 0.0（未证实新鲜）。"""
+        mgr = _make_mgr()
+        mgr.stock_dao.get_active_stock_count = AsyncMock(return_value=100)
+        mgr.quote_dao.get_date_range = AsyncMock(return_value=(None, None))
+
+        cnt_result = MagicMock()
+        cnt_result.scalar = MagicMock(return_value=50)
+        sync_result = MagicMock()
+        sync_result.first = MagicMock(return_value=(datetime.date.today(), "skipped_permission"))
+
+        mock_conn = MagicMock()
+        mock_conn.execution_options = AsyncMock(return_value=mock_conn)
+        mock_conn.execute = AsyncMock(side_effect=[cnt_result, sync_result])
+        mock_engine_ctx, _ = _make_async_engine_ctx(mock_conn)
+        mgr.engine = MagicMock()
+        mgr.engine.connect = MagicMock(return_value=mock_engine_ctx)
+
+        with (
+            patch.object(CacheManager, "wait_for_maintenance", new_callable=AsyncMock),
+            patch(
+                "data.cache.cache_manager.TABLE_DEFINITIONS",
+                {
+                    "stock_name_history": {
+                        "quality_config": {"monitor": True, "freshness_source": "sync_status"},
+                        "sync_config": {"keys": ["ts_code", "start_date"]},
+                    },
+                },
+            ),
+        ):
+            result = await mgr.check_comprehensive_health()
+
+        assert result["tables"]["stock_name_history"]["fresh_ratio"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_health_check_skips_missing_stock_code_column(self):
+        """D2-12：stock 类型表若无 ts_code/con_code 列，直接判 ratio=0，
+        不得发出必抛 UndefinedColumnError 的查询。"""
+        mgr = _make_mgr()
+        mgr.stock_dao.get_active_stock_count = AsyncMock(return_value=100)
+        mgr.quote_dao.get_date_range = AsyncMock(return_value=(None, None))
+
+        mock_conn = MagicMock()
+        mock_conn.execution_options = AsyncMock(return_value=mock_conn)
+        mock_conn.execute = AsyncMock()
+        mock_engine_ctx, _ = _make_async_engine_ctx(mock_conn)
+        mgr.engine = MagicMock()
+        mgr.engine.connect = MagicMock(return_value=mock_engine_ctx)
+
+        with (
+            patch.object(CacheManager, "wait_for_maintenance", new_callable=AsyncMock),
+            patch(
+                "data.cache.cache_manager.TABLE_DEFINITIONS",
+                {
+                    "trade_cal": {
+                        "type": "stock",
+                        "quality_config": {"monitor": True},
+                        "sync_config": {"keys": ["cal_date"]},
+                    },
+                },
+            ),
+        ):
+            result = await mgr.check_comprehensive_health()
+
+        stats = result["tables"]["trade_cal"]
+        assert stats["covered"] == 0
+        assert stats["ratio"] == 0.0
+        assert mock_conn.execute.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_health_check_date_candidates_filtered_by_orm_columns(self):
+        """D2-12：日期候选列先按 ORM 实际列集合过滤，不存在的列（trade_date）不得被探测；
+        repurchase 仅 end_date/ann_date 存在，应直接对 end_date 取 max。"""
+        from utils.time_utils import get_now
+
+        mgr = _make_mgr()
+        mgr.stock_dao.get_active_stock_count = AsyncMock(return_value=100)
+        mgr.quote_dao.get_date_range = AsyncMock(return_value=(None, None))
+
+        cnt_result = MagicMock()
+        cnt_result.scalar = MagicMock(return_value=50)
+        date_result = MagicMock()
+        date_result.scalar = MagicMock(return_value=get_now().date())
+
+        mock_conn = MagicMock()
+        mock_conn.execution_options = AsyncMock(return_value=mock_conn)
+        mock_conn.execute = AsyncMock(side_effect=[cnt_result, date_result])
+        mock_engine_ctx, _ = _make_async_engine_ctx(mock_conn)
+        mgr.engine = MagicMock()
+        mgr.engine.connect = MagicMock(return_value=mock_engine_ctx)
+
+        with (
+            patch.object(CacheManager, "wait_for_maintenance", new_callable=AsyncMock),
+            patch(
+                "data.cache.cache_manager.TABLE_DEFINITIONS",
+                {
+                    "repurchase": {
+                        "quality_config": {"monitor": True},
+                        # 配置了一个 repurchase 不存在的列，应被 ORM 列集合过滤掉
+                        "sync_config": {"keys": ["ts_code", "ann_date"], "date_col": "trade_date"},
+                    },
+                },
+            ),
+        ):
+            result = await mgr.check_comprehensive_health()
+
+        stats = result["tables"]["repurchase"]
+        assert stats["fresh_ratio"] == 1.0
+        sqls = [str(c.args[0]) for c in mock_conn.execute.await_args_list]
+        assert all("trade_date" not in s for s in sqls)
+        assert any("end_date" in s for s in sqls)
+
+    @pytest.mark.asyncio
     async def test_health_check_table_error(self):
         mgr = _make_mgr()
         mgr.stock_dao.get_active_stock_count = AsyncMock(return_value=100)

@@ -73,7 +73,9 @@ class _FakeResult:
 
 
 class _FakeConnection:
-    def __init__(self, *, granted: bool, exc: BaseException | None = None, close_exc: Exception | None = None) -> None:
+    def __init__(
+        self, *, granted: bool, exc: BaseException | None = None, close_exc: BaseException | None = None
+    ) -> None:
         self.granted = granted
         self.exc = exc
         self.close_exc = close_exc
@@ -118,6 +120,33 @@ class _FakeEngine:
         self.disposed = True
         if self.dispose_exc is not None:
             raise self.dispose_exc
+
+
+class _SpyLock:
+    """按 URL 记录 acquire/release 顺序的锁替身（证明切库时先释放旧锁再取新锁）。"""
+
+    instances: list[_SpyLock] = []
+
+    def __init__(self, database_url: str, *, events: list[str] | None = None, granted: bool = True) -> None:
+        self.database_url = database_url
+        self.events = events if events is not None else []
+        self.granted = granted
+        self.acquire_calls = 0
+        self.release_async_calls = 0
+        self.force_release_calls = 0
+        _SpyLock.instances.append(self)
+
+    async def acquire(self) -> bool:
+        self.acquire_calls += 1
+        self.events.append(f"acquire:{self.database_url}")
+        return self.granted
+
+    async def release_async(self) -> None:
+        self.release_async_calls += 1
+        self.events.append(f"release:{self.database_url}")
+
+    def force_release(self) -> None:
+        self.force_release_calls += 1
 
 
 def _install_engine(monkeypatch, engine: _FakeEngine) -> list[dict]:
@@ -249,6 +278,56 @@ class TestInstanceOwnershipLock:
             await lock.acquire()
         assert exc_info.value is cancelled
 
+    def test_database_url_property_exposes_target(self):
+        """D1-03：切库检测需读取锁当前指向的业务库 URL。"""
+        assert InstanceOwnershipLock(_DB_URL).database_url == _DB_URL
+
+    @pytest.mark.asyncio
+    async def test_release_async_closes_connection_and_disposes_engine(self, monkeypatch):
+        """D1-03：关机/切库路径需异步释放（关闭连接即释放会话锁），且可重新取证。"""
+        connection = _FakeConnection(granted=True)
+        engine = _FakeEngine(connection)
+        _install_engine(monkeypatch, engine)
+
+        lock = InstanceOwnershipLock(_DB_URL)
+        assert await lock.acquire() is True
+        await lock.release_async()
+        assert connection.closed is True
+        assert engine.disposed is True
+        assert await lock.acquire() is True
+
+    @pytest.mark.asyncio
+    async def test_release_async_is_noop_when_not_held(self):
+        await InstanceOwnershipLock(_DB_URL).release_async()
+
+    @pytest.mark.asyncio
+    async def test_release_async_records_release_errors_without_raising(self, monkeypatch, caplog):
+        """释放异常只记录（进程退出由 PG 回收会话锁），不得冒充成功或掩盖主流程。"""
+        connection = _FakeConnection(granted=True, close_exc=OSError("close failed"))
+        engine = _FakeEngine(connection, dispose_exc=OSError("dispose failed"))
+        _install_engine(monkeypatch, engine)
+
+        lock = InstanceOwnershipLock(_DB_URL)
+        assert await lock.acquire() is True
+        with caplog.at_level("WARNING"):
+            await lock.release_async()
+        assert engine.disposed is True
+        assert "release failed" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_release_async_propagates_cancellation(self, monkeypatch):
+        """R2：释放途中的取消必须继续传播，不得被兜底吞没。"""
+        cancelled = asyncio.CancelledError()
+        connection = _FakeConnection(granted=True, close_exc=cancelled)
+        engine = _FakeEngine(connection)
+        _install_engine(monkeypatch, engine)
+
+        lock = InstanceOwnershipLock(_DB_URL)
+        assert await lock.acquire() is True
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await lock.release_async()
+        assert exc_info.value is cancelled
+
 
 class _StubLock:
     def __init__(self, *, granted: bool) -> None:
@@ -368,3 +447,185 @@ class TestTaskManagerOwnershipGate:
             TaskManager._atexit_cleanup()
         assert stub.released == 1
         TaskManager._reset_singleton()
+
+
+class _AsyncStubLock:
+    """仅实现异步释放端口的替身（覆盖 release_ownership_async 正常路径）。"""
+
+    def __init__(self) -> None:
+        self.released = 0
+
+    async def acquire(self) -> bool:
+        return True
+
+    async def release_async(self) -> None:
+        self.released += 1
+
+    def force_release(self) -> None:  # pragma: no cover - 仅证明不会走到同步兜底
+        raise AssertionError("force_release should not be used when release_async exists")
+
+
+class TestTaskManagerOwnershipRelease:
+    """D1-03：停机释放与切库重配时的所有权锁生命周期。"""
+
+    @pytest.mark.asyncio
+    async def test_release_ownership_async_uses_async_port_and_clears_state(self):
+        mgr = TaskManager()
+        stub = _AsyncStubLock()
+        mgr._ownership_lock = stub
+
+        await mgr.release_ownership_async()
+
+        assert stub.released == 1
+        assert mgr._ownership_lock is None
+        # 幂等：二次调用无锁可释放
+        await mgr.release_ownership_async()
+
+    @pytest.mark.asyncio
+    async def test_release_ownership_async_falls_back_to_sync_slot(self):
+        """注入替身可能只实现同步 force_release（既有测试端口形状），须兼容。"""
+        mgr = TaskManager()
+        stub = _StubLock(granted=True)
+        mgr._ownership_lock = stub
+
+        await mgr.release_ownership_async()
+
+        assert stub.released == 1
+        assert mgr._ownership_lock is None
+
+    @pytest.mark.asyncio
+    async def test_same_target_reuses_existing_lock_without_new_acquisition(self, monkeypatch):
+        cache = _fake_cache()
+        cache.engine = MagicMock()
+        cache.engine.url = sa.make_url(_DB_URL)
+        _SpyLock.instances = []
+        monkeypatch.setattr("data.persistence.instance_lock.InstanceOwnershipLock", _SpyLock)
+        mgr = TaskManager()
+        try:
+            await _init_with_cache(mgr, cache)
+            first = mgr._ownership_lock
+            assert isinstance(first, _SpyLock)
+            await _init_with_cache(mgr, cache)
+            assert mgr._ownership_lock is first
+            assert len(_SpyLock.instances) == 1
+            assert first.release_async_calls == 0
+        finally:
+            TaskManager._reset_singleton()
+
+    @pytest.mark.asyncio
+    async def test_target_switch_releases_old_lock_before_acquiring_new(self, monkeypatch):
+        """切库重配：旧库锁必须先释放，新库锁取得后才允许执行 stale 回填等写库。"""
+        url_b = "postgresql+asyncpg://probe:pw@localhost:5432/other_db"
+        cache = _fake_cache()
+        cache.engine = MagicMock()
+        cache.engine.url = sa.make_url(_DB_URL)
+        events: list[str] = []
+        created: list[_SpyLock] = []
+
+        class _RecordingSpyLock(_SpyLock):
+            def __init__(self, database_url: str) -> None:
+                super().__init__(database_url, events=events)
+                created.append(self)
+
+        monkeypatch.setattr("data.persistence.instance_lock.InstanceOwnershipLock", _RecordingSpyLock)
+        mgr = TaskManager()
+        try:
+            await _init_with_cache(mgr, cache)
+            first = mgr._ownership_lock
+            assert first is not None
+            assert first is created[0]
+
+            cache.engine.url = sa.make_url(url_b)
+            writes_before = cache.write_db.await_count
+            await _init_with_cache(mgr, cache)
+
+            second = mgr._ownership_lock
+            assert second is not None
+            assert second is created[1]
+            assert second.database_url == url_b
+            assert events == [f"acquire:{_DB_URL}", f"release:{_DB_URL}", f"acquire:{url_b}"]
+            # 新库取证发生在 stale 回填写库之前：第二次 init_db 的写库全部晚于新锁 acquire
+            assert cache.write_db.await_count > writes_before
+            assert first.release_async_calls == 1
+        finally:
+            TaskManager._reset_singleton()
+
+    @pytest.mark.asyncio
+    async def test_target_switch_conflict_keeps_no_lock_for_new_target(self, monkeypatch):
+        """切库后新库锁取不到：不得复用旧锁冒充所有权，也不得写库。"""
+        url_b = "postgresql+asyncpg://probe:pw@localhost:5432/other_db"
+        cache = _fake_cache()
+        cache.engine = MagicMock()
+        cache.engine.url = sa.make_url(_DB_URL)
+        created: list[_SpyLock] = []
+
+        class _SecondRefusedLock(_SpyLock):
+            def __init__(self, database_url: str) -> None:
+                super().__init__(database_url, granted=database_url != url_b)
+                created.append(self)
+
+        monkeypatch.setattr("data.persistence.instance_lock.InstanceOwnershipLock", _SecondRefusedLock)
+        mgr = TaskManager()
+        try:
+            await _init_with_cache(mgr, cache)
+            cache.engine.url = sa.make_url(url_b)
+            cache.write_db.reset_mock()
+            with pytest.raises(InstanceOwnershipConflictError) as exc_info:
+                await _init_with_cache(mgr, cache)
+            assert "另一个应用实例正在使用同一数据库" in str(exc_info.value)
+            assert mgr._ownership_lock is None
+            cache.write_db.assert_not_called()
+            assert created[0].release_async_calls == 1
+        finally:
+            TaskManager._reset_singleton()
+
+    @pytest.mark.asyncio
+    async def test_init_db_failure_after_acquire_releases_ownership(self, monkeypatch):
+        """取锁后初始化失败（含取消）必须放弃所有权再传播，避免残留锁冒充唯一执行者。"""
+        cache = _fake_cache()
+        cache.engine = MagicMock()
+        cache.engine.url = sa.make_url(_DB_URL)
+        created: list[_SpyLock] = []
+
+        class _RecordingSpyLock(_SpyLock):
+            def __init__(self, database_url: str) -> None:
+                super().__init__(database_url)
+                created.append(self)
+
+        monkeypatch.setattr("data.persistence.instance_lock.InstanceOwnershipLock", _RecordingSpyLock)
+        cache.read_db = AsyncMock(side_effect=RuntimeError("schema unavailable"))
+        mgr = TaskManager()
+        try:
+            with pytest.raises(RuntimeError, match="schema unavailable"):
+                await _init_with_cache(mgr, cache)
+            assert created[0].release_async_calls == 1
+            assert mgr._ownership_lock is None
+            assert mgr._db_ready is False
+        finally:
+            TaskManager._reset_singleton()
+
+    @pytest.mark.asyncio
+    async def test_init_db_cancellation_releases_ownership_and_propagates(self, monkeypatch):
+        """R2：取消不得被释放兜底吞没，但锁必须先释放。"""
+        cache = _fake_cache()
+        cache.engine = MagicMock()
+        cache.engine.url = sa.make_url(_DB_URL)
+        created: list[_SpyLock] = []
+
+        class _RecordingSpyLock(_SpyLock):
+            def __init__(self, database_url: str) -> None:
+                super().__init__(database_url)
+                created.append(self)
+
+        monkeypatch.setattr("data.persistence.instance_lock.InstanceOwnershipLock", _RecordingSpyLock)
+        cancelled = asyncio.CancelledError()
+        cache.read_db = AsyncMock(side_effect=cancelled)
+        mgr = TaskManager()
+        try:
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await _init_with_cache(mgr, cache)
+            assert exc_info.value is cancelled
+            assert created[0].release_async_calls == 1
+            assert mgr._ownership_lock is None
+        finally:
+            TaskManager._reset_singleton()

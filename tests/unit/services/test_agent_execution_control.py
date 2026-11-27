@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -15,13 +17,25 @@ from core.agent_types import (
     AgentServiceError,
     ExecutionControlKind,
     ExecutionControlRequest,
+    PlanItemSnapshot,
     PlanNodeSpec,
+    PlanProposal,
     PlanSpecProposal,
+    RetryCommandRecord,
+    RetryExecutionReceipt,
+    RetryExecutionRequest,
+    json_doc,
     plan_control_transition,
+    stable_id,
     validate_control_request,
 )
 from services.agent_service.control import plan_retry
 from services.agent_service.service import AgentService
+from services.agent_service.workflows import (
+    ParentBindIdentity,
+    admit_research_plan,
+    decode_research_payload_full,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -429,3 +443,287 @@ class TestRetryScope:
                 new_round_id="r-2",
             )
         assert info.value.code is AgentErrorCode.INPUT_INVALID
+
+
+# ---------------------------------------------------------------------------
+# 服务层重试派发：落库成功 / 投递失败 / 投递未知 三态分列
+# ---------------------------------------------------------------------------
+
+_EXECUTION_ID = "exec-1"
+_USER_SCOPE = "u1"
+_CLIENT_COMMAND_ID = "cmd-retry-1"
+
+
+def _manifest() -> str:
+    return json_doc(
+        {
+            "schema_version": 1,
+            "text": "研究问题",
+            "mode": "execute",
+            "purpose": "concept",
+            "cutoff": None,
+            "source_refs": [],
+            "role_prompt_refs": [["researcher", "v1"]],
+            "skill_refs": [["skill-a", "2"]],
+            "mcp_scope_digest": None,
+        }
+    )
+
+
+def _retry_proposal() -> PlanProposal:
+    return PlanProposal(
+        execution_id=_EXECUTION_ID,
+        plan_revision=1,
+        items=(
+            PlanItemSnapshot(
+                id="step-1",
+                content="读取行情",
+                status="pending",
+                active_form="读取行情",
+                parent_id=None,
+                depends_on=(),
+            ),
+            PlanItemSnapshot(
+                id="step-2",
+                content="汇总结论",
+                status="pending",
+                active_form="汇总结论",
+                parent_id=None,
+                depends_on=("step-1",),
+            ),
+        ),
+    )
+
+
+class _RetryDao:
+    """重试服务所需的最小 DAO 面（不触库；只验证范围/落库/派发编排）。"""
+
+    def __init__(self, *, replay_receipt: bool = False) -> None:
+        self.recorded: list[RetryCommandRecord] = []
+        self._replay_receipt = replay_receipt
+
+    async def read_authoritative_manifest(self, *, user_scope: str, execution_id: str) -> str:
+        return _manifest()
+
+    async def read_current_plan_proposal(self, *, user_scope: str, execution_id: str) -> PlanProposal:
+        return _retry_proposal()
+
+    async def get_session_read(self, query: Any, *, user_scope: str) -> Any:
+        return SimpleNamespace(
+            executions=(
+                SimpleNamespace(node_id="step-1", parent_execution_id=_EXECUTION_ID, display_state="failed"),
+                SimpleNamespace(node_id="step-2", parent_execution_id=_EXECUTION_ID, display_state="planned"),
+            )
+        )
+
+    async def record_retry_command(self, request: RetryCommandRecord) -> RetryExecutionReceipt:
+        self.recorded.append(request)
+        return RetryExecutionReceipt(
+            execution_id=request.execution_id,
+            command_record_id=stable_id(
+                "command", [request.user_scope, request.execution_id, request.client_command_id]
+            ),
+            round_id=request.round_id,
+            new_round_id=request.new_round_id,
+            redo=request.redo,
+            preserved=request.preserved,
+            plan_digest=request.plan_digest,
+            payload_digest=request.payload_digest,
+            applied=True,
+            replayed=len(self.recorded) > 1 and self._replay_receipt,
+            reason=None,
+        )
+
+
+class _RetryLauncherStub:
+    def __init__(
+        self,
+        *,
+        submitted: bool = True,
+        reason: str | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        self.submitted = submitted
+        self.reason = reason
+        self.error = error
+        self.calls: list[dict[str, Any]] = []
+
+    async def launch(
+        self,
+        payload: dict[str, object],
+        *,
+        user_scope: str,
+        execution_id: str,
+        round_id: str,
+    ) -> tuple[bool, str | None]:
+        self.calls.append(
+            {
+                "payload": payload,
+                "user_scope": user_scope,
+                "execution_id": execution_id,
+                "round_id": round_id,
+            }
+        )
+        if self.error is not None:
+            raise self.error
+        return self.submitted, self.reason
+
+
+def _retry_request() -> RetryExecutionRequest:
+    return RetryExecutionRequest(
+        user_scope=_USER_SCOPE,
+        session_id="s1",
+        execution_id=_EXECUTION_ID,
+        client_command_id=_CLIENT_COMMAND_ID,
+        expected_execution_revision=5,
+        round_id="r-1",
+        targets=("step-1",),
+    )
+
+
+def _expected_round_id() -> str:
+    return stable_id("round", [_USER_SCOPE, _EXECUTION_ID, _CLIENT_COMMAND_ID])
+
+
+_BINDING = ParentBindIdentity(
+    user_scope=_USER_SCOPE,
+    session_id="s1",
+    workflow_code_version="1.0.0",
+    run_epoch=2,
+    expected_input_revision=3,
+)
+
+
+async def _binding_provider(user_scope: str, execution_id: str) -> ParentBindIdentity | None:
+    return _BINDING
+
+
+async def _missing_binding_provider(user_scope: str, execution_id: str) -> ParentBindIdentity | None:
+    return None
+
+
+def _service(
+    dao: _RetryDao, launcher: _RetryLauncherStub | None = None, *, provider: Any = _binding_provider
+) -> AgentService:
+    return AgentService(
+        cast(Any, dao),
+        retry_launcher=None if launcher is None else cast(Any, launcher),
+        retry_binding_identity_provider=None if provider is None else cast(Any, provider),
+    )
+
+
+@pytest.mark.asyncio
+class TestServiceRetryDispatch:
+    async def test_submitted_retry_launches_persisted_new_round(self) -> None:
+        dao = _RetryDao()
+        launcher = _RetryLauncherStub()
+        service = _service(dao, launcher)
+
+        receipt = await service.retry_execution(_retry_request())
+
+        assert receipt.applied is True
+        assert receipt.new_round_id == _expected_round_id()
+        assert receipt.dispatch_state == "submitted"
+        assert receipt.dispatch_reason is None
+        assert dao.recorded[0].targets == ("step-1",)
+        assert len(launcher.calls) == 1
+        assert launcher.calls[0]["round_id"] == receipt.new_round_id
+        call = launcher.calls[0]
+        assert call["user_scope"] == _USER_SCOPE
+        assert call["execution_id"] == _EXECUTION_ID
+        assert call["round_id"] == receipt.new_round_id
+        payload = cast(dict[str, Any], call["payload"])
+        assert payload["round_id"] == receipt.new_round_id
+        assert [node["node_id"] for node in payload["nodes"]] == ["step-1", "step-2"]
+        # 载荷必须带父 workflow 准入所需的冻结策略与绑定身份，否则会被入口拒绝。
+        assert payload["role_capabilities"] == {"researcher": ["skill:skill-a@2"]}
+        assert payload["binding_identity"] == _BINDING.to_wire()
+        decoded = decode_research_payload_full(payload)
+        admit_research_plan(
+            decoded.plan,
+            plan_digest=decoded.plan_digest,
+            role_capabilities=decoded.role_capabilities,
+            preserved=decoded.preserved,
+        )
+        assert decoded.binding_identity == _BINDING
+
+    async def test_refused_launch_keeps_persisted_fact_and_marks_failed(self) -> None:
+        dao = _RetryDao()
+        launcher = _RetryLauncherStub(submitted=False, reason="dispatch_closed")
+        service = _service(dao, launcher)
+
+        receipt = await service.retry_execution(_retry_request())
+
+        # 命令已落库，但明确未投递：不冒充已重跑，也不标成未知。
+        assert receipt.applied is True
+        assert receipt.dispatch_state == "failed"
+        assert receipt.dispatch_reason == "dispatch_closed"
+        assert len(dao.recorded) == 1
+
+    async def test_launch_exception_marks_dispatch_unknown(self) -> None:
+        dao = _RetryDao()
+        launcher = _RetryLauncherStub(error=RuntimeError("native client unavailable"))
+        service = _service(dao, launcher)
+
+        receipt = await service.retry_execution(_retry_request())
+
+        # 落库成功 ≠ 已投递；异常时投递状态未知（可能在原生受理后被中断）。
+        assert receipt.applied is True
+        assert receipt.dispatch_state == "unknown"
+        assert receipt.dispatch_reason is not None
+
+    async def test_without_launcher_dispatch_stays_not_wired(self) -> None:
+        service = _service(_RetryDao(), launcher=None)
+
+        receipt = await service.retry_execution(_retry_request())
+
+        assert receipt.applied is True
+        assert receipt.dispatch_state == "not_wired"
+
+    async def test_replay_keeps_stable_round_identity_and_redelivers_idempotently(self) -> None:
+        dao = _RetryDao(replay_receipt=True)
+        launcher = _RetryLauncherStub()
+        service = _service(dao, launcher)
+
+        first = await service.retry_execution(_retry_request())
+        second = await service.retry_execution(_retry_request())
+
+        assert second.replayed is True
+        assert [call["round_id"] for call in launcher.calls] == [first.new_round_id, second.new_round_id]
+        assert first.new_round_id == second.new_round_id == _expected_round_id()
+
+    async def test_retry_launch_cancellation_propagates(self) -> None:
+        dao = _RetryDao()
+        launcher = _RetryLauncherStub(error=asyncio.CancelledError())
+        service = _service(dao, launcher)
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await service.retry_execution(_retry_request())
+
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        # R2：取消不吞；落库事实保留，供重放时按同一命令键重投。
+        assert len(dao.recorded) == 1
+
+    async def test_missing_binding_identity_fails_closed_before_persisting(self) -> None:
+        dao = _RetryDao()
+        launcher = _RetryLauncherStub()
+        service = _service(dao, launcher, provider=_missing_binding_provider)
+
+        with pytest.raises(AgentServiceError) as info:
+            await service.retry_execution(_retry_request())
+
+        assert info.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+        assert dao.recorded == [], "身份不可得时不落注定无法派发的重试事实"
+        assert launcher.calls == []
+
+    async def test_unwired_binding_identity_provider_fails_closed(self) -> None:
+        dao = _RetryDao()
+        launcher = _RetryLauncherStub()
+        service = _service(dao, launcher, provider=None)
+
+        with pytest.raises(AgentServiceError) as info:
+            await service.retry_execution(_retry_request())
+
+        assert info.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+        assert dao.recorded == []
+        assert launcher.calls == []

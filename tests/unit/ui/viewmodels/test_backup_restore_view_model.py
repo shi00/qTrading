@@ -113,6 +113,25 @@ class TestStartBackup:
         mock_maintenance_service.dump.assert_called_once_with(output_path)
 
     @pytest.mark.asyncio
+    async def test_exists_check_runs_in_io_pool(self, vm, mock_maintenance_service):
+        """R16: 备份文件存在性探测必须经 IO 线程池执行，不得在事件循环线程同步 stat。"""
+        calls: list[tuple[Any, Any]] = []
+
+        async def _run_async(task_type: Any, func: Any, *args: Any, **kwargs: Any) -> Any:
+            calls.append((task_type, func))
+            return func(*args, **kwargs)
+
+        output_path = Path("/tmp/backup.dump")
+        with (
+            _thread_pool_patch(_run_async),
+            patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=False),
+        ):
+            await vm.start_backup(output_path)
+
+        assert calls == [(TaskType.IO, vm_module._path_exists)]
+        mock_maintenance_service.dump.assert_awaited_once_with(output_path)
+
+    @pytest.mark.asyncio
     async def test_start_backup_success_updates_state(self, vm, mock_dump_result):
         output_path = Path("/tmp/backup.dump")
         with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=False):
@@ -428,6 +447,111 @@ class TestDefaultBackupPath:
         assert path.parent == Path.cwd().resolve()
         assert path.name.startswith("qtrading-backup-")
 
+    def test_same_second_collision_appends_incrementing_suffix(self, isolated_app_data_root, monkeypatch) -> None:
+        """D1-11: 同一秒内重复生成不得返回同名路径（否则备份覆盖保护会误判）。"""
+        import datetime
+
+        monkeypatch.setattr(vm_module, "get_now", lambda: datetime.datetime(2026, 1, 1, 0, 0, 0))
+
+        first = vm_module._generate_default_backup_path()
+        first.write_bytes(b"x")
+        second = vm_module._generate_default_backup_path()
+        second.write_bytes(b"x")
+        third = vm_module._generate_default_backup_path()
+
+        assert first.name == "qtrading-backup-20260101-000000.dump"
+        assert second.name == "qtrading-backup-20260101-000000-1.dump"
+        assert third.name == "qtrading-backup-20260101-000000-2.dump"
+
+
+class TestBackupBusyAdmission:
+    """D1-11: 忙态在首次 await 之前同步置位，覆盖路径准备 / 存在性探测窗口 (R16)."""
+
+    @pytest.mark.asyncio
+    async def test_busy_before_path_preparation_blocks_double_click(self, mock_maintenance_service) -> None:
+        """路径准备（IO 池）期间必须已处于忙态：第二次点击直接拒绝，不重复准备/备份。"""
+        expected_path = Path("/fake/qtrading-backup-20260101-000000.dump")
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _run_async(task_type: Any, func: Any, *args: Any, **kwargs: Any) -> Any:
+            if func is vm_module._generate_default_backup_path:
+                entered.set()
+                await release.wait()
+                return expected_path
+            return func(*args, **kwargs)
+
+        vm = BackupRestoreViewModel(maintenance_service=mock_maintenance_service)
+        with (
+            _thread_pool_patch(_run_async),
+            patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=False),
+        ):
+            first = asyncio.create_task(vm.start_backup_with_default_path())
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=5)
+                assert vm.state.is_backing_up is True
+                await vm.start_backup_with_default_path()  # 第二次点击：忙态直接拒绝
+            finally:
+                release.set()
+            await first
+
+        mock_maintenance_service.dump.assert_awaited_once_with(expected_path)
+        assert vm.state.is_backing_up is False
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_exists_check_releases_busy(self, mock_maintenance_service) -> None:
+        """存在性探测被取消：忙态必须释放，且不得启动 dump。"""
+        entered = asyncio.Event()
+        never = asyncio.Event()
+
+        async def _run_async(task_type: Any, func: Any, *args: Any, **kwargs: Any) -> Any:
+            if func is vm_module._path_exists:
+                entered.set()
+                await never.wait()
+            return func(*args, **kwargs)
+
+        vm = BackupRestoreViewModel(maintenance_service=mock_maintenance_service)
+        with _thread_pool_patch(_run_async):
+            task = asyncio.create_task(vm.start_backup(Path("/tmp/backup.dump")))
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            assert vm.state.is_backing_up is True
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await task
+            assert isinstance(exc_info.value, asyncio.CancelledError)
+            assert task.cancelled() is True
+
+        assert vm.state.is_backing_up is False
+        mock_maintenance_service.dump.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_path_preparation_failure_releases_busy_and_propagates(self, mock_maintenance_service) -> None:
+        """路径准备异常：忙态必须释放（否则入口永久锁死），异常继续传播。"""
+
+        async def _run_async(task_type: Any, func: Any, *args: Any, **kwargs: Any) -> Any:
+            raise OSError("disk gone")
+
+        vm = BackupRestoreViewModel(maintenance_service=mock_maintenance_service)
+        with _thread_pool_patch(_run_async), pytest.raises(OSError, match="disk gone"):
+            await vm.start_backup_with_default_path()
+
+        assert vm.state.is_backing_up is False
+        mock_maintenance_service.dump.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_exists_probe_failure_releases_busy_and_propagates(self, mock_maintenance_service) -> None:
+        """存在性探测异常（非取消）：忙态必须释放，异常继续传播。"""
+
+        async def _run_async(task_type: Any, func: Any, *args: Any, **kwargs: Any) -> Any:
+            raise OSError("probe failed")
+
+        vm = BackupRestoreViewModel(maintenance_service=mock_maintenance_service)
+        with _thread_pool_patch(_run_async), pytest.raises(OSError, match="probe failed"):
+            await vm.start_backup(Path("/tmp/backup.dump"))
+
+        assert vm.state.is_backing_up is False
+        mock_maintenance_service.dump.assert_not_called()
+
 
 class TestStartBackupWithDefaultPath:
     """start_backup_with_default_path: IO 池生成默认路径 → 委托 start_backup (R16)."""
@@ -440,7 +564,9 @@ class TestStartBackupWithDefaultPath:
 
         async def _run_async(task_type: Any, func: Any, *args: Any, **kwargs: Any) -> Any:
             calls.append((task_type, func))
-            return expected_path
+            if func is vm_module._generate_default_backup_path:
+                return expected_path
+            return func(*args, **kwargs)
 
         vm = BackupRestoreViewModel(maintenance_service=mock_maintenance_service)
         with (
@@ -449,7 +575,8 @@ class TestStartBackupWithDefaultPath:
         ):
             await vm.start_backup_with_default_path()
 
-        assert calls == [(TaskType.IO, vm_module._generate_default_backup_path)]
+        assert calls[0] == (TaskType.IO, vm_module._generate_default_backup_path)
+        assert all(task_type is TaskType.IO for task_type, _ in calls)
         mock_maintenance_service.dump.assert_awaited_once_with(expected_path)
 
     @pytest.mark.asyncio

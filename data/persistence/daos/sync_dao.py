@@ -29,6 +29,18 @@ class SyncDao(BaseDao):
         status: str = "success",
         last_result_status: str | None = None,
     ):
+        """写入同步状态，严格分离「最近尝试日」与「已确认数据水位」（D2-02）。
+
+        - ``last_sync_date`` = 本次尝试对应的数据日（所有状态都推进，仅作遥测/最近尝试日）；
+        - ``last_data_date`` = 已确认数据水位，**仅** ``status='success'`` 且日期非空时写入，
+          首次插入同样为 NULL；其余状态（failed / fetch_failed / save_failed / partial /
+          cancelled / skipped_permission / empty）只代表尝试或未确认空返回，不得冒充水位。
+        - 冲突更新时 ``last_data_date`` 经 ``GREATEST`` 单调推进（R22）；
+          ``record_count`` 只由成功写入覆盖，且不回退到旧水位（empty / 无权限 / 失败不得
+          抹掉已有历史行数）。
+        - 合法稀疏表「成功抓取且当日确实无记录」由调用方（``historical.py``）经
+          ``mark_empty_days`` 登记到 ``sync_empty_days``，与无权限/收盘前未出数区分。
+        """
         if isinstance(last_data_date, str):
             parsed_date = parse_date(last_data_date).date()
         elif isinstance(last_data_date, datetime):
@@ -53,26 +65,30 @@ class SyncDao(BaseDao):
         now = typing.cast(
             datetime, to_utc_for_db(get_now())
         )  # T4 fix: 与 server_default=now() 时区一致（前提：DB 会话时区为 UTC）
+        # D2-02：水位只由成功完成态写入；非成功状态首插/更新均为 NULL，禁止把失败尝试日
+        # 当作已确认数据水位。
+        watermark_date = parsed_date if status == "success" else None
         sql = '''INSERT INTO sync_status ("table_name","last_sync_date","last_data_date","record_count","status","last_result_status","updated_at")
                VALUES ($1, $2, $3, $4, $5, $6, $7)
                ON CONFLICT("table_name") DO UPDATE SET
-               "last_sync_date"=excluded."last_sync_date",
-               "last_data_date"=CASE WHEN excluded."status" IN ('success','empty','skipped_permission') AND excluded."last_data_date" > COALESCE(sync_status."last_data_date",'1900-01-01'::date)
-                                     THEN excluded."last_data_date"
+               "last_sync_date"=GREATEST(COALESCE(sync_status."last_sync_date", excluded."last_sync_date"), excluded."last_sync_date"),
+               "last_data_date"=CASE WHEN excluded."status"='success' AND excluded."last_data_date" IS NOT NULL
+                                     THEN GREATEST(COALESCE(sync_status."last_data_date", excluded."last_data_date"), excluded."last_data_date")
                                      ELSE sync_status."last_data_date" END,
-               "record_count"=CASE WHEN excluded."status" IN ('success','empty','skipped_permission') AND excluded."last_data_date" >= COALESCE(sync_status."last_data_date",'1900-01-01'::date)
+               "record_count"=CASE WHEN excluded."status"='success' AND excluded."last_data_date" IS NOT NULL
+                                        AND excluded."last_data_date" >= COALESCE(sync_status."last_data_date",'1900-01-01'::date)
                                    THEN excluded."record_count"
                                    ELSE sync_status."record_count" END,
-               "status"=CASE WHEN excluded."last_data_date" >= COALESCE(sync_status."last_data_date",'1900-01-01'::date)
+               "status"=CASE WHEN sync_status."last_sync_date" IS NULL OR excluded."last_sync_date" >= sync_status."last_sync_date"
                              THEN excluded."status"
                              ELSE sync_status."status" END,
-               "last_result_status"=CASE WHEN excluded."last_data_date" >= COALESCE(sync_status."last_data_date",'1900-01-01'::date)
+               "last_result_status"=CASE WHEN sync_status."last_sync_date" IS NULL OR excluded."last_sync_date" >= sync_status."last_sync_date"
                                          THEN excluded."last_result_status"
                                          ELSE sync_status."last_result_status" END,
                "updated_at"=excluded."updated_at"'''
         await self._write_db(
             sql,
-            (table_name, now, parsed_date, record_count, status, last_result_status, now),
+            (table_name, parsed_date, watermark_date, record_count, status, last_result_status, now),
         )
 
     async def get_sync_status(self, table_name: str | None = None) -> pd.DataFrame | dict | None:

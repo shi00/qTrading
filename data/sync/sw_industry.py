@@ -201,6 +201,9 @@ class SwIndustrySyncStrategy(ISyncStrategy):
 
             all_dfs: list[pd.DataFrame] = []
             total_rows = 0
+            # 实际落库行数（checkpoint 各批 + 尾批合计），用于 result.added 与
+            # sync_status.record_count，避免 checkpoint 批次落库后被漏计（D2-11）。
+            written_rows = 0
             errors = 0
             # data-P1-5a: checkpoint 跟踪，避免循环中断导致全量数据丢失
             checkpoint_rows = 0
@@ -257,10 +260,14 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                     result.errors.append(f"member l3_code={l3_code}: {safe_error(e)}")
 
                 # data-P1-5a: 达到 checkpoint 阈值时持久化已累积的数据，
-                # 避免循环中断导致全量数据丢失。仅在保存成功后清空 all_dfs。
+                # 避免循环中断导致全量数据丢失。仅在保存成功（返回实际落库行数）
+                # 后清空 all_dfs；失败或落库 0 行时保留缓冲，避免数据丢失。
                 if total_rows - checkpoint_rows >= _CHECKPOINT_INTERVAL and all_dfs:
-                    if await self._save_members_checkpoint(all_dfs):
+                    saved = await self._save_members_checkpoint(all_dfs)
+                    if saved is not None:
                         checkpoint_rows = total_rows
+                        written_rows += saved
+                        result.added += saved
                         all_dfs = []
 
             if not all_dfs:
@@ -281,7 +288,10 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                 await self.context.cache.sync_dao.update_sync_status(
                     "sw_industry_member",
                     get_now().date(),
-                    total_rows,
+                    written_rows,
+                    # errors>0 时不得以完整成功推进水位（D2-11），失败行业编码
+                    # 已随 result.errors 保留供重试。
+                    status=SyncStatus.PARTIAL.value if errors else "success",
                 )
                 return
 
@@ -292,11 +302,16 @@ class SwIndustrySyncStrategy(ISyncStrategy):
             if {"ts_code", "l3_code", "in_date"}.issubset(combined.columns):
                 combined = combined.drop_duplicates(subset=["ts_code", "l3_code", "in_date"])
             count = await self.member_dao.save_sw_industry_member(combined)
-            result.added += count if count else 0
+            saved = count if count else 0
+            result.added += saved
+            written_rows += saved
             await self.context.cache.sync_dao.update_sync_status(
                 "sw_industry_member",
                 get_now().date(),
-                count or 0,
+                written_rows,
+                # errors>0 时不得以完整成功推进水位（D2-11），失败行业编码
+                # 已随 result.errors 保留供重试。
+                status=SyncStatus.PARTIAL.value if errors else "success",
             )
             logger.info(
                 "[SwIndustrySync] Members | Saved %s member records (errors=%s/%s)",
@@ -350,15 +365,15 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                 raise
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
-    async def _save_members_checkpoint(self, all_dfs: list[pd.DataFrame]) -> bool:
+    async def _save_members_checkpoint(self, all_dfs: list[pd.DataFrame]) -> int | None:
         """data-P1-5a: 保存累积的成分股数据作为 checkpoint。
 
         若同步在循环中途中断，已 fetch 的数据会被持久化，下次无需重新获取。
         member_dao.save_sw_industry_member 是 upsert 语义，多次调用安全。
 
         Returns:
-            True 如果 checkpoint 保存成功，False 否则。
-            调用方 MUST NOT 在返回 False 时清空 all_dfs，否则数据会丢失。
+            实际落库行数（>0）表示保存成功；None 表示保存失败或落库 0 行。
+            调用方 MUST NOT 在返回 None 时清空 all_dfs，否则数据会丢失。
         """
         try:
             combined = pd.concat(all_dfs, ignore_index=True)
@@ -367,12 +382,18 @@ class SwIndustrySyncStrategy(ISyncStrategy):
             # 会把同股同行的多次进出压成一条，丢失时间维度。
             if {"ts_code", "l3_code", "in_date"}.issubset(combined.columns):
                 combined = combined.drop_duplicates(subset=["ts_code", "l3_code", "in_date"])
-            await self.member_dao.save_sw_industry_member(combined)
+            saved = await self.member_dao.save_sw_industry_member(combined)
+            if not saved:
+                # 落库 0 行视为未持久化：保留 all_dfs 供循环后再试，避免静默丢数。
+                logger.warning(
+                    "[SwIndustrySync] Members | Checkpoint persisted 0 rows, keeping buffer for retry",
+                )
+                return None
             logger.info(
                 "[SwIndustrySync] Members | Checkpoint saved: %s records",
-                len(combined),
+                saved,
             )
-            return True
+            return int(saved)
         except EngineDisposedError:
             raise
         except Exception as e:
@@ -386,4 +407,4 @@ class SwIndustrySyncStrategy(ISyncStrategy):
             )
             if severity == "system":
                 raise
-            return False
+            return None

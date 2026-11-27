@@ -5,7 +5,11 @@
 - 只做**编解码与结构校验**，不读写存储、不启连；
 - 解码结果必须再经 :func:`validate_mcp_server_config`（与保存/启连同一入口，I18）；
 - 未知键、缺失键、类型不符一律拒绝，不静默忽略（避免存储被篡改后静默降级）；
-- 不含任何秘密明文：Header 值只允许 ``env:`` / ``keyring:`` 引用（由既有校验保证）。
+- 不含任何秘密明文：Header 与 stdio ``secret_env`` 的值只允许 ``env:`` / ``keyring:``
+  引用（由既有校验保证）；普通环境变量字面量只存 ``env``。
+- **旧配置一次性迁移**：旧 wire 没有 ``secret_env`` 键，其 ``env`` 混放字面量与安全
+  引用。解码时**只按引用形态**（不看变量名）把引用一次性归位到 ``secret_env``，
+  其余保留为普通字面量；下一次保存即写新 wire（旧格式从此封口，不再写入）。
 """
 
 from __future__ import annotations
@@ -24,7 +28,12 @@ from core.agent_types import (
     encode_mcp_service_identity,
     validate_mcp_deadline,
 )
-from services.agent_service.mcp import MCPServerConfig, MCPTransportConfig, validate_mcp_server_config
+from services.agent_service.mcp import (
+    MCPServerConfig,
+    MCPTransportConfig,
+    is_secure_reference,
+    validate_mcp_server_config,
+)
 
 __all__ = ["decode_mcp_server_config", "encode_mcp_server_config"]
 
@@ -32,8 +41,21 @@ _TOP_KEYS = frozenset(
     {"identity", "display_name", "transport", "budget", "connect_deadline_s", "tool_deadline_s", "audit"}
 )
 _TRANSPORT_KEYS = frozenset(
-    {"kind", "command", "args", "env", "cwd", "url", "sse_compat_approved", "headers", "http_risk_approved"}
+    {
+        "kind",
+        "command",
+        "args",
+        "env",
+        "secret_env",
+        "cwd",
+        "url",
+        "sse_compat_approved",
+        "headers",
+        "http_risk_approved",
+    }
 )
+#: 旧 wire（无 ``secret_env``）：仅用于一次性迁移，不再被写出。
+_LEGACY_TRANSPORT_KEYS = _TRANSPORT_KEYS - {"secret_env"}
 _BUDGET_KEYS = frozenset(MCP_BUDGET_FIELDS)
 
 
@@ -85,6 +107,7 @@ def encode_mcp_server_config(config: MCPServerConfig) -> dict[str, Any]:
             "command": transport.command,
             "args": list(transport.args),
             "env": _pair_wires(transport.env),
+            "secret_env": _pair_wires(transport.secret_env),
             "cwd": transport.cwd,
             "url": transport.url,
             "sse_compat_approved": transport.sse_compat_approved,
@@ -99,10 +122,34 @@ def encode_mcp_server_config(config: MCPServerConfig) -> dict[str, Any]:
     return wire
 
 
+def _migrate_legacy_env(
+    pairs: tuple[tuple[str, str], ...],
+) -> tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]]:
+    """旧 wire 的 ``env`` → (普通字面量, 敏感引用)。
+
+    只按**值形态**（``env:`` / ``keyring:`` 引用）分流，不读取变量名、不推测哪一项
+    是秘密；无法证明是引用的值保留为普通字面量（由界面显式字段提示用户改挂 keyring）。
+    """
+
+    literal: list[tuple[str, str]] = []
+    secret: list[tuple[str, str]] = []
+    for name, value in pairs:
+        (secret if is_secure_reference(value) else literal).append((name, value))
+    return tuple(literal), tuple(secret)
+
+
 def _decode_transport(value: object, path: str) -> MCPTransportConfig:
     if not isinstance(value, dict):
         raise AgentValidationError("invalid_mcp_config", f"{path}: must be an object")
-    _require_exact_keys(value, _TRANSPORT_KEYS, path)
+    keys = set(value)
+    if keys == _TRANSPORT_KEYS:
+        env = _pairs(value["env"], f"{path}.env")
+        secret_env = _pairs(value["secret_env"], f"{path}.secret_env")
+    elif keys == _LEGACY_TRANSPORT_KEYS:
+        # 旧 wire 一次性迁移：引用归位到 secret_env，其余保留为普通字面量。
+        env, secret_env = _migrate_legacy_env(_pairs(value["env"], f"{path}.env"))
+    else:
+        raise AgentValidationError("invalid_mcp_config", f"{path}: keys mismatch")
     raw_kind = value["kind"]
     try:
         kind = MCPTransportKind(raw_kind)
@@ -116,7 +163,8 @@ def _decode_transport(value: object, path: str) -> MCPTransportConfig:
         kind=kind,
         command=_optional_str(value["command"], f"{path}.command"),
         args=_str_tuple(value["args"], f"{path}.args"),
-        env=_pairs(value["env"], f"{path}.env"),
+        env=env,
+        secret_env=secret_env,
         cwd=_optional_str(value["cwd"], f"{path}.cwd"),
         url=_optional_str(value["url"], f"{path}.url"),
         sse_compat_approved=approved,

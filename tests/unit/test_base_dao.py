@@ -4131,6 +4131,51 @@ class TestNormalizeRecordsFrame:
         assert records[1]["event_time"] is None
         assert _count_real_null(records) == 0
 
+    def test_float_inf_normalized_to_none_and_counted_as_non_finite(self):
+        """D2-16: ±inf 在 pd.notna 下为 True，必须按有限值判定归一为 None 并登记统计。"""
+        df = pd.DataFrame({"close": [1.5, float("inf"), float("-inf"), np.nan]})
+        records, stats = _normalize_records_frame(df, [], [])
+        assert records[0]["close"] == 1.5
+        assert records[1]["close"] is None
+        assert records[2]["close"] is None
+        assert records[3]["close"] is None  # 普通 NaN 由既有 NULL 归一处理
+        assert stats == {"close": {"count": 2, "samples": [float("inf"), float("-inf")], "kind": "non_finite"}}
+        assert _count_real_null(records) == 0
+
+    def test_decimal_infinity_in_object_column_normalized(self):
+        """D2-16: Decimal('Infinity') 混在 object 列中同样不得直送 NUMERIC。"""
+        df = pd.DataFrame({"amount": pd.Series([Decimal("Infinity"), Decimal("-Infinity"), Decimal("1.5"), None])})
+        records, stats = _normalize_records_frame(df, [], [])
+        assert records[0]["amount"] is None
+        assert records[1]["amount"] is None
+        assert records[2]["amount"] == Decimal("1.5")
+        assert records[3]["amount"] is None
+        assert stats["amount"]["count"] == 2
+        assert stats["amount"]["kind"] == "non_finite"
+
+    def test_plain_nan_is_missing_not_non_finite(self):
+        """D2-16: 合法缺失（float NaN / Decimal NaN）不得被误报为非有限值质量降级。"""
+        df = pd.DataFrame(
+            {
+                "a": [np.nan, 1.0],
+                "b": pd.Series([Decimal("NaN"), Decimal("2.5")], dtype=object),
+            }
+        )
+        records, stats = _normalize_records_frame(df, [], [])
+        assert records[0]["a"] is None
+        assert records[0]["b"] is None
+        assert stats == {}
+        assert _count_real_null(records) == 0
+
+    def test_string_literal_inf_not_treated_as_numeric_non_finite(self):
+        """D2-16: 字符串列中的字面量 "inf" 不是数值，必须原样保留。"""
+        df = pd.DataFrame({"note": ["inf", "normal", np.nan]})
+        records, stats = _normalize_records_frame(df, [], [])
+        assert records[0]["note"] == "inf"
+        assert records[1]["note"] == "normal"
+        assert records[2]["note"] is None
+        assert stats == {}
+
 
 # D1-06 / R9：DB 异常绑定参数不得经日志 / traceback / 上抛异常泄露。
 # 测试内凭据均为显式构造值，非真实密钥（R10）。

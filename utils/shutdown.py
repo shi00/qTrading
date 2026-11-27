@@ -37,6 +37,10 @@ _CLEANUP_STEPS = [
     # 使 Recorder 最终落账可在 engine 释放前完成（预算合计仍为原 Step 3 的 3.0s；
     # stop 仅设置取消信号为同步操作，engine dispose 保留原步 2.0s 余量）。
     ("Step 3", "_step3_stop_processor_workers", True, 1.0),
+    # D1-03：所有权锁由独立连接持有会话级 advisory lock，不释放会使 Step 8 的
+    # `pg_ctl stop -m smart` 一直等待该会话退出直至超时。释放点必须在所有落账
+    # （Step 2 flush + 动态回调如 Recorder 最终落账）之后、异步 engine dispose 之前。
+    ("Step 3a", "_step3a_release_ownership", False, 1.0),
     ("Step 3b", "_step3b_dispose_async_engine", True, 2.0),
     ("Step 4", "_step4_clear_toast", False, 1.0),
     ("Step 5", "_step5_unload_ai_model", True, 2.0),
@@ -307,7 +311,9 @@ class ShutdownCoordinator:
         for step_def in _CLEANUP_STEPS:
             name, method_name, critical, default_timeout = step_def[0], step_def[1], step_def[2], step_def[3]
             # S3（D8）/D02-F02：动态清理回调在 Step 3 后、Step 3b（engine dispose）前穿插执行
-            if method_name == "_step3b_dispose_async_engine" and self._dynamic_cleanup_callbacks:
+            # D1-03：穿插点绑定在 Step 3a（释放所有权锁）之前——回调（如 Recorder 最终落账）
+            # 仍需持有业务库唯一所有权，释放后即不再允许新增写库。
+            if method_name == "_step3a_release_ownership" and self._dynamic_cleanup_callbacks:
                 for dyn_name, dyn_callback, dyn_critical, dyn_timeout in self._dynamic_cleanup_callbacks:
                     start_dyn = time.perf_counter()
 
@@ -540,6 +546,27 @@ class ShutdownCoordinator:
                 logger.info("[Shutdown]   - DataProcessor workers stopped (engine disposal deferred to Step 3b).")
         else:
             logger.info("[Shutdown]   - DataProcessor not initialized, skipping.")
+
+    async def _step3a_release_ownership(self):
+        """D1-03：释放业务库唯一所有权锁（会话级 advisory lock）。
+
+        该锁由独立单连接引擎持有；不释放会让 Step 8 的 ``pg_ctl stop -m smart`` 等待
+        该会话退出直至超时。释放时机必须在所有落账（Step 2 + 动态回调）之后、
+        异步 engine dispose 之前——释放后不得再有业务写库。
+
+        直接读取 ``TaskManager._instance``，不调用单例工厂（关机路径不得因清理创建单例）。
+        释放异常由 ``release_ownership_async`` 记录（进程退出时 PG 回收会话锁）；
+        若确实未释放，Step 8 会以超时/失败独立暴露，不在此处重复判定关键失败。
+        """
+        logger.info("[Shutdown] Step 3a: Releasing business database ownership lock...")
+        from services.task_manager import TaskManager  # lazy-import: 关机步骤按需加载
+
+        instance = TaskManager._instance
+        if instance is None:
+            logger.info("[Shutdown]   - TaskManager not initialized, no ownership lock to release.")
+            return
+        await instance.release_ownership_async()
+        logger.info("[Shutdown]   - Ownership lock released.")
 
     async def _step3b_dispose_async_engine(self):
         """D02-F02：在 Recorder 最终落账后释放异步 DB engine（不经 DataProcessor.close 合并）。"""

@@ -844,7 +844,7 @@ class TestTushareClientApiMethods:
 
     @pytest.mark.asyncio
     async def test_get_cn_gdp_wrapper_delegates_to_handle_api_call(self, tushare_client_mocks):
-        """Phase 2D §3.2.6：get_cn_gdp 委托 _handle_api_call，传递 quarter 和显式 fields。"""
+        """D2-06：get_cn_gdp 委托 _handle_api_call，按官方入参传 q 和显式 fields。"""
         client, _, _ = tushare_client_mocks
         expected_df = pd.DataFrame(
             {
@@ -864,14 +864,27 @@ class TestTushareClientApiMethods:
 
         assert isinstance(result, pd.DataFrame)
         assert not result.empty
-        # 验证 _handle_api_call 被调用，传入 pro.cn_gdp + quarter + 显式 fields
+        # 验证 _handle_api_call 被调用，传入 pro.cn_gdp + q + 显式 fields
         client._handle_api_call.assert_called_once()
         call_args = client._handle_api_call.call_args
         # 第一个位置参数是 pro.cn_gdp callable
         assert callable(call_args.args[0])
-        # kwargs 含 quarter 和 fields
-        assert call_args.kwargs["quarter"] == "2024Q4"
+        # kwargs 用官方参数名 q（旧实现误用 quarter 会被 Tushare 忽略）
+        assert call_args.kwargs["q"] == "2024Q4"
+        assert "quarter" not in call_args.kwargs
         assert "gdp,gdp_yoy,pi,pi_yoy,si,si_yoy,ti,ti_yoy" in call_args.kwargs["fields"]
+
+    @pytest.mark.asyncio
+    async def test_get_cn_gdp_wrapper_passes_range_params(self, tushare_client_mocks):
+        """D2-06：get_cn_gdp 支持 start_q/end_q 区间取数（缺口批量补齐）。"""
+        client, _, _ = tushare_client_mocks
+        client._handle_api_call = AsyncMock(return_value=pd.DataFrame({"quarter": ["2024Q1", "2024Q2"]}))
+        await client.get_cn_gdp(start_q="2024Q1", end_q="2024Q2")
+
+        call_args = client._handle_api_call.call_args
+        assert call_args.kwargs["start_q"] == "2024Q1"
+        assert call_args.kwargs["end_q"] == "2024Q2"
+        assert "q" not in call_args.kwargs
 
     @pytest.mark.asyncio
     async def test_get_top_inst_wrapper_delegates_to_handle_api_call(self, tushare_client_mocks):

@@ -92,7 +92,11 @@ async def list_app_state(engine, prefix: str) -> dict[str, str]:
         await _guard_engine(engine, "list")
         async with engine.connect() as conn:
             result = await conn.execute(
-                sa.select(AppState.config_key, AppState.config_value).where(AppState.config_key.startswith(prefix))
+                sa.select(AppState.config_key, AppState.config_value).where(
+                    # D2-16: autoescape 让前缀中的 ``_`` / ``%`` 按字面量匹配（LIKE 通配符），
+                    # 否则 ``lane_note.`` 之类前缀会越过自身命名空间匹配到相邻键。
+                    AppState.config_key.startswith(prefix, autoescape=True)
+                )
             )
             return {row[0]: row[1] for row in result}
     except asyncio.CancelledError:

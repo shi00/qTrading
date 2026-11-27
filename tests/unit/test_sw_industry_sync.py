@@ -593,7 +593,7 @@ class TestSyncMembersCheckpoint:
         from data.sync.sw_industry import _CHECKPOINT_INTERVAL
 
         ctx = _make_ctx()
-        strategy = _wire_strategy(ctx, member_count=0)
+        strategy = _wire_strategy(ctx, member_count=2)
         # 构造单个 index_code 返回超过阈值的行数
         big_df = pd.DataFrame(
             {
@@ -657,20 +657,20 @@ class TestSyncMembersCheckpoint:
         assert strategy.member_dao.save_sw_industry_member.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_save_members_checkpoint_success_returns_true(self):
-        """_save_members_checkpoint 成功保存返回 True。"""
+    async def test_save_members_checkpoint_success_returns_written_rows(self):
+        """_save_members_checkpoint 成功保存返回实际落库行数。"""
         ctx = _make_ctx()
         strategy = _wire_strategy(ctx, member_count=5)
         dfs = [_make_member_df("801010.SI"), _make_member_df("801020.SI")]
 
         result = await strategy._save_members_checkpoint(dfs)
 
-        assert result is True
+        assert result == 5
         strategy.member_dao.save_sw_industry_member.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_save_members_checkpoint_failure_returns_false(self):
-        """_save_members_checkpoint 失败返回 False（不 raise）。"""
+    async def test_save_members_checkpoint_failure_returns_none(self):
+        """_save_members_checkpoint 失败返回 None（不 raise）。"""
         ctx = _make_ctx()
         strategy = _wire_strategy(ctx, member_count=0)
         strategy.member_dao.save_sw_industry_member = AsyncMock(side_effect=RuntimeError("db down"))
@@ -678,7 +678,126 @@ class TestSyncMembersCheckpoint:
 
         result = await strategy._save_members_checkpoint(dfs)
 
-        assert result is False
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_save_members_checkpoint_zero_rows_returns_none(self):
+        """_save_members_checkpoint 落库 0 行视为未持久化，返回 None（调用方保留缓冲）。"""
+        ctx = _make_ctx()
+        strategy = _wire_strategy(ctx, member_count=0)
+        dfs = [_make_member_df("801010.SI")]
+
+        result = await strategy._save_members_checkpoint(dfs)
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_rows_counted_in_added_and_record_count(self):
+        """checkpoint 落库行数计入 result.added 与 sync_status.record_count（D2-11）。"""
+        from data.sync.sw_industry import _CHECKPOINT_INTERVAL
+
+        ctx = _make_ctx()
+        strategy = _wire_strategy(ctx)
+        # 首批 checkpoint 落库 5000 行，尾批落库 3 行
+        strategy.member_dao.save_sw_industry_member = AsyncMock(side_effect=[_CHECKPOINT_INTERVAL, 3])
+        big_df = pd.DataFrame(
+            {
+                "ts_code": [f"00000{i}.SZ" for i in range(_CHECKPOINT_INTERVAL + 1)],
+                "l3_code": ["801010.SI"] * (_CHECKPOINT_INTERVAL + 1),
+                "in_date": ["20200101"] * (_CHECKPOINT_INTERVAL + 1),
+            }
+        )
+        ctx.api.get_index_member_all = AsyncMock(side_effect=[big_df, _make_member_df("801020.SI")])
+        classify_df = pd.DataFrame({"index_code": ["801010.SI", "801020.SI"], "sw_level": ["L3", "L3"]})
+
+        with patch.object(strategy, "_check_cancelled", return_value=False):
+            result = SyncResult()
+            await strategy._sync_members(result, classify_df)
+
+        expected = _CHECKPOINT_INTERVAL + 3
+        # checkpoint + 尾批各 save 一次
+        assert strategy.member_dao.save_sw_industry_member.await_count == 2
+        assert result.added == expected
+        status_call = ctx.cache.sync_dao.update_sync_status.await_args
+        assert status_call.args[2] == expected
+        assert status_call.kwargs["status"] == "success"
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_zero_rows_keeps_buffer_and_retries(self):
+        """checkpoint 落库 0 行时不清空 all_dfs，循环后尾批重新保存并计数。"""
+        from data.sync.sw_industry import _CHECKPOINT_INTERVAL
+
+        ctx = _make_ctx()
+        strategy = _wire_strategy(ctx)
+        # checkpoint 返回 0（未持久化），尾批重新保存落库 7 行
+        strategy.member_dao.save_sw_industry_member = AsyncMock(side_effect=[0, 7])
+        big_df = pd.DataFrame(
+            {
+                "ts_code": [f"00000{i}.SZ" for i in range(_CHECKPOINT_INTERVAL + 1)],
+                "l3_code": ["801010.SI"] * (_CHECKPOINT_INTERVAL + 1),
+                "in_date": ["20200101"] * (_CHECKPOINT_INTERVAL + 1),
+            }
+        )
+        ctx.api.get_index_member_all = AsyncMock(return_value=big_df)
+        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "sw_level": ["L3"]})
+
+        with patch.object(strategy, "_check_cancelled", return_value=False):
+            result = SyncResult()
+            await strategy._sync_members(result, classify_df)
+
+        assert strategy.member_dao.save_sw_industry_member.await_count == 2
+        assert result.added == 7
+        assert ctx.cache.sync_dao.update_sync_status.await_args.args[2] == 7
+
+    @pytest.mark.asyncio
+    async def test_partial_failure_passes_partial_status_to_sync_status(self):
+        """errors>0 时尾部落库传 status=partial（不推进成功水位），并保留失败行业编码。"""
+        ctx = _make_ctx()
+        strategy = _wire_strategy(ctx, member_count=2)
+        classify_df = pd.DataFrame(
+            {"index_code": ["801010.SI", "801020.SI", "801030.SI"], "sw_level": ["L3", "L3", "L3"]}
+        )
+        ctx.api.get_index_member_all = AsyncMock(
+            side_effect=[RuntimeError("blip 1"), _make_member_df("801020.SI"), RuntimeError("blip 3")]
+        )
+
+        with patch.object(strategy, "_check_cancelled", return_value=False):
+            result = SyncResult()
+            await strategy._sync_members(result, classify_df)
+
+        status_call = ctx.cache.sync_dao.update_sync_status.await_args
+        assert status_call.args[2] == 2
+        assert status_call.kwargs["status"] == SyncStatus.PARTIAL.value
+        assert any("801010.SI" in err for err in result.errors)
+        assert any("801030.SI" in err for err in result.errors)
+
+    @pytest.mark.asyncio
+    async def test_all_checkpointed_partial_uses_partial_status(self):
+        """全部批次已 checkpoint 且有失败行业：传 partial + 已落库行数合计。"""
+        from data.sync.sw_industry import _CHECKPOINT_INTERVAL
+
+        ctx = _make_ctx()
+        strategy = _wire_strategy(ctx)
+        strategy.member_dao.save_sw_industry_member = AsyncMock(side_effect=[_CHECKPOINT_INTERVAL])
+        big_df = pd.DataFrame(
+            {
+                "ts_code": [f"00000{i}.SZ" for i in range(_CHECKPOINT_INTERVAL + 1)],
+                "l3_code": ["801010.SI"] * (_CHECKPOINT_INTERVAL + 1),
+                "in_date": ["20200101"] * (_CHECKPOINT_INTERVAL + 1),
+            }
+        )
+        ctx.api.get_index_member_all = AsyncMock(side_effect=[big_df, RuntimeError("blip")])
+        classify_df = pd.DataFrame({"index_code": ["801010.SI", "801020.SI"], "sw_level": ["L3", "L3"]})
+
+        with patch.object(strategy, "_check_cancelled", return_value=False):
+            result = SyncResult()
+            await strategy._sync_members(result, classify_df)
+
+        assert strategy.member_dao.save_sw_industry_member.await_count == 1
+        status_call = ctx.cache.sync_dao.update_sync_status.await_args
+        assert status_call.args[2] == _CHECKPOINT_INTERVAL
+        assert status_call.kwargs["status"] == SyncStatus.PARTIAL.value
+        assert any("801020.SI" in err for err in result.errors)
 
     @pytest.mark.asyncio
     async def test_save_members_checkpoint_engine_disposed_propagates(self):
