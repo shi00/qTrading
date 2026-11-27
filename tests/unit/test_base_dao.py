@@ -3939,6 +3939,88 @@ class TestSaveUpsertCoerceGate:
         assert WriteQuality().is_degraded("test_table") is True
 
     @pytest.mark.asyncio
+    async def test_non_finite_numeric_real_prepare_logged_and_degraded(self, caplog):
+        """D2-16: 真实执行 _prepare_records，±inf 置 NULL、显式告警并计入写入质量指标。"""
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_table = MagicMock()
+        mock_col_id = MagicMock()
+        mock_col_id.name = "id"
+        mock_col_id.info = {}
+        mock_col_close = MagicMock()
+        mock_col_close.name = "close"
+        mock_col_close.info = {}
+        mock_table.columns = [mock_col_id, mock_col_close]
+        mock_table.c = {"id": mock_col_id, "close": mock_col_close}
+
+        captured = None
+
+        async def capture_execute(stmt, chunk):
+            nonlocal captured
+            captured = chunk
+
+        mock_conn.execute = capture_execute
+        dao = BaseDao(mock_engine)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = None
+            mock_meta.tables = {"test_table": mock_table}
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+
+            df = pd.DataFrame({"id": [1, 2], "close": [float("inf"), 3.5]})
+            with caplog.at_level(logging.ERROR, logger="data.persistence.daos.base_dao"):
+                await dao._save_upsert(df, "test_table", ["id", "close"], ["id"], conn=mock_conn)
+
+        assert captured is not None
+        assert captured[0]["close"] is None
+        assert captured[1]["close"] == 3.5
+        # 1) 显式质量降级告警（非静默吞没）
+        assert any("非有限值" in r.message for r in caplog.records)
+        # 2) 计入表级归一率（rows=2, coerced=1 → 0.5），驱动健康门控降级
+        assert WriteQuality().get_coerce_ratio("test_table") == pytest.approx(0.5)
+        assert WriteQuality().is_degraded("test_table") is True
+
+    @pytest.mark.asyncio
+    async def test_nan_only_write_not_degraded(self):
+        """D2-16 反证：合法缺失（NaN）不得触发非有限值降级。"""
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_table = MagicMock()
+        mock_col_id = MagicMock()
+        mock_col_id.name = "id"
+        mock_col_id.info = {}
+        mock_col_close = MagicMock()
+        mock_col_close.name = "close"
+        mock_col_close.info = {}
+        mock_table.columns = [mock_col_id, mock_col_close]
+        mock_table.c = {"id": mock_col_id, "close": mock_col_close}
+
+        dao = BaseDao(mock_engine)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = None
+            mock_meta.tables = {"test_table": mock_table}
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+
+            df = pd.DataFrame({"id": [1, 2], "close": [np.nan, 3.5]})
+            await dao._save_upsert(df, "test_table", ["id", "close"], ["id"], conn=mock_conn)
+
+        assert WriteQuality().get_coerce_ratio("test_table") == pytest.approx(0.0)
+        assert WriteQuality().is_degraded("test_table") is False
+
+    @pytest.mark.asyncio
     async def test_failed_write_keeps_previous_coerce_stats(self):
         """写入失败不得以未落库的本次尝试覆盖上次成功统计（record_write 时序）。
 
@@ -4129,3 +4211,48 @@ class TestNormalizeRecordsFrame:
         assert records[0]["event_time"] == datetime.datetime(2024, 1, 1, 10, 0, 0)
         assert records[1]["event_time"] is None
         assert _count_real_null(records) == 0
+
+    def test_float_inf_normalized_to_none_and_counted_as_non_finite(self):
+        """D2-16: ±inf 在 pd.notna 下为 True，必须按有限值判定归一为 None 并登记统计。"""
+        df = pd.DataFrame({"close": [1.5, float("inf"), float("-inf"), np.nan]})
+        records, stats = _normalize_records_frame(df, [], [])
+        assert records[0]["close"] == 1.5
+        assert records[1]["close"] is None
+        assert records[2]["close"] is None
+        assert records[3]["close"] is None  # 普通 NaN 由既有 NULL 归一处理
+        assert stats == {"close": {"count": 2, "samples": [float("inf"), float("-inf")], "kind": "non_finite"}}
+        assert _count_real_null(records) == 0
+
+    def test_decimal_infinity_in_object_column_normalized(self):
+        """D2-16: Decimal('Infinity') 混在 object 列中同样不得直送 NUMERIC。"""
+        df = pd.DataFrame({"amount": pd.Series([Decimal("Infinity"), Decimal("-Infinity"), Decimal("1.5"), None])})
+        records, stats = _normalize_records_frame(df, [], [])
+        assert records[0]["amount"] is None
+        assert records[1]["amount"] is None
+        assert records[2]["amount"] == Decimal("1.5")
+        assert records[3]["amount"] is None
+        assert stats["amount"]["count"] == 2
+        assert stats["amount"]["kind"] == "non_finite"
+
+    def test_plain_nan_is_missing_not_non_finite(self):
+        """D2-16: 合法缺失（float NaN / Decimal NaN）不得被误报为非有限值质量降级。"""
+        df = pd.DataFrame(
+            {
+                "a": [np.nan, 1.0],
+                "b": pd.Series([Decimal("NaN"), Decimal("2.5")], dtype=object),
+            }
+        )
+        records, stats = _normalize_records_frame(df, [], [])
+        assert records[0]["a"] is None
+        assert records[0]["b"] is None
+        assert stats == {}
+        assert _count_real_null(records) == 0
+
+    def test_string_literal_inf_not_treated_as_numeric_non_finite(self):
+        """D2-16: 字符串列中的字面量 "inf" 不是数值，必须原样保留。"""
+        df = pd.DataFrame({"note": ["inf", "normal", np.nan]})
+        records, stats = _normalize_records_frame(df, [], [])
+        assert records[0]["note"] == "inf"
+        assert records[1]["note"] == "normal"
+        assert records[2]["note"] is None
+        assert stats == {}
