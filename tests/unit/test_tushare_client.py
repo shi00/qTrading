@@ -2680,17 +2680,17 @@ class TestPaginatedTruncationFlag:
 
 
 class TestProbeClientParamError:
-    """B13 修复：_handle_probe_call 检测 client_param_error 分类为 False。
+    """D2-09：探测参数错误属配置异常，不得记为持久权限否定。
 
     验证：
-    - "必填参数" 错误 → _handle_probe_call 抛 TushareAPIPermissionError
-    - _probe_one 分类为 False
-    - 记 ERROR 日志
+    - "必填参数" 错误 → _handle_probe_call 原样抛出（非 TushareAPIPermissionError）
+    - _probe_one 归入 None（能力未知），不写权威负缓存 False
+    - 记 WARNING 日志
     """
 
     @pytest.mark.asyncio
-    async def test_probe_call_raises_on_client_param_error(self, tushare_client_mocks):
-        """_handle_probe_call 遇 client_param_error 抛 TushareAPIPermissionError。"""
+    async def test_probe_call_reraises_client_param_error_without_permission_mapping(self, tushare_client_mocks):
+        """_handle_probe_call 遇 client_param_error 不得映射为 TushareAPIPermissionError。"""
         client, _, _ = tushare_client_mocks
         func = MagicMock()
         func.__name__ = "test_api"
@@ -2700,12 +2700,13 @@ class TestProbeClientParamError:
             "run_in_executor",
             new=AsyncMock(side_effect=Exception("必填参数 ts_code 未提供")),
         ):
-            with pytest.raises(TushareAPIPermissionError, match="client_param_error"):
+            with pytest.raises(Exception, match="必填参数") as exc_info:
                 await client._handle_probe_call("test_api", func, trade_date="20240101")
+            assert not isinstance(exc_info.value, TushareAPIPermissionError)
 
     @pytest.mark.asyncio
-    async def test_probe_one_classifies_client_param_error_as_false(self, tushare_client_mocks):
-        """_probe_one 将 client_param_error 分类为 False。"""
+    async def test_probe_one_classifies_client_param_error_as_unknown(self, tushare_client_mocks):
+        """_probe_one 将 client_param_error 归入 None（能力未知），而非 False。"""
         client, _, _ = tushare_client_mocks
         func = MagicMock()
         func.__name__ = "test_api"
@@ -2717,12 +2718,11 @@ class TestProbeClientParamError:
         ):
             semaphore = asyncio.Semaphore(1)
             result = await client._probe_one(semaphore, "test_api", {})
-            assert result[0] == "test_api"
-            assert result[1] is False
+            assert result == ("test_api", None)
 
     @pytest.mark.asyncio
-    async def test_probe_call_logs_error_on_client_param_error(self, tushare_client_mocks, caplog):
-        """_handle_probe_call 遇 client_param_error 记 ERROR 日志。"""
+    async def test_probe_call_logs_warning_on_client_param_error(self, tushare_client_mocks, caplog):
+        """_handle_probe_call 遇 client_param_error 记 WARNING 日志。"""
         import logging
 
         client, _, _ = tushare_client_mocks
@@ -2734,9 +2734,8 @@ class TestProbeClientParamError:
             "run_in_executor",
             new=AsyncMock(side_effect=Exception("invalid parameter: ts_code")),
         ):
-            with caplog.at_level(logging.ERROR, logger="data.external.tushare_client"):
-                with pytest.raises(TushareAPIPermissionError) as exc_info:
+            with caplog.at_level(logging.WARNING, logger="data.external.tushare.capability_probe"):
+                with pytest.raises(Exception, match="invalid parameter"):
                     await client._handle_probe_call("test_api", func, trade_date="20240101")
-            assert exc_info.value.api_name == "test_api"
-        error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
-        assert any("client param error" in r.message for r in error_records)
+        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("client param error" in r.message for r in warning_records)

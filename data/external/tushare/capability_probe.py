@@ -519,7 +519,10 @@ class CapabilityProbeService:
                 ("share_float", {"ts_code": PROBE_STOCK_CODE, "ann_date": recent_date}),
                 ("stk_holdertrade", {"ts_code": PROBE_STOCK_CODE, "ann_date": recent_date}),
                 ("index_classify", {"level": "L1", "src": "SW2021"}),
-                ("index_member_all", {"index_code": "801010.SI"}),
+                # D2-09：index_member_all（doc_id=335）合法入参为
+                # l1_code/l2_code/l3_code/ts_code/is_new，无 index_code；
+                # 旧探针传 index_code 触发客户端参数错误并被误判为权限缺失。
+                ("index_member_all", {"ts_code": PROBE_STOCK_CODE}),
                 ("top_inst", {"trade_date": recent_date}),
                 # P0 待实测（2 个）
                 ("stk_factor_pro", {"ts_code": PROBE_STOCK_CODE, "trade_date": recent_date}),
@@ -693,6 +696,7 @@ class CapabilityProbeService:
         - 复用 io_pool / timeout / DataSanitizer / 权限判定
         - 跳过 reduce_rate / on_success（probe 是一次性探测，不永久降速）
         - 权限拒绝抛 TushareAPIPermissionError（由 ``_probe_one`` 分类为 False）
+        - 参数名/格式类客户端错误原样抛出（由 ``_probe_one`` 归入 None，不写负缓存）
 
         R2 红线：内部 await 必须响应 CancelledError，不吞没。
         """
@@ -748,19 +752,21 @@ class CapabilityProbeService:
             if is_permission_error:
                 # 权限拒绝抛 TushareAPIPermissionError，由 _probe_one 分类为 False
                 raise TushareAPIPermissionError(api_name, error_msg) from e
-            # B13 修复：client_param_error（必填参数缺失等）分类为不可用（False）。
-            # probe 使用固定参数，参数错误说明该 API 在当前 probe 参数下不可用，
-            # 应记 ERROR 日志并通过 TushareAPIPermissionError 让 _probe_one 分类为 False。
+            # D2-09：client_param_error（参数名/格式错误等）属探测配置异常，不代表
+            # 账号权限缺失。若映射为 TushareAPIPermissionError，_probe_one 会将其记为
+            # 权威负缓存 False 并持久化，阻断对应表后续同步（index_member_all 曾因
+            # 传入不存在的 index_code 被永久误标不可用）。此处打告警后原样抛出，
+            # 由 _probe_one 归入 None（能力未知），不写缓存。
             is_client_param_error = any(
                 k in error_msg_lower for k in ("必填参数", "缺少参数", "invalid parameter", "missing required")
             )
             if is_client_param_error:
-                logger.error(
-                    "[TushareClient] Probe %s: client param error (API not available with probe params): %s",
+                logger.warning(
+                    "[TushareClient] Probe %s: client param error (probe config mismatch, capability left unknown): %s",
                     api_name,
                     DataSanitizer.sanitize_error(e),
                 )
-                raise TushareAPIPermissionError(api_name, f"client_param_error: {error_msg}") from e
+                raise
             # 其他异常（429 / 网络错误等）原样抛出，由 _probe_one 分类为 None
             # 不调用 reduce_rate（probe 一次性探测，不永久降速）
             raise

@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import logging
 
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -325,6 +326,74 @@ class TestProbeApiCapabilities:
                     assert call["period"] == "20241231"
                 if "enddate" in call:
                     assert call["enddate"] == "20241231"
+
+
+class TestProbeIndexMemberParams:
+    """D2-09：index_member_all 探针必须用合法入参（无 index_code）。
+
+    旧探针传 {"index_code": "801010.SI"}，触发客户端参数错误后被误判为权限缺失，
+    写入持久化权威负缓存 False，阻断申万行业成分同步。
+    """
+
+    @pytest.mark.asyncio
+    async def test_index_member_all_probe_uses_ts_code_not_index_code(self, tushare_client_mocks):
+        client, _, _ = tushare_client_mocks
+        call_params: dict[str, dict] = {}
+
+        async def mock_probe_call(api_name, func, **params):
+            call_params[api_name] = params
+
+        with (
+            patch.object(client, "_handle_probe_call", new_callable=AsyncMock, side_effect=mock_probe_call),
+            patch.object(client, "persist_capabilities_to_app_state", new_callable=AsyncMock),
+        ):
+            await client.probe_api_capabilities()
+
+        assert "index_member_all" in call_params
+        assert call_params["index_member_all"] == {"ts_code": "000001.SZ"}
+        assert "index_code" not in call_params["index_member_all"]
+
+
+class TestProbeClientParamErrors:
+    """D2-09：探测参数错误属探测配置异常，能力状态保持未知，不得落持久负缓存。"""
+
+    @pytest.mark.asyncio
+    async def test_probe_call_param_error_is_not_permission_error(self, tushare_client_mocks, caplog):
+        client, _, _ = tushare_client_mocks
+        func = MagicMock()
+        func.__name__ = "index_member_all"
+        loop = asyncio.get_running_loop()
+
+        with patch.object(
+            loop,
+            "run_in_executor",
+            new=AsyncMock(side_effect=Exception("必填参数 l3_code 未提供")),
+        ):
+            with caplog.at_level(logging.WARNING, logger="data.external.tushare.capability_probe"):
+                with pytest.raises(Exception, match="必填参数") as exc_info:
+                    await client._handle_probe_call("index_member_all", func, ts_code="000001.SZ")
+
+        assert not isinstance(exc_info.value, TushareAPIPermissionError)
+        assert any("client param error" in r.message for r in caplog.records if r.levelno == logging.WARNING)
+
+    @pytest.mark.asyncio
+    async def test_param_error_leaves_capability_unknown(self, tushare_client_mocks):
+        client, _, _ = tushare_client_mocks
+
+        async def mock_probe_call(api_name, func, **params):
+            if api_name == "index_member_all":
+                raise Exception("缺少参数 l3_code")
+            return MagicMock()
+
+        with (
+            patch.object(client, "_handle_probe_call", new_callable=AsyncMock, side_effect=mock_probe_call),
+            patch.object(client, "persist_capabilities_to_app_state", new_callable=AsyncMock),
+        ):
+            results = await client.probe_api_capabilities()
+
+        assert results["index_member_all"] is None
+        assert client.is_api_available("index_member_all") is None
+        assert "index_member_all" not in client._capability_cache
 
 
 class TestCheckDependenciesWithRequiredApis:
