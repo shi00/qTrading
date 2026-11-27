@@ -205,18 +205,116 @@ pub fn normalize_data_dir(path: &Path) -> PathBuf {
 }
 
 fn executable_matches(expected: &Path, actual: &Path) -> bool {
-    let expected = normalize_data_dir(expected);
-    let actual = normalize_data_dir(actual);
+    paths_refer_to_same_object(expected, actual)
+}
+
+/// 文件系统对象身份（同一对象的不同路径写法应比较相等）。
+///
+/// Unix 为 `(st_dev, st_ino)`；Windows 为 `(VolumeSerialNumber, FileIndex)`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileObjectId {
+    volume: u64,
+    index: u64,
+}
+
+/// 读取路径对应的文件系统对象身份；路径不存在/无权限/平台不支持时返回 `None`。
+fn file_object_id(path: &Path) -> Option<FileObjectId> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(path).ok()?;
+        Some(FileObjectId {
+            volume: meta.dev(),
+            index: meta.ino(),
+        })
+    }
     #[cfg(windows)]
     {
-        expected
-            .to_string_lossy()
-            .eq_ignore_ascii_case(&actual.to_string_lossy())
+        win::file_object_id(path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// 去掉 Windows verbatim/设备前缀：`\\?\C:\...` → `C:\...`，
+/// `\\?\UNC\server\share` → `\\server\share`，`\\.\C:\...` → `C:\...`。
+fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.as_os_str().to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+        if let Some(rest) = text.strip_prefix(r"\\.\") {
+            return PathBuf::from(rest);
+        }
+    }
+    path.to_path_buf()
+}
+
+/// 词法规范化：canonicalize 优先（解析符号链接），失败时绝对化并消解 `.`/`..`，
+/// 最后剥离 Windows verbatim 前缀，避免同一目录因 `\\?\` 前缀被判定为不同。
+fn lexical_normalize(path: &Path) -> PathBuf {
+    strip_verbatim_prefix(&normalize_data_dir(path))
+}
+
+/// Windows 路径文本相等判定；`case_sensitive=false` 时按 Unicode 小写比较。
+#[cfg(windows)]
+fn compare_path_text(a: &Path, b: &Path, case_sensitive: bool) -> bool {
+    if case_sensitive {
+        a == b
+    } else {
+        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    }
+}
+
+/// 词法回退比较（身份不可读时使用）。
+///
+/// Windows 上按目标所在卷/目录的大小写敏感属性比较；无法确认该属性时只接受字节级
+/// 相等（fail closed：宁可拒绝停止，也不向可能不属于本集群的 PID 发送信号）。
+fn lexical_paths_equal(a: &Path, b: &Path) -> bool {
+    let (a, b) = (lexical_normalize(a), lexical_normalize(b));
+    #[cfg(windows)]
+    {
+        match (
+            win::dir_is_case_sensitive(&a),
+            win::dir_is_case_sensitive(&b),
+        ) {
+            (Some(a_sensitive), Some(b_sensitive)) => {
+                compare_path_text(&a, &b, a_sensitive || b_sensitive)
+            }
+            _ => a == b,
+        }
     }
     #[cfg(not(windows))]
     {
-        expected == actual
+        a == b
     }
+}
+
+/// 判定两个路径是否指向同一文件系统对象。
+///
+/// 优先用文件身份比对：`canonicalize` 一侧返回 `\\?\` verbatim 前缀、另一侧回退词法
+/// 路径，或大小写不敏感卷上的大小写差异，都会让 `PathBuf !=` 误判为「不是同一目录/
+/// 可执行文件」而拒绝停止合法集群。
+///
+/// 身份不可读、或身份不同（例如运行期间安装目录被重新解包替换了 postgres 二进制，
+/// 同一路径换了 inode）时退回词法比较：路径规范化后相等即视为同一对象——集群归属
+/// 仍由 pid 文件 PGDATA + 启动时刻 + 进程 start-time 共同证明，二进制换代不构成
+/// 「外来进程」。
+fn paths_refer_to_same_object(a: &Path, b: &Path) -> bool {
+    if let (Some(a_id), Some(b_id)) = (file_object_id(a), file_object_id(b)) {
+        if a_id == b_id {
+            return true;
+        }
+    }
+    lexical_paths_equal(a, b)
 }
 
 /// 读取 `data_dir/postmaster.pid` 并构造可验证身份（期望可执行文件为
@@ -259,7 +357,7 @@ pub fn capture_with_expected_exe(
 
     let expected_data_dir = normalize_data_dir(expected_data_dir);
     let actual_data_dir = normalize_data_dir(&pidfile_data_dir);
-    if expected_data_dir != actual_data_dir {
+    if !paths_refer_to_same_object(&expected_data_dir, &actual_data_dir) {
         return Err(IdentityError::DataDirMismatch {
             expected: expected_data_dir,
             actual: actual_data_dir,
@@ -316,7 +414,7 @@ fn validate_process_evidence(
     }
     if let Some(working_dir) = &process.working_dir {
         let actual = normalize_data_dir(working_dir);
-        if actual != data_dir {
+        if !paths_refer_to_same_object(&actual, data_dir) {
             return Err(IdentityError::ProcessDataDirMismatch {
                 expected: data_dir.to_path_buf(),
                 actual,
@@ -343,7 +441,7 @@ pub fn verify_cluster_identity(identity: &ClusterIdentity) -> Result<(), Identit
         .clone()
         .ok_or(IdentityError::IncompletePidFile("第 2 行（PGDATA 路径）"))?;
     let actual_data_dir = normalize_data_dir(&pidfile_data_dir);
-    if actual_data_dir != identity.data_dir {
+    if !paths_refer_to_same_object(&actual_data_dir, &identity.data_dir) {
         return Err(IdentityError::DataDirMismatch {
             expected: identity.data_dir.clone(),
             actual: actual_data_dir,
@@ -708,6 +806,99 @@ mod win {
             working_dir: None,
             executable: PathBuf::from(String::from_utf16_lossy(&buf[..size as usize])),
         })
+    }
+
+    /// 以只读元数据方式打开文件/目录句柄（目录需要 `FILE_FLAG_BACKUP_SEMANTICS`）。
+    fn open_for_info(path: &Path) -> Option<windows_sys::Win32::Foundation::HANDLE> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: wide 以 NUL 结尾且在本函数内有效；desired access=0 只读取元数据；
+        // 共享全部访问权限以免干扰正在运行的进程。
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            None
+        } else {
+            Some(handle)
+        }
+    }
+
+    /// 文件系统对象身份：`(VolumeSerialNumber, FileIndex)`，同一对象的不同路径写法一致。
+    pub fn file_object_id(path: &Path) -> Option<FileObjectId> {
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        };
+        let handle = open_for_info(path)?;
+        // SAFETY: 结构体为 POD，全零初始化合法。
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: handle 有效且只读出参；info 是本栈正确类型。
+        let ok = unsafe { GetFileInformationByHandle(handle, &mut info) };
+        // SAFETY: 句柄在本函数内创建，必须关闭。
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        if ok == 0 {
+            return None;
+        }
+        Some(FileObjectId {
+            volume: u64::from(info.dwVolumeSerialNumber),
+            index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        })
+    }
+
+    /// 目录树是否启用大小写敏感（per-directory 标志）。
+    ///
+    /// 查询失败（旧系统 / 网络共享 / 权限不足）返回 `None`，由调用方 fail closed。
+    pub fn dir_is_case_sensitive(path: &Path) -> Option<bool> {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileCaseSensitiveInfo, GetFileInformationByHandleEx, FILE_CASE_SENSITIVE_INFO,
+        };
+        use windows_sys::Win32::System::SystemServices::FILE_CS_FLAG_CASE_SENSITIVE_DIR;
+
+        let target = if path.is_dir() {
+            path.to_path_buf()
+        } else {
+            path.parent()?.to_path_buf()
+        };
+        let handle = open_for_info(&target)?;
+        let mut info = FILE_CASE_SENSITIVE_INFO { Flags: 0 };
+        let size = std::mem::size_of::<FILE_CASE_SENSITIVE_INFO>() as u32;
+        // SAFETY: handle 有效；info 是本栈正确类型与长度。
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                handle,
+                FileCaseSensitiveInfo,
+                &mut info as *mut _ as *mut std::ffi::c_void,
+                size,
+            )
+        };
+        // SAFETY: 句柄在本函数内创建，必须关闭。
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        if ok == 0 {
+            None
+        } else {
+            Some(info.Flags & FILE_CS_FLAG_CASE_SENSITIVE_DIR != 0)
+        }
     }
 
     pub fn process_identity(pid: u32) -> Result<ProcessIdentity, IdentityError> {
@@ -1213,5 +1404,95 @@ mod tests {
         assert_eq!(start_epoch(1_700_000_000, 12_345, 100), Some(1_700_000_123));
         assert_eq!(start_epoch(1_700_000_000, 12_345, 0), None);
         assert_eq!(start_epoch(1_700_000_000, 12_345, -1), None);
+    }
+
+    /// 文件身份优先：硬链接（不同路径、同一对象）必须判定为同一文件。
+    #[test]
+    fn paths_refer_to_same_object_matches_hardlink() {
+        let dir = unique_tmp("same-object-hardlink");
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = dir.join("original");
+        let alias = dir.join("alias");
+        std::fs::write(&original, b"payload").unwrap();
+        std::fs::hard_link(&original, &alias).expect("create hardlink");
+
+        assert!(
+            paths_refer_to_same_object(&original, &alias),
+            "硬链接必须按文件身份判定为同一对象"
+        );
+        assert!(
+            !lexical_paths_equal(&original, &alias),
+            "词法路径不同，身份判定才是此处的正确依据"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 不同对象必须判定为不同（不能因为都有身份就放行）。
+    #[test]
+    fn paths_refer_to_same_object_rejects_distinct_paths() {
+        let dir = unique_tmp("same-object-distinct");
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        assert!(!paths_refer_to_same_object(&a, &b));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Windows verbatim 前缀（canonicalize 产物）不得导致同一目录被判为不同。
+    #[cfg(windows)]
+    #[test]
+    fn paths_refer_to_same_object_ignores_verbatim_prefix() {
+        let dir = unique_tmp("same-object-verbatim");
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = dir.clone();
+        let verbatim = PathBuf::from(format!(r"\\?\{}", dir.display()));
+        assert!(
+            paths_refer_to_same_object(&plain, &verbatim),
+            "`\\\\?\\` 前缀只是写法差异，不得误判为不同目录"
+        );
+        assert!(lexical_paths_equal(&plain, &verbatim));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 词法回退：剥离 verbatim 前缀；大小写比较按卷属性，无法确认时 fail closed。
+    #[cfg(windows)]
+    #[test]
+    fn lexical_paths_equal_strips_verbatim_prefix_and_respects_case_sensitivity() {
+        assert!(lexical_paths_equal(
+            Path::new(r"C:\qts\data"),
+            Path::new(r"\\?\C:\qts\data")
+        ));
+        assert!(lexical_paths_equal(
+            Path::new(r"\\server\share\data"),
+            Path::new(r"\\?\UNC\server\share\data")
+        ));
+        assert!(!lexical_paths_equal(
+            Path::new(r"C:\qts\data"),
+            Path::new(r"C:\qts\other")
+        ));
+
+        assert!(compare_path_text(
+            Path::new(r"C:\qts\Data"),
+            Path::new(r"C:\qts\data"),
+            false
+        ));
+        assert!(!compare_path_text(
+            Path::new(r"C:\qts\Data"),
+            Path::new(r"C:\qts\data"),
+            true
+        ));
+
+        // 大小写敏感目录：`sub` 与 `Sub` 是不同的目录 → 必须不等（fail closed 同理）。
+        let dir = unique_tmp("case-sensitivity");
+        std::fs::create_dir_all(dir.join("Sub")).unwrap();
+        let cased = dir.join("Sub");
+        let folded = dir.join("sub");
+        if win::dir_is_case_sensitive(&cased) != Some(false) {
+            assert!(
+                !lexical_paths_equal(&cased, &folded),
+                "大小写敏感（或无法确认）时不得把不同大小写的路径判为同一目录"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
