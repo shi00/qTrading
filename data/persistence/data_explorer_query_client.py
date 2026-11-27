@@ -1,3 +1,45 @@
+"""数据浏览器（表浏览 + SQL 控制台）只读查询客户端。
+
+SQL 控制台的越界直读防护分两层，**两层必须同时在位**：
+
+1. **数据库角色最小权限（主防线，真正的安全边界）**：``execute_sql`` 在事务内
+   ``SET LOCAL ROLE qtrading_explorer_ro``。该角色只对公开业务表有 ``SELECT``，
+   ``agent_*``（迁移 0048 的原始体/模型可见/公开导出三表示）与 ``app_state`` 无任何
+   权限；``query_to_xml``／``table_to_xml`` 等执行器为 SECURITY INVOKER，受限角色下
+   同样读不到受管表。角色创建属部署职责（应用不在迁移/启动时建角色），DBA 一次性执行::
+
+       CREATE ROLE qtrading_explorer_ro NOLOGIN;
+       GRANT CONNECT ON DATABASE <database> TO qtrading_explorer_ro;
+       GRANT USAGE ON SCHEMA public TO qtrading_explorer_ro;
+       REVOKE ALL ON ALL TABLES IN SCHEMA public FROM qtrading_explorer_ro;
+       DO $$
+       DECLARE tbl text;
+       BEGIN
+         FOR tbl IN
+           SELECT tablename FROM pg_tables
+           WHERE schemaname = 'public'
+             AND tablename NOT LIKE 'agent\\_%'
+             AND tablename <> 'app_state'
+         LOOP
+           EXECUTE format('GRANT SELECT ON TABLE public.%I TO qtrading_explorer_ro', tbl);
+         END LOOP;
+       END $$;
+       GRANT qtrading_explorer_ro TO <runtime_role>;  -- SET LOCAL ROLE 需成员资格
+
+   每次迁移新增表后重跑「收回 + 逐表授予」块（默认权限会覆盖新表，故需重跑）。
+
+2. **应用层前置校验（快失败提示，非安全边界）**：``validate_read_only_sql`` 拒绝
+   多语句、非 SELECT、危险关键字、受管标识符（``agent_*``／``pg_catalog``／
+   ``information_schema``）与任意执行/文件/大对象/改角色函数（``query_to_*``、
+   ``table_to_*``、``lo_*``、``pg_*``、``dblink*``、``set_config``）。
+   纯 sqlparse 词法检查**不完备**——``query_to_xml('SELECT ... FROM agent_message', ...)``
+   把 SQL 藏在字符串常量里，词法上只是普通字面量；因此必须依赖第 1 层兜底。
+
+角色不存在时第 1 层自动跳过（不破坏既有初始化），此时只剩应用层校验——这正是
+应用层不能省、但也不能单独承担安全边界的原因。若角色已创建但运行时角色不是其成员，
+``SET LOCAL ROLE`` 会失败并以脱敏错误返回（运行角色须按上方 GRANT 授权）。
+"""
+
 import logging
 import re
 import threading
@@ -23,6 +65,114 @@ _STATEMENT_TIMEOUT = "10s"
 # 按目录反射返回原始全列会绕过该投影（如 ``agent_message.body_text`` 原值、
 # ``model_text`` 模型可见），故浏览与导出共用的目录校验统一排除（fail closed）。
 _AGENT_MANAGED_TABLE_PREFIX = "agent_"
+
+# 数据浏览器专用只读角色的会话名（D2-01）。角色由部署流程创建（见模块 docstring），
+# 存在时 execute_sql 以 SET LOCAL ROLE 切到该角色；不存在时跳过，不破坏既有初始化。
+_EXPLORER_ROLE = "qtrading_explorer_ro"
+
+# 应用层前置校验（快失败提示，非安全边界；安全边界见模块 docstring 第 1 层）。
+_BLOCKED_IDENTIFIER_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bagent_\w*", re.IGNORECASE),  # Agent 受管表（迁移 0048 三表示）
+    re.compile(r"\bpg_catalog\b", re.IGNORECASE),  # 系统目录
+    re.compile(r"\binformation_schema\b", re.IGNORECASE),  # 标准元数据视图
+)
+# 可执行任意 SQL / 读写服务器文件 / 切换会话角色的函数前缀（含 schema 限定形态）。
+_BLOCKED_FUNCTION_PREFIXES = (
+    "query_to_",  # query_to_xml：在字符串常量内执行任意 SQL
+    "table_to_",  # table_to_xml：按表名读取整表
+    "cursor_to_",
+    "schema_to_",
+    "database_to_",
+    "lo_",  # 大对象 lo_import / lo_export
+    "pg_",  # pg_read_file / pg_sleep / pg_terminate_backend ...
+    "dblink",  # dblink / dblink_exec
+)
+# set_config 可改写 role 等 GUC，绕过第 1 层角色隔离。
+_BLOCKED_FUNCTION_NAMES = frozenset({"set_config"})
+_FUNCTION_CALL_PATTERN = re.compile(r"\b([a-z_][a-z0-9_$]*)\s*\(", re.IGNORECASE)
+# U&"..." 可用 \005f 之类的转义拼出 agent_message，词法上与受管标识符不同名，故整体禁用。
+_UNICODE_ESCAPE_IDENTIFIER_PATTERN = re.compile(r"\bu&\s*\"", re.IGNORECASE)
+# 危险关键字：词边界匹配，防制表符/换行/注释分隔绕过（P0-2）。
+_DANGEROUS_KEYWORD_PATTERN = re.compile(
+    r"\b(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|TRUNCATE|EXECUTE|GRANT|REVOKE|INTO|COPY)\b",
+    re.IGNORECASE,
+)
+
+
+def _statement_code_without_literals(statement: typing.Any) -> str:
+    """语句 → 去掉注释与字面量常量后的代码文本（保留双引号标识符原样）。
+
+    字面量（单引号、``$$...$$`` dollar-quoted、数值）内的文本不参与标识符/函数匹配
+    （它只是被服务器当参数传递的文本）；双引号是标识符引用（``Literal.String.Symbol``），
+    内容需参与匹配。
+    """
+    parts: list[str] = []
+    for token in statement.flatten():
+        ttype = token.ttype
+        if ttype is not None and (ttype in sqlparse.tokens.Comment or ttype in sqlparse.tokens.Literal):
+            # 双引号标识符（Literal.String.Symbol）保留内容参与匹配，其余字面量/注释整体抹去
+            parts.append(token.value if ttype in sqlparse.tokens.Literal.String.Symbol else " ")
+            continue
+        parts.append(token.value)
+    return "".join(parts)
+
+
+def _has_effective_content(statement: typing.Any) -> bool:
+    """语句是否含有效内容（忽略空白、注释与多余分号，如 ``SELECT 1;;`` 的尾项）。"""
+    for token in statement.flatten():
+        ttype = token.ttype
+        if ttype is not None and (ttype in sqlparse.tokens.Comment or ttype in sqlparse.tokens.Whitespace):
+            continue
+        if token.value.strip(" ;\t\r\n") == "":
+            continue
+        return True
+    return False
+
+
+def validate_read_only_sql(sql_query: str) -> str | None:
+    """SQL 控制台应用层前置校验：通过返回 None，否则返回错误消息。
+
+    规则：单条语句 + 仅 SELECT + 无危险关键字 + 无受管表/系统目录标识符 +
+    无任意执行/文件/大对象/改角色函数。仅为快失败提示，安全边界见模块 docstring
+    第 1 层（会话级只读低权限角色）。
+    """
+    if not isinstance(sql_query, str) or not sql_query.strip():
+        return "Empty query"
+    try:
+        parsed = sqlparse.parse(sql_query)
+    except Exception as e:
+        # F5-P2: R9 脱敏
+        return f"SQL Parse Error: {safe_error(e)}"
+
+    statements = [statement for statement in parsed if _has_effective_content(statement)]
+    if not statements:
+        return "Empty query"
+    if len(statements) > 1:
+        return "Security Alert: Only a single SQL statement is allowed."
+
+    statement = statements[0]
+    if statement.get_type() != "SELECT":
+        return f"Security Alert: Only SELECT statements are allowed. Found: {statement.get_type()}"
+
+    keyword = _DANGEROUS_KEYWORD_PATTERN.search(sql_query)
+    if keyword:
+        return f"Security Alert: Dangerous keyword '{keyword.group(1).upper()}' detected in query."
+
+    code_with_quotes = _statement_code_without_literals(statement)
+    if _UNICODE_ESCAPE_IDENTIFIER_PATTERN.search(code_with_quotes):
+        return "Security Alert: Unicode-escaped identifiers are not allowed."
+    code = code_with_quotes.replace('"', "")
+    for pattern in _BLOCKED_IDENTIFIER_PATTERNS:
+        identifier = pattern.search(code)
+        if identifier:
+            return f"Security Alert: Access to managed identifier '{identifier.group(0)}' is not allowed."
+
+    for function_name in _FUNCTION_CALL_PATTERN.findall(code):
+        lowered = function_name.lower()
+        if lowered in _BLOCKED_FUNCTION_NAMES or lowered.startswith(_BLOCKED_FUNCTION_PREFIXES):
+            return f"Security Alert: Function '{lowered}' is not allowed in the SQL console."
+    return None
+
 
 _OP_MAP = {
     "=": lambda c, v: c == v,
@@ -325,7 +475,10 @@ class DataExplorerQueryClient:
         Includes safety checks to prevent modification queries and memory exhaustion.
 
         NOTE: This method intentionally accepts raw SQL (user's explicit intent).
-        Defense layers: sqlparse SELECT-only check + read-only connection.
+        Defense layers (see module docstring):
+        1. session-scoped least-privilege role ``qtrading_explorer_ro`` (security boundary);
+        2. app-layer validation (single statement, SELECT-only, managed identifiers/functions);
+        3. SET TRANSACTION READ ONLY + statement_timeout.
 
         Returns:
             dict: {
@@ -342,44 +495,10 @@ class DataExplorerQueryClient:
             # F5-P2: R9 脱敏，避免异常消息含 DB 连接字符串等敏感信息流向 UI
             return {"success": False, "data": None, "error": safe_error(e)}
 
-        # 1. Security Check with sqlparse
-        try:
-            parsed = sqlparse.parse(sql_query)
-        except Exception as e:
-            # F5-P2: R9 脱敏
-            return {
-                "success": False,
-                "data": None,
-                "error": f"SQL Parse Error: {safe_error(e)}",
-            }
-
-        if not parsed:
-            return {"success": False, "data": None, "error": "Empty query"}
-
-        for statement in parsed:
-            if statement.get_type() != "SELECT":
-                return {
-                    "success": False,
-                    "data": None,
-                    "error": f"Security Alert: Only SELECT statements are allowed. Found: {statement.get_type()}",
-                }
-
-        # 1.5. Defense-in-depth: Block dangerous keywords even if sqlparse misclassifies
-        # P0-2: Use regex word-boundary matching instead of trailing-space strings.
-        # Trailing-space matching ("DROP ") can be bypassed with tabs, newlines,
-        # or comments: DROP\ttable, DROP\n table, DROP(--comment)table.
-        # P1-2: Added INTO (SELECT...INTO creates tables) and COPY (filesystem access).
-        _DANGEROUS_KEYWORD_PATTERN = re.compile(
-            r"\b(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|TRUNCATE|EXECUTE|GRANT|REVOKE|INTO|COPY)\b",
-            re.IGNORECASE,
-        )
-        match = _DANGEROUS_KEYWORD_PATTERN.search(sql_query)
-        if match:
-            return {
-                "success": False,
-                "data": None,
-                "error": f"Security Alert: Dangerous keyword '{match.group(1).upper()}' detected in query.",
-            }
+        # 1. Application-layer pre-check (fast fail; R9 脱敏由 validator 内部处理)
+        validation_error = validate_read_only_sql(sql_query)
+        if validation_error is not None:
+            return {"success": False, "data": None, "error": validation_error}
 
         # 2. Execute with strictly Read-Only transaction and Memory Protection
         # P0-1: Use REPEATABLE READ + SET TRANSACTION READ ONLY instead of
@@ -395,6 +514,15 @@ class DataExplorerQueryClient:
                     # C6: SET LOCAL 在事务内生效，超时后语句被服务端取消（resource 滥用防线）
                     # DAT-08: SET 不支持参数绑定，改用 set_config(..., true) 等价 SET LOCAL（仅当前事务生效；依赖下方显式事务块）
                     conn.execute(sa.text("SELECT set_config('statement_timeout', :v, true)"), {"v": _STATEMENT_TIMEOUT})
+                    # 第 1 层（安全边界）：切到只读低权限角色，隔离 agent_*/app_state 等受管表。
+                    # 角色由部署流程创建；不存在时跳过以不破坏既有初始化（见模块 docstring）。
+                    role_exists = conn.execute(
+                        sa.text("SELECT 1 FROM pg_roles WHERE rolname = :role"),
+                        {"role": _EXPLORER_ROLE},
+                    ).fetchone()
+                    if role_exists is not None:
+                        # R4：角色名为冻结常量，不可内插，故用静态字面量（须与 _EXPLORER_ROLE 一致）
+                        conn.execute(sa.text("SET LOCAL ROLE qtrading_explorer_ro"))
                     result = conn.execute(sa.text(sql_query))
 
                     # Protection: Fetch at most 2000 rows to prevent memory explosion (DoS)

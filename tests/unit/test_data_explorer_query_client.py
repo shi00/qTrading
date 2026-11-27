@@ -824,6 +824,102 @@ class TestExecuteSql:
         assert result["success"] is True
 
 
+class TestExecuteSqlManagedTableIsolation:
+    """D2-01: SQL 控制台不得越界直读 Agent 受管表（迁移 0048 三表示）。
+
+    应用层前置校验只是快失败提示；真正的安全边界是会话级只读低权限角色
+    （见 data_explorer_query_client 模块 docstring），此处同时验证提示层与角色切换。
+    """
+
+    @staticmethod
+    def _setup_conn(dm, *, role_exists: bool):
+        """装配成功路径连接替身；返回 (mock_conn, executed_sql_texts)。"""
+        mock_conn = MagicMock()
+        mock_conn.execution_options.return_value = mock_conn
+        role_result = MagicMock()
+        role_result.fetchone.return_value = (1,) if role_exists else None
+        data_result = MagicMock()
+        data_result.keys.return_value = ["ts_code"]
+        data_result.fetchmany.return_value = [("000001.SZ",)]
+        executed: list[str] = []
+
+        def _execute(statement, *args, **kwargs):
+            sql_text = str(statement)
+            executed.append(sql_text)
+            return role_result if "pg_roles" in sql_text else data_result
+
+        mock_conn.execute.side_effect = _execute
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        return mock_conn, executed
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT * FROM agent_message",
+            "select * from AGENT_MESSAGE",
+            'SELECT * FROM "agent_message"',
+            "SELECT * FROM public.agent_message",
+            'SELECT * FROM public."AGENT_MESSAGE"',
+            "SELECT * FROM pg_catalog.pg_class",
+            "SELECT * FROM information_schema.tables",
+            "SELECT * FROM stock_basic WHERE ts_code IN (SELECT ts_code FROM agent_message)",
+            "WITH x AS (SELECT * FROM agent_message) SELECT * FROM x",
+            "SELECT * FROM (TABLE agent_message) t",
+            "SELECT query_to_xml('SELECT * FROM agent_message', true, true, '')",
+            "SELECT table_to_xml('agent_message', true, false, '')",
+            "SELECT \"pg_read_file\"('/etc/passwd')",
+            "SELECT pg_read_file('/etc/passwd')",
+            "SELECT lo_export(1, '/tmp/x')",
+            "SELECT dblink_exec('host=x', 'SELECT 1')",
+            "SELECT set_config('role', 'postgres', true)",
+            'SELECT * FROM U&"agent\\005fmessage"',
+            "SELECT 1; SELECT * FROM agent_message",
+        ],
+    )
+    def test_rejects_agent_and_dangerous_queries(self, sql):
+        """受管表/系统目录/任意执行函数/多语句/改角色一律前置拒绝，且不触库。"""
+        dm = _make_dm()
+        result = dm.execute_sql(sql)
+        assert result["success"] is False
+        assert result["data"] is None
+        assert result["error"].startswith("Security Alert")
+        dm._engine.connect.assert_not_called()
+
+    def test_string_literal_mention_is_not_blocked(self):
+        """字面量里出现 agent_ 只是文本，不构成越界读取（避免误伤）。"""
+        dm = _make_dm()
+        _, executed = self._setup_conn(dm, role_exists=True)
+
+        result = dm.execute_sql("SELECT * FROM stock_basic WHERE note = 'agent_message'")
+
+        assert result["success"] is True
+        assert any("SELECT * FROM stock_basic" in sql_text for sql_text in executed)
+
+    def test_switches_to_explorer_role_when_present(self):
+        """角色存在时在只读事务内切到低权限角色，且先于用户查询执行。"""
+        dm = _make_dm()
+        _, executed = self._setup_conn(dm, role_exists=True)
+
+        result = dm.execute_sql("SELECT * FROM stock_basic")
+
+        assert result["success"] is True
+        read_only_index = executed.index("SET TRANSACTION READ ONLY")
+        role_index = next(i for i, text in enumerate(executed) if "SET LOCAL ROLE qtrading_explorer_ro" in text)
+        user_query_index = next(i for i, text in enumerate(executed) if text == "SELECT * FROM stock_basic")
+        assert read_only_index < role_index < user_query_index
+
+    def test_skips_role_switch_when_absent(self):
+        """角色未创建（既有部署）时跳过切换，保留应用层校验作为唯一防线。"""
+        dm = _make_dm()
+        _, executed = self._setup_conn(dm, role_exists=False)
+
+        result = dm.execute_sql("SELECT * FROM stock_basic")
+
+        assert result["success"] is True
+        assert not any("SET LOCAL ROLE" in text for text in executed)
+
+
 class TestDatabaseConfigServiceSQLInjection:
     @pytest.mark.asyncio
     async def test_create_database_rejects_invalid_name_semicolon(self):
