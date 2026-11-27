@@ -3379,5 +3379,6 @@
     "agent_roles_preset_main": "Main role",
     "agent_roles_preset_sub": "Sub role",
     "agent_roles_list_title": "Role list",
-    "agent_roles_loading": "Loading roles…"
+    "agent_roles_loading": "Loading roles…",
+    "agent_comparison_session_revision_unavailable": "Could not read the session draft revision; submission aborted without guessing."
 }
