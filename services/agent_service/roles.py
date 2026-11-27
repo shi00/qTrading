@@ -93,10 +93,20 @@ class RoleCatalogStore:
         return _decode(text, role_id)
 
     async def list_all(self) -> tuple[RoleDefinition, ...]:
-        """列出全部自定义角色（按 ``role_id`` 排序）；单条损坏即显式失败。"""
+        """列出全部自定义角色（按 ``role_id`` 排序）；单条损坏/键名不一致即显式失败。"""
 
         values = await self._scan(self.PREFIX)
-        definitions = [_decode(text, key) for key, text in values.items()]
+        definitions: list[RoleDefinition] = []
+        for key, text in values.items():
+            definition = _decode(text, key)
+            expected_role_id = key.removeprefix(self.PREFIX)
+            if definition.role_id != expected_role_id:
+                raise AgentServiceError(
+                    AgentErrorCode.CONFIG_UNAVAILABLE,
+                    f"role definition key mismatch: {key} vs {definition.role_id}",
+                    key,
+                )
+            definitions.append(definition)
         return tuple(sorted(definitions, key=lambda item: item.role_id))
 
     async def create(self, definition: RoleDefinition) -> bool:

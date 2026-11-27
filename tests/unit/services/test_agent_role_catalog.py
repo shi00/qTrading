@@ -306,6 +306,24 @@ async def test_list_roles_undecodable_is_unavailable(store: tuple[RoleCatalogSto
 
 
 @pytest.mark.asyncio
+async def test_list_roles_key_mismatch_is_unavailable(store: tuple[RoleCatalogStore, dict[str, str]]) -> None:
+    """键后缀与定义 ``role_id`` 不一致 → 按损坏定义显式失败，消息含键与定义 id。"""
+
+    catalog, data = store
+    service = RoleCatalogService(catalog)
+    await service.create_new("beta_role", "乙", "v1", updated_by="tester")
+    data["agent.role.def.zzz_alias"] = data.pop("agent.role.def.beta_role")
+
+    with pytest.raises(AgentServiceError) as excinfo:
+        await service.list_roles()
+
+    assert type(excinfo.value) is AgentServiceError
+    assert excinfo.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+    assert "agent.role.def.zzz_alias" in excinfo.value.sanitized_message
+    assert "beta_role" in excinfo.value.sanitized_message
+
+
+@pytest.mark.asyncio
 async def test_create_new_rejects_unavailable_model_connection(
     store: tuple[RoleCatalogStore, dict[str, str]],
 ) -> None:

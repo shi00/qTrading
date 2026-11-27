@@ -242,8 +242,8 @@ class RolesSettingsViewModel(ObservableViewModelMixin[RolesSettingsState]):
     async def copy(self, source_role_id: str) -> None:
         """以来源角色的提示词与模型覆盖为模板预填新建草稿。
 
-        预置角色直接使用静态 ``sub`` 模板（不读目录，目录中无预置定义）；
-        自定义角色读目录定义。
+        预置角色使用与来源一致的静态模板（``main`` → 主模板、``sub`` → sub 模板，
+        不读目录，目录中无预置定义）；自定义角色读目录定义。
         """
 
         if source_role_id in PRESET_ROLE_IDS:
@@ -251,7 +251,7 @@ class RolesSettingsViewModel(ObservableViewModelMixin[RolesSettingsState]):
                 editing=RoleDraft(
                     role_id="",
                     display_name="",
-                    prompt_body=SUB_ROLE_PROMPT_TEMPLATE,
+                    prompt_body=ROLE_PROMPT_DEFAULTS[source_role_id][0],
                     model_connection_id=None,
                     role_version=None,
                     is_new=True,

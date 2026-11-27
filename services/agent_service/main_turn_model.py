@@ -19,7 +19,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any, Final, Protocol
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 from pydantic import BaseModel, Field
 
@@ -91,12 +91,17 @@ class _ResolvedRoute(Protocol):
     def snapshot(self) -> Any: ...
 
 
-#: 场景路由解析（测试注入替身；生产走 ``resolve_executor``）。
-#:
-#: 调用契约：``preferred_connection_id`` 为 ``None`` 时按**零参**调用（兼容既有
-#: 零参替身）；非 ``None`` 时以 ``preferred_connection_id`` 关键字调用（会话/角色
-#: 模型选择须作用于本次路由解析，不可静默丢弃）。
-RouteResolver = Callable[..., Any]
+class RouteResolver(Protocol):
+    """场景路由解析契约（测试注入替身；生产走 ``_resolve_route``）。
+
+    调用契约：零参调用（``preferred_connection_id is None``）与关键字调用
+    ``preferred_connection_id=...`` 均必须成立——会话/角色模型选择须作用于本次
+    路由解析，不可静默丢弃。
+    """
+
+    def __call__(self, *, preferred_connection_id: str | None = None) -> Awaitable[_ResolvedRoute | None]: ...
+
+
 #: 模型桥工厂（测试注入替身；生产为 ``GatewayModel``）。
 ModelFactory = Callable[..., Any]
 #: 单次受治理调用（测试注入替身；生产为 pydantic-ai ``Agent``）。

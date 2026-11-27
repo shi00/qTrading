@@ -27,6 +27,7 @@ from utils.config_models import ROLE_PROMPT_DEFAULTS
 
 #: 新建/复制的期望模板正文（与设计 §7.1 的 ``sub`` 模板一致，取自配置正本）。
 SUB_TEMPLATE = ROLE_PROMPT_DEFAULTS["sub"][0]
+MAIN_TEMPLATE = ROLE_PROMPT_DEFAULTS["main"][0]
 
 pytestmark = pytest.mark.unit
 
@@ -341,6 +342,24 @@ async def test_copy_preset_uses_static_template_without_service() -> None:
     assert draft.model_connection_id is None
     assert draft.copy_from == "sub"
     assert vm.state.error_key is None
+    assert catalog.calls == []
+
+
+@pytest.mark.asyncio
+async def test_copy_main_preset_uses_main_template() -> None:
+    """复制 ``main`` 必须用主角色模板，不能复用 sub 模板。"""
+
+    catalog = _RecordingCatalog()
+    vm = await _vm_with(catalog)
+    catalog.calls.clear()
+
+    await vm.copy("main")
+
+    draft = vm.state.editing
+    assert draft is not None
+    assert draft.prompt_body == MAIN_TEMPLATE
+    assert draft.prompt_body != SUB_TEMPLATE
+    assert draft.copy_from == "main"
     assert catalog.calls == []
 
 

@@ -212,6 +212,12 @@ def _read_saved_role_prompt(
             raise AgentServiceError(
                 AgentErrorCode.CONFIG_UNAVAILABLE, "custom role definition version mismatch", role_key
             )
+        if definition.role_id != role_key:
+            raise AgentServiceError(
+                AgentErrorCode.CONFIG_UNAVAILABLE,
+                f"custom role definition role_id mismatch: {role_key} vs {definition.role_id}",
+                role_key,
+            )
         return RolePromptIdentity(text=definition.prompt_body, version=definition.role_version)
 
     default_text, default_version = ROLE_PROMPT_DEFAULTS[role_key]
