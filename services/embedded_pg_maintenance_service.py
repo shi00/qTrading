@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import enum
 import json
 import logging
@@ -67,8 +68,8 @@ SIDECAR_DEFAULT_USERNAME = "postgres"
 # Windows 下主程序为 GUI（windowed）进程，拉起 console 子系统的 sidecar CLI 时若不带
 # CREATE_NO_WINDOW 会弹出可见控制台窗口（备份/恢复/doctor 期间黑窗）；开发模式从终端
 # 运行时子进程继承终端控制台不弹窗，故仅打包安装版暴露。POSIX 平台传 0。
-# D07-007: 另加 CREATE_NEW_PROCESS_GROUP，使取消可经 taskkill /T 精确作用于 sidecar 树，
-# 不波及 qTrading 自身的控制台进程组。
+# D07-007: 另加 CREATE_NEW_PROCESS_GROUP，使 POSIX 侧进程组语义在 Windows 控制台子进程上
+# 保持独立；D1-04 起 Windows 取消改由受控 Job Object 承担，不再依赖 taskkill /T。
 _SIDECAR_CREATION_FLAGS = (
     subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
 )
@@ -78,7 +79,211 @@ _SIDECAR_CREATION_FLAGS = (
 # 上限（3.0 + 1.5s）需留在关机看门狗预算内（默认 10s / 25s）。
 _CANCEL_GRACE_S = 3.0
 _CANCEL_KILL_GRACE_S = 1.5
-_TASKKILL_TIMEOUT_S = 5.0
+
+# D1-04: Windows 取消以 Job Object 身份（句柄）为准，不再对裸 PID 执行 taskkill：
+# ``proc.poll()`` 预检与真正发信号之间存在 PID 复用窗口，强杀裸 PID 可能误杀无关进程。
+# 下列常量为 CreateJobObjectW / SetInformationJobObject 所需 winnt.h 取值。
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
+_PROCESS_TERMINATE = 0x0001
+_PROCESS_SET_QUOTA = 0x0100
+
+
+class _JobBasicLimitInformation(ctypes.Structure):
+    """``JOBOBJECT_BASIC_LIMIT_INFORMATION`` 的 ctypes 映射（仅字段布局，跨平台可构造）。"""
+
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_int64),
+        ("PerJobUserTimeLimit", ctypes.c_int64),
+        ("LimitFlags", ctypes.c_uint32),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", ctypes.c_uint32),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", ctypes.c_uint32),
+        ("SchedulingClass", ctypes.c_uint32),
+    ]
+
+
+class _JobIoCounters(ctypes.Structure):
+    """``IO_COUNTERS`` 的 ctypes 映射。"""
+
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_uint64),
+        ("WriteOperationCount", ctypes.c_uint64),
+        ("OtherOperationCount", ctypes.c_uint64),
+        ("ReadTransferCount", ctypes.c_uint64),
+        ("WriteTransferCount", ctypes.c_uint64),
+        ("OtherTransferCount", ctypes.c_uint64),
+    ]
+
+
+class _JobExtendedLimitInformation(ctypes.Structure):
+    """``JOBOBJECT_EXTENDED_LIMIT_INFORMATION`` 的 ctypes 映射。"""
+
+    _fields_ = [
+        ("BasicLimitInformation", _JobBasicLimitInformation),
+        ("IoInfo", _JobIoCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+class _JobBasicAccountingInformation(ctypes.Structure):
+    """``JOBOBJECT_BASIC_ACCOUNTING_INFORMATION`` 的 ctypes 映射（``ActiveProcesses`` 为判据）。"""
+
+    _fields_ = [
+        ("TotalUserTime", ctypes.c_int64),
+        ("TotalKernelTime", ctypes.c_int64),
+        ("ThisPeriodTotalUserTime", ctypes.c_int64),
+        ("ThisPeriodTotalKernelTime", ctypes.c_int64),
+        ("TotalPageFaultCount", ctypes.c_uint32),
+        ("TotalProcesses", ctypes.c_uint32),
+        ("ActiveProcesses", ctypes.c_uint32),
+        ("TotalTerminatedProcesses", ctypes.c_uint32),
+    ]
+
+
+_JOB_KERNEL32: Any = None
+
+
+def _job_kernel32() -> Any:
+    """懒加载 kernel32 并声明 Job Object API 签名（仅 win32 实际调用）。"""
+    global _JOB_KERNEL32
+    if _JOB_KERNEL32 is None:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[reportAttributeAccessIssue]  # Windows-only：WinDLL 在 Linux 平台不存在
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+        kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+        kernel32.SetInformationJobObject.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+        ]
+        kernel32.SetInformationJobObject.restype = ctypes.c_bool
+        kernel32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        kernel32.AssignProcessToJobObject.restype = ctypes.c_bool
+        kernel32.TerminateJobObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        kernel32.TerminateJobObject.restype = ctypes.c_bool
+        kernel32.QueryInformationJobObject.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        kernel32.QueryInformationJobObject.restype = ctypes.c_bool
+        kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_bool, ctypes.c_uint32]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_bool
+        _JOB_KERNEL32 = kernel32
+    return _JOB_KERNEL32
+
+
+class _WindowsJob:
+    """维护子进程的受控 Job Object（D1-04，仅 win32 实例化）。
+
+    取消作用于登记到该 Job 的进程集合（句柄身份），而不是裸 PID：``taskkill /PID`` 在
+    ``proc.poll()`` 预检与真正发信号之间存在 PID 复用窗口，可能误杀无关进程。
+    ``JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`` 保证句柄关闭时残留的 pg 子进程随之终止，不产生
+    孤儿继续写目标文件。创建或登记失败时调用方必须按「取消未证明」处理，不得退回裸 PID 强杀。
+    登记发生在 ``Popen`` 之后：理论上存在「子进程在登记前自行派生子进程」的极窄窗口；sidecar
+    需先解析参数才拉起 pg 工具，该窗口远小于取消阶段（分钟级）的 PID 复用窗口。
+    """
+
+    def __init__(self, handle: int, kernel32: Any) -> None:
+        self._handle = handle
+        self._kernel32 = kernel32
+        self._lock = threading.RLock()
+        self._closed = False
+
+    @classmethod
+    def create(cls) -> _WindowsJob | None:
+        """创建带 KILL_ON_JOB_CLOSE 的 Job；创建/设置失败返回 None。"""
+        kernel32 = _job_kernel32()
+        handle = kernel32.CreateJobObjectW(None, None)
+        if not handle:
+            return None
+        info = _JobExtendedLimitInformation()
+        info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        ok = kernel32.SetInformationJobObject(
+            handle,
+            _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        )
+        if not ok:
+            kernel32.CloseHandle(handle)
+            return None
+        return cls(int(handle), kernel32)
+
+    def assign(self, proc: subprocess.Popen[str]) -> bool:
+        """把刚启动的 sidecar 纳入 Job。
+
+        ``OpenProcess`` 使用 ``proc.pid``：此刻该 PID 仍由本进程持有存活子进程（刚 Popen），
+        不存在「PID 已被复用」的窗口；取消阶段的身份风险由 Job 句柄本身承担。
+        """
+        with self._lock:
+            if self._closed or not self._handle:
+                return False
+            if proc.poll() is not None:
+                # 子进程已退出：无可登记目标（也无需再登记）
+                return False
+            process_handle = self._kernel32.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, proc.pid)
+            if not process_handle:
+                return False
+            try:
+                return bool(self._kernel32.AssignProcessToJobObject(self._handle, process_handle))
+            finally:
+                self._kernel32.CloseHandle(process_handle)
+
+    def terminate(self) -> bool:
+        """终止 Job 内全部进程；Job 已关闭或调用失败返回 False。"""
+        with self._lock:
+            if self._closed or not self._handle:
+                return False
+            return bool(self._kernel32.TerminateJobObject(self._handle, 1))
+
+    def wait_empty(self, timeout: float) -> bool:
+        """在 ``timeout`` 内证明 Job 内活动进程数归零。
+
+        句柄已关闭视为已终止：``KILL_ON_JOB_CLOSE`` 语义保证关闭时残留进程被终止。
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._lock:
+                if self._closed or not self._handle:
+                    return True
+                info = _JobBasicAccountingInformation()
+                ok = self._kernel32.QueryInformationJobObject(
+                    self._handle,
+                    _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+                    ctypes.byref(info),
+                    ctypes.sizeof(info),
+                    None,
+                )
+                if not ok:
+                    return False
+                if info.ActiveProcesses == 0:
+                    return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(remaining, 0.05))
+
+    def close(self) -> None:
+        """关闭 Job 句柄（KILL_ON_JOB_CLOSE 使残留进程随之终止）；可重复调用。"""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self._handle:
+                self._kernel32.CloseHandle(self._handle)
+                self._handle = 0
 
 
 class EmbeddedPgMaintenanceError(RuntimeError):
@@ -106,7 +311,7 @@ class CancelStatus(enum.Enum):
     """终止信号未能送达——命令已在送达前自然结束（退出码由工作线程按业务语义分类）。"""
 
     UNPROVEN = "unproven"
-    """宽限期内无法证明进程树停止，可能仍在运行。"""
+    """无法证明进程树停止或无法证明目标身份（如 Windows 未登记受控 Job），可能仍在运行。"""
 
 
 def _coerce_runtime_port(value: object) -> int | None:
@@ -121,7 +326,7 @@ def _coerce_runtime_port(value: object) -> int | None:
 
 
 def _wait_process_exit(proc: subprocess.Popen[str], timeout: float) -> bool:
-    """在 ``timeout`` 内证明单进程已退出（仅 Windows 树终止后的 wrapper 证明用）。
+    """在 ``timeout`` 内证明单进程已退出（Windows 无受控 Job 时的 wrapper 兜底证明）。
 
     ``Popen.wait()`` 在另一线程持有 waitpid 锁时可能立即返回 ``None``，因此以
     ``poll()`` 是否给出退出码作为唯一判据，并在剩余时间内小步重试。
@@ -145,7 +350,7 @@ def _wait_process_exit(proc: subprocess.Popen[str], timeout: float) -> bool:
 def _resolve_pgid(proc: subprocess.Popen[str]) -> int:
     """sidecar 以独立 session 启动，pg 子进程继承同一进程组（组 id == 启动时 pid）。"""
     try:
-        return os.getpgid(proc.pid)
+        return os.getpgid(proc.pid)  # type: ignore[reportAttributeAccessIssue]  # POSIX-only：getpgid 在 Windows 平台不存在（本函数仅 POSIX 分支调用）
     except OSError:
         # wrapper 已退出但进程组可能仍被 pg 子进程持有——沿用启动时的组 id
         return proc.pid
@@ -155,7 +360,7 @@ def _process_group_alive(proc: subprocess.Popen[str]) -> bool:
     """POSIX：进程组内是否仍有任何进程（含已忽略 SIGTERM 的 pg_dump 子进程）。"""
     pgid = _resolve_pgid(proc)
     try:
-        os.killpg(pgid, 0)
+        os.killpg(pgid, 0)  # type: ignore[reportAttributeAccessIssue]  # POSIX-only：killpg 在 Windows 平台不存在（本函数仅 POSIX 分支调用）
     except ProcessLookupError:
         return False
     except OSError:
@@ -164,14 +369,33 @@ def _process_group_alive(proc: subprocess.Popen[str]) -> bool:
     return True
 
 
-def _wait_process_tree_exit(proc: subprocess.Popen[str], timeout: float) -> bool:
+class _SignalOutcome(enum.Enum):
+    """``_signal_process_tree`` 的可核对结果。
+
+    ``IDENTITY_UNPROVEN`` 表示无法证明终止作用于目标 sidecar 进程树（如 Windows 未成功登记
+    受控 Job）：调用方必须按「取消未确认」上报，不得当作已取消或已自然结束。
+    """
+
+    DELIVERED = "delivered"
+    """终止信号已送达仍存在的目标进程树。"""
+
+    ALREADY_EXITED = "already_exited"
+    """目标已自然结束，信号无处送达（退出码由工作线程按业务语义分类）。"""
+
+    IDENTITY_UNPROVEN = "identity_unproven"
+    """无法证明目标进程树身份，未发送任何终止信号。"""
+
+
+def _wait_process_tree_exit(proc: subprocess.Popen[str], timeout: float, *, job: _WindowsJob | None = None) -> bool:
     """在 ``timeout`` 内证明整棵 sidecar 进程树已退出。
 
     POSIX 以「进程组为空」为判据——仅 wrapper 退出不足以证明，忽略 SIGTERM 的
-    pg_dump/pg_restore 会成为孤儿继续写目标文件；Windows 以 taskkill /T 后 wrapper
-    退出为判据（taskkill 返回成功表示整树已终止）。
+    pg_dump/pg_restore 会成为孤儿继续写目标文件；Windows 优先以受控 Job 的活动进程数
+    归零为判据（``job`` 为 None 时退化为 wrapper 退出，仅在没有可证明身份时的兜底）。
     """
     if os.name == "nt":
+        if job is not None:
+            return job.wait_empty(timeout)
         return _wait_process_exit(proc, timeout)
     deadline = time.monotonic() + timeout
     while True:
@@ -188,27 +412,21 @@ def _wait_process_tree_exit(proc: subprocess.Popen[str], timeout: float) -> bool
         time.sleep(min(remaining, 0.05))
 
 
-def _signal_process_tree(proc: subprocess.Popen[str], *, force: bool) -> bool:
-    """向 sidecar wrapper 及其 pg 子进程发送终止信号，返回是否送达存活的进程树。
+def _signal_process_tree(proc: subprocess.Popen[str], *, force: bool, job: _WindowsJob | None = None) -> _SignalOutcome:
+    """向 sidecar wrapper 及其 pg 子进程发送终止信号。
 
     - POSIX：sidecar 以 ``start_new_session=True`` 启动，pg_dump/pg_restore 继承同一进程组，
       ``killpg`` 使取消到达真正的 pg 子进程（仅 terminate wrapper 会留下孤儿）。
-    - Windows：无信号语义，使用 ``taskkill /T /F`` 终止整棵进程树。
+    - Windows：无信号语义，取消只能作用于启动时登记的受控 Job Object（D1-04）。未登记 Job
+      （创建/登记失败）时返回 ``IDENTITY_UNPROVEN``，绝不退回 ``taskkill /PID``：裸 PID 强杀
+      在 ``poll()`` 预检后仍有 PID 复用窗口，可能误杀无关进程。
     """
     if os.name == "nt":
-        # Windows 无 graceful 信号；console 子进程也不响应 WM_CLOSE，直接整树强制终止。
-        args = ["taskkill", "/PID", str(proc.pid), "/T", "/F"]
-        try:
-            completed = subprocess.run(
-                args,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=_TASKKILL_TIMEOUT_S,
-                creationflags=_SIDECAR_CREATION_FLAGS,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return False
-        return completed.returncode == 0
+        if job is None:
+            return _SignalOutcome.IDENTITY_UNPROVEN
+        if job.terminate():
+            return _SignalOutcome.DELIVERED
+        return _SignalOutcome.ALREADY_EXITED if proc.poll() is not None else _SignalOutcome.IDENTITY_UNPROVEN
     try:
         pgid = _resolve_pgid(proc)
         if pgid != proc.pid:
@@ -219,13 +437,13 @@ def _signal_process_tree(proc: subprocess.Popen[str], *, force: bool) -> bool:
                     proc.kill()
                 else:
                     proc.terminate()
-                return True
-            return False
+                return _SignalOutcome.DELIVERED
+            return _SignalOutcome.ALREADY_EXITED
         os.killpg(pgid, signal.SIGKILL if force else signal.SIGTERM)
-        return True
+        return _SignalOutcome.DELIVERED
     except OSError:
         # 进程组已不存在：命令已自然结束
-        return False
+        return _SignalOutcome.ALREADY_EXITED
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,9 +567,14 @@ class EmbeddedPgMaintenanceService:
             # D16-F06: 单任务预留位。必须在 Popen 之前置位，确保并发第二个 dump
             # 在启动子进程前即被拒绝（旧实现先 Popen 后检查，被拒子进程已可能触碰输出文件）。
             self._dump_task_reserved = False
-            # D07-007: 本次可取消命令是否已收到取消请求（工作线程据此把退出归类为取消，
-            # 而非按负退出码误报 unknown_error）；每次启动新的可取消命令时重置。
-            self._cancel_requested = False
+            # D1-04: 单调递增运行代际令牌。取消标记 ``_cancel_requested_generation`` 绑定
+            # 具体代际，新一轮运行即换新代际，旧标记不会污染本轮退出分类。
+            self._run_generation = 0
+            self._active_generation: int | None = None
+            self._cancel_requested_generation: int | None = None
+            # D1-04: 当前运行的受控 Windows Job（仅 win32 且成功登记时非 None）；
+            # 为 None 时 Windows 取消只能报「未确认」，绝不对裸 PID 强杀。
+            self._active_job: _WindowsJob | None = None
             self._initialized = True
 
     @classmethod
@@ -691,8 +914,10 @@ class EmbeddedPgMaintenanceService:
         """
 
         def _run() -> tuple[int, str, str]:
+            generation: int | None = None
             registered = False
             reserved = False
+            job: _WindowsJob | None = None
             if cancel_allowed:
                 # D16-F06: 先在锁内预留单任务状态，再 Popen。并发第二个 dump 在此处即被拒绝，
                 # 不会启动任何子进程（旧实现先 Popen 后检查，被拒子进程已可能触碰输出文件）。
@@ -700,10 +925,15 @@ class EmbeddedPgMaintenanceService:
                     if self._active_proc is not None or self._dump_task_reserved:
                         raise EmbeddedPgMaintenanceError("已有备份任务在进行中，请先完成后再试")
                     self._dump_task_reserved = True
-                    # D07-007: 新命令开始即清除上一次的取消标记，避免把后续退出误判为取消
-                    self._cancel_requested = False
+                    # D1-04: 每次可取消运行分配唯一代际令牌并清除旧标记；取消标记按代际绑定，
+                    # 上一轮的取消请求不可能被本轮误读（跨轮污染）。
+                    self._run_generation += 1
+                    generation = self._run_generation
+                    self._cancel_requested_generation = None
                     reserved = True
             try:
+                if reserved:
+                    job = self._create_windows_job()
                 proc = subprocess.Popen(
                     argv,
                     stdout=subprocess.PIPE,
@@ -719,10 +949,18 @@ class EmbeddedPgMaintenanceService:
                     # D07-007: 独立进程组，取消时整组终止（Windows 下该参数被忽略）
                     start_new_session=os.name != "nt",
                 )
-                if reserved:
+                if reserved and generation is not None:
+                    # D1-04: 先把子进程登记进受控 Job，再向 request_cancel 暴露句柄——保证它
+                    # 只可能看到「已归属可证明身份的 Job」与「明确无 Job」两种状态，不会看到
+                    # 尚未登记的中间态（否则可能对空 Job 报「已取消」而真实子进程仍在跑）。
+                    if job is not None and not job.assign(proc):
+                        job.close()
+                        job = None
                     with self._lock:
                         # 预留位保证此处无第二个任务；登记句柄供 request_cancel() 终止。
                         self._active_proc = proc
+                        self._active_generation = generation
+                        self._active_job = job
                         registered = True
                 try:
                     stdout, stderr = proc.communicate(timeout=3600)
@@ -735,7 +973,7 @@ class EmbeddedPgMaintenanceService:
                         proc.communicate()
                     except OSError:
                         pass  # 进程已被回收，忽略输出回收异常
-                    if self._cancellation_requested(registered):
+                    if self._is_cancel_requested(generation):
                         # D07-007: 已请求取消但 3600s 内仍未退出——状态未知，不得报超时/成功
                         logger.error(
                             "[embedded_pg_maintenance] cancel unproven: sidecar still running after timeout: %s",
@@ -755,11 +993,12 @@ class EmbeddedPgMaintenanceService:
                     raise EmbeddedPgMaintenanceError(
                         f"sidecar 命令超时（3600s）: {argv[0] if argv else 'sidecar'}"
                     ) from exc
-                if self._cancellation_requested(registered):
-                    # D07-007: 取消后 wrapper 的负退出码不代表业务失败；但「已取消」也必须
-                    # 以整棵进程树停止为前提——忽略 SIGTERM 的 pg 子进程仍存活时只能报未知。
+                if self._is_cancel_requested(generation):
+                    # D07-007/D1-04: 取消后 wrapper 的负退出码不代表业务失败；但「已取消」也必须
+                    # 以整棵进程树停止为前提。Windows 有受控 Job 时以 Job 内活动进程数归零为
+                    # 判据，POSIX 以进程组为空为判据；两者都无法证明时只能报未知。
                     # 宽限窗口覆盖 request_cancel() 的 SIGTERM + 强杀两段等待。
-                    if os.name != "nt" and not _wait_process_tree_exit(proc, _CANCEL_GRACE_S + _CANCEL_KILL_GRACE_S):
+                    if not _wait_process_tree_exit(proc, _CANCEL_GRACE_S + _CANCEL_KILL_GRACE_S, job=job):
                         logger.error(
                             "[embedded_pg_maintenance] cancel unproven after wrapper exit: %s",
                             DataSanitizer.sanitize_error(str(argv[:2])),
@@ -777,18 +1016,44 @@ class EmbeddedPgMaintenanceService:
                 with self._lock:
                     if registered:
                         self._active_proc = None
+                        self._active_generation = None
+                        self._active_job = None
                     if reserved:
                         # Popen 失败时也在此释放预留位（失败不得留下永久占用状态）。
                         self._dump_task_reserved = False
+                if job is not None:
+                    # D1-04: KILL_ON_JOB_CLOSE 保证关闭时残留的 pg 子进程随之终止。
+                    job.close()
 
         return await ThreadPoolManager().run_async(TaskType.IO, _run)
 
-    def _cancellation_requested(self, registered: bool) -> bool:
-        """工作线程读取取消标记（仅对已登记句柄的可取消命令生效）。"""
-        if not registered:
+    @staticmethod
+    def _create_windows_job() -> _WindowsJob | None:
+        """Windows：为可取消维护命令创建受控 Job Object。
+
+        创建失败不阻断命令（备份仍可执行），但取消随之降级为「未证明身份」，
+        ``request_cancel`` 只能返回 ``UNPROVEN``，绝不退回裸 PID 强杀。
+        """
+        if os.name != "nt":
+            return None
+        try:
+            job = _WindowsJob.create()
+        except OSError as exc:
+            logger.warning(
+                "[embedded_pg_maintenance] Windows Job Object 创建失败，取消将按未确认处理: %s",
+                DataSanitizer.sanitize_error(exc),
+            )
+            return None
+        if job is None:
+            logger.debug("[embedded_pg_maintenance] Windows Job Object 不可用，取消将按未确认处理")
+        return job
+
+    def _is_cancel_requested(self, generation: int | None) -> bool:
+        """工作线程读取取消标记：仅当标记归属于本次运行代际时生效（D1-04）。"""
+        if generation is None:
             return False
         with self._lock:
-            return self._cancel_requested
+            return self._cancel_requested_generation == generation
 
     def request_cancel(self, *, timeout: float = _CANCEL_GRACE_S) -> CancelStatus:
         """终止在途可取消 sidecar 命令的整棵进程树，并证明其已停止（当前仅 dump）。
@@ -799,33 +1064,45 @@ class EmbeddedPgMaintenanceService:
         无活动命令或 restore/doctor/shell 命令返回 ``NO_ACTIVE``。
         注：``_run_sidecar`` 的 Popen 前预留期尚无进程句柄可终止，此时返回 ``NO_ACTIVE``；
         子进程启动后可再次调用（预留期极短，见 ``_run_sidecar`` 实现）。
-        取消信号经独立进程组送达 sidecar 内部拉起的 pg_dump/pg_restore（POSIX ``killpg``、
-        Windows ``taskkill /T /F``）；仅 terminate wrapper 会留下继续写目标的孤儿进程。
-        ``UNPROVEN`` 表示宽限期内无法证明停止，进程可能仍在运行——调用方不得当作已取消。
+        取消信号经独立进程组送达 sidecar 内部拉起的 pg_dump/pg_restore（POSIX ``killpg``），
+        Windows 则作用于启动时登记的受控 Job Object（D1-04）；仅 terminate wrapper 会留下
+        继续写目标的孤儿进程。
+        ``UNPROVEN`` 表示无法证明停止或无法证明目标身份（如 Windows 未成功登记 Job），
+        进程可能仍在运行——调用方不得当作已取消，须按「取消未确认」上报。
         """
         with self._lock:
             proc = self._active_proc
-            if proc is None:
+            generation = self._active_generation
+            job = self._active_job
+            if proc is None or generation is None:
                 return CancelStatus.NO_ACTIVE
-            self._cancel_requested = True
-            # 锁内发送首个终止信号：与 finally 清空句柄串行化，消除 stale-PID（pid 复用）窗口
-            signalled = _signal_process_tree(proc, force=False)
-        if not signalled:
-            # 进程组已不存在：命令在信号送达前已自然结束，退出码交由工作线程分类
-            with self._lock:
-                self._cancel_requested = False
-            logger.info("[embedded_pg_maintenance] request_cancel: active sidecar command already exited")
-            return CancelStatus.ALREADY_EXITED
-        # 以「进程组为空」为停止判据（wrapper 退出不等于 pg 子进程退出）
-        if _wait_process_tree_exit(proc, timeout):
+            # D1-04: 取消标记、代际绑定与首个终止信号在同一临界区提交；回滚也在同一临界区
+            # 完成，工作线程不可能读到「将被撤销」的中间态（旧实现锁拆分导致误判取消）。
+            self._cancel_requested_generation = generation
+            outcome = _signal_process_tree(proc, force=False, job=job)
+            if outcome is not _SignalOutcome.DELIVERED:
+                # 同一临界区内回滚：仅撤销本代际的标记，不触碰已被新一轮写入的标记。
+                if self._cancel_requested_generation == generation:
+                    self._cancel_requested_generation = None
+                if outcome is _SignalOutcome.IDENTITY_UNPROVEN:
+                    logger.warning(
+                        "[embedded_pg_maintenance] request_cancel: cannot prove target identity; "
+                        "cancel not confirmed (pid=%s)",
+                        proc.pid,
+                    )
+                    return CancelStatus.UNPROVEN
+                logger.info("[embedded_pg_maintenance] request_cancel: active sidecar command already exited")
+                return CancelStatus.ALREADY_EXITED
+        # 以「进程组为空 / Job 内活动进程归零」为停止判据（wrapper 退出不等于 pg 子进程退出）
+        if _wait_process_tree_exit(proc, timeout, job=job):
             logger.info(
                 "[embedded_pg_maintenance] request_cancel: process tree terminated (pid=%s)",
                 proc.pid,
             )
             return CancelStatus.CANCELLED
         # pg 子进程可能忽略 SIGTERM：整组强杀后再给一个短的退出证明窗口
-        _signal_process_tree(proc, force=True)
-        if _wait_process_tree_exit(proc, _CANCEL_KILL_GRACE_S):
+        _signal_process_tree(proc, force=True, job=job)
+        if _wait_process_tree_exit(proc, _CANCEL_KILL_GRACE_S, job=job):
             logger.info(
                 "[embedded_pg_maintenance] request_cancel: process tree force-killed (pid=%s)",
                 proc.pid,
