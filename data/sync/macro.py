@@ -134,23 +134,60 @@ def _compute_gdp_publish_date(period_date: datetime.date) -> datetime.date:
     return datetime.date(period_date.year, next_month, 20)
 
 
-def _latest_quarter_before(period: datetime.date) -> str:
-    """根据 period（最新 macro_economy period）推断应同步的最近 quarter。
+def _quarter_index(quarter: str) -> int:
+    """将 "YYYYQN" 转为连续季度序号（year*4 + q-1），便于跨年比较与区间计算。"""
+    if not isinstance(quarter, str) or len(quarter) != 6 or quarter[4] not in ("Q", "q") or not quarter[5].isdigit():
+        raise ValueError(f"invalid quarter: {quarter!r}")
+    return int(quarter[:4]) * 4 + int(quarter[5]) - 1
 
-    若 period 是 2024-06-30（Q2 末），返回 "2024Q2"；若 period 是 2024-07-15
-    （Q3 中），返回 "2024Q2"（Q3 未结束，不能拉取）。
+
+def _quarter_from_index(index: int) -> str:
+    """将连续季度序号转回 "YYYYQN"。"""
+    year, rem = divmod(index, 4)
+    return f"{year}Q{rem + 1}"
+
+
+def _iter_quarters(start_q: str, end_q: str) -> list[str]:
+    """生成 [start_q, end_q] 闭区间内的全部季度（升序）。"""
+    return [_quarter_from_index(i) for i in range(_quarter_index(start_q), _quarter_index(end_q) + 1)]
+
+
+def _contiguous_quarter_runs(quarters: list[str]) -> list[tuple[str, str]]:
+    """将季度列表按连续区间分组，供 cn_gdp 的 start_q/end_q 区间取数使用。
+
+    把离散缺口合并为最少的区间，既补齐全部缺失季度又避免逐季调用导致限流压力。
+    """
+    if not quarters:
+        return []
+    ordered = sorted({_quarter_index(q) for q in quarters})
+    runs: list[tuple[str, str]] = []
+    run_start = prev = ordered[0]
+    for idx in ordered[1:]:
+        if idx == prev + 1:
+            prev = idx
+            continue
+        runs.append((_quarter_from_index(run_start), _quarter_from_index(prev)))
+        run_start = prev = idx
+    runs.append((_quarter_from_index(run_start), _quarter_from_index(prev)))
+    return runs
+
+
+def _latest_quarter_before(period: datetime.date) -> str:
+    """返回 period 当天（含）已结束的最近季度。
+
+    D2-06：季末日必须返回当季（旧实现 month<=6 时把 2024-06-30 算成 Q1，少算一季）：
+    - 2024-03-31 → "2024Q1"，2024-06-30 → "2024Q2"
+    - 2024-09-30 → "2024Q3"，2024-12-31 → "2024Q4"
+    - 非季末日取已结束的上一季：2024-06-29 → "2024Q1"，2025-01-05 → "2024Q4"
 
     Returns:
         "YYYYQN" 字符串
     """
-    month = period.month
-    if month <= 3:
-        return f"{period.year - 1}Q4"
-    if month <= 6:
-        return f"{period.year}Q1"
-    if month <= 9:
-        return f"{period.year}Q2"
-    return f"{period.year}Q3"
+    quarter_idx = period.year * 4 + (period.month - 1) // 3
+    quarter_end = _quarter_to_period_end(_quarter_from_index(quarter_idx))
+    if quarter_end is None or quarter_end > period:
+        quarter_idx -= 1
+    return _quarter_from_index(quarter_idx)
 
 
 class MacroSyncStrategy(ISyncStrategy):
@@ -254,19 +291,14 @@ class MacroSyncStrategy(ISyncStrategy):
             if self._check_cancelled(result):
                 return
 
-            # Phase 2D §3.2.6：cn_gdp 同步分支
-            # v1.10.0 P0-1：cn_gdp API 期望 quarter 参数（如 "2024Q4"），与 cn_m/cn_cpi/cn_ppi
-            # 的 start_m（YYYYMM）不兼容，因此使用专用 get_cn_gdp(quarter) wrapper。
-            # quarter 推断：根据 latest period 取最近已结束的季度，避免拉取未公布数据。
+            # Phase 2D §3.2.6：cn_gdp 同步分支（D2-06 独立水位 + 历史缺口补齐）
+            # v1.10.0 P0-1：cn_gdp 官方入参为 q/start_q/end_q（非 quarter），与
+            # cn_m/cn_cpi/cn_ppi 的 start_m（YYYYMM）不兼容，使用专用 get_cn_gdp wrapper。
+            # 不得用月度 MAX(period) 单点推算单季（如 M2 已到 2026-10 时只拉一个季），
+            # 也不能只从最新季度往后拉：须以历史窗口 - 库内 gdp 非空季度 = 缺口 补齐。
             df_gdp = None
             try:
-                if latest is not None:
-                    latest_period = parse_date(str(latest)).date() if isinstance(latest, str) else latest
-                    quarter = _latest_quarter_before(latest_period)
-                    df_gdp = await self.context.api.get_cn_gdp(quarter=quarter)
-                else:
-                    current_year = get_now().year
-                    df_gdp = await self.context.api.get_cn_gdp(quarter=f"{current_year - 1}Q4")
+                df_gdp = await self._sync_gdp_backfill(result)
             except EngineDisposedError:  # pragma: no cover - 防御性守卫，EngineDisposedError 从 API 层抛出概率极低
                 raise
             except TushareAPIPermissionError:
@@ -353,6 +385,68 @@ class MacroSyncStrategy(ISyncStrategy):
             # 避免「有错误但 status=success」误导消费方（对齐 _sync_index_weights 循环分支）。
             if result.status not in ("failed", "cancelled"):
                 result.status = SyncStatus.PARTIAL.value
+
+    async def _sync_gdp_backfill(self, result: typing.Any):
+        """按目标历史窗口补齐全部缺失季度（D2-06）。
+
+        GDP 与月度 CPI/M2 共用 macro_economy 表，月度 MAX(period) 不能代表 GDP
+        水位。此处以配置的历史窗口（``get_init_history_years``）生成应有季度集合，
+        与库内 ``gdp IS NOT NULL`` 的季度集合做差，按连续缺失区间用
+        ``start_q``/``end_q`` 批量补齐——既不受月度水位影响，也能回填历史缺口。
+
+        PIT 说明：GDP 行 ``publish_date`` 为保守估算（季度末次月 20 日），**不是**
+        官方精确披露时点；仅请求估算发布日已到的季度，避免拉取未公布数据。
+        该估算晚于/接近实际发布窗口，不产生前视偏差，但不得当作严格 PIT 时间戳。
+
+        Returns:
+            合并后的 GDP DataFrame（含 period/gdp/... 列），无缺口或取数失败返回 None。
+        """
+        from utils.config_handler import ConfigHandler
+
+        today = get_now().date()
+        end_quarter = _latest_quarter_before(today)
+        end_date = _quarter_to_period_end(end_quarter)
+        # 若最近已结束季度的保守发布日未到（如 1 月 5 日时上年 Q4 尚未发布），回退一季。
+        while end_date is not None and _compute_gdp_publish_date(end_date) > today:
+            end_quarter = _quarter_from_index(_quarter_index(end_quarter) - 1)
+            end_date = _quarter_to_period_end(end_quarter)
+        if end_date is None:  # pragma: no cover - 防御性守卫，合法季度恒可解析
+            return None
+
+        years = max(1, int(ConfigHandler.get_init_history_years()))
+        start_quarter = f"{today.year - years}Q1"
+        start_date = _quarter_to_period_end(start_quarter)
+        if start_date is None:  # pragma: no cover - 防御性守卫，合法季度恒可解析
+            return None
+
+        existing = await self.dao.get_gdp_periods(start_date, end_date)
+        existing_set = set(existing)
+        missing = [
+            q for q in _iter_quarters(start_quarter, end_quarter) if _quarter_to_period_end(q) not in existing_set
+        ]
+        if not missing:
+            return None
+
+        runs = _contiguous_quarter_runs(missing)
+        logger.debug(
+            "[MacroSync] GDP | backfill %s quarter(s) in %s run(s) (%s..%s); publish_date is estimated, not official",
+            len(missing),
+            len(runs),
+            start_quarter,
+            end_quarter,
+        )
+
+        frames: list[pd.DataFrame] = []
+        for run_start, run_end in runs:
+            if self._check_cancelled(result):
+                return None
+            df = await self.context.api.get_cn_gdp(start_q=run_start, end_q=run_end)
+            if df is not None and not df.empty:
+                frames.append(df)
+
+        if not frames:
+            return None
+        return pd.concat(frames, ignore_index=True)
 
     @classmethod
     def _merge_macro_data(
