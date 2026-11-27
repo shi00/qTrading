@@ -19,11 +19,12 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import flet as ft
 import pytest
 
-from app.bootstrap import EmbeddedPgStartupScenario
+from app.bootstrap import FATAL_STARTUP_POLICY_ERROR, EmbeddedPgStartupScenario
 from app.startup_controller import StartupContext, StartupController, StartupState
 from ui.i18n import I18n
 from ui.startup_views import (
     StartupView,
+    _FATAL_STARTUP_POLICY_ERROR,
     _StartupBridge,
     _build_error_view,
     _build_loading_view,
@@ -1008,6 +1009,33 @@ def test_build_error_view_engine_missing(mock_i18n):
     texts = _find_controls(view, ft.Text)
     text_values = {t.value for t in texts if hasattr(t, "value")}
     assert "error_db_engine_missing" in text_values
+
+
+def test_build_error_view_fatal_hides_skip_retry_reconfigure_keeps_exit(mock_i18n):
+    """D1-01: fatal 启动策略错误只保留 Exit，禁止 Skip/Retry/Reconfigure 绕过。"""
+    on_retry = MagicMock()
+    on_reconfigure = MagicMock()
+    on_skip = MagicMock()
+    on_exit = MagicMock()
+    context = StartupContext(error=FATAL_STARTUP_POLICY_ERROR, detail="STRICT_QUALITY_GATE=false")
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_error_view(context, on_retry, on_reconfigure, on_skip, on_exit=on_exit)
+
+    assert _find_button_by_text(view, "skip") is None
+    assert _find_button_by_text(view, "db_reconfigure") is None
+    assert _find_button_by_text(view, "retry") is None
+    exit_button = _find_button_by_text(view, "exit_program")
+    assert exit_button is not None
+    _trigger_click(exit_button)
+    on_exit.assert_called_once()
+    on_retry.assert_not_called()
+    on_reconfigure.assert_not_called()
+    on_skip.assert_not_called()
+
+
+def test_fatal_error_code_constant_matches_bootstrap():
+    """UI 层不得 import app 层（R1），错误码常量靠本用例防漂移。"""
+    assert _FATAL_STARTUP_POLICY_ERROR == FATAL_STARTUP_POLICY_ERROR
 
 
 def test_build_error_view_sanitizes_detail(mock_i18n):

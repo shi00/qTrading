@@ -57,6 +57,18 @@ _embedded_pg_url_file_atexit_registered = False
 # shutdown 回调经 bind_scheduling_cleanup 在组装完成的同一时点显式挂到当期 coordinator。
 _scheduling_services: dict[str, Any] | None = None
 
+# D1-01：不可跳过的启动策略拒绝错误码。UI 层（ui.startup_views）以同一字面量
+# 判定 fatal（ui 不得 import app 层，R1），两处一致性由单测守护。
+FATAL_STARTUP_POLICY_ERROR = "fatal_startup_policy"
+
+
+class FatalStartupPolicyError(RuntimeError):
+    """启动策略拒绝（不可跳过）：即使 UI 提供 Skip 也不得进入主界面。
+
+    D1-01：``STRICT_QUALITY_GATE=false`` 等安全策略拒绝必须在连接池存活时
+    阻断启动，不得被 Skip 降级为「无数据库运行全部业务」。
+    """
+
 
 def _ai_usage_dao_provider() -> Any:
     """账本 DAO 惰性解析（D6）：engine 未就绪 / 未组装时返回 None（persisted=False 降级）。"""
@@ -660,7 +672,7 @@ def _validate_quality_gate_strictness() -> None:
     is_debug = os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")
     if not is_e2e and not is_debug and not is_strict_quality_gate_enabled():
         logger.error("[Bootstrap] STRICT_QUALITY_GATE=false 且非开发模式：质量门控是安全机制，拒绝启动。")
-        raise RuntimeError(
+        raise FatalStartupPolicyError(
             "STRICT_QUALITY_GATE=false 禁止在非开发模式启动：数据质量门控是量化决策安全机制。"
             "请删除该环境变量，或设置 DEBUG=true 豁免（仅限本地调试）。"
         )

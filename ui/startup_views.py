@@ -34,6 +34,11 @@ from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
+# D1-01：不可跳过的启动策略拒绝错误码。ui 层不得 import app 层（R1），此处以
+# 与 app.bootstrap.FATAL_STARTUP_POLICY_ERROR 相同的字面量判定 fatal，
+# 两处一致性由单测守护（tests/unit/ui/test_startup_views.py）。
+_FATAL_STARTUP_POLICY_ERROR = "fatal_startup_policy"
+
 
 class StartupControllerProtocol(Protocol):
     """StartupController 最小接口（ui 层定义，app 层实现，解耦 ui→app 依赖）。
@@ -48,7 +53,8 @@ class StartupControllerProtocol(Protocol):
     async def upgrade_retry(self) -> None: ...
     async def retry(self) -> None: ...
     async def reconfigure(self) -> None: ...
-    def skip(self) -> None: ...
+    async def skip(self) -> None: ...
+    def exit_app(self) -> None: ...
     async def onboarding_complete(self) -> Any: ...
 
 
@@ -609,21 +615,43 @@ def _build_error_view(
     on_retry: Callable[[ft.ControlEvent], None],
     on_reconfigure: Callable[[ft.ControlEvent], None],
     on_skip: Callable[[ft.ControlEvent], None],
+    on_exit: Callable[[ft.ControlEvent], None] | None = None,
 ) -> ft.Container:
-    """构造启动错误视图 (db_init_failed / db_engine_missing / task_manager_init_failed)."""
+    """构造启动错误视图 (db_init_failed / db_engine_missing / task_manager_init_failed).
+
+    D1-01：fatal 启动策略错误（``_FATAL_STARTUP_POLICY_ERROR``）不可跳过，
+    仅保留 Exit 按钮，隐藏 Retry / Reconfigure / Skip。
+    """
     error = context.error or ""
+    is_fatal = error == _FATAL_STARTUP_POLICY_ERROR
     # R9: detail 二次脱敏 (与升级失败对话框一致, 禁止渲染未脱敏异常原文)
     localized_detail = _get_localized_detail(context.detail or "")
     safe_detail = DataSanitizer.sanitize_error(localized_detail) if localized_detail else ""
+    if is_fatal:
+        title = I18n.get("error_db_init_failed")
+        actions: list[ft.Control] = (
+            [ft.TextButton(I18n.get("exit_program"), on_click=safe_on_click(on_exit))] if on_exit is not None else []
+        )
+    else:
+        title = (
+            I18n.get("error_db_init_failed") if error != "db_engine_missing" else I18n.get("error_db_engine_missing")
+        )
+        actions = [
+            ft.Button(I18n.get("retry"), icon=ft.Icons.REFRESH, on_click=safe_on_click(on_retry)),
+            ft.TextButton(
+                I18n.get("db_reconfigure"),
+                icon=ft.Icons.SETTINGS,
+                on_click=safe_on_click(on_reconfigure),
+            ),
+            ft.TextButton(I18n.get("skip"), on_click=safe_on_click(on_skip)),
+        ]
     return ft.Container(
         content=ft.Column(
             safe_controls(
                 [
                     ft.Icon(ft.Icons.ERROR_OUTLINE, color=AppColors.ERROR, size=AppStyles.ICON_SIZE_XL),
                     ft.Text(
-                        I18n.get("error_db_init_failed")
-                        if error != "db_engine_missing"
-                        else I18n.get("error_db_engine_missing"),
+                        title,
                         size=AppStyles.FONT_SIZE_HEADLINE,
                         weight=ft.FontWeight.BOLD,
                     ),
@@ -633,17 +661,7 @@ def _build_error_view(
                         size=AppStyles.FONT_SIZE_LG,
                     ),
                     ft.Row(
-                        safe_controls(
-                            [
-                                ft.Button(I18n.get("retry"), icon=ft.Icons.REFRESH, on_click=safe_on_click(on_retry)),
-                                ft.TextButton(
-                                    I18n.get("db_reconfigure"),
-                                    icon=ft.Icons.SETTINGS,
-                                    on_click=safe_on_click(on_reconfigure),
-                                ),
-                                ft.TextButton(I18n.get("skip"), on_click=safe_on_click(on_skip)),
-                            ]
-                        ),
+                        safe_controls(actions),
                         alignment=ft.MainAxisAlignment.CENTER,
                         spacing=20,
                     ),
@@ -814,9 +832,14 @@ def StartupView(
             run_task_fn(controller.reconfigure)
 
         def _on_skip(e: ft.ControlEvent) -> None:
-            controller.skip()
+            # D1-01: skip 已改为 async（进入 READY 前须关停 Agent / 释放所有权 / 关闭引擎），
+            # 经 run_task_fn 调度而非在事件处理器内同步执行。
+            run_task_fn(controller.skip)
 
-        return _build_error_view(context, _on_retry, _on_reconfigure, _on_skip)
+        def _on_exit(e: ft.ControlEvent) -> None:
+            controller.exit_app()
+
+        return _build_error_view(context, _on_retry, _on_reconfigure, _on_skip, on_exit=_on_exit)
     # LOADING / NEED_UPGRADE / UPGRADE_* → loading 背景 (dialog 由 ft.use_dialog 声明式管理)
     # 传递 context.embedded_pg_scenario 以显示差异化文案（embedded PG 启动期）
     return _build_loading_view(scenario=context.embedded_pg_scenario)

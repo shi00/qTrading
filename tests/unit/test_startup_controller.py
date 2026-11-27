@@ -5,7 +5,8 @@ import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.startup_controller import StartupController, StartupState
+from app.bootstrap import FATAL_STARTUP_POLICY_ERROR, FatalStartupPolicyError
+from app.startup_controller import StartupContext, StartupController, StartupState
 
 pytestmark = pytest.mark.unit
 
@@ -164,6 +165,18 @@ class TestStartupInitServices:
 
         assert ctrl.state == StartupState.INIT_FAILED
         assert ctrl.context.error == "init_exception"
+
+    @pytest.mark.asyncio
+    async def test_init_services_fatal_policy_error_marks_fatal(self, controller):
+        """D1-01: 质量门控严格性拒绝启动必须标记为不可跳过（fatal），不得降级为普通 init_exception."""
+        ctrl, transitions = controller
+        with patch("app.startup_controller.initialize_services", new_callable=AsyncMock) as mock_init:
+            mock_init.side_effect = FatalStartupPolicyError("STRICT_QUALITY_GATE=false 禁止启动")
+            await ctrl._init_services()
+
+        assert ctrl.state == StartupState.INIT_FAILED
+        assert ctrl.context.error == FATAL_STARTUP_POLICY_ERROR
+        assert "STRICT_QUALITY_GATE=false" in (ctrl.context.detail or "")
 
     @pytest.mark.asyncio
     async def test_init_services_set_onboarding_complete_failure_continues_to_ready(self, controller):
@@ -654,15 +667,173 @@ class TestStartupReconfigure:
 
 
 class TestStartupSkip:
-    def test_skip_shows_warning_and_enters_ready(self, controller, _mock_thread_pool):
+    """D1-01: Skip 必须先关停已启动 Agent / 释放所有权锁 / 关闭引擎，失败不得进 READY."""
+
+    @pytest.mark.asyncio
+    async def test_skip_teardown_order_agent_then_ownership_then_engine(self, controller):
+        """D1-01: 关闭顺序 = Agent 关闭门 → 所有权锁释放 → 引擎关闭（引擎最后释放）。"""
+        ctrl, _ = controller
+        ctrl._state = StartupState.INIT_FAILED
+        order: list[str] = []
+
+        class _Wiring:
+            async def prepare_close(self) -> None:
+                order.append("agent")
+
+            def close_ready(self) -> bool:
+                return True
+
+        ctrl._agent_wiring = _Wiring()
+
+        async def _release() -> None:
+            order.append("ownership")
+
+        async def _close() -> None:
+            order.append("engine")
+
+        ctrl._cache_manager.close.side_effect = _close
+        with patch("services.task_manager.TaskManager") as mock_tm:
+            mock_tm.return_value.release_ownership_async = AsyncMock(side_effect=_release)
+            await ctrl.skip()
+
+        assert order == ["agent", "ownership", "engine"]
+        assert ctrl.state == StartupState.READY
+
+    @pytest.mark.asyncio
+    async def test_skip_releases_ownership_closes_engine_then_ready(self, controller):
         ctrl, transitions = controller
         ctrl._state = StartupState.INIT_FAILED
 
-        ctrl.skip()
+        with patch("services.task_manager.TaskManager") as mock_tm:
+            mock_tm.return_value.release_ownership_async = AsyncMock()
+            await ctrl.skip()
 
+        mock_tm.return_value.release_ownership_async.assert_awaited_once()
+        ctrl._cache_manager.close.assert_awaited_once()
         assert ctrl.state == StartupState.READY
+        assert transitions[-1][0] == StartupState.READY
         ctrl._on_show_toast.assert_called_once_with("warning_skip_db", "warning")
-        _mock_thread_pool.return_value.run_async.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skip_refused_for_fatal_policy_error(self, controller):
+        ctrl, transitions = controller
+        ctrl._state = StartupState.INIT_FAILED
+        ctrl._context = StartupContext(error=FATAL_STARTUP_POLICY_ERROR, detail="policy")
+
+        with patch("services.task_manager.TaskManager") as mock_tm:
+            mock_tm.return_value.release_ownership_async = AsyncMock()
+            await ctrl.skip()
+
+        assert ctrl.state == StartupState.INIT_FAILED
+        mock_tm.return_value.release_ownership_async.assert_not_awaited()
+        ctrl._cache_manager.close.assert_not_awaited()
+        ctrl._on_show_toast.assert_not_called()
+        assert StartupState.READY not in [s for s, _ in transitions]
+
+    @pytest.mark.asyncio
+    async def test_skip_reentry_guard_closes_once(self, controller):
+        ctrl, transitions = controller
+        ctrl._state = StartupState.INIT_FAILED
+
+        async def slow_close():
+            await asyncio.sleep(0)
+
+        ctrl._cache_manager.close.side_effect = slow_close
+        with patch("services.task_manager.TaskManager") as mock_tm:
+            mock_tm.return_value.release_ownership_async = AsyncMock()
+            await asyncio.gather(ctrl.skip(), ctrl.skip())
+
+        mock_tm.return_value.release_ownership_async.assert_awaited_once()
+        ctrl._cache_manager.close.assert_awaited_once()
+        assert ctrl.state == StartupState.READY
+        assert [s for s, _ in transitions].count(StartupState.LOADING) == 1
+
+    @pytest.mark.asyncio
+    async def test_skip_close_failure_keeps_init_failed(self, controller):
+        ctrl, transitions = controller
+        ctrl._state = StartupState.INIT_FAILED
+        ctrl._cache_manager.close.side_effect = RuntimeError("engine dispose failed")
+
+        with patch("services.task_manager.TaskManager") as mock_tm:
+            mock_tm.return_value.release_ownership_async = AsyncMock()
+            await ctrl.skip()
+
+        assert ctrl.state == StartupState.INIT_FAILED
+        assert ctrl.context.error == "skip_failed"
+        assert StartupState.READY not in [s for s, _ in transitions]
+        ctrl._on_show_toast.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skip_ownership_failure_still_closes_engine_and_keeps_failed(self, controller):
+        ctrl, _ = controller
+        ctrl._state = StartupState.INIT_FAILED
+
+        with patch("services.task_manager.TaskManager") as mock_tm:
+            mock_tm.return_value.release_ownership_async = AsyncMock(side_effect=RuntimeError("lock release failed"))
+            await ctrl.skip()
+
+        ctrl._cache_manager.close.assert_awaited_once()
+        assert ctrl.state == StartupState.INIT_FAILED
+        assert ctrl.context.error == "skip_failed"
+
+    @pytest.mark.asyncio
+    async def test_skip_agent_close_not_ready_blocks_engine_close(self, controller):
+        ctrl, transitions = controller
+        ctrl._state = StartupState.INIT_FAILED
+
+        class _BlockedWiring:
+            def __init__(self) -> None:
+                self.prepared = 0
+
+            async def prepare_close(self) -> None:
+                self.prepared += 1
+
+            def close_ready(self) -> bool:
+                return False
+
+        blocked = _BlockedWiring()
+        ctrl._agent_wiring = blocked
+
+        with patch("services.task_manager.TaskManager") as mock_tm:
+            mock_tm.return_value.release_ownership_async = AsyncMock()
+            await ctrl.skip()
+
+        assert blocked.prepared == 1
+        mock_tm.return_value.release_ownership_async.assert_not_awaited()
+        ctrl._cache_manager.close.assert_not_awaited()
+        assert ctrl.state == StartupState.INIT_FAILED
+        assert transitions[-1][1].error == "agent_close_not_ready"
+        assert ctrl._agent_wiring is blocked
+
+    @pytest.mark.asyncio
+    async def test_skip_propagates_cancelled_error(self, controller):
+        """R2: 关闭阶段被取消必须原样传播，不得转成 READY/INIT_FAILED。"""
+        ctrl, _ = controller
+        ctrl._state = StartupState.INIT_FAILED
+        ctrl._cache_manager.close.side_effect = asyncio.CancelledError()
+
+        with patch("services.task_manager.TaskManager") as mock_tm:
+            mock_tm.return_value.release_ownership_async = AsyncMock()
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await ctrl.skip()
+
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        # 取消后不得进入 READY；状态停在同步段切换的 LOADING，交由停机流程收尾
+        assert ctrl.state == StartupState.LOADING
+        ctrl._on_show_toast.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skip_ignored_when_not_init_failed(self, controller):
+        ctrl, transitions = controller
+        ctrl._state = StartupState.READY
+
+        with patch("services.task_manager.TaskManager") as mock_tm:
+            mock_tm.return_value.release_ownership_async = AsyncMock()
+            await ctrl.skip()
+
+        mock_tm.return_value.release_ownership_async.assert_not_awaited()
+        ctrl._cache_manager.close.assert_not_awaited()
+        assert ctrl.state == StartupState.READY
 
 
 class TestStartupUpgrade:
