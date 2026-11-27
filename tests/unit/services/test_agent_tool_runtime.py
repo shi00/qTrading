@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -18,6 +19,7 @@ from core.agent_types import (
     AgentErrorCode,
     AgentServiceError,
     MCPServiceIdentity,
+    OperationGrantScope,
     ToolGrantFact,
     ToolGrantState,
 )
@@ -31,7 +33,12 @@ from services.agent_service.mcp_tools import (
     audit_scope_digest,
     canonical_arguments_digest,
 )
-from services.agent_service.tool_runtime import ToolRunScope, ToolRuntime, build_tool_runtime
+from services.agent_service.tool_runtime import (
+    ToolApprovalCoordinator,
+    ToolRunScope,
+    ToolRuntime,
+    build_tool_runtime,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -114,6 +121,18 @@ class _Dispatcher:
         return self.outcome
 
 
+class _RacingDispatcher(_Dispatcher):
+    """调用门拒绝前模拟并发撤销：验证按持久事实回判而非沿用 source_disabled。"""
+
+    def __init__(self, outcome: Exception, on_call: Any) -> None:
+        super().__init__(outcome)
+        self._on_call = on_call
+
+    async def call(self, request: ToolCallRequest) -> ToolCallOutcome:
+        self._on_call()
+        return await super().call(request)
+
+
 _BOUNDARY_DIGEST = "f" * 64
 
 
@@ -130,22 +149,34 @@ class _Boundary:
         return ToolBoundaryAttestation(self.digest, self.blocked_reason)
 
 
-def _runtime(dispatcher: _Dispatcher, dao: _Dao, boundary: _Boundary | None = None) -> ToolRuntime:
-    return ToolRuntime(
-        tools=(),
-        dispatcher=dispatcher,  # type: ignore[arg-type]  # 单测替身，非真实管理器
-        catalog=(MCPToolDescriptor(name="search", schema_json=_schema()),),
-        connection_generation=3,
-        identity=_IDENTITY,
-        scope=_SCOPE,
-        role_tools=("search",),
-        request_tools=("search",),
-        permission_tools=("search",),
-        service_tools=("search",),
-        audit_scope=("search",),
-        dao=dao,  # type: ignore[arg-type]  # 单测替身，非真实 DAO
-        boundary=boundary or _Boundary(),
-    )
+def _runtime(
+    dispatcher: _Dispatcher,
+    dao: Any,
+    boundary: _Boundary | None = None,
+    *,
+    approvals: ToolApprovalCoordinator | None = None,
+    approval_timeout_s: float | None = None,
+) -> ToolRuntime:
+    values: dict[str, Any] = {
+        "tools": (),
+        "dispatcher": dispatcher,
+        "catalog": (MCPToolDescriptor(name="search", schema_json=_schema()),),
+        "connection_generation": 3,
+        "identity": _IDENTITY,
+        "scope": _SCOPE,
+        "role_tools": ("search",),
+        "request_tools": ("search",),
+        "permission_tools": ("search",),
+        "service_tools": ("search",),
+        "audit_scope": ("search",),
+        "dao": dao,
+        "boundary": boundary or _Boundary(),
+    }
+    if approvals is not None:
+        values["approvals"] = approvals
+    if approval_timeout_s is not None:
+        values["approval_timeout_s"] = approval_timeout_s
+    return ToolRuntime(**values)  # type: ignore[arg-type]  # 单测替身，非真实管理器/DAO
 
 
 class TestBuildToolRuntime:
@@ -298,3 +329,213 @@ class TestToolRuntimeExecute:
         assert exc.value.family == "single_result_bytes"
 
         assert dao.results[-1].outcome_state == "unknown"
+
+
+class _ApprovalDao:
+    """审批状态机替身：读出的持久许可状态由用例显式驱动（不直接返回 granted）。"""
+
+    def __init__(
+        self,
+        *,
+        state: ToolGrantState = ToolGrantState.PENDING,
+        approval: bool | None = None,
+        operation_phase: str = "prepared",
+        effect_state: str = "not_dispatched",
+        expires_in: float | None = 300.0,
+    ) -> None:
+        self.state = state
+        self.approval = approval
+        self.operation_phase = operation_phase
+        self.effect_state = effect_state
+        self.expires_at = None if expires_in is None else _wire(datetime.now(UTC) + timedelta(seconds=expires_in))
+        self.decisions: list[Any] = []
+        self.results: list[Any] = []
+
+    async def save_tool_decision(self, request: Any) -> ToolGrantFact:
+        self.decisions.append(request)
+        return ToolGrantFact(
+            decision_id=request.decision_id,
+            grant_id="grant-1",
+            grant_revision=1,
+            grant_state=self.state,
+        )
+
+    async def save_tool_result(self, request: Any) -> None:
+        self.results.append(request)
+        phase, effect = {
+            "completed": ("result_saved", "confirmed"),
+            "failed": ("failed_confirmed", "not_dispatched"),
+            "unknown": ("unknown", "unknown"),
+        }[request.outcome_state]
+        self.operation_phase = phase
+        self.effect_state = effect
+
+    async def read_operation_grant_scope(self, *, operation_id: str) -> OperationGrantScope:
+        request = self.decisions[-1]
+        return OperationGrantScope(
+            user_scope=request.user_scope,
+            operation_id=operation_id,
+            execution_id=request.execution_id,
+            round_id=request.round_id,
+            grant_id="grant-1",
+            decision_id=request.decision_id,
+            grant_revision=1,
+            grant_state=self.state,
+            tool_call_id=request.tool_call_id,
+            parameter_digest=request.parameter_digest,
+            expires_at=self.expires_at,
+            approval=self.approval,
+            operation_phase=self.operation_phase,
+            effect_state=self.effect_state,
+            io_state="not_started",
+        )
+
+    async def claim_tool_dispatch(self, request: Any) -> ToolGrantFact:
+        raise AssertionError("claim must go through dispatcher")
+
+
+def _wire(moment: datetime) -> str:
+    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+class _AutoAnswerCoordinator(ToolApprovalCoordinator):
+    """登记等待后立刻落定答复（同事务语义的替身），验证消费后唤醒。"""
+
+    def __init__(self, dao: _ApprovalDao, *, approve: bool) -> None:
+        super().__init__()
+        self._dao = dao
+        self._approve = approve
+
+    def prepare(self, *, decision_id: str) -> Any:
+        ticket = super().prepare(decision_id=decision_id)
+        self._dao.state = ToolGrantState.GRANTED if self._approve else ToolGrantState.REVOKED
+        self._dao.approval = self._approve
+        self.notify_consumed(decision_id)
+        return ticket
+
+
+class _CancellingTicket:
+    async def wait(self, timeout_s: float) -> bool:
+        raise asyncio.CancelledError()
+
+
+class _CancellingCoordinator:
+    def prepare(self, *, decision_id: str) -> _CancellingTicket:
+        return _CancellingTicket()
+
+    def release(self, ticket: _CancellingTicket) -> None:
+        return None
+
+    def notify_consumed(self, decision_id: str) -> None:
+        return None
+
+
+class TestToolApprovalWait:
+    async def test_pending_waits_then_denies_with_approval_timeout(self) -> None:
+        """PENDING 超时未答 → approval_timeout，零派发，如实落 failed/not_dispatched。"""
+
+        dispatcher = _Dispatcher(ToolCallOutcome(ToolCallState.COMPLETED, {}, "op-1"))
+        dao = _ApprovalDao()
+        runtime = _runtime(dispatcher, dao, approvals=ToolApprovalCoordinator(), approval_timeout_s=0.01)
+
+        outcome = await runtime.execute(tool_name="search", arguments={"query": "x"}, tool_call_id="call-1")
+
+        assert outcome.state is ToolCallState.FAILED
+        assert outcome.result == {"state": "denied", "reason": "approval_timeout"}
+        assert dispatcher.requests == []
+        assert dao.results[-1].outcome_state == "failed"
+
+    async def test_user_rejection_denies_with_permission_rejected(self) -> None:
+        dispatcher = _Dispatcher(ToolCallOutcome(ToolCallState.COMPLETED, {}, "op-1"))
+        dao = _ApprovalDao()
+        runtime = _runtime(dispatcher, dao, approvals=_AutoAnswerCoordinator(dao, approve=False))
+
+        outcome = await runtime.execute(tool_name="search", arguments={"query": "x"}, tool_call_id="call-1")
+
+        assert outcome.state is ToolCallState.FAILED
+        assert outcome.result == {"state": "denied", "reason": "permission_rejected"}
+        assert dispatcher.requests == []
+        assert dao.results[-1].outcome_state == "failed"
+
+    async def test_approval_dispatches_once_and_replay_does_not_resend(self) -> None:
+        dispatcher = _Dispatcher(ToolCallOutcome(ToolCallState.COMPLETED, {"answer": 1}, "op-1"))
+        dao = _ApprovalDao()
+        runtime = _runtime(dispatcher, dao, approvals=_AutoAnswerCoordinator(dao, approve=True))
+
+        first = await runtime.execute(tool_name="search", arguments={"query": "x"}, tool_call_id="call-1")
+
+        assert first.state is ToolCallState.COMPLETED
+        assert len(dispatcher.requests) == 1
+        assert dao.results[-1].outcome_state == "completed"
+
+        # 已认领/已入终态：同 tool_call_id 重放不得二次外发，也不得把已知结果改写为 failed。
+        dao.state = ToolGrantState.CLAIMED
+        dao.operation_phase = "result_saved"
+        dao.effect_state = "confirmed"
+        results_before = len(dao.results)
+
+        replay = await runtime.execute(tool_name="search", arguments={"query": "x"}, tool_call_id="call-1")
+
+        assert replay.state is ToolCallState.UNKNOWN
+        assert len(dispatcher.requests) == 1
+        assert len(dao.results) == results_before
+
+    async def test_revocation_after_grant_denies_with_permission_revoked(self) -> None:
+        dispatcher = _Dispatcher(ToolCallOutcome(ToolCallState.COMPLETED, {}, "op-1"))
+        dao = _ApprovalDao(state=ToolGrantState.REVOKED, approval=True)
+        runtime = _runtime(dispatcher, dao)
+
+        outcome = await runtime.execute(tool_name="search", arguments={"query": "x"}, tool_call_id="call-1")
+
+        assert outcome.state is ToolCallState.FAILED
+        assert outcome.result == {"state": "denied", "reason": "permission_revoked"}
+        assert dispatcher.requests == []
+        assert dao.results[-1].outcome_state == "failed"
+
+    async def test_cancellation_while_waiting_propagates_with_zero_dispatch(self) -> None:
+        dispatcher = _Dispatcher(ToolCallOutcome(ToolCallState.COMPLETED, {}, "op-1"))
+        dao = _ApprovalDao()
+        runtime = _runtime(dispatcher, dao, approvals=_CancellingCoordinator())  # type: ignore[arg-type]
+
+        with pytest.raises(asyncio.CancelledError):
+            await runtime.execute(tool_name="search", arguments={"query": "x"}, tool_call_id="call-1")
+
+        assert dispatcher.requests == []
+        assert dao.results == []
+
+    async def test_admitted_but_expired_denies_with_approval_timeout(self) -> None:
+        dispatcher = _Dispatcher(ToolCallOutcome(ToolCallState.COMPLETED, {}, "op-1"))
+        dao = _ApprovalDao(state=ToolGrantState.GRANTED, expires_in=-1.0)
+        runtime = _runtime(dispatcher, dao)
+
+        outcome = await runtime.execute(tool_name="search", arguments={"query": "x"}, tool_call_id="call-1")
+
+        assert outcome.state is ToolCallState.FAILED
+        assert outcome.result == {"state": "denied", "reason": "approval_timeout"}
+        assert dispatcher.requests == []
+
+    async def test_claim_race_revocation_is_reclassified_precisely(self) -> None:
+        dispatcher = _RacingDispatcher(
+            AgentServiceError(AgentErrorCode.SOURCE_DISABLED, "revoked", "svc-1:2"),
+            lambda: setattr(dao, "state", ToolGrantState.REVOKED),
+        )
+        dao = _ApprovalDao(state=ToolGrantState.GRANTED, approval=True)
+        runtime = _runtime(dispatcher, dao)
+
+        outcome = await runtime.execute(tool_name="search", arguments={"query": "x"}, tool_call_id="call-1")
+
+        assert outcome.state is ToolCallState.FAILED
+        assert outcome.result == {"state": "denied", "reason": "permission_revoked"}
+        assert len(dispatcher.requests) == 1
+        assert dao.results[-1].outcome_state == "failed"
+
+    async def test_coordinator_notify_wakes_registered_waiter(self) -> None:
+        coordinator = ToolApprovalCoordinator()
+        ticket = coordinator.prepare(decision_id="decision-1")
+        waiter = asyncio.create_task(ticket.wait(1.0))
+        await asyncio.sleep(0)
+
+        coordinator.notify_consumed("decision-1")
+
+        assert await asyncio.wait_for(waiter, 1.0) is True
+        coordinator.release(ticket)

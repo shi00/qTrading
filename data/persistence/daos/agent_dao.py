@@ -5046,6 +5046,10 @@ class AgentDao(BaseDao):
         operation → 其绑定的 ``grant_id`` → 决定行事实。任一环节缺失以 ``None``
         字段返回（调用方必须拒绝派发，不得猜测授权）；operation 不存在返回
         ``None``。只读、无锁、无副作用。
+
+        审批闭环（D7-01）：另带决定有效期、答复消费时刻/批准值与 operation
+        三态，供 runtime 在等待后全量重核并区分「用户拒绝 / 已授后撤销 /
+        超时未答 / 已出站重放」，不把不同原因混同为 ``SOURCE_DISABLED``。
         """
 
         self._check_engine("tool grant scope")
@@ -5062,17 +5066,26 @@ class AgentDao(BaseDao):
                         AgentOperation.grant_id,
                         AgentOperation.tool_call_id,
                         AgentOperation.parameter_digest,
+                        AgentOperation.phase,
+                        AgentOperation.effect_state,
+                        AgentOperation.io_state,
                     ).where(AgentOperation.operation_id == operation_id)
                 )
             ).first()
             if operation_row is None:
                 return None
+            operation_fields = {
+                "user_scope": operation_row.user_scope,
+                "operation_id": operation_id,
+                "execution_id": operation_row.execution_id,
+                "round_id": operation_row.round_id,
+                "operation_phase": operation_row.phase,
+                "effect_state": operation_row.effect_state,
+                "io_state": operation_row.io_state,
+            }
             if operation_row.grant_id is None:
                 return OperationGrantScope(
-                    user_scope=operation_row.user_scope,
-                    operation_id=operation_id,
-                    execution_id=operation_row.execution_id,
-                    round_id=operation_row.round_id,
+                    **operation_fields,
                     grant_id=None,
                     decision_id=None,
                     grant_revision=None,
@@ -5088,6 +5101,17 @@ class AgentDao(BaseDao):
                         AgentDecision.grant_state,
                         AgentDecision.tool_call_id,
                         AgentDecision.parameter_digest,
+                        AgentDecision.expires_at,
+                        AgentDecision.answer_consumed_at,
+                        AgentCommand.request_payload,
+                    )
+                    .select_from(AgentDecision)
+                    .outerjoin(
+                        AgentCommand,
+                        sa.and_(
+                            AgentCommand.user_scope == AgentDecision.user_scope,
+                            AgentCommand.command_record_id == AgentDecision.answer_command_id,
+                        ),
                     )
                     .where(
                         AgentDecision.user_scope == operation_row.user_scope,
@@ -5098,10 +5122,7 @@ class AgentDao(BaseDao):
             ).first()
             if decision_row is None:
                 return OperationGrantScope(
-                    user_scope=operation_row.user_scope,
-                    operation_id=operation_id,
-                    execution_id=operation_row.execution_id,
-                    round_id=operation_row.round_id,
+                    **operation_fields,
                     grant_id=operation_row.grant_id,
                     decision_id=None,
                     grant_revision=None,
@@ -5114,16 +5135,18 @@ class AgentDao(BaseDao):
             except ValueError:
                 grant_state = None
             return OperationGrantScope(
-                user_scope=operation_row.user_scope,
-                operation_id=operation_id,
-                execution_id=operation_row.execution_id,
-                round_id=operation_row.round_id,
+                **operation_fields,
                 grant_id=operation_row.grant_id,
                 decision_id=decision_row.decision_id,
                 grant_revision=decision_row.grant_revision,
                 grant_state=grant_state,
                 tool_call_id=decision_row.tool_call_id,
                 parameter_digest=decision_row.parameter_digest,
+                expires_at=_wire_time(decision_row.expires_at) if decision_row.expires_at is not None else None,
+                answer_consumed_at=(
+                    _wire_time(decision_row.answer_consumed_at) if decision_row.answer_consumed_at is not None else None
+                ),
+                approval=_tool_approval(decision_row.request_payload),
             )
 
     async def save_tool_decision(self, request: SaveToolDecisionRequest) -> ToolGrantFact:
@@ -5561,6 +5584,9 @@ class AgentDao(BaseDao):
                             AgentOperation.grant_id,
                             AgentOperation.owner_epoch,
                             AgentOperation.run_epoch,
+                            AgentOperation.phase,
+                            AgentOperation.effect_state,
+                            AgentOperation.io_state,
                         )
                         .where(
                             AgentOperation.user_scope == request.user_scope,
@@ -5600,6 +5626,18 @@ class AgentDao(BaseDao):
                     raise AgentServiceError(
                         AgentErrorCode.POLICY_DENIED,
                         "dispatch claim rejected: operation run epoch is stale",
+                        identity,
+                    )
+                # D7-01：operation 已出站/已入终态即不得再次认领（防重放二次外发）。
+                # 在 operation 行锁内与 grant CAS 同事务复核，不依赖调用方读时快照。
+                if (
+                    operation_row.phase != "prepared"
+                    or operation_row.effect_state != "not_dispatched"
+                    or operation_row.io_state != "not_started"
+                ):
+                    raise AgentServiceError(
+                        AgentErrorCode.POLICY_DENIED,
+                        "dispatch claim rejected: operation is already dispatched or terminal",
                         identity,
                     )
             occurred = datetime.now(UTC)
