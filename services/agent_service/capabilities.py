@@ -499,6 +499,45 @@ def evaluate_research_boundary(
     return None
 
 
+@dataclass(frozen=True, slots=True)
+class ResearchBoundaryAdmission:
+    """阶段①「安全准入」的结论（不含窗口超限判定）。
+
+    ``request_context`` 为按模式裁剪工具后的待发请求；``policy`` 为本次请求新鲜
+    取得的事实，供阶段③「压缩后窗口复核」复用同一份策略（不重复回读 DAO）。
+    ``measured_input_tokens`` 为该裁剪后请求的全输入下限。
+    """
+
+    request_context: ModelRequestContext
+    policy: ResearchBoundaryPolicy
+    measured_input_tokens: int
+    measured_verified: bool
+
+    def exceeds_context_window(self) -> bool:
+        """准入请求是否已超出窗口（压缩可挽救，因此阶段①不据此阻断）。"""
+
+        return (
+            evaluate_research_boundary(self.policy, measured_input_tokens=self.measured_input_tokens)
+            == "context_window_exceeded"
+        )
+
+
+def _boundary_denied(message: str) -> AgentServiceError:
+    return AgentServiceError(AgentErrorCode.POLICY_DENIED, message, "research_boundary")
+
+
+def _context_window_exceeded_error(
+    policy: ResearchBoundaryPolicy, *, measured: int, measured_verified: bool
+) -> AgentServiceError:
+    estimates = [estimate for estimate in (policy.estimated_input_tokens, measured) if estimate is not None]
+    return _boundary_denied(
+        f"context window exceeded: estimated={max(estimates)} "
+        f"+output_reserve={policy.output_reserve_tokens} "
+        f"window={policy.strictest_context_window_tokens()} "
+        f"measured_basis={'verified' if measured_verified else 'estimated'}"
+    )
+
+
 @dataclass(kw_only=True)
 class ResearchBoundary(AbstractCapability[Any]):
     """模型请求前的边界能力：模式裁剪工具、禁用来源阻断、窗口阻断。
@@ -506,14 +545,18 @@ class ResearchBoundary(AbstractCapability[Any]):
     只做裁剪/阻断，不授权：真实授权仍在派发点按最新事实二次核定；策略由
     ``policy_provider`` 每次请求新鲜取得（异步，可回读 DAO）。不修改
     ``messages``/持久历史，不捕获 ``CancelledError``（R2）。
+
+    为支持「准入 → 压缩 → 窗口复核」的三段式编排（D7-02），窗口超限判定从准入中
+    拆出：:meth:`preflight` 只核来源/窗口事实可核定与否，:meth:`enforce_context_window`
+    在压缩后复核完整请求。:meth:`before_model_request` 保持原语义（准入 + 窗口门）。
     """
 
     policy_provider: Callable[[RunContext[Any]], Awaitable[ResearchBoundaryPolicy]]
     id: str | None = "research_boundary"
 
-    async def before_model_request(
-        self, ctx: RunContext[Any], request_context: ModelRequestContext
-    ) -> ModelRequestContext:
+    async def preflight(self, ctx: RunContext[Any], request_context: ModelRequestContext) -> ResearchBoundaryAdmission:
+        """阶段①：模式裁剪工具 + 来源未禁用 + 窗口事实可核定；**不**判超窗。"""
+
         policy = await self.policy_provider(ctx)
         # 先按模式裁剪工具，再对「最终待发请求」自测全输入（I47）：先测会被裁剪掉
         # 的工具 schema 会高估，导致本可放行的请求被误拒。
@@ -530,10 +573,8 @@ class ResearchBoundary(AbstractCapability[Any]):
             candidate_context, tokenizer_model=policy.tokenizer_model
         )
         if measured is None:
-            raise AgentServiceError(
-                AgentErrorCode.POLICY_DENIED,
-                "request input size unestimable (binary or unencodable input); refusing to guess before dispatch",
-                "research_boundary",
+            raise _boundary_denied(
+                "request input size unestimable (binary or unencodable input); refusing to guess before dispatch"
             )
         if not measured_verified:
             # R21：模型 tokenizer 不可证明时只做保守估算，不把它当作已核事实。
@@ -543,25 +584,58 @@ class ResearchBoundary(AbstractCapability[Any]):
             )
         reason = evaluate_research_boundary(policy, measured_input_tokens=measured)
         if reason == "source_disabled":
-            raise AgentServiceError(
-                AgentErrorCode.POLICY_DENIED,
-                "source disabled for new dispatch",
-                "research_boundary",
-            )
+            raise _boundary_denied("source disabled for new dispatch")
         if reason == "window_unknown":
-            raise AgentServiceError(
-                AgentErrorCode.POLICY_DENIED,
-                "context window unknown; refusing to guess before dispatch",
-                "research_boundary",
+            raise _boundary_denied("context window unknown; refusing to guess before dispatch")
+        return ResearchBoundaryAdmission(
+            request_context=candidate_context,
+            policy=policy,
+            measured_input_tokens=measured,
+            measured_verified=measured_verified,
+        )
+
+    def enforce_context_window(
+        self, admission: ResearchBoundaryAdmission, request_context: ModelRequestContext
+    ) -> None:
+        """阶段③：对（压缩后的）完整请求复核窗口；超出/不可估即拒绝放行。
+
+        只按该请求的全输入实测量判定：``policy.estimated_input_tokens`` 描述的是
+        压缩前的原始请求，压缩后沿用会让压缩永远无法挽救超窗（D7-02）。
+        """
+
+        policy = admission.policy
+        measured, measured_verified = _estimate_request_input_tokens(
+            request_context, tokenizer_model=policy.tokenizer_model
+        )
+        if measured is None:
+            raise _boundary_denied(
+                "request input size unestimable (binary or unencodable input); refusing to guess before dispatch"
             )
+        if not measured_verified:
+            logger.warning(
+                "[ResearchBoundary] input token count is an estimate (no verified tokenizer: model=%r)",
+                policy.tokenizer_model,
+            )
+        # 压缩后只信实测量：``estimated_input_tokens`` 描述压缩前的原始请求，
+        # 沿用会让压缩永远无法挽救超窗（D7-02）。
+        reason = evaluate_research_boundary(
+            replace(policy, estimated_input_tokens=None), measured_input_tokens=measured
+        )
         if reason == "context_window_exceeded":
-            estimates = [estimate for estimate in (policy.estimated_input_tokens, measured) if estimate is not None]
-            raise AgentServiceError(
-                AgentErrorCode.POLICY_DENIED,
-                f"context window exceeded: estimated={max(estimates)} "
-                f"+output_reserve={policy.output_reserve_tokens} "
-                f"window={policy.strictest_context_window_tokens()} "
-                f"measured_basis={'verified' if measured_verified else 'estimated'}",
-                "research_boundary",
+            raise _context_window_exceeded_error(policy, measured=measured, measured_verified=measured_verified)
+        if reason == "window_unknown":
+            raise _boundary_denied("context window unknown; refusing to guess before dispatch")
+        if reason == "source_disabled":
+            raise _boundary_denied("source disabled for new dispatch")
+
+    async def before_model_request(
+        self, ctx: RunContext[Any], request_context: ModelRequestContext
+    ) -> ModelRequestContext:
+        admission = await self.preflight(ctx, request_context)
+        if admission.exceeds_context_window():
+            raise _context_window_exceeded_error(
+                admission.policy,
+                measured=admission.measured_input_tokens,
+                measured_verified=admission.measured_verified,
             )
-        return candidate_context
+        return admission.request_context
