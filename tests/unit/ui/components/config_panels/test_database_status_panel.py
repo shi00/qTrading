@@ -131,7 +131,9 @@ def _render_panel(
     refresh_status 走 mock doctor（不触碰真实 sidecar）。
     """
     if page is None:
-        page = FakePage()
+        # execute_tasks=True：挂载期 use_effect 提交的 refresh_status 需真实执行，
+        # 才能断言医生结果落到 state（该异步命令有限，不会阻塞）。
+        page = FakePage(execute_tasks=True)
 
     if doctor_result is None:
         doctor_result = MagicMock()

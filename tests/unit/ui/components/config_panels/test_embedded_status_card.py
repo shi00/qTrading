@@ -225,7 +225,8 @@ class TestEmbeddedStatusCardVMLifecycle:
 
     def test_mount_triggers_single_refresh(self, mock_i18n_state, mock_app_colors_state) -> None:
         """use_effect(dependencies=[]) 挂载时提交一次 refresh_status，重渲染不重复。"""
-        page = FakePage()
+        # execute_tasks=True：需真实 await refresh_status 才能断言其被调用一次。
+        page = FakePage(execute_tasks=True)
         with contextlib.ExitStack() as stack:
             _patch_visuals(stack)
             refresh_mock = stack.enter_context(
