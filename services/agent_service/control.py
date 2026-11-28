@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Set as AbstractSet
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -39,6 +40,7 @@ from core.agent_types import (
 )
 from services.agent_service.workflows import (
     NodeOutcome,
+    ParentBindIdentity,
     RetryScope,
     build_retry_payload,
     compute_retry_scope,
@@ -49,7 +51,8 @@ class RetryLauncher(Protocol):
     """重试载荷的原生投递端口（未注入时服务只落重试事实，不伪造已重跑）。
 
     返回 ``(submitted, reason)``：``submitted=False`` 时 ``reason`` 说明未投递
-    的真实原因；异常由调用方经 ``classify_error`` 降级为 ``dispatch_state=failed``。
+    的真实原因（调用方记 ``dispatch_state=failed``）；异常表示投递状态未知（调用
+    方经 ``classify_error`` 记 ``dispatch_state=unknown``，不冒充未投递）。
     """
 
     async def launch(
@@ -79,11 +82,17 @@ def plan_retry(
     execution_id: str,
     new_round_id: str,
     plan_digest: str | None = None,
+    role_capabilities: Mapping[str, AbstractSet[str]] | None = None,
+    binding_identity: ParentBindIdentity | None = None,
 ) -> RetryPlan:
     """按持久计划与已观察叶状态计算重试范围并构造新轮载荷。
 
     目标必须是可重试叶（``failed`` / ``ended``）；``redo`` 含目标及传递下游；
     范围外 ``complete`` 叶作为保留前置。任一不满足显式拒绝（不猜、不放行）。
+
+    ``role_capabilities`` / ``binding_identity`` 为派发所需的冻结准入事实：父
+    workflow 入口会重新准入并建立真实轮次，缺任一即零叶派发（不得以提案自述
+    能力或自造身份替代，R2-I09）。
     """
 
     identity = f"{execution_id}/{new_round_id}"
@@ -122,6 +131,8 @@ def plan_retry(
             plan_digest=digest,
             targets=targets,
             preserved_outcomes=preserved,
+            role_capabilities=role_capabilities,
+            binding_identity=binding_identity,
         )
     except AgentValidationError as exc:
         # 保留前置缺失/陈旧等均属输入不可满足：显式拒绝，不用非法载荷派发。

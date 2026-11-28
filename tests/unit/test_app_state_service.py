@@ -1,6 +1,8 @@
 import asyncio
+import logging
 
 import pytest
+from sqlalchemy.exc import DBAPIError
 from unittest.mock import AsyncMock, MagicMock
 
 from data.persistence import engine_provider
@@ -12,7 +14,7 @@ from data.persistence.app_state_service import (
     set_app_state_if,
     set_app_state_max,
 )
-from data.persistence.daos.base_dao import EngineDisposedError
+from data.persistence.daos.base_dao import DatabaseQueryError, EngineDisposedError
 
 pytestmark = pytest.mark.unit
 
@@ -166,6 +168,22 @@ class TestListAppState:
         result = await list_app_state(engine, "agent.mcp.role.")
 
         assert result == {"agent.mcp.role.main@1": "{}", "agent.mcp.role.sub@1": "{}"}
+
+    @pytest.mark.asyncio
+    async def test_prefix_wildcards_are_escaped(self):
+        """D2-16：前缀中的 ``_`` / ``%`` 必须按字面量匹配，不得越过自身命名空间。"""
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(return_value=[])
+        engine = _make_connect_engine(mock_conn)
+
+        await list_app_state(engine, "agent.comparison.lane_note.100%")
+
+        stmt = mock_conn.execute.call_args[0][0]
+        sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "lane/_note." in sql
+        assert "100/%" in sql
+        assert "ESCAPE '/'" in sql
+        assert "lane_note." not in sql
 
     @pytest.mark.asyncio
     async def test_query_failure_propagates_instead_of_empty(self, caplog):
@@ -402,3 +420,142 @@ class TestSetAppStateIf:
         with pytest.raises(asyncio.CancelledError) as exc:
             await set_app_state_if(engine, "k", None, "v")
         assert type(exc.value) is asyncio.CancelledError
+
+
+# D1-06 / R9：app_state 读写失败时，日志与上抛异常不得泄露绑定参数明文。
+# 测试内凭据均为显式构造值，非真实密钥（R10）。
+_TEST_BOUND_SECRET = "my-pin"
+_TEST_DSN_PASSWORD = "fake-dsn-password"
+
+
+class _FakePgError(Exception):
+    """模拟 asyncpg 驱动异常（带 sqlstate 属性）。"""
+
+    sqlstate: str
+
+    def __init__(self, message: str, sqlstate: str) -> None:
+        super().__init__(message)
+        self.sqlstate = sqlstate
+
+
+def _make_dbapi_error() -> DBAPIError:
+    orig = _FakePgError(
+        'duplicate key value violates unique constraint "app_state_pkey"; '
+        f"dsn=postgresql+asyncpg://app_user:{_TEST_DSN_PASSWORD}@db.internal:5432/qtrading",
+        "23505",
+    )
+    return DBAPIError(
+        "INSERT INTO app_state (config_key, config_value) VALUES ($1, $2)",
+        ("config_key", _TEST_BOUND_SECRET),
+        orig,
+    )
+
+
+def _full_log_text(caplog) -> str:
+    formatter = logging.Formatter("%(message)s")
+    return "\n".join(formatter.format(record) for record in caplog.records)
+
+
+class TestDbErrorRedaction:
+    """D1-06 / R9：app_state 4 个读写函数的日志与上抛异常不含绑定参数明文。"""
+
+    @staticmethod
+    def _assert_no_leak(text: str) -> None:
+        assert _TEST_BOUND_SECRET not in text
+        assert _TEST_DSN_PASSWORD not in text
+
+    @pytest.mark.asyncio
+    async def test_get_app_state_swallow_logs_sanitized_error(self, caplog):
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(side_effect=_make_dbapi_error())
+        engine = _make_connect_engine(mock_conn)
+
+        with caplog.at_level(logging.DEBUG):
+            assert await get_app_state(engine, "some_key") is None
+
+        self._assert_no_leak(_full_log_text(caplog))
+
+    @pytest.mark.asyncio
+    async def test_list_app_state_raises_sanitized_error(self, caplog):
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(side_effect=_make_dbapi_error())
+        engine = _make_connect_engine(mock_conn)
+
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(DatabaseQueryError) as exc_info:
+                await list_app_state(engine, "agent.mcp.role.")
+
+        message = str(exc_info.value)
+        self._assert_no_leak(message)
+        assert "DBAPIError" in message
+        assert "sqlstate=23505" in message
+        assert exc_info.value.__cause__ is None
+        self._assert_no_leak(_full_log_text(caplog))
+
+    @pytest.mark.asyncio
+    async def test_strict_write_raises_sanitized_error(self, caplog):
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(side_effect=_make_dbapi_error())
+        engine = _make_begin_engine(mock_conn)
+
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(DatabaseQueryError) as exc_info:
+                await set_app_state(engine, "financial:full_sync_pending", "[]", strict=True)
+
+        self._assert_no_leak(str(exc_info.value))
+        assert "sqlstate=23505" in str(exc_info.value)
+        assert exc_info.value.__cause__ is None
+        self._assert_no_leak(_full_log_text(caplog))
+
+    @pytest.mark.asyncio
+    async def test_non_strict_write_logs_sanitized_error(self, caplog):
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(side_effect=_make_dbapi_error())
+        engine = _make_begin_engine(mock_conn)
+
+        with caplog.at_level(logging.DEBUG):
+            await set_app_state(engine, "theme", "dark")
+
+        self._assert_no_leak(_full_log_text(caplog))
+
+    @pytest.mark.asyncio
+    async def test_conditional_write_raises_sanitized_error(self, caplog):
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(side_effect=_make_dbapi_error())
+        engine = _make_begin_engine(mock_conn)
+
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(DatabaseQueryError) as exc_info:
+                await set_app_state_if(engine, "k", None, "v")
+
+        self._assert_no_leak(str(exc_info.value))
+        assert exc_info.value.__cause__ is None
+        self._assert_no_leak(_full_log_text(caplog))
+
+    @pytest.mark.asyncio
+    async def test_delete_raises_sanitized_error(self, caplog):
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(side_effect=_make_dbapi_error())
+        engine = _make_begin_engine(mock_conn)
+
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(DatabaseQueryError) as exc_info:
+                await delete_app_state(engine, "agent.mcp.svc")
+
+        self._assert_no_leak(str(exc_info.value))
+        assert exc_info.value.__cause__ is None
+        self._assert_no_leak(_full_log_text(caplog))
+
+    @pytest.mark.asyncio
+    async def test_strict_write_max_raises_sanitized_error(self, caplog):
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(side_effect=_make_dbapi_error())
+        engine = _make_begin_engine(mock_conn)
+
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(DatabaseQueryError) as exc_info:
+                await set_app_state_max(engine, "financial:disclosure_checkpoint", "20250901", strict=True)
+
+        self._assert_no_leak(str(exc_info.value))
+        assert exc_info.value.__cause__ is None
+        self._assert_no_leak(_full_log_text(caplog))

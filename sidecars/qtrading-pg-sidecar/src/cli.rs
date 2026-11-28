@@ -41,7 +41,7 @@ pub enum Command {
     /// 查询状态（stdout 输出 status JSON）
     Status(DataDirArgs),
     /// 诊断数据目录/版本/锁/上次异常退出（stdout 输出 doctor JSON）
-    Doctor(DataDirArgs),
+    Doctor(DoctorArgs),
     /// 备份：运行中实例直连 pg_dump，或离线临时实例 pg_dump
     Dump(DumpArgs),
     /// 恢复到新目录，不覆盖原目录（§12.2，需维护锁）
@@ -59,6 +59,20 @@ pub struct DataDirArgs {
     /// PGDATA 目录（<app data>/postgres/16/data）
     #[arg(long)]
     pub data_dir: PathBuf,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct DoctorArgs {
+    /// PGDATA 目录（<app data>/postgres/16/data）
+    #[arg(long)]
+    pub data_dir: PathBuf,
+    /// 业务库名（可选；提供时诊断其是否满足维护命令标识符契约，
+    /// 用于存量非标名称集群的兼容迁移提示）
+    #[arg(long)]
+    pub database: Option<String>,
+    /// 超级用户名（可选；同上）
+    #[arg(long)]
+    pub username: Option<String>,
 }
 
 #[derive(clap::Args, Debug, Clone)]

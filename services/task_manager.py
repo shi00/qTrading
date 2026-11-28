@@ -1191,6 +1191,9 @@ class TaskManager:
             ownership_lock: 业务库唯一所有权锁端口（``InstanceOwnershipLock`` 形状，
                 测试可注入替身）。缺省时按当前引擎连接目标自建；无法解析
                 SQLAlchemy 引擎（测试替身）时按既有行为放行。
+
+        切库重配（D1-03）：当前引擎目标与已持锁目标不一致时，先收敛在途持久化并释放
+        旧锁，再对新目标取证；取锁后任何初始化失败（含取消）先释放锁再原样传播。
         """
         logger.info("[TaskManager] init_db started")
         from data.cache.cache_manager import CacheManager
@@ -1210,92 +1213,123 @@ class TaskManager:
 
             raise InstanceOwnershipConflictError()
 
-        # D03-001: 启动/重启边界重新开放业务提交准入（递增代际，拒绝上一代际遗留的
-        # 延迟 _enqueue 闭包）。停机路径由 close_admission 关闭。
-        self.reopen_admission()
+        try:
+            # D03-001: 启动/重启边界重新开放业务提交准入（递增代际，拒绝上一代际遗留的
+            # 延迟 _enqueue 闭包）。停机路径由 close_admission 关闭。
+            self.reopen_admission()
 
-        # Wait for database schema to be ready (handled safely by CacheManager)
+            # Wait for database schema to be ready (handled safely by CacheManager)
 
-        # 2. Mark stale RUNNING/QUEUED from last session as INTERRUPTED
-        # LIFE-01: 反序列化前确保内置崩溃重建工厂已注册（幂等），否则 INTERRUPTED 任务
-        # 无法回填 factory，崩溃后重试能力缺失。
-        from services import task_rebuild  # noqa: F401  # (LIFE-01) side-effect: register built-in retryable factories
+            # 2. Mark stale RUNNING/QUEUED from last session as INTERRUPTED
+            # LIFE-01: 反序列化前确保内置崩溃重建工厂已注册（幂等），否则 INTERRUPTED 任务
+            # 无法回填 factory，崩溃后重试能力缺失。
+            from services import task_rebuild  # noqa: F401  # (LIFE-01) side-effect: register built-in retryable factories
 
-        await cache.write_db(
-            "UPDATE task_history SET status = $1, description = $2 WHERE status IN ('RUNNING', 'QUEUED')",
-            (
-                TaskStatus.INTERRUPTED.value,
-                _serialize_msg_field(Message("task_interrupted_desc")),
-            ),
-        )
-
-        # 3. Load recent history (read_db returns pd.DataFrame)
-        df = await cache.read_db(
-            "SELECT * FROM task_history ORDER BY created_at DESC LIMIT 200",
-        )
-        if df is not None and not df.empty:
-            for _, row in df.iterrows():
-                try:
-                    t = AppTask(
-                        id=row.get("id", ""),  # type: ignore[union-attr]
-                        name=_deserialize_msg_field(str(row.get("name", "") or "")),
-                        task_type=_deserialize_msg_field(str(row.get("task_type", "System") or "System")),
-                        status=TaskStatus(row.get("status", "COMPLETED")),
-                        progress=float(row.get("progress", 0) or 0),
-                        description=_deserialize_msg_field(str(row.get("description", "") or "")),
-                        error=str(row.get("error", "") or ""),
-                        result=row.get("result"),
-                        created_at=self._safe_dt(row.get("created_at")) or get_now(),
-                        started_at=self._safe_dt(row.get("started_at")),
-                        completed_at=self._safe_dt(row.get("completed_at")),
-                    )
-                    self._rehydrate_retry_info(t, row)
-                    self._history.append(t)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    log_classified(
-                        logger,
-                        e,
-                        "general",
-                        "[TaskManager] Skipping malformed history row (%s): %s",
-                        exc_info=True,
-                    )
-            logger.info(
-                "[TaskManager] Loaded %s historical task(s) from DB.",
-                len(self._history),
+            await cache.write_db(
+                "UPDATE task_history SET status = $1, description = $2 WHERE status IN ('RUNNING', 'QUEUED')",
+                (
+                    TaskStatus.INTERRUPTED.value,
+                    _serialize_msg_field(Message("task_interrupted_desc")),
+                ),
             )
 
-        # 4. Purge old records (>30 days)
-        # H1 举一反三 fix: 与 completed_at (UTC tz-naive) 时区一致，避免 8 小时偏差
-        cutoff_date = cast(datetime.datetime, to_utc_for_db(get_now() - datetime.timedelta(days=30)))
-        # review03-C12: 清理失败可容忍（不阻断 init_db）——显式打开吞错，_write_db 内部有 warning 日志
-        await cache.write_db(
-            "DELETE FROM task_history WHERE completed_at < $1",
-            (cutoff_date,),
-            suppress_errors=True,
-        )
+            # 3. Load recent history (read_db returns pd.DataFrame)
+            df = await cache.read_db(
+                "SELECT * FROM task_history ORDER BY created_at DESC LIMIT 200",
+            )
+            if df is not None and not df.empty:
+                for _, row in df.iterrows():
+                    try:
+                        t = AppTask(
+                            id=row.get("id", ""),  # type: ignore[union-attr]
+                            name=_deserialize_msg_field(str(row.get("name", "") or "")),
+                            task_type=_deserialize_msg_field(str(row.get("task_type", "System") or "System")),
+                            status=TaskStatus(row.get("status", "COMPLETED")),
+                            progress=float(row.get("progress", 0) or 0),
+                            description=_deserialize_msg_field(str(row.get("description", "") or "")),
+                            error=str(row.get("error", "") or ""),
+                            result=row.get("result"),
+                            created_at=self._safe_dt(row.get("created_at")) or get_now(),
+                            started_at=self._safe_dt(row.get("started_at")),
+                            completed_at=self._safe_dt(row.get("completed_at")),
+                        )
+                        self._rehydrate_retry_info(t, row)
+                        self._history.append(t)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        log_classified(
+                            logger,
+                            e,
+                            "general",
+                            "[TaskManager] Skipping malformed history row (%s): %s",
+                            exc_info=True,
+                        )
+                logger.info(
+                    "[TaskManager] Loaded %s historical task(s) from DB.",
+                    len(self._history),
+                )
 
-        self._db_ready = True
-        logger.info("[TaskManager] Persistence layer initialized.")
+            # 4. Purge old records (>30 days)
+            # H1 举一反三 fix: 与 completed_at (UTC tz-naive) 时区一致，避免 8 小时偏差
+            cutoff_date = cast(datetime.datetime, to_utc_for_db(get_now() - datetime.timedelta(days=30)))
+            # review03-C12: 清理失败可容忍（不阻断 init_db）——显式打开吞错，_write_db 内部有 warning 日志
+            await cache.write_db(
+                "DELETE FROM task_history WHERE completed_at < $1",
+                (cutoff_date,),
+                suppress_errors=True,
+            )
+
+            self._db_ready = True
+            logger.info("[TaskManager] Persistence layer initialized.")
+        except BaseException:
+            # D1-03：取锁后任何初始化失败（含取消，R2）都必须先放弃所有权再原样传播——
+            # 否则残留锁会让本进程在库实际不可用时继续冒充「唯一存活执行者」。
+            await self.release_ownership_async()
+            raise
 
     async def _acquire_ownership(self, cache: Any, ownership_lock: Any | None) -> bool:
         """取得业务库唯一所有权（已持有则幂等）；无 SQLAlchemy 引擎目标时按无锁放行。
 
         生产 ``CacheManager.engine`` 恒为 ``AsyncEngine``（带 ``url``），故正常路径必然
         建立跨进程证据；非 SQLAlchemy 引擎只出现在测试替身，此时保持既有回填行为。
+
+        D1-03 切库重配：锁的会话级所有权只对**锁连接指向的那个库**成立。目标 URL 变化时
+        必须先在旧目标上收敛落账、释放旧锁，再对新目标取证；复用旧锁会让 ``acquire()``
+        幂等返回真，从而在**新库未获锁**的情况下执行 stale 回填等写库（无锁越权写）。
         """
 
-        lock = ownership_lock if ownership_lock is not None else self._ownership_lock
-        if lock is not None:
-            return bool(await lock.acquire())
+        if ownership_lock is not None:
+            return bool(await ownership_lock.acquire())
+
+        existing = self._ownership_lock
         url = _resolve_business_db_url(cache)
         if url is None:
+            # 测试替身/无法解析引擎：沿用既有「无锁放行」行为（已有锁则继续幂等使用）
+            if existing is not None:
+                return bool(await existing.acquire())
             logger.debug(
                 "[TaskManager] Business database URL unresolvable on the current engine; "
                 "task ownership lock not enforced"
             )
             return True
+        # 无 ``database_url`` 的注入替身按「同一目标」处理，保持既有契约不变。
+        if existing is not None and getattr(existing, "database_url", url) == url:
+            return bool(await existing.acquire())
+
+        if existing is not None:
+            # 切库：先等本进程已排队的最后状态写在途归零（有界），再放弃旧库所有权。
+            # ``flush`` 只保证 tracked 写在途归零，不代表 SQL 已成功（D11-S01），故超时只告警。
+            try:
+                await self.flush_persistence(timeout_s=1.5)
+            except TimeoutError:
+                logger.warning(
+                    "[TaskManager] Pending persistence writes did not settle before switching ownership lock; "
+                    "releasing previous lock anyway."
+                )
+            await self.release_ownership_async()
+            logger.info("[TaskManager] Business database target changed; previous ownership lock released.")
+
         from data.persistence.instance_lock import InstanceOwnershipLock
 
         lock = InstanceOwnershipLock(url)
@@ -1303,6 +1337,22 @@ class TaskManager:
             return False
         self._ownership_lock = lock
         return True
+
+    async def release_ownership_async(self) -> None:
+        """异步放弃业务库唯一所有权（关机 Step 3a / 切库重配）。
+
+        优先走锁端口新增的 ``release_async``（关闭持锁连接 + dispose 独立引擎）；
+        仅实现同步 ``force_release`` 的注入替身走同步兜底。重复调用幂等。
+        """
+
+        lock, self._ownership_lock = self._ownership_lock, None
+        if lock is None:
+            return
+        release_async = getattr(lock, "release_async", None)
+        if release_async is None:
+            lock.force_release()
+            return
+        await release_async()
 
     def _release_ownership_lock(self) -> None:
         """放弃业务库唯一所有权（单例重置/进程退出；连接关闭即释放会话锁）。"""

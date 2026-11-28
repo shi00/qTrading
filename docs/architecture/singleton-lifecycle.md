@@ -73,14 +73,14 @@ def __init__(self, *, config=None, clock=None):
 2. **初始化**：首次实例化按上文模板的双检锁执行，`_initialized` 保证初始化逻辑只执行一次（`TushareClient` 例外：重复实例化且注入不同 token 时会重跑 token 切换）。
 3. **优雅停机（主路径）**：`ShutdownCoordinator.do_cleanup()` 按 `utils/shutdown.py::_CLEANUP_STEPS` 的 Step 0 → Step 8（含 Step 3b、Step 5b）释放资源：取消在途任务 → 停后台服务 → 刷盘 → 停止 `DataProcessor` worker（Step 3）→ 动态清理回调（含 Recorder 最终落账，Step 3 后、Step 3b 前）→ 释放异步 DB engine（Step 3b）→ 清 Toast → 卸载 AI 模型 / 情绪子进程 → 关线程池 → 关共享同步引擎 → 停内置 PostgreSQL。持有资源的单例须接入对应步骤（复用既有静态步骤，或经 `register_cleanup_callback()` 新增动态步骤——后者在 Step 3 后、Step 3b 前按注册顺序执行；`_CLEANUP_STEPS` 有索引断言，勿随意插行）；停机步骤只读既有实例（`Cls._instance`，或 `get_instance()` 这类不构造新实例的访问器），禁止调用会创建资源的工厂/构造器，避免关机时重建资源。
 4. **成功标记**：全部关键步骤成功后才调用 `mark_graceful_shutdown_completed()`；失败、超时与外层取消路径均不标记。
-5. **atexit 兜底**：仅在未完成优雅停机时执行（`_atexit_fired` 保证至多一次），由 registry 的单一 atexit handler 按注册顺序的**逆序**调用各单例的 `_atexit_cleanup()`（未实现则跳过）；单个清理异常只告警，不阻断其余单例。
+5. **atexit 兜底**：仅在未完成优雅停机时执行（`_atexit_fired` 保证至多一次），由 registry 的单一 atexit handler 按注册顺序的**逆序**调用各单例的 `_atexit_cleanup()`（未实现则跳过）；标记 `_atexit_cleanup_last = True` 的单例（如 `EmbeddedPostgresService`）固定排到末尾，保证 sidecar/PG 在所有 DB 客户端 dispose 连接池之后再停止（D1-03，不依赖模块 import 顺序）；单个清理异常只告警，不阻断其余单例。
 6. **取消语义（R2）**：停机步骤与清理方法不得吞没 `asyncio.CancelledError`，必须向上抛出；registry 只捕获 `Exception`，`CancelledError` 属 `BaseException`，会自然穿透。
 
 ### 单例注册清单
 
 > R15 人工评审对照基准。新增/移除单例时同步更新本清单。
 
-**注册单例（`@register_singleton`，25 个）**：
+**注册单例（`@register_singleton`，26 个）**：
 
 | 类名 | 模块路径 | 职责 |
 |------|---------|------|
@@ -109,6 +109,7 @@ def __init__(self, *, config=None, clock=None):
 | `ActualInputBinderRegistry` | `services/agent_service/workflows.py` | 父实际输入绑定器登记（P1-07：组装期注入、未登记即 `actual_input_binding_unavailable` 父零叶派发；`_reset_singleton` 清空登记，测试自动隔离） |
 | `LeafTicketGateRegistry` | `services/agent_service/workflows.py` | 叶资源票据门登记（P1-07：组装期注入、未登记即 `leaf_ticket_gate_unavailable` 父零叶派发；`_reset_singleton` 清空登记，测试自动隔离） |
 | `AnswerConsumerRegistry` | `services/agent_service/workflows.py` | 答复消费者登记（P1-05：组合根注入用户域 + 共享 DAO，未登记即明确拒绝、不伪造已消费；`_reset_singleton` 清空登记，测试自动隔离） |
+| `TerminalStateDaoRegistry` | `services/agent_service/workflows.py` | 应用执行终态写入端口登记（P1-08：组合根安装或惰性取共享 `CacheManager().agent_dao`，不可得即明确拒绝；`_reset_singleton` 清空登记，测试自动隔离） |
 
 **非注册单例（无 `@register_singleton`，但事实单例）**：
 
@@ -139,6 +140,7 @@ def __init__(self, *, config=None, clock=None):
 
 - **单元测试（`tests/unit/`）**：`tests/unit/conftest.py` 的 `_reset_all_singletons` autouse fixture 在每个用例前后调用 `reset_all_singletons()`（逐类执行 `_reset_singleton`，单类异常仅告警不阻断），并复位模块级 `_graceful_shutdown_completed`（`_atexit_fired` 由 `reset_all_singletons()` 一并复位），使每个用例从「未优雅停机」基线开始。
 - **非注册单例**：`ProxyManager._reset_singleton()` 由同一 autouse fixture 显式调用；`DataExplorerQueryClient` 由 `_reset_data_explorer_shared_engine` autouse fixture 复位（见上表）。
+- **模块级 UI 共享状态**：`ui/agent_decision_arbiter.py` 的 `get_decision_arbiter()`（进程级决定仲裁器，残留 owner 会误判 `agent_decision_busy`）与 `ui/viewmodels/research_observer_view_model.py` 的 `shared_research_observer()`（共享观察 VM）均为模块级共享实例，不属于 `@register_singleton`；由同一 autouse fixture 经 `_reset_ui_shared_runtime_state()` 调用真实复位入口（`reset()` / `reset_shared_research_observer()`）前后复位。
 - **集成 / e2e 测试**：不做逐用例自动重置（integration 仅由 `tests/integration/conftest.py` 的 `cleanup_singletons_session` 在会话 teardown 统一关闭并 `reset_all_singletons()`），需手动调用 `_reset_singleton`，或用 `tests/conftest.py::singleton_state` 保存/恢复 `_instance`（后者不触发 registry 重置与 `_atexit_cleanup`）。
 - 机制正本：[docs/guides/testing.md](../guides/testing.md)「测试编写规则」。
 

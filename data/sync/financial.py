@@ -179,11 +179,21 @@ def _dump_pending_disclosure_targets(pending: dict[str, set[tuple[str, str]]]) -
 
 
 def _status_data_date(status: dict | None) -> datetime.date | None:
-    """Business water level from sync_status: last_data_date, fallback last_sync_date."""
+    """已确认数据水位：只读 ``last_data_date``（由成功完成态写入）。
+
+    失败 / 取消 / 权限跳过 / 部分完成 / 未确认空返回等非成功状态只推进
+    ``last_sync_date``（最近尝试日），其 ``last_data_date`` 可能为 NULL（非成功首插），
+    禁止回退 ``last_sync_date`` 把尝试日当作水位（D2-02）。仅存量记录（无状态判定
+    字段）或成功态保留回退，以维持增量窗口兼容。
+    """
     if not status:
         return None
     raw = status.get("last_data_date")
     if raw is None or pd.isna(raw):
+        status_value = status.get("status")
+        # 白名单式回退：只允许「无状态字段的存量记录」与「成功态」，其余一律拒绝。
+        if isinstance(status_value, str) and status_value and status_value != "success":
+            return None
         raw = status.get("last_sync_date")
     if raw is None or pd.isna(raw):
         return None
@@ -259,9 +269,9 @@ class FinancialSyncStrategy(ISyncStrategy):
     async def _record_cancelled_watermark(self, result: SyncResult, stage: str) -> None:
         """协作退出时提交 cancelled 状态，且不推进成功水位。
 
-        ``update_sync_status`` 对非 success/empty/skipped_permission 状态不更新
-        ``last_data_date``（R22），因此这里显式写 cancelled 只记录本次尝试被取消，
-        不会把未完成范围伪装成已完成的成功水位。
+        ``update_sync_status`` 只对 ``status='success'`` 推进 ``last_data_date``（R22），
+        因此这里显式写 cancelled 只记录本次尝试被取消，不会把未完成范围伪装成已完成
+        的成功水位。
         """
         self._mark_cancelled(result, stage)
         await self.context.cache.sync_dao.update_sync_status(

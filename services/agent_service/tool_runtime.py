@@ -11,6 +11,19 @@
 - **逐调用人答（P1-10）**：决定只落 ``pending`` + 有界有效期，只有本次答复被
   消费且为批准才激活 ``granted``；启连审核/目录勾选不构成逐调用批准，未答/
   拒答/过期一律零派发；
+- **可恢复审批等待（D7-01）**：``pending`` 后由
+  :class:`ToolApprovalCoordinator` 按 ``decision_id`` 登记等待本次答复事件，
+  受决定有效期与单次工具 deadline 上限约束；答复消费事务（``consume_answer``）
+  完成后唤醒等待者，醒后仍以持久 ``agent_decision`` 事实重核（不复用内存
+  事件作为授权证据，重启/跨任务恢复均按库内状态判定）；严禁在不可中断 step
+  内死循环轮询，``CancelledError`` 原样传播（R2）；
+- **恢复后全量重核与幂等防重发**：再次 claim 前由 DAO 在事务内重核有效期、
+  执行轮次、参数/授权摘要、撤销状态与 ``agent_operation`` 尚未出站/未入终态
+  （CAS）；已认领/已出站的重放只回明未知，不二次外发，也不把已知结果改写成
+  失败（R21）；
+- **精确错误语义**：超时未答 → ``approval_timeout``、用户明确拒绝 →
+  ``permission_rejected``、已授后撤销 → ``permission_revoked``，不得混同为
+  ``source_disabled``；
 - **研究边界新鲜核定**（I43）：保存决定前读取来源事实并冻结摘要，派发前由调用门
   重新读取比对；已登记来源中存在禁用版本即零决定/零 claim/零派发；
 - **结果如实落库**：``completed`` / ``failed`` / ``unknown`` 三态分别映射
@@ -18,7 +31,8 @@
 
 生产组合根经 :func:`build_tool_runtime_factory` 接线：只认用户显式启连的单一服务，
 未启连 / 无授权 / 目录漂移一律返回 ``None``（叶 Agent 零工具、零外发），
-**不会隐式建连**。人工答复 UI 闭环同样不在本轮。
+**不会隐式建连**。答复消费经组合根登记 ``AnswerConsumerRegistry``，消费成功后
+唤醒同一进程内的审批等待者。
 """
 
 from __future__ import annotations
@@ -29,7 +43,7 @@ import logging
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Final, Protocol
+from typing import Any, Final, Protocol, cast
 
 from pydantic_ai import Tool
 
@@ -43,6 +57,7 @@ from core.agent_types import (
     SaveToolDecisionRequest,
     SaveToolResultRequest,
     ToolGrantFact,
+    ToolGrantState,
     resolve_tool_allowlist,
     sha256_hex,
     stable_id,
@@ -67,6 +82,12 @@ from services.agent_service.tools import ToolSpec, build_deferred_tools, validat
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "APPROVAL_TIMEOUT",
+    "PERMISSION_REJECTED",
+    "PERMISSION_REVOKED",
+    "ToolApprovalCoordinator",
+    "ToolApprovalPort",
+    "ToolApprovalTicket",
     "ToolDecisionDao",
     "ToolRunScope",
     "ToolRuntime",
@@ -87,6 +108,91 @@ _DENIED_CODES: Final[frozenset[AgentErrorCode]] = frozenset(
         AgentErrorCode.INPUT_INVALID,
     }
 )
+#: 审批闭环的精确拒绝原因（D7-01；不得混同为 ``source_disabled``）。
+APPROVAL_TIMEOUT: Final[str] = "approval_timeout"
+PERMISSION_REJECTED: Final[str] = "permission_rejected"
+PERMISSION_REVOKED: Final[str] = "permission_revoked"
+#: 已入终态的 operation phase：重放不得覆盖已知结果/已知失败（R21）。
+_TERMINAL_OPERATION_PHASES: Final[frozenset[str]] = frozenset({"result_saved", "failed_confirmed", "unknown"})
+
+
+class ToolApprovalTicket:
+    """一次审批等待的登记句柄：只负责唤醒，不承载授权事实。"""
+
+    def __init__(self, *, decision_id: str) -> None:
+        self.decision_id = decision_id
+        # 在 prepare() 的运行循环内创建，实例不跨循环复用。
+        self._loop = asyncio.get_running_loop()
+        self._event = asyncio.Event()  # R11_ALLOWED: 运行循环内创建，实例不跨循环复用
+
+    async def wait(self, timeout_s: float) -> bool:
+        """等待答复消费唤醒；超时返回 ``False``，取消原样传播（R2）。"""
+
+        if timeout_s <= 0:
+            return False
+        try:
+            async with asyncio.timeout(timeout_s):
+                await self._event.wait()
+            return True
+        except TimeoutError:
+            return False
+
+    def _notify(self) -> None:
+        """跨任务/跨线程安全唤醒（DBOS 消费步骤可能不在等待者线程）。"""
+
+        try:
+            self._loop.call_soon_threadsafe(self._event.set)
+        except RuntimeError:
+            # 等待者循环已关闭：等待方已取消/退出，无对象可唤醒。
+            return
+
+
+class ToolApprovalCoordinator:
+    """进程内可恢复审批等待登记（D7-01）。
+
+    只做「唤醒」：答复消费事务提交后由组合根调用 :meth:`notify_consumed`，
+    被唤醒方必须重新读取持久 ``agent_decision`` 事实，内存事件不构成授权证据。
+    """
+
+    def __init__(self) -> None:
+        self._waiters: dict[str, list[ToolApprovalTicket]] = {}
+
+    def prepare(self, *, decision_id: str) -> ToolApprovalTicket:
+        ticket = ToolApprovalTicket(decision_id=decision_id)
+        self._waiters.setdefault(decision_id, []).append(ticket)
+        return ticket
+
+    def release(self, ticket: ToolApprovalTicket) -> None:
+        remaining = [item for item in self._waiters.get(ticket.decision_id, ()) if item is not ticket]
+        if remaining:
+            self._waiters[ticket.decision_id] = remaining
+        else:
+            self._waiters.pop(ticket.decision_id, None)
+
+    def notify_consumed(self, decision_id: str) -> None:
+        """答复消费成功后唤醒该决定的所有等待者（幂等，可重复调用）。"""
+
+        for ticket in tuple(self._waiters.get(decision_id, ())):
+            ticket._notify()
+
+
+class ToolApprovalPort(Protocol):
+    """审批等待端口（生产为 :class:`ToolApprovalCoordinator`）。"""
+
+    def prepare(self, *, decision_id: str) -> ToolApprovalTicket: ...
+
+    def release(self, ticket: ToolApprovalTicket) -> None: ...
+
+    def notify_consumed(self, decision_id: str) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _PermissionState:
+    """持久许可事实的解析结果（``denied_reason`` 为空且未出站才允许派发）。"""
+
+    scope: OperationGrantScope | None
+    denied_reason: str | None = None
+    already_started: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +239,10 @@ class ToolRuntime:
     audit_scope: tuple[str, ...]
     dao: ToolDecisionDao
     boundary: ToolBoundaryPort
+    #: 审批等待端口；``None`` = 无可恢复等待能力（PENDING 直接按超时零派发）。
+    approvals: ToolApprovalPort | None = None
+    #: 单次审批等待上限（另受决定 ``expires_at`` 约束；生产取单次工具 deadline）。
+    approval_timeout_s: float = _TOOL_DECISION_TTL.total_seconds()
 
     async def execute(
         self,
@@ -170,7 +280,7 @@ class ToolRuntime:
                 operation_id,
             )
         try:
-            await self.dao.save_tool_decision(
+            fact = await self.dao.save_tool_decision(
                 SaveToolDecisionRequest(
                     user_scope=self.scope.user_scope,
                     session_id=self.scope.session_id,
@@ -203,6 +313,14 @@ class ToolRuntime:
                 )
             raise
 
+        # D7-01：pending 时等待本次 decision_id 的答复事件；醒后（或无可恢复等待
+        # 能力时）一律以持久许可事实重核，精确区分超时/拒绝/撤销/已出站重放。
+        permission = await self._resolve_permission(decision_id=decision_id, operation_id=operation_id, fact=fact)
+        if permission.already_started:
+            return await self._already_started(operation_id, permission.scope)
+        if permission.denied_reason is not None:
+            return await self._deny(operation_id, permission.denied_reason, scope=permission.scope)
+
         request = ToolCallRequest(
             identity=self.identity,
             tool_name=tool_name,
@@ -224,18 +342,110 @@ class ToolRuntime:
             raise
         except AgentServiceError as exc:
             if exc.code in _DENIED_CODES:
-                await self._record(operation_id, ToolCallState.FAILED, {"state": "denied", "reason": exc.code.value})
-                return ToolCallOutcome(
-                    ToolCallState.FAILED,
-                    {"state": "denied", "reason": exc.code.value},
-                    operation_id,
-                )
+                # claim 竞争/撤销/过期等由调用门折叠为拒绝码；按持久事实还原
+                # 精确原因，不把许可问题混同为 source_disabled（R21）。
+                refusal = await self._classify_dispatch_refusal(operation_id)
+                if refusal is not None:
+                    if refusal.already_started:
+                        return await self._already_started(operation_id, refusal.scope)
+                    if refusal.denied_reason is not None:
+                        return await self._deny(operation_id, refusal.denied_reason, scope=refusal.scope)
+                kicker = {"state": "denied", "reason": exc.code.value}
+                await self._record(operation_id, ToolCallState.FAILED, kicker)
+                return ToolCallOutcome(ToolCallState.FAILED, kicker, operation_id)
             if exc.code is AgentErrorCode.BUDGET_BLOCKED:
                 # 结果族超限时调用已发生：结果不可用按 unknown 记录，不伪装确定失败。
                 await self._record(operation_id, ToolCallState.UNKNOWN, {"state": "unknown"})
             raise
         await self._record(operation_id, outcome.state, outcome.result)
         return outcome
+
+    async def _resolve_permission(
+        self, *, decision_id: str, operation_id: str, fact: ToolGrantFact
+    ) -> _PermissionState:
+        """读取持久许可事实；pending 先等待答复，醒后仍以库内状态为准。"""
+
+        scope = await self.dao.read_operation_grant_scope(operation_id=operation_id)
+        state = scope.grant_state if scope is not None else fact.grant_state
+        if state is ToolGrantState.PENDING:
+            await self._await_answer(decision_id=decision_id, operation_id=operation_id, scope=scope)
+            scope = await self.dao.read_operation_grant_scope(operation_id=operation_id)
+            state = scope.grant_state if scope is not None else ToolGrantState.PENDING
+        if state is ToolGrantState.GRANTED:
+            if _decision_expired(scope):
+                return _PermissionState(scope=scope, denied_reason=APPROVAL_TIMEOUT)
+            if scope is not None and _operation_started(scope):
+                return _PermissionState(scope=scope, already_started=True)
+            return _PermissionState(scope=scope)
+        if state is ToolGrantState.REVOKED:
+            return _PermissionState(scope=scope, denied_reason=_revocation_reason(scope))
+        if state is ToolGrantState.CLAIMED:
+            return _PermissionState(scope=scope, already_started=True)
+        # 等待结束仍 pending：本次未答/不可解释，按超时零派发。
+        return _PermissionState(scope=scope, denied_reason=APPROVAL_TIMEOUT)
+
+    async def _await_answer(self, *, decision_id: str, operation_id: str, scope: OperationGrantScope | None) -> None:
+        """登记并等待本次答复事件（单次有界等待，不做不可中断轮询）。"""
+
+        if self.approvals is None:
+            return
+        timeout_s = self._approval_remaining(scope)
+        if timeout_s <= 0:
+            return
+        ticket = self.approvals.prepare(decision_id=decision_id)
+        try:
+            # 可恢复：注册后立即复核持久事实，防「答复在注册前已消费」的丢唤醒。
+            latest = await self.dao.read_operation_grant_scope(operation_id=operation_id)
+            if latest is not None and latest.grant_state is not ToolGrantState.PENDING:
+                return
+            timeout_s = self._approval_remaining(latest if latest is not None else scope, fallback=timeout_s)
+            if timeout_s <= 0:
+                return
+            await ticket.wait(timeout_s)
+        finally:
+            self.approvals.release(ticket)
+
+    def _approval_remaining(self, scope: OperationGrantScope | None, *, fallback: float | None = None) -> float:
+        limit = self.approval_timeout_s if fallback is None else min(self.approval_timeout_s, fallback)
+        if scope is not None:
+            expires_at = _parse_wire_moment(scope.expires_at)
+            if expires_at is not None:
+                limit = min(limit, (expires_at - datetime.now(UTC)).total_seconds())
+        return max(0.0, limit)
+
+    async def _classify_dispatch_refusal(self, operation_id: str) -> _PermissionState | None:
+        """claim 被拒后按持久事实还原原因；``None`` = 与许可状态无关的拒绝。"""
+
+        scope = await self.dao.read_operation_grant_scope(operation_id=operation_id)
+        if scope is None:
+            return None
+        if scope.grant_state is ToolGrantState.REVOKED:
+            return _PermissionState(scope=scope, denied_reason=_revocation_reason(scope))
+        if scope.grant_state is ToolGrantState.CLAIMED:
+            return _PermissionState(scope=scope, already_started=True)
+        if scope.grant_state is ToolGrantState.PENDING:
+            return _PermissionState(scope=scope, denied_reason=APPROVAL_TIMEOUT)
+        if scope.grant_state is ToolGrantState.GRANTED:
+            if _decision_expired(scope):
+                return _PermissionState(scope=scope, denied_reason=APPROVAL_TIMEOUT)
+            if _operation_started(scope):
+                return _PermissionState(scope=scope, already_started=True)
+        return None
+
+    async def _deny(self, operation_id: str, reason: str, *, scope: OperationGrantScope | None) -> ToolCallOutcome:
+        payload = {"state": "denied", "reason": reason}
+        if not _operation_terminal(scope):
+            await self._record(operation_id, ToolCallState.FAILED, payload)
+        return ToolCallOutcome(ToolCallState.FAILED, payload, operation_id)
+
+    async def _already_started(self, operation_id: str, scope: OperationGrantScope | None) -> ToolCallOutcome:
+        """已认领/已出站的重放：不二次外发，也不写/覆盖 operation 结果（R21）。
+
+        认领可能属于仍在途的原执行者；此处回明未知，由原执行者落终态，避免并发
+        重放把对方的 ``prepared``/``result_saved`` 改写成 ``unknown``。
+        """
+
+        return ToolCallOutcome(ToolCallState.UNKNOWN, None, operation_id)
 
     async def _record(self, operation_id: str, state: ToolCallState, payload: Any) -> None:
         """落库结果；保存未确认即明确失败，不发布成果。"""
@@ -270,6 +480,50 @@ def _wire_moment(moment: datetime) -> str:
     """UTC 微秒 Z 时刻文本（与 DAO wire 格式一致）。"""
 
     return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _parse_wire_moment(value: str | None) -> datetime | None:
+    """解析 DAO wire 时刻；不可解析返回 ``None``（不得当作无限期，R21）。"""
+
+    if value is None:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def _operation_started(scope: OperationGrantScope) -> bool:
+    """operation 是否可能已出站（phase/effect/io 任一离开初始态）。"""
+
+    if scope.operation_phase is not None and scope.operation_phase != "prepared":
+        return True
+    if scope.effect_state is not None and scope.effect_state != "not_dispatched":
+        return True
+    return scope.io_state is not None and scope.io_state != "not_started"
+
+
+def _operation_terminal(scope: OperationGrantScope | None) -> bool:
+    """operation 是否已入终态（终态不得被重放覆盖，R21）。"""
+
+    return scope is not None and scope.operation_phase in _TERMINAL_OPERATION_PHASES
+
+
+def _decision_expired(scope: OperationGrantScope | None) -> bool:
+    """决定有效期是否已过；不可解析按未过期处理（由 DAO 事务内再次拒绝，R21）。"""
+
+    if scope is None:
+        return False
+    expires_at = _parse_wire_moment(scope.expires_at)
+    return expires_at is not None and expires_at <= datetime.now(UTC)
+
+
+def _revocation_reason(scope: OperationGrantScope | None) -> str:
+    """撤销原因：仅 ``approval is False`` 才是用户明确拒绝，其余按已授后撤销。"""
+
+    if scope is not None and scope.approval is False:
+        return PERMISSION_REJECTED
+    return PERMISSION_REVOKED
 
 
 def _canonical_text(payload: Any) -> str:
@@ -352,12 +606,16 @@ def _specs_from_catalog(catalog: tuple[MCPToolDescriptor, ...], *, allowed: froz
     return tuple(specs)
 
 
-def build_tool_runtime_factory(*, dao: ToolRuntimeDao, lifecycle: MCPServiceLifecycle) -> ToolRuntimeFactory:
+def build_tool_runtime_factory(
+    *, dao: ToolRuntimeDao, lifecycle: MCPServiceLifecycle, approvals: ToolApprovalPort | None = None
+) -> ToolRuntimeFactory:
     """构造逐叶工具工厂：只认显式启连的单一服务，否则零工具（**绝不自动启连**）。
 
     - 无已连接服务 / 多个已连接（无法确定归属）/ 无启连授权 / 目录摘要漂移
       → 返回 ``None``（叶运行零工具）；
     - 其余走 :func:`build_tool_runtime`：冻结目录 ∩ 授权集合 → 完整 schema 校验。
+    - ``approvals`` 为组合根共享的审批等待登记（答复消费侧须调用同一实例的
+      :meth:`ToolApprovalCoordinator.notify_consumed`）。
     """
 
     def _factory(scope: ToolRunScope) -> ToolRuntime | None:
@@ -376,9 +634,20 @@ def build_tool_runtime_factory(*, dao: ToolRuntimeDao, lifecycle: MCPServiceLife
             request_tools=sets.request_tools,
             permission_tools=sets.permission_tools,
             boundary=DaoToolBoundaryPort(dao=dao, user_scope=scope.user_scope, execution_id=scope.execution_id),
+            approvals=approvals,
         )
 
     return _factory
+
+
+def _approval_timeout_ceiling(manager: SharedMCPConnectionManager, identity: MCPServiceIdentity) -> float:
+    """审批等待上限：不超出单次工具 deadline，也不超出决定 TTL。"""
+
+    ceiling = _TOOL_DECISION_TTL.total_seconds()
+    deadline_reader = getattr(manager, "tool_deadline_s", None)
+    if callable(deadline_reader):
+        ceiling = min(ceiling, float(cast(float, deadline_reader(identity))))
+    return max(0.0, ceiling)
 
 
 def build_tool_runtime(
@@ -391,6 +660,7 @@ def build_tool_runtime(
     request_tools: Iterable[str],
     permission_tools: Iterable[str],
     boundary: ToolBoundaryPort,
+    approvals: ToolApprovalPort | None = None,
 ) -> ToolRuntime:
     """冻结目录 + 允许集 → 校验/装工具；空允许集返回零工具（合法形态）。"""
 
@@ -425,5 +695,7 @@ def build_tool_runtime(
         audit_scope=manager.audit_tool_scope(identity),
         dao=dao,
         boundary=boundary,
+        approvals=approvals,
+        approval_timeout_s=_approval_timeout_ceiling(manager, identity),
     )
     return runtime

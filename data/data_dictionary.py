@@ -353,6 +353,9 @@ TABLE_DEFINITIONS = {
             "keys": ["index_code", "sw_level"],
         },
         "quality_config": {"tier": 1, "monitor": True, "sparse": False},
+        # D2-12：全局快照维度表，无 ts_code 列；按 global 语义做存在性检查，
+        # 不参与「每只股票覆盖」统计，避免健康检查对其执行 count(DISTINCT ts_code)。
+        "type": "global",
     },
     "sw_industry_member": {
         "alias": "tab_sw_industry_member",
@@ -362,7 +365,9 @@ TABLE_DEFINITIONS = {
             "api": "get_index_member_all",
             "keys": ["ts_code", "l3_code", "in_date"],
         },
-        "quality_config": {"tier": 1, "monitor": True, "sparse": False},
+        # D2-12：低频维度表（数据长期无变动属正常），in_date 不是同步新鲜度日期；
+        # 新鲜度按 sync_status 成功同步时点评估。
+        "quality_config": {"tier": 1, "monitor": True, "sparse": False, "freshness_source": "sync_status"},
     },
     "stock_name_history": {
         "alias": "tab_stock_name_history",
@@ -372,7 +377,9 @@ TABLE_DEFINITIONS = {
             "api": "get_namechange",
             "keys": ["ts_code", "start_date"],
         },
-        "quality_config": {"tier": 1, "monitor": True, "sparse": False},
+        # D2-12：名称变更历史低频且 ann_date/start_date 非同步新鲜度日期，
+        # 长期无变动属正常；新鲜度按 sync_status 成功同步时点评估。
+        "quality_config": {"tier": 1, "monitor": True, "sparse": False, "freshness_source": "sync_status"},
     },
     "repurchase": {
         "alias": "tab_repurchase",

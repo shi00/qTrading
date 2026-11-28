@@ -46,6 +46,8 @@ from core.agent_types import (
 )
 from core.model_management_types import ExecutionSnapshot, ModelTurnProtocolError
 from services.agent_service import leaf_agent
+from services.agent_service.capabilities import ResearchBoundary
+from services.agent_service.context_compaction import ContextCompaction
 from services.agent_service.leaf_agent import (
     LEAF_ATTRIBUTION_UNAVAILABLE,
     LEAF_BINDING_REVISION_STALE,
@@ -387,6 +389,20 @@ class TestRunLeafAgentSuccess:
         await run_leaf_agent(_model(), _context(source_refs=(ref,)), _binding(), dao=dao)
 
         assert dao.drafts[0].source_refs == (ref,)
+
+    async def test_capabilities_use_single_staged_guard(self, _fake_agent: type[_FakeAgent]) -> None:
+        """边界与压缩必须交给单一三段式门编排，而不是并列能力（D7-02）。"""
+
+        dao = _Dao()
+
+        await run_leaf_agent(_model(), _context(), _binding(), dao=dao)
+
+        capabilities = _fake_agent.instances[0].kwargs["capabilities"]
+        assert len(capabilities) == 1
+        guard = capabilities[0]
+        assert isinstance(guard, leaf_agent.LeafRequestGuard)
+        assert isinstance(guard.boundary, ResearchBoundary)
+        assert isinstance(guard.compaction, ContextCompaction)
 
     async def test_predecessor_artifacts_are_read_and_saved_as_parent_refs(self, _fake_agent: type[_FakeAgent]) -> None:
         dao = _Dao(artifacts={"art-pre": _Artifact()})

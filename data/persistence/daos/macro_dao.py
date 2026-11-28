@@ -135,6 +135,33 @@ class MacroDao(BaseDao):
             return df.iloc[0]["max_date"]
         return None
 
+    async def get_gdp_periods(
+        self,
+        start_date: datetime.date,
+        end_date: datetime.date,
+    ) -> list[datetime.date]:
+        """返回 [start_date, end_date] 内 ``gdp IS NOT NULL`` 的季度末 period 列表。
+
+        D2-06：GDP 与月度指标同表，``MAX(period)`` 由月度行主导，不能作为 GDP
+        水位。同步层据此建立独立季度水位并按缺口补齐（合法 0 值不算缺失，
+        仅 NULL 视为缺口，遵循 R21）。
+        """
+        t = MacroEconomy.__table__
+        stmt = sa.select(t.c.period).where(
+            t.c.gdp.is_not(None),
+            t.c.period >= start_date,
+            t.c.period <= end_date,
+        )
+        df = await self._read_db_select(stmt)
+        if df is None or df.empty:
+            return []
+        periods: list[datetime.date] = []
+        for value in df["period"]:
+            if value is None or pd.isna(value):
+                continue
+            periods.append(value.date() if isinstance(value, datetime.datetime) else value)
+        return periods
+
     async def get_shibor_latest_date(self):
         """Get latest date in shibor_daily."""
         df = await self._read_db("SELECT MAX(record_date) as max_date FROM shibor_daily")

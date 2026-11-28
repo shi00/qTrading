@@ -38,6 +38,33 @@ class TestSyncedTableRegistryConsistency:
         missing = sorted(set(HistoricalSyncStrategy.SYNCED_TABLES) - _SAFE_TABLE_NAMES)
         assert not missing, f"SYNCED_TABLES 中未登记进 _SAFE_TABLE_NAMES 的表: {missing}"
 
+    def test_safe_table_names_derived_from_data_dictionary_and_orm(self):
+        """D2-16：白名单必须由 TABLE_DEFINITIONS ∩ ORM 派生，防止手工清单再次漂移。"""
+        from data.data_dictionary import TABLE_DEFINITIONS
+        from data.persistence.daos.quote_dao import _SAFE_TABLE_NAMES
+        from data.persistence.models import Base
+
+        expected = frozenset(TABLE_DEFINITIONS).intersection(Base.metadata.tables)
+        assert expected == _SAFE_TABLE_NAMES
+        assert isinstance(_SAFE_TABLE_NAMES, frozenset)
+
+    def test_safe_table_names_regression_previously_missing_business_tables(self):
+        """D2-16 回归：此前漏登记的 8 张业务表必须可被 check_table_has_data 校验。"""
+        from data.persistence.daos.quote_dao import _SAFE_TABLE_NAMES
+
+        previously_missing = {
+            "express",
+            "pledge_detail",
+            "share_float",
+            "stk_holdertrade",
+            "sw_industry_classify",
+            "sw_industry_member",
+            "stock_name_history",
+            "stock_concepts",
+        }
+        missing = sorted(previously_missing - _SAFE_TABLE_NAMES)
+        assert not missing, f"白名单仍缺失业务表: {missing}"
+
     def test_synced_tables_all_registered_in_quality_scoring(self):
         """SYNCED_TABLES 每张表都必须显式登记容忍系数 / 低频豁免 / 固定期望行数之一。"""
         from data.persistence.daos.quote_dao import (

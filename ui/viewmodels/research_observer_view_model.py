@@ -2831,8 +2831,41 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         elif kind == ExecutionControlKind.CLOSE_UNKNOWN.value:
             await self.close_unknown_execution(execution_id, reason=reason)
 
+    def _resolve_retry_target(self, root: ExecutionNodeView, node_id: str) -> tuple[ExecutionNodeView | None, str]:
+        """在根执行子树内按计划 ``node_id`` 唯一解析目标叶（不猜）。
+
+        返回 ``(目标, "")``；缺失返回 ``CONTROL_TARGET_UNAVAILABLE``，同一子树内
+        多个执行共享同一 ``node_id``（跨轮历史/异常投影）返回
+        ``CONTROL_TARGET_AMBIGUOUS``——两者都显式拒绝，绝不按首个命中提交（R21）。
+        """
+
+        wanted = (node_id or "").strip()
+        if not wanted:
+            return None, "CONTROL_TARGET_UNAVAILABLE"
+        children: dict[str | None, list[ExecutionNodeView]] = {}
+        for item in self._state.execution_nodes:
+            children.setdefault(item.parent_execution_id, []).append(item)
+        matches: list[ExecutionNodeView] = []
+        seen: set[str] = set()
+        stack = list(children.get(root.execution_id, ()))
+        while stack:
+            current = stack.pop()
+            if current.execution_id == root.execution_id or current.execution_id in seen:
+                continue
+            seen.add(current.execution_id)
+            if current.node_id == wanted:
+                matches.append(current)
+            stack.extend(children.get(current.execution_id, ()))
+        if len(matches) == 1:
+            return matches[0], ""
+        return None, "CONTROL_TARGET_AMBIGUOUS" if len(matches) > 1 else "CONTROL_TARGET_UNAVAILABLE"
+
     async def retry_execution(self, execution_id: str, target_node_id: str) -> None:
-        """重试某单任务（``execution_id`` 为根执行，``target_node_id`` 为失败叶）。
+        """重试某单任务（``execution_id`` 为根执行，``target_node_id`` 为计划 node_id）。
+
+        UI 传入的是计划步骤身份（``ExecutionNodeView.node_id``），与执行身份
+        （``execution_id``）是不同命名空间：只在当前根执行子树内按 ``node_id``
+        唯一解析目标叶。缺失或存在歧义时显式拒绝，不按猜测提交（R21）。
 
         范围由服务按持久计划精确重算；UI 只提交目标身份与根执行预期版。
         """
@@ -2841,9 +2874,12 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             self._set_state(last_error_code="CONTROL_UNAVAILABLE")
             return
         node = self.execution_node(execution_id)
-        target = self.execution_node(target_node_id)
-        if node is None or target is None or node.current_round_id is None or not target.node_id:
+        if node is None or node.parent_execution_id is not None or node.current_round_id is None:
             self._set_control_error(execution_id, "retry", "CONTROL_TARGET_UNAVAILABLE")
+            return
+        target, resolution_error = self._resolve_retry_target(node, target_node_id)
+        if target is None:
+            self._set_control_error(execution_id, "retry", resolution_error)
             return
         if self._state.control_pending_execution_id is not None:
             return
@@ -5750,24 +5786,27 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         if self._state.composer_pending:
             return
         self._track_inflight_cancellable()
-        # 冻结能力 = 用户显式手选 ∩ 角色自身授权（默认能力不自动授予，R21）。
-        allowed_skills, allowed_mcp, bounds_error = await self._role_capability_bounds()
-        if bounds_error is not None:
-            if mode is Mode.EXECUTE:
-                self._set_state(composer_error_key=bounds_error)
-                return
-            # 讨论/计划零研究：授权未知时不携带任何外部能力，也不阻断直答/计划。
-            allowed_skills = allowed_mcp = frozenset()
-        skill_refs = self._state.skill_selection
-        if allowed_skills is not None:
-            skill_refs = tuple(ref for ref in skill_refs if f"skill:{ref[0]}@{ref[1]}" in allowed_skills)
+        # 先置 pending 再等待授权读取：避免两个并发首问在读取窗口内重复受理（重入保护）。
         self._set_state(composer_pending=True, composer_error_key=None, last_dispatch_reason=None)
-        selection = tuple(
-            self._mcp_identities[key] for key in self._state.mcp_scope_selected if key in self._mcp_identities
-        )
-        if allowed_mcp is not None:
-            selection = tuple(identity for identity in selection if identity.stable_key() in allowed_mcp)
+        skill_refs: tuple[tuple[str, str], ...] = ()
+        selection: tuple[MCPServiceIdentity, ...] = ()
         try:
+            # 冻结能力 = 用户显式手选 ∩ 角色自身授权（默认能力不自动授予，R21）。
+            allowed_skills, allowed_mcp, bounds_error = await self._role_capability_bounds()
+            if bounds_error is not None:
+                if mode is Mode.EXECUTE:
+                    self._set_state(composer_pending=False, composer_error_key=bounds_error)
+                    return
+                # 讨论/计划零研究：授权未知时不携带任何外部能力，也不阻断直答/计划。
+                allowed_skills = allowed_mcp = frozenset()
+            skill_refs = self._state.skill_selection
+            if allowed_skills is not None:
+                skill_refs = tuple(ref for ref in skill_refs if f"skill:{ref[0]}@{ref[1]}" in allowed_skills)
+            selection = tuple(
+                self._mcp_identities[key] for key in self._state.mcp_scope_selected if key in self._mcp_identities
+            )
+            if allowed_mcp is not None:
+                selection = tuple(identity for identity in selection if identity.stable_key() in allowed_mcp)
             # 会话键优先；新会话仅当用户**显式**选择过模型才写键（自动默认不写，
             # 读失败时也不覆盖已存键，如实保持继承）。
             preferred = self._state.session_model_connection_id

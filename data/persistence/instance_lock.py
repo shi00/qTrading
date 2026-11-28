@@ -29,6 +29,8 @@ from typing import Any, Final
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from utils.sanitizers import DataSanitizer
+
 logger = logging.getLogger(__name__)
 
 #: 业务库「任务回填唯一所有权」键（"ASTOCKTK" ASCII，64 位有符号范围内；不与迁移锁键复用）。
@@ -64,6 +66,11 @@ class InstanceOwnershipLock:
         self._engine: AsyncEngine | None = None
         self._connection: Any = None
         self._held = False
+
+    @property
+    def database_url(self) -> str:
+        """本锁当前指向的业务库连接串（切库重配时用于判定是否需要重新取证）。"""
+        return self._database_url
 
     async def acquire(self) -> bool:
         """尝试取得唯一所有权；已持有且持锁连接存活时幂等返回 ``True``。
@@ -116,6 +123,38 @@ class InstanceOwnershipLock:
         except Exception:  # 连接失活/绑定其他事件循环：按未持有处理，不冒充所有权
             return False
         return True
+
+    async def release_async(self) -> None:
+        """异步释放所有权（关机 Step 3a / 切库重配）：关闭持锁连接即释放会话锁。
+
+        释放异常按资源分别记录后继续——会话锁在进程退出时由 PG 兜底回收；
+        若确实未释放，``ShutdownCoordinator`` Step 8 停 PG 会以超时/失败独立暴露，
+        不会把「已知未释放」伪装成成功。只捕获 ``Exception``，``CancelledError``
+        继续传播（R2）。释放后可重新 ``acquire()``（同进程轮换/重试接管）。
+        """
+
+        connection, engine = self._connection, self._engine
+        self._connection = None
+        self._engine = None
+        self._held = False
+        if connection is not None:
+            try:
+                await connection.close()
+            except Exception as e:  # R2_ALLOWED: 释放兜底，仅捕获 Exception，CancelledError 不属其中
+                logger.warning(
+                    "[InstanceLock] Ownership lock release failed (close): %s",
+                    DataSanitizer.sanitize_error(e),
+                )
+        if engine is not None:
+            try:
+                await engine.dispose()
+            except Exception as e:  # R2_ALLOWED: 释放兜底，仅捕获 Exception，CancelledError 不属其中
+                logger.warning(
+                    "[InstanceLock] Ownership lock release failed (dispose): %s",
+                    DataSanitizer.sanitize_error(e),
+                )
+        if connection is not None or engine is not None:
+            logger.info("[InstanceLock] Business database ownership lock released.")
 
     def force_release(self) -> None:
         """同步释放（单例重置/进程退出路径）：关闭底层连接即释放会话锁。
