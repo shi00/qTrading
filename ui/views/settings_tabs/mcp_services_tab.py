@@ -269,6 +269,12 @@ def MCPServicesTab(lifecycle: Any | None = None) -> ft.Container:
                     size=AppStyles.FONT_SIZE_CAPTION,
                     color=AppColors.TEXT_HINT,
                 ),
+                _text_field("mcp_field_secret_env", draft.secret_env_text, "secret_env_text", multiline=True),
+                ft.Text(
+                    I18n.get("mcp_hint_secret_env"),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.TEXT_HINT,
+                ),
                 _text_field("mcp_field_cwd", draft.cwd, "cwd"),
             ]
             if is_stdio

@@ -8,7 +8,9 @@
 
 设计要点：
 - ``@register_singleton`` 协议：``_reset_singleton`` + ``_atexit_cleanup``
-- atexit 反序清理：本单例必须在 CacheManager 之后注册（先停 sidecar 再 dispose engine）
+- atexit 清理顺序：``_atexit_cleanup_last = True`` 使本单例排在所有 DB 客户端之后停止
+  （先 dispose 连接池/引擎，再停 sidecar/PG；D1-03 由 singleton_registry 显式分层保证，
+  不依赖模块 import 顺序）
 - ``asyncio.to_thread`` 包装同步 Popen/wait，避免阻塞事件循环（R16）
 - ``--parent-pid`` 传递：Python 崩溃时 sidecar 自走 graceful stop 兜底
 - stderr 重定向到 ``sidecar.stderr.log`` 二次归档（panic hook 输出在此）
@@ -33,6 +35,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from data.persistence.db_config_service import DatabaseConfigService
 from data.persistence.embedded_postgres.protocol import ConnectionInfo
 from data.persistence.embedded_postgres.version import resolve_pg_major_version
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -381,6 +384,10 @@ class EmbeddedPostgresService:
 
     _instance: EmbeddedPostgresService | None = None
     _lock = threading.RLock()
+    # D1-03：atexit 兜底必须最后停 sidecar/PG——其余 DB 客户端（CacheManager 等）需要
+    # 先 dispose 自己的连接池；否则 PG 先停会让连接失效、dispose 报错。由
+    # ``utils.singleton_registry._atexit_cleanup_order`` 读取，不依赖 import 顺序。
+    _atexit_cleanup_last = True
 
     def __new__(cls, *args: object, **kwargs: object) -> EmbeddedPostgresService:
         with cls._lock:
@@ -744,7 +751,17 @@ class EmbeddedPostgresService:
             self._cleanup_failed_start()
             raise EmbeddedPostgresStartError(f"password_file read failed: {exc}") from exc
 
-        url = f"postgresql+asyncpg://{self._username}:{password}@{self._listen}:{port}/{self._database}"
+        # 监听地址 ≠ 可连接的单目标客户端地址：0.0.0.0/::/* 必须映射为回环，
+        # IPv6 需在 URL 中包 []（由 build_url 统一处理），否则 create_async_engine 解析崩溃。
+        connect_host = DatabaseConfigService.host_for_client(str(ready.get("host", "")) or self._listen)
+        url = DatabaseConfigService.build_url(
+            host=connect_host,
+            port=port,
+            user=self._username,
+            password=password,
+            database=self._database,
+            async_driver=True,
+        )
         # R9: 注册完整 URL 为 secret，确保日志/异常中带密码的 URL 被 sanitize_error 精确脱敏
         DataSanitizer.register_secret(url)
         # R9: 单独注册裸密码为 secret，防止 sidecar stderr 中裸密码（非完整 URL）未被脱敏（spec.md §1.5）

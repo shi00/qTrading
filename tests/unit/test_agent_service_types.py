@@ -8,6 +8,8 @@
 - 回执语义：保存/投递/消费事实分列（INV-06），不把保存成功显示成已生效。
 """
 
+from dataclasses import replace
+
 import pytest
 
 from core.agent_types import (
@@ -289,6 +291,28 @@ class TestSubmissionReceipt:
         """历史回执无 mode → None（不伪造默认值，R21）。"""
 
         assert decode_submission_receipt(_submission_wire()).mode is None
+
+    def test_wire_roundtrip_keeps_authoritative_input_revision(self):
+        """受理回执携带权威输入版（同执行排队修订后为 2、3…）。"""
+
+        receipt = replace(_submission(), input_revision=2)
+        wire = encode_submission_receipt(receipt)
+        assert wire["input_revision"] == 2
+        assert decode_submission_receipt(wire) == receipt
+
+    def test_legacy_wire_without_input_revision_decodes_to_accept_authority(self):
+        """历史受理回执无 input_revision → 1（受理命令 input_revision 恒为 1，唯一权威值）。"""
+
+        assert decode_submission_receipt(_submission_wire()).input_revision == 1
+
+    def test_rejects_non_positive_input_revision(self):
+        wire = _submission_wire()
+        wire["input_revision"] = 0
+        _reject(
+            lambda: decode_submission_receipt(wire),
+            "invalid_revision",
+            "$.submission_receipt.input_revision",
+        )
 
     def test_rejects_unknown_mode(self):
         wire = _submission_wire()

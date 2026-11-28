@@ -42,6 +42,8 @@ from pydantic_ai.messages import (
     TextPart,
     TextPartDelta,
 )
+from pydantic_ai.models import ModelRequestContext
+from pydantic_ai.tools import RunContext
 
 from core.agent_types import (
     AgentErrorCode,
@@ -54,8 +56,14 @@ from core.agent_types import (
     is_digest,
 )
 from core.model_management_types import ModelTurnProtocolError
+from services.agent_service.capabilities import ResearchBoundary
 from services.agent_service.capability_wiring import build_leaf_boundary
-from services.agent_service.context_compaction import build_leaf_compaction
+from services.agent_service.context_compaction import (
+    ContextCompaction,
+    build_leaf_compaction,
+    plan_compaction,
+    summarize_segment_within_window,
+)
 from services.agent_service.leaf_runtime import (
     AGENT_RESEARCH_SCENARIO_ID,
     AdmissionCountingToolExecutor,
@@ -101,6 +109,7 @@ __all__ = [
     "LeafAgentDeps",
     "LeafAttributionFacts",
     "LeafEventHandler",
+    "LeafRequestGuard",
     "LeafResultStore",
     "LeafStreamEvent",
     "RolePromptIdentity",
@@ -616,6 +625,58 @@ def _resolve_agent_dao(dao: Any | None) -> Any | None:
     return getattr(CacheManager(), "agent_dao", None)
 
 
+@dataclass(kw_only=True)
+class LeafRequestGuard(AbstractCapability[Any]):
+    """叶模型请求的三段式门（D7-02）：① 安全准入 → ② 压缩 → ③ 压缩后窗口复核。
+
+    顺序固定，不能把边界与压缩作为两个并列能力下发：``CombinedCapability`` 严格按
+    传入顺序串行执行 ``before_model_request``，边界若先于压缩，就会对尚未压缩的
+    超窗请求直接抛 ``POLICY_DENIED``，使压缩永远无法挽救。
+
+    - 阶段①：来源未禁用 / 外发作用域可核（由 ``preflight`` 取最新策略并核验）/
+      超窗时待摘要片段不超过摘要模型自身窗口上限；
+    - 阶段②：交给既有 :class:`ContextCompaction`（复用本次运行自己的
+      ``GatewayModel``，摘要回合的调用号仍由该实例按持久执行身份确定性派生，
+      额度经既有准入执行器计一次，不重复计数）；
+    - 阶段③：对压缩后的完整请求复核窗口，仍超出即拒绝。
+    """
+
+    boundary: ResearchBoundary
+    compaction: ContextCompaction | None = None
+    id: str | None = "leaf_request_guard"
+
+    async def before_model_request(
+        self, ctx: RunContext[Any], request_context: ModelRequestContext
+    ) -> ModelRequestContext:
+        admission = await self.boundary.preflight(ctx, request_context)
+        candidate = admission.request_context
+        if admission.exceeds_context_window():
+            self._require_summarizable(candidate)
+        if self.compaction is not None:
+            candidate = await self.compaction.before_model_request(ctx, candidate)
+        self.boundary.enforce_context_window(admission, candidate)
+        return candidate
+
+    def _require_summarizable(self, request_context: ModelRequestContext) -> None:
+        """阶段①：超窗时唯一挽救路径是摘要，先核待摘要片段不超摘要窗口。
+
+        未装压缩（显式关闭）时不在此拒绝：由阶段③对未变请求复核窗口后如实拒绝。
+        """
+
+        compaction = self.compaction
+        if compaction is None:
+            return
+        messages = request_context.messages
+        plan = plan_compaction(messages, keep_messages=compaction.config.keep_messages)
+        if plan.cutoff is None or not summarize_segment_within_window(messages, plan.cutoff, compaction.budget):
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                "context over window and no safe, in-window summary segment; "
+                "refusing to dispatch an oversized summary request",
+                "leaf_request_guard",
+            )
+
+
 async def run_leaf_agent(
     model: GatewayModel,
     context: LeafExecutionContext,
@@ -776,9 +837,7 @@ async def run_leaf_agent(
         scenario_id=AGENT_RESEARCH_SCENARIO_ID,
         timeout_seconds=lambda: require_leaf_turn_timeout(binding),
     )
-    capabilities: tuple[AbstractCapability[Any], ...] = (
-        (boundary, compaction) if compaction is not None else (boundary,)
-    )
+    capabilities: tuple[AbstractCapability[Any], ...] = (LeafRequestGuard(boundary=boundary, compaction=compaction),)
     agent: Agent[LeafAgentDeps, Any] = Agent(
         model,
         name=LEAF_AGENT_NAME,

@@ -221,7 +221,8 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         self._get_cancel_event().set()
         # A4: 传播到 TaskManager 注入的 task-level cancel_event，确保
         # TaskManager 视角能看到取消信号。context.cancel_event 来自 DI
-        # （threading.Event，见 run_concept_sync docstring），非类属性，R11 合规。
+        # （initialize_system 注入轮次 asyncio.Event；run_concept_sync 注入
+        # threading.Event），非类属性，R11 合规。
         if self.context.cancel_event is not None:
             self.context.cancel_event.set()
         self._quality_tier = None  # Reset to uninitialized; will re-evaluate on next strategy run
@@ -989,6 +990,15 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         # Clear any previous cancel state
         self.clear_cancel()
 
+        # D2-08：每轮注入共享的轮次取消事件。取消有两条通道（data-sync.md C18）：
+        # 1) 原生 asyncio.CancelledError（TaskManager 取消 / 停机）→ 原样传播（R2）；
+        # 2) 协作式 request_cancel()/stop() → 置位处理器事件并同步置位本事件。
+        # 子策略（sw_industry/macro/holder/name_change）入口先读本事件再复位自身取消
+        # 标志，避免「上一阶段已取消、下一阶段复位后仍发请求」。本事件由宿主本轮持有，
+        # 子策略不得清除；每轮新建避免跨轮复用陈旧取消状态（finally 还原宿主原事件）。
+        run_cancel_event = asyncio.Event()
+        previous_cancel_event = self.context.cancel_event
+
         # Ensure schema exists before any sync step writes to it.
         # Onboarding path skips bootstrap.initialize_services (StartupController NEED_ONBOARDING
         # short-circuit), so init_db() must be called here. Idempotent (guarded by
@@ -1031,6 +1041,9 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 msg = Message(f"init_step_{step_num}")
             progress_callback(current, 100, msg)
 
+        # D2-08：赋值紧贴 try（中间无 await），确保 finally 一定覆盖本轮注入的还原。
+        self.context.cancel_event = run_cancel_event
+
         try:
             # ===== Step 1: Stock List (5%) =====
             report_step(1)
@@ -1046,6 +1059,13 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             # ===== Step 1.5: Concepts (runs as part of Step 1) =====
             report_step(1, 0.5, 1, Message("init_sync_concepts"))
             await self.sync_concepts()
+            # D2-08：概念同步可能以 0 正常返回（fetch_one 预检短路）而非抛取消异常，
+            # 阶段返回后必须统一复核取消信号，避免继续启动后续子阶段发请求。
+            if self.is_cancelled():
+                logger.warning(
+                    "[DataProcessor] Init | ⏹️ Cancel requested after concepts sync; init not reported as complete.",
+                )
+                return None
 
             # ===== Step 1.6: Base Dimensions (SW industry / name history) =====
             # UIR-F14-002: sw_industry / name_change 模块契约声明「由 DataProcessor 在
@@ -1062,6 +1082,9 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 ("sw_industry", 0.7, "init_sync_sw_industry"),
                 ("name_change", 0.9, "init_sync_name_change"),
             ):
+                # D2-08：每个子阶段启动前复核取消信号，已取消则不再启动。
+                if self.is_cancelled():
+                    return None
                 report_step(1, sub_progress, 1, Message(msg_key))
                 dimension_result = await self.strategies[dimension_key].run()
                 if dimension_result.status == SyncStatus.CANCELLED.value:
@@ -1170,7 +1193,18 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             # ===== Step 5: AI Alpha Data (10%) =====
             report_step(5, 0, 3, Message("init_sync_macro"))
 
+            # D2-08：子阶段启动前复核取消信号；macro 返回 cancelled 时不得继续启动 holder
+            # （holder 入口虽会识别轮次事件，但不应把已取消轮次的请求发出去）。
+            if self.is_cancelled():
+                return None
             macro_res = await self.strategies["macro"].run()
+            if macro_res.status == SyncStatus.CANCELLED.value:
+                logger.warning(
+                    "[DataProcessor] Init | ⏹️ Macro sync cancelled; init not reported as complete.",
+                )
+                return None
+            if self.is_cancelled():
+                return None
             if macro_res.status == "failed":
                 logger.warning(
                     "[DataProcessor] Init | ⚠️ Macro sync failed: %s",
@@ -1179,21 +1213,43 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
             report_step(5, 1, 3, Message("init_sync_holders"))
 
+            if self.is_cancelled():
+                return None
             holder_res = await self.strategies["holder"].run()
             # D05-F05：holder 少量表失败时策略上报 partial（errors 记录失败目标/期间）。
             # 此前仅检查 failed，导致 partial/errors 缺口被忽略并在初始化末段假报完整成功。
+            # D2-03：Tushare 权限不可用属「可见降级」而非 IO/DB 失败——holder 策略把权限
+            # 跳过聚合为 warnings-only partial（errors 为空、sync_status 已记
+            # skipped_permission）。此时保留可见告警但不阻断初始化（不因权限受限表把
+            # 其他已完成的表一并判失败），也不静默当作已完备（capability 指示器据此反映）。
             if holder_res.status == SyncStatus.CANCELLED.value:
                 logger.warning(
                     "[DataProcessor] Init | ⏹️ Holder sync cancelled; init not reported as complete.",
                 )
                 return None
-            if holder_res.status in (SyncStatus.FAILED.value, SyncStatus.PARTIAL.value) or holder_res.errors:
+            # D2-08：阶段返回后统一复核取消信号（holder 可能正常返回但取消已生效）。
+            if self.is_cancelled():
+                return None
+            if holder_res.status == SyncStatus.FAILED.value or holder_res.errors:
                 degraded_steps.append("holder")
                 logger.warning(
                     "[DataProcessor] Init | ⚠️ Holder sync not fully ready (status=%s, errors=%s); continuing, final status degraded.",
                     holder_res.status,
                     holder_res.errors,
                 )
+            elif holder_res.status == SyncStatus.PARTIAL.value:
+                if holder_res.warnings:
+                    logger.warning(
+                        "[DataProcessor] Init | ⚠️ Holder sync tables skipped due to Tushare permission (%s); "
+                        "keeping the degradation visible without failing init.",
+                        "; ".join(holder_res.warnings),
+                    )
+                else:
+                    degraded_steps.append("holder")
+                    logger.warning(
+                        "[DataProcessor] Init | ⚠️ Holder sync not fully ready (status=%s); continuing, final status degraded.",
+                        holder_res.status,
+                    )
 
             report_step(5, 2, 3, Message("init_step_5_done"))
 
@@ -1228,6 +1284,11 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 exc_info=True,
             )
             raise  # Re-raise so UI can catch and display
+        finally:
+            # D2-08：归还宿主原有 cancel_event。仅当本轮仍是注入者时还原，
+            # 避免并发轮次互相覆盖（后一轮已注入自己的事件时不得被前一轮覆盖）。
+            if self.context.cancel_event is run_cancel_event:
+                self.context.cancel_event = previous_cancel_event
 
     # ... get_stock_history, get_strategy_data ...
     async def get_stock_history(self, ts_code, days=365, end_date=None):

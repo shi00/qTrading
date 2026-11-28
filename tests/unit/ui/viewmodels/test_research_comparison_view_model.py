@@ -64,8 +64,18 @@ class _FakeService:
         self.retried: list[tuple[str, int]] = []
         self.stopped: list[str] = []
         self.read_queries: list[Any] = []
+        self.run_calls = 0
+        self.submit_calls = 0
+
+    async def run_comparison(self, request: Any) -> Any:
+        self.run_calls += 1
+        self.submitted.append(request)
+        if self.submit_error is not None:
+            raise self.submit_error
+        return self.receipt
 
     async def submit_comparison(self, request: Any) -> Any:
+        self.submit_calls += 1
         self.submitted.append(request)
         if self.submit_error is not None:
             raise self.submit_error
@@ -311,12 +321,19 @@ async def test_submit_freezes_group_and_projects_costs() -> None:
 
     await vm.submit()
 
+    assert service.run_calls == 1
+    assert service.submit_calls == 0
     assert len(service.submitted) == 1
     request = service.submitted[0]
     assert request.expected_revision == 4
     assert [lane.connection_id for lane in request.lanes] == ["a", "b"]
     assert request.lanes[0].scope_version == 7
     assert request.lanes[0].connection_purpose == "end_of_day_research"
+    # 比较路冻结主角色与显式零外部能力集（已核准空集），否则派发侧无法解析确定性计划。
+    assert request.shared.role_prompt_refs
+    assert request.shared.role_prompt_refs[0][0] == "main"
+    assert request.shared.skill_refs == ()
+    assert request.shared.mcp_scope_digest is None
     assert vm.state.group_ref is not None
     assert vm.state.message_key == "agent_comparison_submitted"
     lanes = {lane.lane_ref: lane for lane in vm.state.lanes}
@@ -399,6 +416,24 @@ async def test_retry_rejection_surfaces_error_code() -> None:
 
     assert vm.state.message_key == "agent_comparison_retry_rejected"
     assert vm.state.error_code == "lane_reliable_result"
+
+
+@pytest.mark.asyncio
+async def test_retry_aborts_when_session_revision_unreadable() -> None:
+    service = _FakeService(
+        view=_view(_lane("lane-1"), _lane("lane-2")),
+        retry=SimpleNamespace(error_code=None),
+        session_error=RuntimeError("session down"),
+    )
+    vm = _vm(service)
+    vm._set_state(group_ref="group-1")
+
+    await vm.retry_lane("lane-1")
+
+    assert service.retried == []
+    assert vm.state.retrying_lane is None
+    assert vm.state.error_key == "agent_comparison_session_revision_unavailable"
+    assert vm.state.error_code == "session_revision_unavailable"
 
 
 @pytest.mark.asyncio
@@ -560,7 +595,10 @@ async def test_ineligible_connection_rejected_by_reason() -> None:
 
 @pytest.mark.asyncio
 async def test_submit_failure_reports_generic_error_code() -> None:
-    service = _FakeService(submit_error=RuntimeError("network down"))
+    service = _FakeService(
+        submit_error=RuntimeError("network down"),
+        read=SimpleNamespace(summary=SimpleNamespace(draft_revision=1), executions=[]),
+    )
     vm = _vm(service)
     await _select_two(vm)
 
@@ -616,7 +654,7 @@ async def test_retry_and_stop_failures_and_reentrancy_guards() -> None:
 
 
 @pytest.mark.asyncio
-async def test_session_read_failures_degrade_to_zero_and_unknown() -> None:
+async def test_session_read_failure_aborts_submit_without_revision_guess() -> None:
     service = _FakeService(
         view=_view(_lane("lane-1"), _lane("lane-2")),
         receipt=SimpleNamespace(all_accepted=True),
@@ -627,14 +665,52 @@ async def test_session_read_failures_degrade_to_zero_and_unknown() -> None:
 
     await vm.submit()
 
-    assert service.submitted[0].expected_revision == 0
-    assert all(lane.active_ms is None for lane in vm.state.lanes)
+    # 读取失败不伪造 0 版受理：不调用编排，显式报错中止。
+    assert service.submitted == []
+    assert service.run_calls == 0
+    assert vm.state.submitting is False
+    assert vm.state.error_key == "agent_comparison_session_revision_unavailable"
+    assert vm.state.error_code == "session_revision_unavailable"
+    assert vm.state.group_ref is None
+
+
+@pytest.mark.asyncio
+async def test_invalid_draft_revision_aborts_submit_without_revision_guess() -> None:
+    service = _FakeService(
+        view=_view(_lane("lane-1"), _lane("lane-2")),
+        receipt=SimpleNamespace(all_accepted=True),
+        read=SimpleNamespace(summary=SimpleNamespace(draft_revision=True), executions=[]),
+    )
+    vm = _vm(service)
+    await _select_two(vm)
+
+    await vm.submit()
+
+    assert service.submitted == []
+    assert vm.state.error_key == "agent_comparison_session_revision_unavailable"
+    assert vm.state.error_code == "session_revision_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_missing_draft_revision_aborts_submit_without_revision_guess() -> None:
+    service = _FakeService(
+        view=_view(_lane("lane-1"), _lane("lane-2")),
+        receipt=SimpleNamespace(all_accepted=True),
+        read=SimpleNamespace(summary=SimpleNamespace(), executions=[]),
+    )
+    vm = _vm(service)
+    await _select_two(vm)
+
+    await vm.submit()
+
+    assert service.submitted == []
+    assert vm.state.error_key == "agent_comparison_session_revision_unavailable"
 
 
 @pytest.mark.asyncio
 async def test_lane_durations_skip_other_group_and_invalid_rows() -> None:
     read = SimpleNamespace(
-        summary=SimpleNamespace(draft_revision=True),
+        summary=SimpleNamespace(draft_revision=5),
         executions=[
             SimpleNamespace(comparison_group_ref="other-group", comparison_lane_ref="lane-1", active_ms=10),
             SimpleNamespace(comparison_group_ref=_expected_group_ref(), comparison_lane_ref="lane-1", active_ms=True),
@@ -655,8 +731,8 @@ async def test_lane_durations_skip_other_group_and_invalid_rows() -> None:
     lanes = {lane.lane_ref: lane for lane in vm.state.lanes}
     assert lanes["lane-1"].active_ms is None
     assert lanes["lane-2"].active_ms == 30
-    # 非法稿版（bool）按 0 处理，不伪装成具体版本。
-    assert service.submitted[0].expected_revision == 0
+    # 合法稿版按原值冻结为受理 CAS 基线。
+    assert service.submitted[0].expected_revision == 5
 
 
 @pytest.mark.asyncio

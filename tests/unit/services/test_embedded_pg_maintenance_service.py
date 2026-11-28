@@ -23,12 +23,14 @@ Mock 策略：
 
 from __future__ import annotations
 
+import ctypes
 import json
 import logging
 import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from contextlib import nullcontext
 from pathlib import Path
@@ -1055,17 +1057,18 @@ class TestRequestCancel:
 
     def test_request_cancel_terminates_process_tree_and_proves_exit(self, maintenance_service) -> None:
         """正常取消：向整棵进程树发终止信号，并以退出证明返回 CANCELLED。"""
-        from services.embedded_pg_maintenance_service import CancelStatus
+        from services.embedded_pg_maintenance_service import CancelStatus, _SignalOutcome
 
         proc_mock = MagicMock()
         proc_mock.pid = 4321
         proc_mock.poll.return_value = 0
         maintenance_service._active_proc = proc_mock
+        maintenance_service._active_generation = 1
 
         with (
             patch(
                 "services.embedded_pg_maintenance_service._signal_process_tree",
-                return_value=True,
+                return_value=_SignalOutcome.DELIVERED,
             ) as signal_mock,
             patch(
                 "services.embedded_pg_maintenance_service._wait_process_tree_exit",
@@ -1075,22 +1078,23 @@ class TestRequestCancel:
             status = maintenance_service.request_cancel()
 
         assert status is CancelStatus.CANCELLED
-        signal_mock.assert_called_once_with(proc_mock, force=False)
-        assert maintenance_service._cancel_requested is True
+        signal_mock.assert_called_once_with(proc_mock, force=False, job=None)
+        assert maintenance_service._is_cancel_requested(1) is True
         proc_mock.terminate.assert_not_called()
 
     def test_request_cancel_escalates_to_kill_when_child_ignores_signal(self, maintenance_service) -> None:
         """pg 子进程忽略 SIGTERM：升级整组强杀，强杀后退出仍按 CANCELLED 报告。"""
-        from services.embedded_pg_maintenance_service import CancelStatus
+        from services.embedded_pg_maintenance_service import CancelStatus, _SignalOutcome
 
         proc_mock = MagicMock()
         proc_mock.pid = 4321
         maintenance_service._active_proc = proc_mock
+        maintenance_service._active_generation = 1
 
         with (
             patch(
                 "services.embedded_pg_maintenance_service._signal_process_tree",
-                return_value=True,
+                return_value=_SignalOutcome.DELIVERED,
             ) as signal_mock,
             patch(
                 "services.embedded_pg_maintenance_service._wait_process_tree_exit",
@@ -1100,20 +1104,24 @@ class TestRequestCancel:
             status = maintenance_service.request_cancel(timeout=0.01)
 
         assert status is CancelStatus.CANCELLED
-        assert [c.kwargs for c in signal_mock.call_args_list] == [{"force": False}, {"force": True}]
+        assert [c.kwargs for c in signal_mock.call_args_list] == [
+            {"force": False, "job": None},
+            {"force": True, "job": None},
+        ]
 
     def test_request_cancel_unproven_when_tree_never_exits(self, maintenance_service, caplog) -> None:
         """宽限期与强杀窗口都未退出：返回 UNPROVEN，日志明示可能仍在运行。"""
-        from services.embedded_pg_maintenance_service import CancelStatus
+        from services.embedded_pg_maintenance_service import CancelStatus, _SignalOutcome
 
         proc_mock = MagicMock()
         proc_mock.pid = 4321
         maintenance_service._active_proc = proc_mock
+        maintenance_service._active_generation = 1
 
         with (
             patch(
                 "services.embedded_pg_maintenance_service._signal_process_tree",
-                return_value=True,
+                return_value=_SignalOutcome.DELIVERED,
             ),
             patch(
                 "services.embedded_pg_maintenance_service._wait_process_tree_exit",
@@ -1128,20 +1136,21 @@ class TestRequestCancel:
 
     def test_request_cancel_oserror_treated_as_already_exited(self, maintenance_service) -> None:
         """终止信号无法送达（进程组已消失）→ ALREADY_EXITED，不把取消标记带入后续退出分类。"""
-        from services.embedded_pg_maintenance_service import CancelStatus
+        from services.embedded_pg_maintenance_service import CancelStatus, _SignalOutcome
 
         proc_mock = MagicMock()
         proc_mock.pid = 4321
         maintenance_service._active_proc = proc_mock
+        maintenance_service._active_generation = 1
 
         with patch(
             "services.embedded_pg_maintenance_service._signal_process_tree",
-            return_value=False,
+            return_value=_SignalOutcome.ALREADY_EXITED,
         ):
             status = maintenance_service.request_cancel()
 
         assert status is CancelStatus.ALREADY_EXITED
-        assert maintenance_service._cancel_requested is False
+        assert maintenance_service._cancel_requested_generation is None
 
 
 # =============================================================================
@@ -1367,7 +1376,7 @@ class TestDumpCancellationIntegrity:
         proc_mock.returncode = returncode
 
         def _communicate(timeout=None):
-            maintenance_service._cancel_requested = True
+            maintenance_service._cancel_requested_generation = maintenance_service._active_generation
             return ("", "")
 
         proc_mock.communicate = MagicMock(side_effect=_communicate)
@@ -1406,7 +1415,7 @@ class TestDumpCancellationIntegrity:
         def _communicate(timeout=None):
             calls["n"] += 1
             if calls["n"] == 1:
-                maintenance_service._cancel_requested = True
+                maintenance_service._cancel_requested_generation = maintenance_service._active_generation
                 raise subprocess.TimeoutExpired(cmd="sidecar", timeout=3600)
             return ("", "")
 
@@ -1426,10 +1435,6 @@ class TestDumpCancellationIntegrity:
             with pytest.raises(EmbeddedPgMaintenanceCancelUnprovenError, match="可能仍在运行"):
                 await maintenance_service._run_sidecar(["sidecar", "dump"], cancel_allowed=True)
 
-    @pytest.mark.skipif(
-        os.name == "nt",
-        reason="Windows 无进程组探测，wrapper 退出即按已取消报告（见 test_windows_cancel_after_wrapper_exit_counts_as_cancelled）",
-    )
     @pytest.mark.asyncio(loop_scope="function")
     async def test_cancel_unproven_after_wrapper_exit_raises_unproven(self, maintenance_service) -> None:
         """wrapper 已退出但无法证明 pg 子进程停止：报未知，不得谎报「已取消」。"""
@@ -1454,14 +1459,14 @@ class TestDumpCancellationIntegrity:
             with pytest.raises(EmbeddedPgMaintenanceCancelUnprovenError, match="可能仍在运行"):
                 await maintenance_service._run_sidecar(["sidecar", "dump"], cancel_allowed=True)
 
-    @pytest.mark.skipif(
-        os.name != "nt",
-        reason="仅 Windows：平台门跳过进程树探测，wrapper 退出即报已取消",
-    )
     @pytest.mark.asyncio(loop_scope="function")
-    async def test_windows_cancel_after_wrapper_exit_counts_as_cancelled(self, maintenance_service) -> None:
-        """Windows（os.name=="nt"）平台门跳过 _wait_process_tree_exit：取消后不得误报 Unproven。"""
-        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceCancelledError
+    async def test_cancel_proven_after_wrapper_exit_reports_cancelled(self, maintenance_service) -> None:
+        """整树停止证明成立（含 Windows 受控 Job 归零）时按已取消报告，不再跳过证明。"""
+        from services.embedded_pg_maintenance_service import (
+            _CANCEL_GRACE_S,
+            _CANCEL_KILL_GRACE_S,
+            EmbeddedPgMaintenanceCancelledError,
+        )
 
         proc_mock = self._proc_requesting_cancel(maintenance_service, returncode=-15)
 
@@ -1476,13 +1481,13 @@ class TestDumpCancellationIntegrity:
             ),
             patch(
                 "services.embedded_pg_maintenance_service._wait_process_tree_exit",
-                return_value=False,
+                return_value=True,
             ) as tree_wait,
         ):
             with pytest.raises(EmbeddedPgMaintenanceCancelledError, match="已被取消"):
                 await maintenance_service._run_sidecar(["sidecar", "dump"], cancel_allowed=True)
 
-        tree_wait.assert_not_called()
+        tree_wait.assert_called_once_with(proc_mock, _CANCEL_GRACE_S + _CANCEL_KILL_GRACE_S, job=None)
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_dump_cancel_without_target_raises_cancelled(self, maintenance_service, tmp_path: Path) -> None:
@@ -1682,70 +1687,101 @@ class TestProcessTreeHelpersUnit:
 
         assert _wait_process_tree_exit(proc, 1.0) is True
 
-    # ---- _signal_process_tree Windows taskkill / POSIX 分支 ----
-    def test_signal_process_tree_windows_taskkill_success(self, monkeypatch) -> None:
-        from services.embedded_pg_maintenance_service import _signal_process_tree
+    def test_wait_process_tree_exit_windows_prefers_job_proof(self, monkeypatch) -> None:
+        """Windows 有受控 Job 时以 Job 内活动进程归零为判据，不再依赖 wrapper 退出。"""
+        from services.embedded_pg_maintenance_service import _wait_process_tree_exit
 
         monkeypatch.setattr(os, "name", "nt")
-        completed = subprocess.CompletedProcess(args=[], returncode=0)
-        with patch("services.embedded_pg_maintenance_service.subprocess.run", return_value=completed) as run_mock:
-            assert _signal_process_tree(MagicMock(pid=99), force=False) is True
+        job = MagicMock()
+        job.wait_empty.return_value = True
+        proc = MagicMock()
 
-        args = run_mock.call_args[0][0]
-        assert args[0] == "taskkill"
-        assert "/T" in args and "/F" in args
+        with patch("services.embedded_pg_maintenance_service._wait_process_exit") as fallback:
+            assert _wait_process_tree_exit(proc, 0.5, job=job) is True
 
-    def test_signal_process_tree_windows_taskkill_timeout_returns_false(self, monkeypatch) -> None:
-        from services.embedded_pg_maintenance_service import _signal_process_tree
+        job.wait_empty.assert_called_once_with(0.5)
+        fallback.assert_not_called()
+
+    # ---- _signal_process_tree Windows Job Object / POSIX 分支 ----
+    def test_signal_process_tree_windows_without_job_is_identity_unproven(self, monkeypatch) -> None:
+        """D1-04: 无受控 Job 时不得改用 taskkill /PID 强杀，只能报「身份未证明」。"""
+        from services.embedded_pg_maintenance_service import _SignalOutcome, _signal_process_tree
 
         monkeypatch.setattr(os, "name", "nt")
-        with patch(
-            "services.embedded_pg_maintenance_service.subprocess.run",
-            side_effect=subprocess.TimeoutExpired(cmd="taskkill", timeout=5),
-        ):
-            assert _signal_process_tree(MagicMock(pid=99), force=False) is False
+        proc = MagicMock(pid=99, poll=MagicMock(return_value=None))
+        with patch("services.embedded_pg_maintenance_service.subprocess.run") as run_mock:
+            assert _signal_process_tree(proc, force=False, job=None) is _SignalOutcome.IDENTITY_UNPROVEN
+
+        run_mock.assert_not_called()
+
+    def test_signal_process_tree_windows_terminates_job(self, monkeypatch) -> None:
+        """D1-04: 取消作用于 Job 句柄（TerminateJobObject），不以裸 PID 定位目标。"""
+        from services.embedded_pg_maintenance_service import _SignalOutcome, _signal_process_tree
+
+        monkeypatch.setattr(os, "name", "nt")
+        job = MagicMock()
+        job.terminate.return_value = True
+        with patch("services.embedded_pg_maintenance_service.subprocess.run") as run_mock:
+            assert _signal_process_tree(MagicMock(pid=99), force=False, job=job) is _SignalOutcome.DELIVERED
+
+        job.terminate.assert_called_once_with()
+        run_mock.assert_not_called()
+
+    def test_signal_process_tree_windows_job_terminate_failure(self, monkeypatch) -> None:
+        """Job 终止失败：wrapper 已退出报 ALREADY_EXITED，否则只能报身份未证明。"""
+        from services.embedded_pg_maintenance_service import _SignalOutcome, _signal_process_tree
+
+        monkeypatch.setattr(os, "name", "nt")
+        job = MagicMock()
+        job.terminate.return_value = False
+
+        exited = MagicMock(pid=99, poll=MagicMock(return_value=0))
+        assert _signal_process_tree(exited, force=False, job=job) is _SignalOutcome.ALREADY_EXITED
+
+        alive = MagicMock(pid=99, poll=MagicMock(return_value=None))
+        assert _signal_process_tree(alive, force=False, job=job) is _SignalOutcome.IDENTITY_UNPROVEN
 
     @_requires_posix_group_api
     def test_signal_process_tree_terminates_single_proc_when_not_leader(self, monkeypatch) -> None:
         """未成为进程组长（或 pid 复用）时不得 killpg；wrapper 存活则单进程终止。"""
-        from services.embedded_pg_maintenance_service import _signal_process_tree
+        from services.embedded_pg_maintenance_service import _SignalOutcome, _signal_process_tree
 
         proc = MagicMock()
         proc.pid = 4321
         proc.poll = MagicMock(return_value=None)
         monkeypatch.setattr(os, "getpgid", lambda pid: pid + 7)
 
-        assert _signal_process_tree(proc, force=False) is True
+        assert _signal_process_tree(proc, force=False) is _SignalOutcome.DELIVERED
         proc.terminate.assert_called_once_with()
         proc.kill.assert_not_called()
 
     @_requires_posix_group_api
     def test_signal_process_tree_force_kills_single_proc(self, monkeypatch) -> None:
-        from services.embedded_pg_maintenance_service import _signal_process_tree
+        from services.embedded_pg_maintenance_service import _SignalOutcome, _signal_process_tree
 
         proc = MagicMock()
         proc.pid = 4321
         proc.poll = MagicMock(return_value=None)
         monkeypatch.setattr(os, "getpgid", lambda pid: pid + 7)
 
-        assert _signal_process_tree(proc, force=True) is True
+        assert _signal_process_tree(proc, force=True) is _SignalOutcome.DELIVERED
         proc.kill.assert_called_once_with()
 
     @_requires_posix_group_api
     def test_signal_process_tree_refuses_when_wrapper_exited(self, monkeypatch) -> None:
         """wrapper 已退出且组 id 不可信：放弃信号，交由上层证明逻辑。"""
-        from services.embedded_pg_maintenance_service import _signal_process_tree
+        from services.embedded_pg_maintenance_service import _SignalOutcome, _signal_process_tree
 
         proc = MagicMock()
         proc.pid = 4321
         proc.poll = MagicMock(return_value=0)
         monkeypatch.setattr(os, "getpgid", lambda pid: pid + 7)
 
-        assert _signal_process_tree(proc, force=False) is False
+        assert _signal_process_tree(proc, force=False) is _SignalOutcome.ALREADY_EXITED
 
     @_requires_posix_group_api
     def test_signal_process_tree_killpg_group_graceful_and_force(self, monkeypatch) -> None:
-        from services.embedded_pg_maintenance_service import _signal_process_tree
+        from services.embedded_pg_maintenance_service import _SignalOutcome, _signal_process_tree
 
         proc = MagicMock()
         proc.pid = 4321
@@ -1753,21 +1789,21 @@ class TestProcessTreeHelpersUnit:
         sent: list[tuple[int, int]] = []
         monkeypatch.setattr(os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
 
-        assert _signal_process_tree(proc, force=False) is True
-        assert _signal_process_tree(proc, force=True) is True
+        assert _signal_process_tree(proc, force=False) is _SignalOutcome.DELIVERED
+        assert _signal_process_tree(proc, force=True) is _SignalOutcome.DELIVERED
         assert sent == [(4321, signal.SIGTERM), (4321, signal.SIGKILL)]
 
     @_requires_posix_group_api
-    def test_signal_process_tree_oserror_returns_false(self, monkeypatch) -> None:
-        """进程组已不存在（OSError）：命令已自然结束，返回 False。"""
-        from services.embedded_pg_maintenance_service import _signal_process_tree
+    def test_signal_process_tree_oserror_returns_already_exited(self, monkeypatch) -> None:
+        """进程组已不存在（OSError）：命令已自然结束。"""
+        from services.embedded_pg_maintenance_service import _SignalOutcome, _signal_process_tree
 
         proc = MagicMock()
         proc.pid = 4321
         monkeypatch.setattr(os, "getpgid", lambda pid: pid)
         monkeypatch.setattr(os, "killpg", lambda pgid, sig: (_ for _ in ()).throw(OSError("no group")))
 
-        assert _signal_process_tree(proc, force=False) is False
+        assert _signal_process_tree(proc, force=False) is _SignalOutcome.ALREADY_EXITED
 
     # ---- 取消后产物状态未知（stat OSError → Unproven） ----
     @pytest.mark.asyncio(loop_scope="function")
@@ -1877,6 +1913,432 @@ class TestProcessTreeProof:
             if proc.poll() is None:
                 proc.kill()
                 proc.wait(timeout=10)
+
+
+# =============================================================================
+# D1-04: 取消代际隔离（锁拆分误判 / 跨轮污染）
+# =============================================================================
+class TestCancelGenerationIsolation:
+    """D1-04: 取消标记绑定单调递增代际，并与终止信号在同一临界区内提交/回滚。"""
+
+    def test_rollback_shares_critical_section_with_commit(self, maintenance_service) -> None:
+        """信号未送达时回滚与置位同临界区：并发读者在临界区结束前不可能读到 True。"""
+        from services.embedded_pg_maintenance_service import CancelStatus, _SignalOutcome
+
+        proc_mock = MagicMock()
+        proc_mock.pid = 4321
+        proc_mock.poll.return_value = 0
+        maintenance_service._active_proc = proc_mock
+        maintenance_service._active_generation = 7
+
+        observed: dict[str, bool] = {}
+        reader_done = threading.Event()
+
+        def _reader() -> None:
+            observed["cancel"] = maintenance_service._is_cancel_requested(7)
+            reader_done.set()
+
+        def _fake_signal(proc, *, force, job=None):
+            # 此处 request_cancel 仍持有 _lock：读者线程必须阻塞到临界区结束
+            threading.Thread(target=_reader, daemon=True).start()
+            time.sleep(0.05)
+            assert not reader_done.is_set(), "读者在临界区结束前读到了取消标记"
+            return _SignalOutcome.ALREADY_EXITED
+
+        with patch(
+            "services.embedded_pg_maintenance_service._signal_process_tree",
+            side_effect=_fake_signal,
+        ):
+            status = maintenance_service.request_cancel()
+
+        assert reader_done.wait(timeout=5)
+        assert observed["cancel"] is False
+        assert status is CancelStatus.ALREADY_EXITED
+        assert maintenance_service._is_cancel_requested(7) is False
+
+    def test_cancel_flag_is_scoped_to_generation(self, maintenance_service) -> None:
+        """标记只对写入它的代际生效，后续轮次不会被上一轮的取消污染。"""
+        maintenance_service._cancel_requested_generation = 3
+        assert maintenance_service._is_cancel_requested(3) is True
+        assert maintenance_service._is_cancel_requested(4) is False
+        assert maintenance_service._is_cancel_requested(None) is False
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_new_run_allocates_new_generation_and_clears_flag(self, maintenance_service) -> None:
+        """新一轮可取消命令分配新代际并清除旧标记，成功退出不得被误判为取消。"""
+        maintenance_service._run_generation = 41
+        maintenance_service._cancel_requested_generation = 1
+        proc_mock = MagicMock()
+        proc_mock.returncode = 0
+        captured: dict[str, object] = {}
+
+        def _communicate(timeout=None):
+            captured["flag"] = maintenance_service._cancel_requested_generation
+            captured["generation"] = maintenance_service._active_generation
+            return ("", "")
+
+        proc_mock.communicate = MagicMock(side_effect=_communicate)
+
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service.ThreadPoolManager",
+                return_value=_DirectTP(),
+            ),
+            patch(
+                "services.embedded_pg_maintenance_service.subprocess.Popen",
+                return_value=proc_mock,
+            ),
+        ):
+            exit_code, _stdout, _stderr = await maintenance_service._run_sidecar(
+                ["sidecar", "dump"], cancel_allowed=True
+            )
+
+        assert exit_code == 0
+        assert captured["flag"] is None
+        assert captured["generation"] == 42
+
+
+# =============================================================================
+# D1-04: Windows 受控 Job Object（身份绑定，替代裸 PID taskkill）
+# =============================================================================
+class _FakeJobKernel32:
+    """按脚本返回 Job 活动进程数的 kernel32 替身（仅覆盖测试用到的 API）。"""
+
+    def __init__(self, active_processes: list[int]) -> None:
+        self._active = list(active_processes)
+        self.closed_handles: list[object] = []
+        self.terminated = 0
+
+    def QueryInformationJobObject(self, handle, info_class, info_ptr, size, ret):
+        from services.embedded_pg_maintenance_service import _JobBasicAccountingInformation
+
+        info = ctypes.cast(info_ptr, ctypes.POINTER(_JobBasicAccountingInformation)).contents
+        info.ActiveProcesses = self._active.pop(0) if len(self._active) > 1 else self._active[0]
+        return True
+
+    def TerminateJobObject(self, handle, code):
+        self.terminated += 1
+        return True
+
+    def CloseHandle(self, handle):
+        self.closed_handles.append(handle)
+        return True
+
+
+class TestWindowsJobObject:
+    """D1-04: 受控 Job Object 的停止证明与句柄生命周期。"""
+
+    def test_wait_empty_true_when_no_active_processes(self) -> None:
+        from services.embedded_pg_maintenance_service import _WindowsJob
+
+        job = _WindowsJob(1234, _FakeJobKernel32([0]))
+        assert job.wait_empty(0.2) is True
+
+    def test_wait_empty_false_on_timeout(self) -> None:
+        from services.embedded_pg_maintenance_service import _WindowsJob
+
+        job = _WindowsJob(1234, _FakeJobKernel32([2]))
+        assert job.wait_empty(0.05) is False
+
+    def test_closed_job_counts_as_terminated_and_rejects_terminate(self) -> None:
+        from services.embedded_pg_maintenance_service import _WindowsJob
+
+        fake = _FakeJobKernel32([3])
+        job = _WindowsJob(1234, fake)
+        job.close()
+        job.close()  # 幂等
+        assert fake.closed_handles == [1234]
+        assert job.wait_empty(0.2) is True
+        assert job.terminate() is False
+
+    def test_create_sets_kill_on_job_close(self, monkeypatch) -> None:
+        import services.embedded_pg_maintenance_service as module
+
+        captured: dict[str, object] = {}
+
+        class _FakeApi:
+            def CreateJobObjectW(self, attrs, name):
+                return 5678
+
+            def SetInformationJobObject(self, handle, info_class, info_ptr, size):
+                info = ctypes.cast(info_ptr, ctypes.POINTER(module._JobExtendedLimitInformation)).contents
+                captured["limit_flags"] = info.BasicLimitInformation.LimitFlags
+                return True
+
+            def CloseHandle(self, handle):
+                return True
+
+        monkeypatch.setattr(module, "_job_kernel32", lambda: _FakeApi())
+        job = module._WindowsJob.create()
+
+        assert isinstance(job, module._WindowsJob)
+        assert job._handle == 5678
+        assert captured["limit_flags"] == module._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+
+    def test_create_returns_none_when_limit_set_fails(self, monkeypatch) -> None:
+        import services.embedded_pg_maintenance_service as module
+
+        class _FakeApi:
+            def CreateJobObjectW(self, attrs, name):
+                return 1
+
+            def SetInformationJobObject(self, *args):
+                return False
+
+            def CloseHandle(self, handle):
+                return True
+
+        monkeypatch.setattr(module, "_job_kernel32", lambda: _FakeApi())
+        assert module._WindowsJob.create() is None
+
+    def test_create_returns_none_when_job_object_creation_fails(self, monkeypatch) -> None:
+        """CreateJobObjectW 返回空句柄时不得继续设置限额，直接返回 None。"""
+        import services.embedded_pg_maintenance_service as module
+
+        class _FakeApi:
+            def CreateJobObjectW(self, attrs, name):
+                return 0
+
+            def CloseHandle(self, handle):
+                raise AssertionError("未创建的 Job 不应关闭句柄")
+
+        monkeypatch.setattr(module, "_job_kernel32", lambda: _FakeApi())
+        assert module._WindowsJob.create() is None
+
+    def test_job_kernel32_declares_signatures_and_caches(self, monkeypatch) -> None:
+        """kernel32 懒加载：仅首次声明 Job API 签名，后续复用同一句柄。"""
+        import services.embedded_pg_maintenance_service as module
+
+        calls: list[str] = []
+        fake = MagicMock()
+
+        def _win_dll(name, use_last_error=False):
+            calls.append(name)
+            return fake
+
+        monkeypatch.setattr(module, "_JOB_KERNEL32", None)
+        monkeypatch.setattr(ctypes, "WinDLL", _win_dll, raising=False)
+
+        assert module._job_kernel32() is fake
+        assert calls == ["kernel32"]
+        assert fake.CreateJobObjectW.argtypes == [ctypes.c_void_p, ctypes.c_wchar_p]
+        assert fake.CreateJobObjectW.restype is ctypes.c_void_p
+        assert fake.TerminateJobObject.argtypes == [ctypes.c_void_p, ctypes.c_uint32]
+        # 第二次调用直接复用缓存，不重复加载 DLL
+        assert module._job_kernel32() is fake
+        assert calls == ["kernel32"]
+
+    def test_terminate_on_open_job_reports_kernel_result(self) -> None:
+        import services.embedded_pg_maintenance_service as module
+
+        fake = _FakeJobKernel32([1])
+        job = module._WindowsJob(1234, fake)
+        assert job.terminate() is True
+        assert fake.terminated == 1
+
+    def test_wait_empty_false_when_query_fails(self) -> None:
+        """QueryInformationJobObject 失败时无法证明归零，必须返回 False。"""
+        import services.embedded_pg_maintenance_service as module
+
+        class _FakeApi:
+            def QueryInformationJobObject(self, *args):
+                return False
+
+        assert module._WindowsJob(1234, _FakeApi()).wait_empty(0.2) is False
+
+    def test_assign_registers_process_handle_and_always_closes_it(self) -> None:
+        import services.embedded_pg_maintenance_service as module
+
+        assigned: list[tuple[object, object]] = []
+        closed: list[object] = []
+
+        class _FakeApi:
+            def OpenProcess(self, access, inherit, pid):
+                assert pid == 77
+                return 4321
+
+            def AssignProcessToJobObject(self, job_handle, process_handle):
+                assigned.append((job_handle, process_handle))
+                return True
+
+            def CloseHandle(self, handle):
+                closed.append(handle)
+                return True
+
+        proc = MagicMock()
+        proc.pid = 77
+        proc.poll.return_value = None
+
+        assert module._WindowsJob(1234, _FakeApi()).assign(proc) is True
+        assert assigned == [(1234, 4321)]
+        assert closed == [4321]
+
+    def test_assign_closes_process_handle_when_assignment_fails(self) -> None:
+        import services.embedded_pg_maintenance_service as module
+
+        closed: list[object] = []
+
+        class _FakeApi:
+            def OpenProcess(self, access, inherit, pid):
+                return 4321
+
+            def AssignProcessToJobObject(self, job_handle, process_handle):
+                return False
+
+            def CloseHandle(self, handle):
+                closed.append(handle)
+                return True
+
+        proc = MagicMock()
+        proc.pid = 77
+        proc.poll.return_value = None
+
+        assert module._WindowsJob(1234, _FakeApi()).assign(proc) is False
+        assert closed == [4321]
+
+    def test_assign_rejects_closed_job_exited_process_and_open_failure(self) -> None:
+        """三种不可登记场景均返回 False 且不产生副作用。"""
+        import services.embedded_pg_maintenance_service as module
+
+        closed: list[object] = []
+
+        class _FakeApi:
+            def OpenProcess(self, access, inherit, pid):
+                return 0
+
+            def AssignProcessToJobObject(self, job_handle, process_handle):
+                raise AssertionError("进程句柄打开失败时不应登记")
+
+            def CloseHandle(self, handle):
+                closed.append(handle)
+                return True
+
+        live_proc = MagicMock()
+        live_proc.pid = 77
+        live_proc.poll.return_value = None
+
+        closed_job = module._WindowsJob(1234, _FakeApi())
+        closed_job.close()
+        assert closed_job.assign(live_proc) is False
+
+        exited_proc = MagicMock()
+        exited_proc.pid = 78
+        exited_proc.poll.return_value = 0
+        assert module._WindowsJob(1234, _FakeApi()).assign(exited_proc) is False
+
+        assert module._WindowsJob(1234, _FakeApi()).assign(live_proc) is False
+        assert closed == [1234]
+
+    def test_create_windows_job_returns_none_on_oserror(self, monkeypatch, caplog) -> None:
+        """Job 创建抛 OSError 时降级为无 Job（取消按未确认处理）。"""
+        import services.embedded_pg_maintenance_service as module
+
+        monkeypatch.setattr(os, "name", "nt")
+        with (
+            patch.object(module._WindowsJob, "create", side_effect=OSError("boom")),
+            caplog.at_level(logging.WARNING),
+        ):
+            assert module.EmbeddedPgMaintenanceService._create_windows_job() is None
+        assert any("Job Object 创建失败" in r.message for r in caplog.records)
+
+    def test_create_windows_job_logs_unavailable_on_none(self, monkeypatch, caplog) -> None:
+        import services.embedded_pg_maintenance_service as module
+
+        monkeypatch.setattr(os, "name", "nt")
+        with (
+            patch.object(module._WindowsJob, "create", return_value=None),
+            caplog.at_level(logging.DEBUG),
+        ):
+            assert module.EmbeddedPgMaintenanceService._create_windows_job() is None
+        assert any("Job Object 不可用" in r.message for r in caplog.records)
+
+    def test_request_cancel_without_job_reports_unproven(self, monkeypatch, maintenance_service, caplog) -> None:
+        """D1-04: Windows 无受控 Job 时只能报「取消未确认」，不得强杀裸 PID。"""
+        from services.embedded_pg_maintenance_service import CancelStatus
+
+        monkeypatch.setattr(os, "name", "nt")
+        maintenance_service._active_proc = MagicMock(pid=99)
+        maintenance_service._active_generation = 5
+        maintenance_service._active_job = None
+
+        with caplog.at_level(logging.WARNING):
+            status = maintenance_service.request_cancel()
+
+        assert status is CancelStatus.UNPROVEN
+        assert maintenance_service._is_cancel_requested(5) is False
+        assert any("cannot prove target identity" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_run_sidecar_assigns_job_before_registration(self, maintenance_service, monkeypatch) -> None:
+        """D1-04: 先登记 Job 再暴露句柄；运行结束关闭 Job（KILL_ON_JOB_CLOSE 兜底）。"""
+        from services.embedded_pg_maintenance_service import _WindowsJob
+
+        monkeypatch.setattr(os, "name", "nt")
+        job = MagicMock()
+        job.assign.return_value = True
+        proc_mock = MagicMock()
+        proc_mock.returncode = 0
+        captured: dict[str, object] = {}
+
+        def _communicate(timeout=None):
+            captured["job"] = maintenance_service._active_job
+            return ("", "")
+
+        proc_mock.communicate = MagicMock(side_effect=_communicate)
+
+        with (
+            patch.object(_WindowsJob, "create", return_value=job),
+            patch(
+                "services.embedded_pg_maintenance_service.ThreadPoolManager",
+                return_value=_DirectTP(),
+            ),
+            patch(
+                "services.embedded_pg_maintenance_service.subprocess.Popen",
+                return_value=proc_mock,
+            ),
+        ):
+            await maintenance_service._run_sidecar(["sidecar", "dump"], cancel_allowed=True)
+
+        job.assign.assert_called_once_with(proc_mock)
+        assert captured["job"] is job
+        job.close.assert_called_once_with()
+        assert maintenance_service._active_job is None
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_assign_failure_exposes_no_job(self, maintenance_service, monkeypatch) -> None:
+        """D1-04: Job 登记失败时显式降级（不暴露 Job），取消只能报未确认。"""
+        from services.embedded_pg_maintenance_service import _WindowsJob
+
+        monkeypatch.setattr(os, "name", "nt")
+        job = MagicMock()
+        job.assign.return_value = False
+        proc_mock = MagicMock()
+        proc_mock.returncode = 0
+        captured: dict[str, object] = {}
+
+        def _communicate(timeout=None):
+            captured["job"] = maintenance_service._active_job
+            captured["proc"] = maintenance_service._active_proc
+            return ("", "")
+
+        proc_mock.communicate = MagicMock(side_effect=_communicate)
+
+        with (
+            patch.object(_WindowsJob, "create", return_value=job),
+            patch(
+                "services.embedded_pg_maintenance_service.ThreadPoolManager",
+                return_value=_DirectTP(),
+            ),
+            patch(
+                "services.embedded_pg_maintenance_service.subprocess.Popen",
+                return_value=proc_mock,
+            ),
+        ):
+            await maintenance_service._run_sidecar(["sidecar", "dump"], cancel_allowed=True)
+
+        assert captured["job"] is None
+        assert captured["proc"] is proc_mock
+        job.close.assert_called_once_with()
 
 
 # =============================================================================

@@ -98,11 +98,11 @@ class TestSyncDaoUpdateSyncStatus:
 
     @pytest.mark.asyncio
     async def test_partial_status_is_recorded_without_claiming_completion(self):
-        """UIR-F14-004 检查点语义：partial/failed 写入只记最近尝试（last_sync_date），
-        业务水位 last_data_date 仅由 success/empty/skipped_permission 推进。
+        """UIR-F14-004/D2-02 检查点语义：partial/failed 写入只记最近尝试（last_sync_date），
+        业务水位 last_data_date 仅由 status='success' 推进。
 
         DAO 无法直接执行 SQL，故断言：① 写入参数保留 partial 状态与 fetch_failed 结果；
-        ② 更新语句中 last_data_date 的推进仅限已完成状态，partial/failed 不推进。
+        ② 非成功首插 last_data_date 参数为 NULL；③ 更新语句仅成功态经 GREATEST 推进水位。
         """
         dao = SyncDao(MagicMock())
         dao._write_db = AsyncMock(return_value=1)
@@ -110,8 +110,48 @@ class TestSyncDaoUpdateSyncStatus:
         sql, params = dao._write_db.call_args[0]
         assert params[4] == "partial"
         assert params[5] == SYNC_RESULT_FETCH_FAILED
-        # 已有记录时 last_data_date 只在完成状态下推进
-        assert "\"last_data_date\"=CASE WHEN excluded.\"status\" IN ('success','empty','skipped_permission')" in sql
+        assert params[1] == datetime.date(2024, 10, 19)  # last_sync_date＝最近尝试日
+        assert params[2] is None  # 首插非成功态不得写业务水位
+        # 已有记录时 last_data_date 只在成功态经 GREATEST 单调推进
+        assert "excluded.\"status\"='success'" in sql
+        assert 'GREATEST(COALESCE(sync_status."last_data_date"' in sql
+
+    @pytest.mark.asyncio
+    async def test_first_insert_non_success_status_leaves_watermark_null(self):
+        """D2-02：failed/cancelled/partial/skipped_permission/empty 首插均不得写水位。"""
+        for status in ("failed", "fetch_failed", "save_failed", "cancelled", "partial", "skipped_permission", "empty"):
+            dao = SyncDao(MagicMock())
+            dao._write_db = AsyncMock(return_value=1)
+            await dao.update_sync_status("daily_quotes", "20241019", 0, status=status)
+            _sql, params = dao._write_db.call_args[0]
+            assert params[1] == datetime.date(2024, 10, 19), status
+            assert params[2] is None, status
+
+    @pytest.mark.asyncio
+    async def test_first_insert_success_writes_watermark(self):
+        """D2-02：仅成功完成态首插写入 last_data_date。"""
+        dao = SyncDao(MagicMock())
+        dao._write_db = AsyncMock(return_value=1)
+        await dao.update_sync_status("daily_quotes", "20241019", 5000, status="success")
+        _sql, params = dao._write_db.call_args[0]
+        assert params[1] == datetime.date(2024, 10, 19)
+        assert params[2] == datetime.date(2024, 10, 19)
+
+    @pytest.mark.asyncio
+    async def test_out_of_order_update_keeps_max_watermark_and_history_count(self):
+        """D2-02/R22：乱序写入时水位单调（GREATEST），record_count 不被回退或非成功态覆写。"""
+        dao = SyncDao(MagicMock())
+        dao._write_db = AsyncMock(return_value=1)
+        await dao.update_sync_status("daily_quotes", "20241019", 5000, status="success")
+        sql, _params = dao._write_db.call_args[0]
+        # 旧日期后到：GREATEST 保护水位不下降
+        assert (
+            'GREATEST(COALESCE(sync_status."last_data_date", excluded."last_data_date"), excluded."last_data_date")'
+            in sql
+        )
+        # record_count 仅在成功且日期不早于既有水位时覆盖（empty/无权限/失败不得抹掉历史行数）
+        assert 'excluded."last_data_date" >= COALESCE(sync_status."last_data_date",\'1900-01-01\'::date)' in sql
+        assert "'success','empty','skipped_permission'" not in sql
 
     @pytest.mark.asyncio
     async def test_failed_status_with_records_still_not_complete(self):

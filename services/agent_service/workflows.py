@@ -1360,6 +1360,7 @@ class PlanRunSummary:
 # ---------------------------------------------------------------------------
 
 
+@register_singleton
 class TerminalStateDaoRegistry:
     """应用执行终态写入端口登记（组合根安装；进程内单例，测试显式复位）。
 
