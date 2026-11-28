@@ -12,6 +12,7 @@ import pandas as pd
 import sqlalchemy as sa
 from sqlalchemy import Date, DateTime
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import StatementError
 
 from data.persistence import engine_provider
 from data.persistence.models import Base
@@ -45,6 +46,25 @@ _UPSERT_CHUNK_SIZE = 500
 _LONG_TX_ROW_THRESHOLD = 20_000
 # PRF-06: 匹配顶层 LIMIT 子句（排除子查询括号内的 LIMIT），避免重复追加语法错误
 _HAS_TOP_LEVEL_LIMIT = re.compile(r"\bLIMIT\b(?![^()]*\))", re.IGNORECASE)
+
+
+def _safe_db_error(exc: BaseException) -> str:
+    """DB 异常安全摘要（R9 / D1-06）：类名 + SQLSTATE + 脱敏描述，剔除绑定参数段。
+
+    所有对外的日志与异常消息都必须经本函数，禁止直接 ``str(e)`` / ``{e}``——
+    SQLAlchemy 的 DBAPIError 字符串默认带完整的 ``[parameters: {...}]``。
+    """
+    return DataSanitizer.sanitize_db_error(exc)
+
+
+def _db_error_traceback_allowed(exc: BaseException) -> bool:
+    """是否允许在日志中附带原始 traceback（R9 / D1-06）。
+
+    携带绑定参数的 DB 异常（``StatementError`` 及其子类如 ``DBAPIError``）一旦以
+    ``exc_info=True`` 落盘，traceback 会原样渲染异常字符串中的参数块，故禁带；
+    其余异常保留 traceback 以维持诊断价值。
+    """
+    return not isinstance(exc, StatementError)
 
 
 def _build_df_normalized(rows, cols):
@@ -217,9 +237,15 @@ class BaseDao:
         except Exception as e:
             # P3-M5-ClassifyError-System-Gap: 用 classify_error 替代手写字符串匹配
             if classify_error(e, "db")["code"] == "interrupted":
+                # R5：生命周期错误仍以 EngineDisposedError 传播；from None 断开携带
+                # 绑定参数的原始异常链（R9 / D1-06），诊断要素保留在消息摘要中。
                 raise EngineDisposedError(
-                    f"[{self.__class__.__name__}] Engine disposed during guarded begin: {e}"
-                ) from e
+                    f"[{self.__class__.__name__}] Engine disposed during guarded begin: {_safe_db_error(e)}"
+                ) from None
+            if isinstance(e, StatementError):
+                raise DatabaseQueryError(
+                    f"[{self.__class__.__name__}] Database error during guarded begin: {_safe_db_error(e)}"
+                ) from None
             raise
 
     @staticmethod
@@ -348,8 +374,8 @@ class BaseDao:
             if isinstance(r, BaseException):
                 raise DatabaseQueryError(
                     f"[{BaseDao.__name__}] Chunked read failed; partial results discarded "
-                    f"to avoid silent data loss: {r}"
-                ) from r
+                    f"to avoid silent data loss: {_safe_db_error(r)}"
+                ) from None
         return list(results)
 
     @staticmethod
@@ -517,7 +543,7 @@ class BaseDao:
                 "[%s] %s | Chunked read failed, partial results discarded: %s",
                 self.__class__.__name__,
                 log_prefix,
-                DataSanitizer.sanitize_error(e),
+                _safe_db_error(e),
             )
             return pd.DataFrame()
         except Exception as e:
@@ -525,7 +551,7 @@ class BaseDao:
                 "[%s] %s: %s",
                 self.__class__.__name__,
                 log_prefix,
-                DataSanitizer.sanitize_error(e),
+                _safe_db_error(e),
             )
             return pd.DataFrame()
 
@@ -638,7 +664,7 @@ class BaseDao:
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.debug("[BaseDao] Engine sync_engine check skipped: %s", e)
+            logger.debug("[BaseDao] Engine sync_engine check skipped: %s", _safe_db_error(e))
 
         # P1-3: 共享事务连接（conn is not None）时，suppress_errors 必须忽略。
         # PostgreSQL 事务中发生错误后进入 "aborted" 状态，后续语句全部失败；
@@ -684,11 +710,11 @@ class BaseDao:
                 logger.warning(
                     "[%s] DB Closed during write (Shutdown): %s",
                     self.__class__.__name__,
-                    e,
+                    _safe_db_error(e),
                 )
                 raise EngineDisposedError(
-                    f"[{self.__class__.__name__}] Engine disposed during write, data not persisted: {e}"
-                ) from e
+                    f"[{self.__class__.__name__}] Engine disposed during write, data not persisted: {_safe_db_error(e)}"
+                ) from None
 
             # P1-3: 共享事务连接（is_shared_conn=True）时，suppress_errors 必须忽略。
             # PostgreSQL 事务中发生错误后进入 "aborted" 状态，后续语句全部失败；
@@ -702,11 +728,11 @@ class BaseDao:
                     "[BaseDao] Write Error on shared conn (%s: %s, %.1fms, suppress_errors ignored)\nSQL: %s...",
                     elapsed,
                     sql[:200],
-                    exc_info=True,
+                    exc_info=_db_error_traceback_allowed(e),
                 )
                 raise DatabaseQueryError(
-                    f"[{self.__class__.__name__}] Database write failed on shared conn: {e}"
-                ) from e
+                    f"[{self.__class__.__name__}] Database write failed on shared conn: {_safe_db_error(e)}"
+                ) from None
 
             if suppress_errors:
                 log_classified(
@@ -724,11 +750,13 @@ class BaseDao:
                     "[BaseDao] Write Error (%s: %s, %.1fms)\nSQL: %s...",
                     elapsed,
                     sql[:200],
-                    exc_info=True,
+                    exc_info=_db_error_traceback_allowed(e),
                 )
 
             if not suppress_errors:
-                raise DatabaseQueryError(f"[{self.__class__.__name__}] Database write failed: {e}") from e
+                raise DatabaseQueryError(
+                    f"[{self.__class__.__name__}] Database write failed: {_safe_db_error(e)}"
+                ) from None
             return -1
 
     @staticmethod
@@ -987,11 +1015,11 @@ class BaseDao:
                 logger.warning(
                     "[%s] DB Closed during upsert (Shutdown): %s",
                     self.__class__.__name__,
-                    e,
+                    _safe_db_error(e),
                 )
                 raise EngineDisposedError(
-                    f"[{self.__class__.__name__}] Engine disposed during upsert, data not persisted: {e}"
-                ) from e
+                    f"[{self.__class__.__name__}] Engine disposed during upsert, data not persisted: {_safe_db_error(e)}"
+                ) from None
 
             # P1-3: 共享事务连接（is_shared_conn=True）时，suppress_errors 必须忽略。
             # PostgreSQL 事务中发生错误后进入 "aborted" 状态，后续语句全部失败；
@@ -1005,9 +1033,11 @@ class BaseDao:
                     "[BaseDao] UPSERT Error on shared conn (%s: %s, %.1fms, suppress_errors ignored) on %s",
                     elapsed,
                     table_name,
-                    exc_info=True,
+                    exc_info=_db_error_traceback_allowed(e),
                 )
-                raise
+                raise DatabaseQueryError(
+                    f"[{self.__class__.__name__}] Database write failed on shared conn: {_safe_db_error(e)}"
+                ) from None
 
             if suppress_errors:
                 log_classified(
@@ -1026,10 +1056,12 @@ class BaseDao:
                     "[BaseDao] UPSERT Error (%s: %s, %.1fms) on %s",
                     elapsed,
                     table_name,
-                    exc_info=True,
+                    exc_info=_db_error_traceback_allowed(e),
                 )
             if not suppress_errors:
-                raise
+                raise DatabaseQueryError(
+                    f"[{self.__class__.__name__}] Database write failed: {_safe_db_error(e)}"
+                ) from None
             return -1
 
     @staticmethod
@@ -1144,9 +1176,11 @@ class BaseDao:
                 logger.warning(
                     "[%s] DB Closed during read (Shutdown): %s",
                     self.__class__.__name__,
-                    e,
+                    _safe_db_error(e),
                 )
-                raise EngineDisposedError(f"[{self.__class__.__name__}] Engine disposed during read: {e}") from e
+                raise EngineDisposedError(
+                    f"[{self.__class__.__name__}] Engine disposed during read: {_safe_db_error(e)}"
+                ) from None
 
             log_classified(
                 logger,
@@ -1156,7 +1190,9 @@ class BaseDao:
                 elapsed,
             )
             if not suppress_errors:
-                raise DatabaseQueryError(f"[{self.__class__.__name__}] Database read failed: {e}") from e
+                raise DatabaseQueryError(
+                    f"[{self.__class__.__name__}] Database read failed: {_safe_db_error(e)}"
+                ) from None
             return pd.DataFrame()
 
         if max_rows is not None and len(rows) > max_rows:
@@ -1275,9 +1311,11 @@ class BaseDao:
                 logger.warning(
                     "[%s] DB Closed during read (Shutdown): %s",
                     self.__class__.__name__,
-                    e,
+                    _safe_db_error(e),
                 )
-                raise EngineDisposedError(f"[{self.__class__.__name__}] Engine disposed during read: {e}") from e
+                raise EngineDisposedError(
+                    f"[{self.__class__.__name__}] Engine disposed during read: {_safe_db_error(e)}"
+                ) from None
 
             log_classified(
                 logger,
@@ -1287,7 +1325,9 @@ class BaseDao:
                 elapsed,
             )
             if not suppress_errors:
-                raise DatabaseQueryError(f"[{self.__class__.__name__}] Database read failed: {e}") from e
+                raise DatabaseQueryError(
+                    f"[{self.__class__.__name__}] Database read failed: {_safe_db_error(e)}"
+                ) from None
             return pd.DataFrame()
 
         # review03-C4: max_rows 检查位于 except 之外——超限是编程/查询错误，

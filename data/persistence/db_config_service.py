@@ -543,7 +543,9 @@ class DatabaseConfigService:
         url = cls.build_url(host, port, user, password, database, async_driver=True)
 
         try:
-            engine = create_async_engine(url, echo=False)
+            # D1-06 / R9：内置 PG 服务路径的引擎同样隐藏绑定参数，避免迁移失败时
+            # SQLAlchemy 异常字符串渲染出业务明文参数。
+            engine = create_async_engine(url, echo=False, hide_parameters=True)
             try:
                 # Ensure Alembic env.py can find the correct database URL
                 with override_db_url(url):
