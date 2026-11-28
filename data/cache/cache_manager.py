@@ -50,6 +50,10 @@ from utils.time_utils import get_now, to_utc_for_db
 
 logger = logging.getLogger(__name__)
 
+# D1-07: 维护窗口等待在途长批分块事务排空的上限（秒）。超时仍继续维护并记录
+# error——停机/清库不得被单个卡死的分块永久拖住；残留分块会因代际变化自行中止。
+_MAINTENANCE_DRAIN_TIMEOUT_SECONDS = 30.0
+
 
 from utils.singleton_registry import register_singleton
 
@@ -80,6 +84,8 @@ class CacheManager:
 
         del_loop_local("cache_maint_event")
         del_loop_local("cache_init_lock")
+        # D1-07: 维护代际/排空屏障同为 loop-local 状态，测试隔离须一并清理
+        del_loop_local("basedao_maint_barrier")
 
         # review03-C11 Step2: 清空 engine_provider 模块级状态，保证跨用例隔离
         engine_provider.reset_engine_provider()
@@ -209,19 +215,11 @@ class CacheManager:
             # 重试释放，否则 early-return 会让引擎/连接池泄漏到进程退出（atexit 亦跳过）。
             if self._disposed and self.engine is None:
                 return
-            # R5 修复 #M5-001：与 clear_all_cache 对称，先 clear 事件阻塞后续查询进入 DAO 路径
-            self._maintenance_event.clear()
             try:
-                BaseDao._get_maintenance_event().clear()
-            except Exception as e:
-                # P3-M5-ClassifyError-System-Gap: 接入 classify_severity 统一分类
-                severity = classify_severity(e, "db")
-                logger.debug(
-                    "[CacheManager] Maintenance event clear failed during dispose (severity=%s): %s",
-                    severity,
-                    safe_error(e),
-                )
-            try:
+                # R5 修复 #M5-001：与 clear_all_cache 对称，先阻塞后续查询进入 DAO 路径；
+                # D1-07：同时递增维护代际并等待在途长批分块事务排空。
+                # 放在 try 内：取消/异常路径由 finally 放行维护事件，避免写入永久阻塞。
+                await self._enter_maintenance()
                 self._disposed = True
                 # review03-C11 Step2: 同步 engine_provider，DAO 侧 R5 守卫即时生效
                 engine_provider.mark_disposed(True)
@@ -236,18 +234,8 @@ class CacheManager:
                 # web 模式下多 session 共享进程，必须重置以允许新 session 重建连接。
                 self._schema_initialized = False
             finally:
-                # R5 修复 #M5-001：与 clear_all_cache L359 对称，dispose 完成后 set 事件放行等待方
-                try:
-                    BaseDao._get_maintenance_event().set()
-                except Exception as e:
-                    # P3-M5-ClassifyError-System-Gap: 接入 classify_severity 统一分类
-                    severity = classify_severity(e, "db")
-                    logger.debug(
-                        "[CacheManager] Maintenance event set failed during dispose (severity=%s): %s",
-                        severity,
-                        safe_error(e),
-                    )
-                self._maintenance_event.set()
+                # R5 修复 #M5-001：与 clear_all_cache 对称，dispose 完成后 set 事件放行等待方
+                await self._exit_maintenance()
 
         # P3-M5-Close-DelLoopLocal-Risk 修复：close() 不删除 loop-local 锁实例。
         # 测试隔离已由 _reset_singleton 方法处理（该方法调用 del_loop_local）；
@@ -261,6 +249,54 @@ class CacheManager:
         if not self._maintenance_event.is_set():
             pass  # logger.info("[CacheManager] Waiting for maintenance...") removed
             await self._maintenance_event.wait()
+
+    async def _enter_maintenance(self) -> None:
+        """进入维护窗口：阻塞新写入、递增维护代际、等待在途长批分块排空（D1-07）。
+
+        调用方必须在 ``try/finally`` 中配对调用 :meth:`_exit_maintenance`，否则维护
+        事件不会重新 set，所有 DAO 写入将永久阻塞。
+
+        顺序要点：先 clear 事件（同一事件循环内同步生效，无 await 间隙），再递增代际，
+        最后等待排空——若反过来，写入可能在「等待排空」与「递增代际」之间登记为在途，
+        导致维护与分块抢写。代际递增放在排空之前，使被阻塞的写入恢复后必定观察到变化。
+        """
+        self._maintenance_event.clear()
+        try:
+            BaseDao._get_maintenance_event().clear()
+        except Exception as e:
+            # P3-M5-ClassifyError-System-Gap: 接入 classify_severity 统一分类
+            severity = classify_severity(e, "db")
+            logger.debug(
+                "[CacheManager] Maintenance event clear failed (severity=%s): %s",
+                severity,
+                safe_error(e),
+            )
+        barrier = BaseDao._get_maintenance_barrier()
+        barrier.bump_epoch()
+        if not await barrier.wait_drained(_MAINTENANCE_DRAIN_TIMEOUT_SECONDS):
+            logger.error(
+                "[CacheManager] Maintenance drain timeout (%.0fs): in-flight chunked writes still "
+                "active; proceeding with maintenance. Those writers will abort on their next epoch check.",
+                _MAINTENANCE_DRAIN_TIMEOUT_SECONDS,
+            )
+
+    async def _exit_maintenance(self) -> None:
+        """退出维护窗口：重新 set 维护事件放行等待的写入（D1-07）。
+
+        与 :meth:`_enter_maintenance` 配对；内部无 await，取消路径下 await 本方法仍会
+        完整执行，保证事件不会被遗留在 clear 状态。
+        """
+        try:
+            BaseDao._get_maintenance_event().set()
+        except Exception as e:
+            # P3-M5-ClassifyError-System-Gap: 接入 classify_severity 统一分类
+            severity = classify_severity(e, "db")
+            logger.debug(
+                "[CacheManager] Maintenance event set failed (severity=%s): %s",
+                severity,
+                safe_error(e),
+            )
+        self._maintenance_event.set()
 
     @staticmethod
     def _prepare_data_params(df: pd.DataFrame, cols: list, table_name: str | None = None):
@@ -409,12 +445,13 @@ class CacheManager:
         tables, materialized views). Falls back to metadata.drop_all() if
         the database user lacks OWNER/SUPERUSER privileges.
         """
-        self._maintenance_event.clear()
-        from data.persistence.daos.base_dao import BaseDao
         from data.persistence.models import metadata
 
-        BaseDao._get_maintenance_event().clear()
+        # D1-07：清库前阻塞新写入、递增维护代际并等待在途长批分块排空，
+        # 避免分块事务与 DROP SCHEMA 抢写、或把清库前的数据写入新库。
+        # 放在 try 内：取消/异常路径由 finally 放行维护事件，避免写入永久阻塞。
         try:
+            await self._enter_maintenance()
             # R5 修复 #M5-002：在 None 检查之前加 _disposed 守卫，防止 disposed 引擎被复用
             if self._disposed:
                 raise EngineDisposedError("CacheManager disposed during clear_all_cache")
@@ -444,19 +481,7 @@ class CacheManager:
             self._schema_initialized = False
             await self.init_db(force=True, auto_migrate=True)
         finally:
-            try:
-                from data.persistence.daos.base_dao import BaseDao
-
-                BaseDao._get_maintenance_event().set()
-            except Exception as e:
-                # P3-M5-ClassifyError-System-Gap: 接入 classify_severity 统一分类
-                severity = classify_severity(e, "db")
-                logger.debug(
-                    "[CacheManager] Failed to set BaseDao maintenance event (severity=%s): %s",
-                    severity,
-                    safe_error(e),
-                )
-            self._maintenance_event.set()
+            await self._exit_maintenance()
 
     # --- DELAGATIONS START HERE ---
 

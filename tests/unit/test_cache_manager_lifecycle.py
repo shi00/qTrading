@@ -1,5 +1,7 @@
 """CacheManager close → init_db 重初始化回归测试。"""
 
+import asyncio
+
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 
@@ -146,3 +148,93 @@ class TestCacheManagerCloseLoopLocalLocks:
 
         assert cm.engine is None
         assert cm._disposed is True
+
+
+@pytest.mark.unit
+class TestCacheManagerMaintenanceBarrier:
+    """D1-07: 维护窗口递增代际并等待在途长批分块事务排空。"""
+
+    @pytest.mark.asyncio
+    async def test_enter_maintenance_bumps_epoch_and_blocks_until_drained(self):
+        """进入维护须先阻塞新写入、递增代际，并等待在途分块写完。"""
+        from data.cache.cache_manager import CacheManager
+        from data.persistence.daos.base_dao import BaseDao
+
+        cm = CacheManager()
+        barrier = BaseDao._get_maintenance_barrier()
+        epoch_before = barrier.epoch
+        barrier.begin_write()  # 模拟在途分块事务
+        enter_task = asyncio.create_task(cm._enter_maintenance())
+        try:
+            await asyncio.sleep(0.02)
+            assert not enter_task.done(), "在途分块未排空时维护不得进入"
+            assert barrier.epoch == epoch_before + 1, "维护入口必须递增代际"
+            assert not cm._maintenance_event.is_set(), "维护期间必须阻塞新写入"
+            barrier.end_write()
+            await asyncio.wait_for(enter_task, timeout=2.0)
+        finally:
+            barrier.end_write()  # 幂等回收，避免异常路径泄漏计数
+            if not enter_task.done():
+                enter_task.cancel()
+            await cm._exit_maintenance()
+        assert cm._maintenance_event.is_set(), "维护退出必须放行等待方"
+
+    @pytest.mark.asyncio
+    async def test_close_defers_dispose_until_inflight_writes_drain(self):
+        """close() 必须先排空在途分块事务，再释放引擎。"""
+        from data.cache.cache_manager import CacheManager
+        from data.persistence.daos.base_dao import BaseDao
+
+        cm = CacheManager()
+        mock_engine = MagicMock()
+        mock_engine.dispose = AsyncMock()
+        cm.engine = mock_engine
+        cm._schema_initialized = True
+        dispose_mock = AsyncMock()
+        barrier = BaseDao._get_maintenance_barrier()
+        epoch_before = barrier.epoch
+        barrier.begin_write()
+        close_task = None
+        try:
+            with patch.object(cm._engine_manager, "dispose", dispose_mock):
+                close_task = asyncio.create_task(cm.close())
+                await asyncio.sleep(0.02)
+                dispose_mock.assert_not_called()
+                assert not close_task.done(), "在途分块未排空时不得释放引擎"
+                barrier.end_write()
+                await asyncio.wait_for(close_task, timeout=2.0)
+            dispose_mock.assert_awaited_once()
+        finally:
+            barrier.end_write()
+            if close_task is not None and not close_task.done():
+                close_task.cancel()
+                await asyncio.gather(close_task, return_exceptions=True)
+        assert barrier.epoch == epoch_before + 1
+        assert cm._maintenance_event.is_set()
+
+    @pytest.mark.asyncio
+    async def test_close_cancelled_during_drain_still_releases_maintenance_event(self):
+        """维护入口等待排空时被取消 → finally 必须放行事件，避免后续写入永久阻塞。"""
+        from data.cache.cache_manager import CacheManager
+        from data.persistence.daos.base_dao import BaseDao
+
+        cm = CacheManager()
+        mock_engine = MagicMock()
+        mock_engine.dispose = AsyncMock()
+        cm.engine = mock_engine
+        cm._schema_initialized = True
+        barrier = BaseDao._get_maintenance_barrier()
+        barrier.begin_write()  # 让 close() 停在排空等待
+        close_task = asyncio.create_task(cm.close())
+        try:
+            await asyncio.sleep(0.02)
+            assert not close_task.done()
+            close_task.cancel()
+            cancel_results = await asyncio.gather(close_task, return_exceptions=True)
+            assert isinstance(cancel_results[0], asyncio.CancelledError), "close() 必须响应取消而非吞没 CancelledError"
+        finally:
+            barrier.end_write()
+            if not close_task.done():
+                await asyncio.gather(close_task, return_exceptions=True)
+        assert cm._maintenance_event.is_set(), "取消后 finally 必须放行维护事件"
+        assert await barrier.wait_drained(0.1) is True
