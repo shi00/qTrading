@@ -30,6 +30,7 @@ import asyncio
 import inspect
 from dataclasses import dataclass, field
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 from flet.components.component import Component, Renderer
 
@@ -86,11 +87,35 @@ class FakePage:
 
     session: FakeSession = field(default_factory=FakeSession, compare=False, hash=False)
     web: bool = False
+    # 记录 page.run_task 提交的任务（测试断言挂载期副作用只触发一次）
+    scheduled_tasks: list[Any] = field(default_factory=list, compare=False, hash=False)
+    # 是否同步驱动被调度协程至完成。默认只记录并关闭协程（同 mock_flet.MockFletPage 语义），
+    # 避免把常驻任务（如 TaskCenterView 的 1s ticker 无限循环）用 asyncio.run 跑到死；
+    # 需要断言挂载期一次性异步命令（如 refresh_status）副作用的测试显式开启。
+    execute_tasks: bool = False
 
     def __post_init__(self) -> None:
         self._services = FakeServiceRegistry()
         self.services: list[Any] = []
         self._dialogs: _FakeDialogList = _FakeDialogList()
+
+    def run_task(self, handler: Any, *args: Any, **kwargs: Any) -> Any:
+        """模拟 ``Page.run_task``：记录任务并返回可 cancel 的桩任务。
+
+        真实 ``Page.run_task`` 在页面事件循环中异步执行协程并返回 Task；测试桩默认
+        不驱动协程（常驻任务会永久阻塞，触发 pytest 超时）。``execute_tasks=True``
+        时同步跑完协程，供断言异步命令执行副作用。
+        """
+        self.scheduled_tasks.append(handler)
+        result = handler(*args, **kwargs)
+        if not inspect.iscoroutine(result):
+            return None
+        if self.execute_tasks:
+            asyncio.run(result)
+            return None
+        task = MagicMock()
+        result.close()
+        return task
 
     def _prepare_dialog(self, *args: Any, **kwargs: Any) -> None:  # noqa: ARG002
         """吸收 ft.use_dialog 的 _prepare_dialog 调用 (声明式 dialog 测试支持)。"""

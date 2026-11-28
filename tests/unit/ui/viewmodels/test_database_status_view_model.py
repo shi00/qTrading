@@ -42,6 +42,9 @@ def mock_doctor_result():
     result.postgres_alive = True
     result.port = 55432
     result.state_file = "running"
+    result.issues = []
+    result.restore_residuals = []
+    result.dump_partials = []
     return result
 
 
@@ -101,6 +104,10 @@ class TestStateImmutability:
         assert vm.state.status_type == "info"
         assert vm.state.error_message is None
         assert vm.state.is_refreshing is False
+        # R21: 诊断渠道初始为「未知」用 None 表示，不得用空列表冒充「无异常」
+        assert vm.state.issues is None
+        assert vm.state.restore_residuals is None
+        assert vm.state.dump_partials is None
 
 
 # --- refresh_status ---
@@ -598,3 +605,40 @@ class TestVMi18nContract:
         # 禁止在 VM 中 import I18n（无 import 即无法调用）
         assert "from ui.i18n import" not in source
         assert "import ui.i18n" not in source
+
+
+# --- 诊断渠道 (D1-12): issues / restore_residuals / dump_partials ---
+
+
+class TestDiagnosticsChannel:
+    """refresh_status 必须透传 DoctorResult 的故障渠道，不得丢弃 (R21)。"""
+
+    def test_defaults_are_none_not_empty(self, vm):
+        """未刷新时三项为 None（未知），空列表只能表示「已确认无异常」。"""
+        assert vm.state.issues is None
+        assert vm.state.restore_residuals is None
+        assert vm.state.dump_partials is None
+
+    @pytest.mark.asyncio
+    async def test_refresh_passes_through_issues(self, vm, mock_doctor_result):
+        """issues / restore_residuals / dump_partials 原样透传到 state。"""
+        mock_doctor_result.issues = [
+            {"code": "disk_low", "severity": "warning", "message": "剩余磁盘空间不足"},
+        ]
+        mock_doctor_result.restore_residuals = ["/fake/data.restore-20260101"]
+        mock_doctor_result.dump_partials = ["/fake/dump.partial"]
+
+        await vm.refresh_status()
+
+        assert vm.state.issues == [{"code": "disk_low", "severity": "warning", "message": "剩余磁盘空间不足"}]
+        assert vm.state.restore_residuals == ["/fake/data.restore-20260101"]
+        assert vm.state.dump_partials == ["/fake/dump.partial"]
+
+    @pytest.mark.asyncio
+    async def test_refresh_empty_lists_are_not_none(self, vm):
+        """sidecar 明确报告无异常时是空列表（≠ 未知的 None）。"""
+        await vm.refresh_status()
+
+        assert vm.state.issues == []
+        assert vm.state.restore_residuals == []
+        assert vm.state.dump_partials == []
