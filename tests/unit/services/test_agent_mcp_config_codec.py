@@ -74,7 +74,21 @@ def _stdio_transport() -> MCPTransportConfig:
         command=sys.executable,
         args=("-c", "pass"),
         env=(("MCP_LOG", "debug"),),
+        secret_env=(("MCP_TOKEN", "keyring:mcp-token"),),
         cwd=os.path.dirname(sys.executable),
+    )
+
+
+def _stdio_config(*, env: tuple[tuple[str, str], ...], secret_env: tuple[tuple[str, str], ...]) -> MCPServerConfig:
+    return _config(
+        MCPTransportConfig(
+            kind=MCPTransportKind.STDIO,
+            command=sys.executable,
+            args=("-c", "pass"),
+            env=env,
+            secret_env=secret_env,
+            cwd=os.path.dirname(sys.executable),
+        )
     )
 
 
@@ -138,3 +152,78 @@ class TestCodecRejection:
         wire["transport"]["http_risk_approved"] = False
         decoded = decode_mcp_server_config(wire)
         assert decoded.transport.http_risk_approved is False
+
+    def test_plaintext_secret_env_is_rejected(self) -> None:
+        """敏感字段只接受安全引用：明文秘密不得被编码/落库（R9/R10）。"""
+
+        config = _stdio_config(env=(), secret_env=(("MCP_TOKEN", "synthetic-plaintext-secret"),))
+        with pytest.raises(AgentValidationError) as exc:
+            encode_mcp_server_config(config)
+        assert exc.value.code == "invalid_transport"
+
+    def test_secure_reference_in_plain_env_is_rejected(self) -> None:
+        """普通字段不得承载安全引用：分类由字段显式决定，不混放。"""
+
+        config = _stdio_config(env=(("MCP_TOKEN", "env:MCP_TOKEN"),), secret_env=())
+        with pytest.raises(AgentValidationError) as exc:
+            encode_mcp_server_config(config)
+        assert exc.value.code == "invalid_transport"
+
+    def test_duplicate_env_names_across_fields_are_rejected(self) -> None:
+        config = _stdio_config(
+            env=(("MCP_TOKEN", "debug"),),
+            secret_env=(("MCP_TOKEN", "keyring:mcp-token"),),
+        )
+        with pytest.raises(AgentValidationError) as exc:
+            encode_mcp_server_config(config)
+        assert exc.value.code == "invalid_transport"
+
+    def test_remote_transport_cannot_carry_secret_env(self) -> None:
+        transport = MCPTransportConfig(
+            kind=MCPTransportKind.STREAMABLE_HTTP,
+            url="https://mcp.example.test/tools",
+            secret_env=(("MCP_TOKEN", "keyring:mcp-token"),),
+            http_risk_approved=True,
+        )
+        with pytest.raises(AgentValidationError) as exc:
+            encode_mcp_server_config(_config(transport))
+        assert exc.value.code == "invalid_transport"
+
+
+class TestLegacyEnvMigration:
+    """旧 wire（无 ``secret_env``）一次性迁移：只按引用形态分流，不按变量名猜秘密。"""
+
+    def test_legacy_references_move_to_secret_env_and_new_wire_has_no_plain_refs(self) -> None:
+        wire = encode_mcp_server_config(_config(_stdio_transport()))
+        wire["transport"].pop("secret_env")
+        wire["transport"]["env"] = [["MCP_LOG", "debug"], ["MCP_TOKEN", "env:MCP_LOCAL_TOKEN"]]
+
+        decoded = decode_mcp_server_config(wire)
+
+        assert decoded.transport.env == (("MCP_LOG", "debug"),)
+        assert decoded.transport.secret_env == (("MCP_TOKEN", "env:MCP_LOCAL_TOKEN"),)
+        sealed = encode_mcp_server_config(decoded)["transport"]
+        assert "secret_env" in sealed
+        assert sealed["secret_env"] == [["MCP_TOKEN", "env:MCP_LOCAL_TOKEN"]]
+        assert all(not value.startswith(("env:", "keyring:")) for _name, value in sealed["env"])
+
+    def test_legacy_migration_does_not_classify_by_variable_name(self) -> None:
+        """名为 TOKEN 的字面量不被提升为秘密字段：分类只看引用形态，不看变量名。"""
+
+        wire = encode_mcp_server_config(_config(_stdio_transport()))
+        wire["transport"].pop("secret_env")
+        wire["transport"]["env"] = [["MCP_TOKEN", "synthetic-not-a-reference"]]
+
+        decoded = decode_mcp_server_config(wire)
+
+        assert decoded.transport.env == (("MCP_TOKEN", "synthetic-not-a-reference"),)
+        assert decoded.transport.secret_env == ()
+
+    def test_legacy_wire_without_secret_env_key_round_trips_after_migration(self) -> None:
+        wire = encode_mcp_server_config(_config(_stdio_transport()))
+        wire["transport"].pop("secret_env")
+
+        decoded = decode_mcp_server_config(wire)
+        again = decode_mcp_server_config(encode_mcp_server_config(decoded))
+
+        assert again == decoded

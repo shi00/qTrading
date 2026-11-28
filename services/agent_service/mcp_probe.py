@@ -82,7 +82,9 @@ class StdioImplementationProbe:
             "scripts": [{"path": item.path, "size": item.size, "sha256": item.sha256} for item in scripts],
             "cwd": str(cwd.resolve()),
             "args": list(transport.args),
-            "env_keys": sorted(name for name, _ in transport.env),
+            # 只纳入键名（不含值）：普通字面量与敏感引用分属两个字段，任一名变化都
+            # 应改变实现指纹。
+            "env_keys": sorted(name for name, _ in (*transport.env, *transport.secret_env)),
         }
         canonical = json.dumps(payload, ensure_ascii=False, separators=_JSON_SEPARATORS, sort_keys=True)
         return sha256_hex(canonical.encode("utf-8"))

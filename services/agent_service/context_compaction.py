@@ -68,6 +68,7 @@ __all__ = [
     "COMPACTION_SUMMARY_FAILED",
     "COMPACTION_SUMMARY_MODEL_UNBOUND",
     "COMPACTION_SUMMARY_NO_MODEL",
+    "COMPACTION_SUMMARY_SEGMENT_OVER_WINDOW",
     "COMPACTION_SUMMARY_TIMEOUT",
     "COMPACTION_SUMMARY_TIMEOUT_UNAVAILABLE",
     "COMPACTION_SUMMARY_TRUNCATED",
@@ -85,6 +86,7 @@ __all__ = [
     "mark_user_correction",
     "plan_compaction",
     "resolve_compaction_budget",
+    "summarize_segment_within_window",
 ]
 
 logger = logging.getLogger(__name__)
@@ -101,6 +103,8 @@ COMPACTION_BUDGET_INSUFFICIENT: Final[str] = "budget_insufficient"
 COMPACTION_NOTHING_TO_SUMMARIZE: Final[str] = "nothing_to_summarize"
 #: 所有候选切点都会拆散工具调用/结果配对：该边界不可切。
 COMPACTION_BOUNDARY_UNCUTTABLE: Final[str] = "boundary_uncuttable"
+#: 待摘要片段超过摘要模型自身窗口上限：不发出必然超窗的摘要请求。
+COMPACTION_SUMMARY_SEGMENT_OVER_WINDOW: Final[str] = "summary_segment_over_window"
 #: 摘要回合拿不到可用模型（未绑定）。
 COMPACTION_SUMMARY_NO_MODEL: Final[str] = "summary_no_model"
 #: 摘要回合的期限不可核验（不以臆造默认预算外发）。
@@ -266,32 +270,72 @@ def is_tool_pair_safe_cut(messages: Sequence[ModelMessage], cutoff: int) -> bool
     """在 ``cutoff`` 处切分是否不拆散任何工具调用/结果配对。
 
     配对按 ``tool_call_id`` 逐一匹配（同一 id 在后续回合复用时取最近一次调用）；
-    调用与结果落到切点两侧即视为该边界不可切。
+    以下任一情况即视为该边界不可切（切分后会留下供应商拒绝的半截配对）：
+
+    - 调用与结果落到切点两侧；
+    - 保留区间内出现孤立 ``ToolReturnPart``（无匹配调用，含空 ``tool_call_id``）；
+    - 保留区间内残留未闭合 ``ToolCallPart``（全历史都无对应结果）；
+    - ``RetryPromptPart`` 与其工具调用被切点隔断（有 id 按配对判；无 id 的重试反馈
+      归属于其前最近一条含工具调用的 ``ModelResponse``）。
     """
 
     if cutoff <= 0 or cutoff >= len(messages):
         return True
     pending: dict[str, int] = {}
+    last_response_with_call: int | None = None
     for index, message in enumerate(messages):
         if isinstance(message, ModelResponse):
+            has_call = False
             for part in message.parts:
                 if isinstance(part, ToolCallPart) and part.tool_call_id:
                     pending[part.tool_call_id] = index
+                    has_call = True
+            if has_call:
+                last_response_with_call = index
             continue
         if not isinstance(message, ModelRequest):
             continue
         for part in message.parts:
-            if not isinstance(part, ToolReturnPart | RetryPromptPart):
+            if isinstance(part, ToolReturnPart):
+                call_id = part.tool_call_id
+                call_index = pending.pop(call_id, None) if call_id else None
+                if call_index is None:
+                    if index >= cutoff:
+                        return False
+                    continue
+                if (call_index < cutoff) != (index < cutoff):
+                    return False
+                continue
+            if not isinstance(part, RetryPromptPart):
                 continue
             call_id = part.tool_call_id
             if not call_id:
+                # 无 id 的重试反馈归属于其前最近一条工具调用响应；隔断即不可切。
+                if index >= cutoff and last_response_with_call is not None and last_response_with_call < cutoff:
+                    return False
                 continue
             call_index = pending.pop(call_id, None)
             if call_index is None:
+                if index >= cutoff:
+                    return False
                 continue
             if (call_index < cutoff) != (index < cutoff):
                 return False
-    return True
+    # 残留未闭合的工具调用：保留区间内的会被外发而永远等不到结果。
+    return all(call_index < cutoff for call_index in pending.values())
+
+
+def summarize_segment_within_window(messages: Sequence[ModelMessage], cutoff: int, budget: CompactionBudget) -> bool:
+    """待摘要片段是否不超过摘要模型自身的上下文窗口上限。
+
+    摘要回合复用被压缩运行的同一模型绑定，窗口事实与压缩预算同源；窗口不可知即
+    无法核定（``False``，调用方拒绝放行，不猜默认窗口，R21）。
+    """
+
+    window = budget.strictest_context_window_tokens()
+    if window is None:
+        return False
+    return estimate_context_tokens(messages[:cutoff]) <= window
 
 
 def plan_compaction(messages: Sequence[ModelMessage], *, keep_messages: int) -> CompactionPlan:
@@ -678,6 +722,8 @@ async def compact_messages(
         return CompactionOutcome(messages=original, compressed=False, reason=plan.reason)
 
     summarize_messages = original[: plan.cutoff]
+    if not summarize_segment_within_window(original, plan.cutoff, budget):
+        return CompactionOutcome(messages=original, compressed=False, reason=COMPACTION_SUMMARY_SEGMENT_OVER_WINDOW)
     summary_result, response = await _generate_summary(
         model,
         summarize_messages,

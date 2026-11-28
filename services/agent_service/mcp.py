@@ -60,8 +60,13 @@ class MCPTransportConfig:
     #: stdio：绝对可执行文件路径；不经 shell 解析。
     command: str | None = None
     args: tuple[str, ...] = ()
-    #: stdio：已核安全引用后的最小环境（键值对，保序）；不含应用环境副本。
+    #: stdio：**普通环境变量字面量**（键值对，保序）；不含应用环境副本，也不得承载
+    #: 凭据安全引用——引用必须声明在 :attr:`secret_env`，两者结构上分离，不按变量名
+    #: 猜测哪一项是秘密。
     env: tuple[tuple[str, str], ...] = ()
+    #: stdio：**敏感凭据引用**（键值对，保序）。值只能是 ``env:VAR`` / ``keyring:item``；
+    #: 明文秘密在此被拒绝，故凭据只以引用落库、在 spawn 前才读取（R9/R10）。
+    secret_env: tuple[tuple[str, str], ...] = ()
     #: stdio：绝对工作目录（必填：不使用应用自身 cwd 解析资源）。
     cwd: str | None = None
     #: streamable_http / sse：目标 URL（不得内嵌用户名/密码）。
@@ -112,6 +117,63 @@ def _valid_header_ref(value: str) -> bool:
     return False
 
 
+def is_secure_reference(value: str) -> bool:
+    """值是否为 ``env:NAME`` / ``keyring:item`` 安全引用（非空、无控制字符）。
+
+    与 HTTP Header 值同一判据；供编解码迁移与删除盘点复用，不在别处重复实现。
+    """
+
+    return _valid_header_ref(value)
+
+
+def _valid_env_name(name: str) -> bool:
+    """环境变量名合法性（ASCII 字母/下划线开头，后续字母数字/下划线）。"""
+
+    if not name or not name.isascii():
+        return False
+    if not (name[0].isalpha() or name[0] == "_"):
+        return False
+    return all(ch.isalnum() or ch == "_" for ch in name)
+
+
+def _validate_stdio_env(
+    env: tuple[tuple[str, str], ...],
+    secret_env: tuple[tuple[str, str], ...],
+    path: str,
+) -> None:
+    """stdio 环境的结构性拆分校验：普通字面量与敏感引用互不混用、名称唯一。
+
+    分类只由调用方声明所在的字段决定，**不按变量名猜测秘密**：``env`` 承载普通
+    字面量（不得是安全引用），``secret_env`` 承载安全引用（不得是明文秘密）。
+    """
+
+    seen: set[str] = set()
+    for pair in env:
+        if not isinstance(pair, tuple) or len(pair) != 2 or not all(isinstance(part, str) and part for part in pair):
+            _fail_transport("env entries must be non-empty string pairs", f"{path}.env")
+        name, value = pair
+        if not _valid_env_name(name):
+            _fail_transport("env name is not a valid environment variable name", f"{path}.env")
+        if name in seen:
+            _fail_transport("duplicate env name", f"{path}.env")
+        seen.add(name)
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+            _fail_transport("env value must not contain control characters", f"{path}.env")
+        if is_secure_reference(value):
+            _fail_transport("secure references must be declared in secret_env", f"{path}.env")
+    for pair in secret_env:
+        if not isinstance(pair, tuple) or len(pair) != 2 or not all(isinstance(part, str) and part for part in pair):
+            _fail_transport("secret env entries must be non-empty string pairs", f"{path}.secret_env")
+        name, value = pair
+        if not _valid_env_name(name):
+            _fail_transport("secret env name is not a valid environment variable name", f"{path}.secret_env")
+        if name in seen:
+            _fail_transport("duplicate env name", f"{path}.secret_env")
+        seen.add(name)
+        if not is_secure_reference(value):
+            _fail_transport("secret env value must be a secure reference (env: / keyring:)", f"{path}.secret_env")
+
+
 def _validate_http_headers(headers: tuple[tuple[str, str], ...], path: str) -> None:
     """Header 白名单 + 安全引用：禁凭据/走私类 Header，禁明文值，禁重复名。"""
 
@@ -143,10 +205,6 @@ def validate_transport_config(config: MCPTransportConfig, path: str = "$.mcp.tra
     if not isinstance(config.kind, MCPTransportKind):
         _fail_transport("unknown transport kind", path)
 
-    for pair in config.env:
-        if not isinstance(pair, tuple) or len(pair) != 2 or not all(isinstance(part, str) and part for part in pair):
-            _fail_transport("env entries must be non-empty string pairs", f"{path}.env")
-
     if config.kind is MCPTransportKind.STDIO:
         if not isinstance(config.command, str) or not config.command:
             _fail_transport("stdio requires an executable command", f"{path}.command")
@@ -173,10 +231,11 @@ def validate_transport_config(config: MCPTransportConfig, path: str = "$.mcp.tra
         for arg in config.args:
             if not isinstance(arg, str):
                 _fail_transport("stdio args must be strings", f"{path}.args")
+        _validate_stdio_env(config.env, config.secret_env, path)
         return
 
     # streamable_http / sse
-    if config.command is not None or config.args or config.env or config.cwd is not None:
+    if config.command is not None or config.args or config.env or config.secret_env or config.cwd is not None:
         _fail_transport("remote transports must not carry local process fields", path)
     if not isinstance(config.url, str) or not config.url:
         _fail_transport("remote transport requires a url", f"{path}.url")

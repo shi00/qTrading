@@ -177,6 +177,14 @@ class DataSanitizer:
         re.IGNORECASE,
     )
 
+    # D1-06: SQLAlchemy DBAPI 异常字符串中的绑定参数块（`[parameters: ...]`，长参数时
+    # 可跨多行）与官方文档链接。绑定参数常含业务明文/凭据，且值域不可穷举，任何
+    # 值级脱敏规则都无法保证不漏，故整段剔除——这是 R9 的最小可信边界。
+    _PATTERN_DB_PARAMETERS_BLOCK = re.compile(r"\[parameters:.*?(?=\(Background on this error at:|\Z)", re.DOTALL)
+    _PATTERN_DB_ERROR_BACKGROUND = re.compile(r"\(Background on this error at:.*?\)", re.DOTALL)
+    # 对外 DB 错误摘要的最大字符数（脱敏后截断，避免刷屏）。
+    _DB_ERROR_TEXT_MAX_LEN = 600
+
     # PII 检测: 手机号、身份证号、邮箱、银行卡号、统一社会信用代码
     # 参考: https://blog.csdn.net/weixin_40369899/article/details/135644486 (手机号)
     # 参考: https://cloud.tencent.com/developer/article/2275911 (身份证)
@@ -255,7 +263,7 @@ class DataSanitizer:
         return text
 
     @staticmethod
-    def sanitize_error(exception: Exception | str, show_traceback: bool = False) -> str:
+    def sanitize_error(exception: BaseException | str, show_traceback: bool = False) -> str:
         """
         异常信息脱敏
 
@@ -269,6 +277,10 @@ class DataSanitizer:
             脱敏后的错误信息
         """
         msg = str(exception)
+
+        # D1-06: 先整段剔除 SQLAlchemy 绑定参数与文档链接（参数值可能含业务明文/凭据）。
+        msg = DataSanitizer._PATTERN_DB_PARAMETERS_BLOCK.sub("", msg)
+        msg = DataSanitizer._PATTERN_DB_ERROR_BACKGROUND.sub("", msg)
 
         msg = DataSanitizer._PATTERN_URL_QUERY_KEY.sub(r"\1\2=***", msg)
 
@@ -304,14 +316,19 @@ class DataSanitizer:
         if show_traceback and isinstance(exception, BaseException):
             import traceback
 
-            tb_lines = traceback.format_exception(
-                type(exception),
-                exception,
-                exception.__traceback__,
+            tb_text = "".join(
+                traceback.format_exception(
+                    type(exception),
+                    exception,
+                    exception.__traceback__,
+                )
             )
+            # D1-06: 参数块可能跨多行，须在整体文本上剔除（逐行正则无法覆盖续行）。
+            tb_text = DataSanitizer._PATTERN_DB_PARAMETERS_BLOCK.sub("", tb_text)
+            tb_text = DataSanitizer._PATTERN_DB_ERROR_BACKGROUND.sub("", tb_text)
             # 先做凭证脱敏（与主流程一致），再做路径脱敏
             tb_clean = []
-            for line in tb_lines:
+            for line in tb_text.splitlines():
                 line = DataSanitizer._PATTERN_URL_QUERY_KEY.sub(r"\1\2=***", line)
                 line = DataSanitizer._PATTERN_STANDALONE_KEY_VALUE.sub(r"\1=***", line)
                 line = DataSanitizer._PATTERN_COLON_KEY_VALUE.sub(r"\1: ***", line)
@@ -333,6 +350,55 @@ class DataSanitizer:
             return "\n".join(tb_clean)
 
         return msg
+
+    @staticmethod
+    def _extract_sqlstate(exception: object, max_depth: int = 6) -> str | None:
+        """沿异常链提取 SQLSTATE（``sqlstate`` / ``pgcode``），仅用于脱敏诊断（D1-06）。
+
+        asyncpg 原生异常暴露 ``sqlstate``，psycopg 暴露 ``pgcode``；SQLAlchemy 把
+        驱动异常挂在 ``orig`` 上。SQLSTATE 是出错后仍可安全外发的诊断要素。
+        """
+        current: object = exception
+        seen: set[int] = set()
+        for _ in range(max_depth):
+            if not isinstance(current, BaseException) or id(current) in seen:
+                break
+            seen.add(id(current))
+            for attr in ("sqlstate", "pgcode"):
+                value = getattr(current, attr, None)
+                if isinstance(value, str) and value:
+                    return value
+            orig = getattr(current, "orig", None)
+            if isinstance(orig, BaseException):
+                current = orig
+            else:
+                current = current.__cause__ or current.__context__
+        return None
+
+    @staticmethod
+    def sanitize_db_error(exception: BaseException | str) -> str:
+        """DB 异常安全摘要：异常类名 + SQLSTATE + 脱敏描述（R9 / D1-06）。
+
+        与 :meth:`sanitize_error` 的差别：
+        1. 在脱敏前整段剔除 SQLAlchemy 的 ``[parameters: ...]`` 绑定参数块与
+           ``(Background on this error ...)`` 链接——参数值域不可穷举，值级脱敏
+           无法保证不漏；
+        2. 显式保留异常类名与 SQLSTATE，使断开原始异常链后仍具备定因能力；
+        3. 结果压缩空白并截断，避免日志刷屏（截断发生在脱敏之后，不会新增泄露）。
+
+        Args:
+            exception: 异常对象（或异常字符串）。
+
+        Returns:
+            形如 ``DBAPIError (sqlstate=23505): ...`` 的安全摘要。
+        """
+        sqlstate = DataSanitizer._extract_sqlstate(exception)
+        type_name = type(exception).__name__ if isinstance(exception, BaseException) else "str"
+        text = " ".join(DataSanitizer.sanitize_error(exception).split())
+        if len(text) > DataSanitizer._DB_ERROR_TEXT_MAX_LEN:
+            text = text[: DataSanitizer._DB_ERROR_TEXT_MAX_LEN] + "...(truncated)"
+        label = f"{type_name} (sqlstate={sqlstate})" if sqlstate else type_name
+        return f"{label}: {text}" if text else label
 
     @classmethod
     def _is_sensitive_key(cls, key: str, sensitive_keys: list[str]) -> bool:

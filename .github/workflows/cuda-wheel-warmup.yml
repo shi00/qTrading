@@ -107,7 +107,7 @@ jobs:
           Add-Content -Path $env:GITHUB_OUTPUT -Value "key=$key"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
         # CUDA 构建产物会污染共享 uv 缓存（CPU 腿可能误取到 CUDA wheel，反之亦然），
         # 故不启用 setup-uv 自带缓存，改用下方的显式 wheel bank（Release 资产）。
         with:

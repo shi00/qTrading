@@ -1067,6 +1067,25 @@ class TestDeleteAndRoleAssignments:
         assert vm.state.role_assignments[0].role_id == "main"
 
     @pytest.mark.asyncio
+    async def test_role_assignment_preserves_prefixed_role_version(self) -> None:
+        """角色目录的 ``rN`` / 请求头的 ``vN`` 版本字符串原样保存，不被 int 强转拒绝。"""
+
+        for version in ("r1", "v1", "2"):
+            fake = _FakeLifecycle([_config()])
+            vm = _vm(fake)
+            await vm.load()
+            vm.begin_role_new()
+            vm.set_role_text("role_id", "main")
+            vm.set_role_text("role_version", version)
+            vm.toggle_role_service(_identity().stable_key())
+
+            await vm.save_role_assignment()
+
+            assert len(fake.role_saved) == 1, version
+            saved = cast(RoleMCPAssignment, fake.role_saved[0])
+            assert saved.role_version == version
+
+    @pytest.mark.asyncio
     async def test_role_assignment_rejects_missing_role_id(self) -> None:
         fake = _FakeLifecycle([_config()])
         vm = _vm(fake)

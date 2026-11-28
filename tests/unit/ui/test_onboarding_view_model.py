@@ -1538,6 +1538,142 @@ class TestOnboardingVMDisposeProtocol:
 
 
 # =====================================================================
+# Test: dispose/cancel 在 DataProcessor 构造期间也必须中止同步 (D1-11)
+# =====================================================================
+
+
+class TestOnboardingVMSyncCancelledDuringProcessorCreation:
+    """D1-11: 取消/卸载必须独立于 UI 展示态生效。
+
+    ``dispose()`` 会同步重置 state（sync_in_progress → False），View 侧基于
+    ``sync_in_progress`` 的清理判据会漏发取消信号；VM 必须维护独立标志，并在
+    ``_ensure_processor()`` 返回后立即中止同步，避免孤儿同步继续运行。
+    """
+
+    @staticmethod
+    def _gated_run_async(entered: asyncio.Event, release: asyncio.Event, processor: MagicMock):
+        async def _run_async(_task_type, _func, *_args, **_kwargs):
+            entered.set()
+            await release.wait()
+            return processor
+
+        return _run_async
+
+    async def test_dispose_during_processor_creation_aborts_sync(self, bound_vm):
+        """处理器仍在构造时卸载：构造返回后不得启动 initialize_system。"""
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        processor = MagicMock()
+        processor.initialize_system = AsyncMock(return_value=True)
+        processor.stop = AsyncMock()
+
+        with patch("ui.viewmodels.onboarding_view_model.ThreadPoolManager") as tp_cls:
+            tp_cls.return_value.run_async = self._gated_run_async(entered, release, processor)
+            task = asyncio.create_task(bound_vm.start_sync(quick=True))
+            await entered.wait()
+            bound_vm.dispose()
+            release.set()
+            await task
+
+        processor.initialize_system.assert_not_awaited()
+        assert bound_vm.state == OnboardingState()
+
+    async def test_cancel_during_processor_creation_aborts_sync(self, bound_vm):
+        """处理器仍在构造时取消：构造返回后不得启动 initialize_system。"""
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        processor = MagicMock()
+        processor.initialize_system = AsyncMock(return_value=True)
+        processor.stop = AsyncMock()
+
+        with patch("ui.viewmodels.onboarding_view_model.ThreadPoolManager") as tp_cls:
+            tp_cls.return_value.run_async = self._gated_run_async(entered, release, processor)
+            task = asyncio.create_task(bound_vm.start_sync(quick=True))
+            await entered.wait()
+            await bound_vm.cancel_sync()
+            release.set()
+            await task
+
+        processor.initialize_system.assert_not_awaited()
+        assert bound_vm.sync_in_progress is False
+
+    async def test_dispose_schedules_processor_stop_while_sync_in_progress(self, bound_vm):
+        """同步进行中卸载：已构造的处理器必须被调度 stop()（阻止孤儿同步继续）。"""
+        gate = _ControlledSync(1)
+        bound_vm._data_processor = gate
+        bound_vm.current_step = 4
+        task = asyncio.create_task(bound_vm.start_sync(quick=True))
+        try:
+            await gate.started[0].wait()
+            bound_vm.dispose()
+            for _ in range(50):
+                if gate.stop.await_count:
+                    break
+                await asyncio.sleep(0)
+            gate.stop.assert_awaited_once()
+        finally:
+            with patch(_SLEEP_PATCH, new_callable=AsyncMock):
+                gate.release[0].set()
+                await task
+        assert bound_vm.state == OnboardingState()
+
+    async def test_dispose_without_active_sync_does_not_stop_processor(self, bound_vm):
+        """未在同步中卸载：不得停掉共享处理器（避免误伤其他同步来源）。"""
+        processor = MagicMock()
+        processor.stop = AsyncMock()
+        bound_vm._data_processor = processor
+
+        bound_vm.dispose()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        processor.stop.assert_not_awaited()
+
+    async def test_start_sync_after_dispose_does_not_construct_processor(self, bound_vm):
+        """卸载后 start_sync 必须直接返回，不构造处理器（无孤儿运行）。"""
+        bound_vm.dispose()
+        with patch("ui.viewmodels.onboarding_view_model.ThreadPoolManager") as tp_cls:
+            await bound_vm.start_sync(quick=True)
+
+        tp_cls.return_value.run_async.assert_not_called()
+        assert bound_vm.state == OnboardingState()
+
+    async def test_start_sync_after_cancel_runs_normally(self, bound_vm):
+        """取消后再次同步：独立标志必须被新一轮运行重置（不得永久锁死）。"""
+        processor = MagicMock()
+        processor.initialize_system = AsyncMock(return_value=False)
+        processor.stop = AsyncMock()
+        bound_vm._data_processor = processor
+
+        await bound_vm.cancel_sync()
+        await bound_vm.start_sync(quick=True)
+
+        processor.initialize_system.assert_awaited_once()
+        assert bound_vm.sync_in_progress is False
+
+    async def test_stale_run_aborts_when_new_run_starts_during_creation(self, bound_vm):
+        """A 构造期间取消并立刻发起 B：A 构造返回后必须中止（不得与 B 并发同步）。"""
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        processor = MagicMock()
+        processor.initialize_system = AsyncMock(return_value=False)
+        processor.stop = AsyncMock()
+
+        with patch("ui.viewmodels.onboarding_view_model.ThreadPoolManager") as tp_cls:
+            tp_cls.return_value.run_async = self._gated_run_async(entered, release, processor)
+            first = asyncio.create_task(bound_vm.start_sync(quick=True))
+            await entered.wait()
+            await bound_vm.cancel_sync()
+            second = asyncio.create_task(bound_vm.start_sync(quick=True))
+            await asyncio.sleep(0)  # 让 B 进入 _ensure_processor（等待 A 持有的锁）
+            release.set()
+            await first
+            await second
+
+        processor.initialize_system.assert_awaited_once()  # 仅 B 启动同步
+
+
+# =====================================================================
 # Test: Service Delegation
 # =====================================================================
 

@@ -43,9 +43,12 @@ from core.agent_types import (
     SourceKind,
     SourceVersionRef,
     decode_role_definition,
+    json_doc,
 )
 from core.model_management_types import ExecutionSnapshot, ModelTurnProtocolError
 from services.agent_service import leaf_agent
+from services.agent_service.capabilities import ResearchBoundary
+from services.agent_service.context_compaction import ContextCompaction
 from services.agent_service.leaf_agent import (
     LEAF_ATTRIBUTION_UNAVAILABLE,
     LEAF_BINDING_REVISION_STALE,
@@ -101,12 +104,13 @@ def _context(
     source_refs: tuple[Any, ...] = (),
     input_revision: int | None = 2,
     predecessor_artifacts: tuple[tuple[str, str], ...] = (),
+    role_key: str = "analyst",
 ) -> LeafExecutionContext:
     return LeafExecutionContext(
         execution_id="execution-1",
         round_id="round-1",
         plan_digest="b" * 64,
-        node=PlanNodeSpec(node_id="n1", target="梳理公司业务", role_key="analyst", source_refs=source_refs),
+        node=PlanNodeSpec(node_id="n1", target="梳理公司业务", role_key=role_key, source_refs=source_refs),
         input_digest=input_digest,
         input_revision=input_revision,
         predecessor_artifacts=predecessor_artifacts,
@@ -195,6 +199,36 @@ class _Dao:
 
     async def read_boundary_source_keys(self, *, user_scope: str, execution_id: str) -> Any:
         return frozenset(), frozenset()
+
+
+class _ManifestDao(_Dao):
+    """带权威冻结 manifest 的 DAO 替身（叶角色正文快照来源）。"""
+
+    def __init__(self, manifest: str | None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.manifest = manifest
+        self.manifest_reads: list[tuple[str, str]] = []
+
+    async def read_authoritative_manifest(self, *, user_scope: str, execution_id: str) -> str | None:
+        self.manifest_reads.append((user_scope, execution_id))
+        return self.manifest
+
+
+def _frozen_manifest(
+    *,
+    version: str = "v-frozen",
+    snapshot_text: str | None = "受理时冻结的角色正文",
+    snapshot_version: str | None = None,
+) -> str:
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "role_prompt_refs": [["main", version]],
+    }
+    if snapshot_text is not None:
+        payload["role_prompt_snapshots"] = [
+            {"role_id": "main", "version": snapshot_version or version, "text": snapshot_text}
+        ]
+    return json_doc(payload)
 
 
 class _RunResult:
@@ -316,7 +350,7 @@ class TestRunLeafAgentSuccess:
         assert agent.kwargs["retries"] == 0
         assert agent.kwargs["tools"] == ()
         assert agent.kwargs["name"] == "qtrading_research"
-        assert "saved-sub-prompt" in agent.kwargs["instructions"]
+        assert "saved-analyst-prompt" in agent.kwargs["instructions"]
         assert "analyst" in agent.kwargs["instructions"]
         assert agent.deps.session_id == "session-1"
 
@@ -336,6 +370,32 @@ class TestRunLeafAgentSuccess:
         instructions = _fake_agent.instances[0].kwargs["instructions"]
         assert "默认子角色正文" in instructions
         assert "优先解释行业景气度" in instructions
+
+    async def test_role_prompt_reader_receives_frozen_node_role_key(self, _fake_agent: type[_FakeAgent]) -> None:
+        """角色 Prompt 按节点冻结的 ``role_key`` 解析，不固定为预置 ``"sub"``。"""
+
+        seen: list[str] = []
+
+        def _reader(role_key: str) -> leaf_agent.RolePromptIdentity:
+            seen.append(role_key)
+            return leaf_agent.RolePromptIdentity(text="冻结正文", version="v1")
+
+        await run_leaf_agent(_model(), _context(role_key="main"), _binding(), dao=_Dao(), role_prompt_reader=_reader)
+
+        assert seen == ["main"]
+
+    async def test_custom_role_without_frozen_definition_fails_not_sub(
+        self, _fake_agent: type[_FakeAgent], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """自定义角色缺冻结定义时显式失败，不静默降级为子角色正文。"""
+
+        monkeypatch.setattr(leaf_agent, "_read_saved_role_prompt", _ORIGINAL_READ_SAVED_ROLE_PROMPT)
+
+        outcome = await run_leaf_agent(_model(), _context(role_key="analyst"), _binding(), dao=_Dao())
+
+        assert outcome.state == "failed"
+        assert outcome.error_code == LEAF_ROLE_PROMPT_UNAVAILABLE
+        assert _fake_agent.instances == []
 
     async def test_role_prompt_unavailable_fails_without_outbound(self, _fake_agent: type[_FakeAgent]) -> None:
         dao = _Dao()
@@ -378,6 +438,107 @@ class TestRunLeafAgentSuccess:
         assert _fake_agent.instances == []
         assert dao.drafts == []
 
+    async def test_acceptance_snapshot_survives_later_settings_change(
+        self, _fake_agent: type[_FakeAgent], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """受理后修改设置页正文 → 叶仍用受理时冻结快照（不读当前设置冒充）。"""
+
+        monkeypatch.setattr(
+            leaf_agent,
+            "_read_saved_role_prompt",
+            lambda role_key: leaf_agent.RolePromptIdentity(text="受理后改过的正文", version="v-changed"),
+        )
+        dao = _ManifestDao(_frozen_manifest(version="v-frozen", snapshot_text="受理时冻结的角色正文"))
+
+        outcome = await run_leaf_agent(
+            _model(),
+            _context(role_key="main"),
+            _binding(),
+            dao=dao,
+            frozen_role_prompt_provider=leaf_agent.build_frozen_role_prompt_provider(dao),
+        )
+
+        assert outcome.state == "complete"
+        instructions = _fake_agent.instances[0].kwargs["instructions"]
+        assert "受理时冻结的角色正文" in instructions
+        assert "受理后改过的正文" not in instructions
+        assert dao.manifest_reads == [("user-1", "execution-1")]
+
+    async def test_snapshot_version_mismatch_fails_without_outbound(self, _fake_agent: type[_FakeAgent]) -> None:
+        """冻结引用版本与正文快照版本不一致 → 显式失败、零外发。"""
+
+        dao = _ManifestDao(_frozen_manifest(version="v-frozen", snapshot_version="v-other"))
+
+        outcome = await run_leaf_agent(
+            _model(),
+            _context(role_key="main"),
+            _binding(),
+            dao=dao,
+            frozen_role_prompt_provider=leaf_agent.build_frozen_role_prompt_provider(dao),
+        )
+
+        assert outcome.state == "failed"
+        assert outcome.error_code == LEAF_ROLE_PROMPT_UNAVAILABLE
+        assert _fake_agent.instances == []
+        assert dao.drafts == []
+
+    async def test_missing_snapshot_with_changed_settings_fails_without_outbound(
+        self, _fake_agent: type[_FakeAgent], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """无正文快照（旧/比较 manifest）时版本必须一致；改后版本不同即失败。"""
+
+        monkeypatch.setattr(
+            leaf_agent,
+            "_read_saved_role_prompt",
+            lambda role_key: leaf_agent.RolePromptIdentity(text="改后正文", version="v-changed"),
+        )
+        dao = _ManifestDao(_frozen_manifest(version="v-frozen", snapshot_text=None))
+
+        outcome = await run_leaf_agent(
+            _model(),
+            _context(role_key="main"),
+            _binding(),
+            dao=dao,
+            frozen_role_prompt_provider=leaf_agent.build_frozen_role_prompt_provider(dao),
+        )
+
+        assert outcome.state == "failed"
+        assert outcome.error_code == LEAF_ROLE_PROMPT_UNAVAILABLE
+        assert _fake_agent.instances == []
+        assert dao.drafts == []
+
+    async def test_missing_frozen_ref_fails_without_outbound(self, _fake_agent: type[_FakeAgent]) -> None:
+        """manifest 未冻结该节点角色 → 显式失败，不回落预置子角色。"""
+
+        dao = _ManifestDao(json_doc({"schema_version": 1, "role_prompt_refs": [["sub", "v1"]]}))
+
+        outcome = await run_leaf_agent(
+            _model(),
+            _context(role_key="main"),
+            _binding(),
+            dao=dao,
+            frozen_role_prompt_provider=leaf_agent.build_frozen_role_prompt_provider(dao),
+        )
+
+        assert outcome.state == "failed"
+        assert outcome.error_code == LEAF_ROLE_PROMPT_UNAVAILABLE
+        assert _fake_agent.instances == []
+
+    async def test_manifest_unavailable_fails_without_outbound(self, _fake_agent: type[_FakeAgent]) -> None:
+        dao = _ManifestDao(None)
+
+        outcome = await run_leaf_agent(
+            _model(),
+            _context(role_key="main"),
+            _binding(),
+            dao=dao,
+            frozen_role_prompt_provider=leaf_agent.build_frozen_role_prompt_provider(dao),
+        )
+
+        assert outcome.state == "failed"
+        assert outcome.error_code == LEAF_ROLE_PROMPT_UNAVAILABLE
+        assert _fake_agent.instances == []
+
     async def test_node_source_refs_are_saved_with_result(self, _fake_agent: type[_FakeAgent]) -> None:
         ref = SourceVersionRef(
             source_kind=SourceKind.USER_MESSAGE, source_id="src-1", source_version="1", source_digest="c" * 64
@@ -387,6 +548,20 @@ class TestRunLeafAgentSuccess:
         await run_leaf_agent(_model(), _context(source_refs=(ref,)), _binding(), dao=dao)
 
         assert dao.drafts[0].source_refs == (ref,)
+
+    async def test_capabilities_use_single_staged_guard(self, _fake_agent: type[_FakeAgent]) -> None:
+        """边界与压缩必须交给单一三段式门编排，而不是并列能力（D7-02）。"""
+
+        dao = _Dao()
+
+        await run_leaf_agent(_model(), _context(), _binding(), dao=dao)
+
+        capabilities = _fake_agent.instances[0].kwargs["capabilities"]
+        assert len(capabilities) == 1
+        guard = capabilities[0]
+        assert isinstance(guard, leaf_agent.LeafRequestGuard)
+        assert isinstance(guard.boundary, ResearchBoundary)
+        assert isinstance(guard.compaction, ContextCompaction)
 
     async def test_predecessor_artifacts_are_read_and_saved_as_parent_refs(self, _fake_agent: type[_FakeAgent]) -> None:
         dao = _Dao(artifacts={"art-pre": _Artifact()})
@@ -713,6 +888,25 @@ class TestBuildLeafAgentRunner:
 
         assert outcome.state == "failed"
         assert outcome.error_code == LEAF_ATTRIBUTION_UNAVAILABLE
+
+    async def test_runner_uses_frozen_role_prompt_snapshot(
+        self, _fake_agent: type[_FakeAgent], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """生产工厂默认接线受理冻结 manifest（不依赖调用方手工注入 reader）。"""
+
+        monkeypatch.setattr(
+            leaf_agent,
+            "_read_saved_role_prompt",
+            lambda role_key: leaf_agent.RolePromptIdentity(text="改后正文", version="v-changed"),
+        )
+        dao = _ManifestDao(_frozen_manifest(version="v-frozen", snapshot_text="受理时冻结的角色正文"))
+
+        outcome = await build_leaf_agent_runner(dao)(_model(), _context(role_key="main"), _binding())
+
+        assert outcome.state == "complete"
+        instructions = _fake_agent.instances[0].kwargs["instructions"]
+        assert "受理时冻结的角色正文" in instructions
+        assert "改后正文" not in instructions
 
 
 class _ToolRuntimeStub:

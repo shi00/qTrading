@@ -482,7 +482,7 @@ class TestPrePublishFailures:
         assert outcome.receipt.error_code == "delivery_stage_readback_failed"
         assert store.published == []
 
-    async def test_readback_mismatch_keeps_staged_and_never_publishes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_readback_mismatch_discards_staged_before_publish(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _boom(fields: object, content: bytes, format_name: str) -> tuple[DeliveryField, ...]:
             raise DeliveryRenderError("delivery_render_readback_mismatch", "tampered")
 
@@ -499,8 +499,24 @@ class TestPrePublishFailures:
         assert outcome.receipt.phase == "staged"
         assert outcome.receipt.error_code == "delivery_render_readback_mismatch"
         assert outcome.receipt.output_digest == dao.saved[-1].output_digest
-        assert outcome.staged_cleaned is False
+        # 校验失败仍在校验阶段：发布未认领，writer 退出前必须清掉本交付暂存。
+        assert outcome.staged_cleaned is True
+        assert len(store.cancelled) == 1
         _assert_receipt_wire(outcome.receipt)
+
+    async def test_validated_save_failure_discards_staged(self) -> None:
+        dao = FakePhaseDao()
+        dao.fail_phases = {"validated"}
+        store = FakeStore()
+
+        with pytest.raises(AgentServiceError) as error:
+            await _service(artifacts=FakeArtifacts([_read()]), dao=dao, store=store).deliver(_command(), _context())
+
+        assert error.value.code == AgentErrorCode.REVISION_CONFLICT
+        assert dao.phases == ["manifest_saved", "staged"]
+        assert store.published == []
+        # 推进到 validated 失败：确定尚未认领发布，暂存应被清理。
+        assert len(store.cancelled) == 1
 
     async def test_render_failure_without_body_is_confirmed_before_staging(self) -> None:
         store = FakeStore()
@@ -628,6 +644,8 @@ class TestCancelAndUnknown:
         assert outcome.receipt.error_code == "delivery_publish_unverified"
         assert outcome.receipt.next_action is not None
         assert outcome.staged_cleaned is False
+        # commit_unknown：保留暂存与恢复事实，严禁盲删。
+        assert store.cancelled == []
         _assert_receipt_wire(outcome.receipt)
 
     async def test_published_content_mismatch_is_unknown(self) -> None:
@@ -641,6 +659,7 @@ class TestCancelAndUnknown:
 
         assert dao.phases[-1] == "unknown"
         assert outcome.receipt.phase == "unknown"
+        assert store.cancelled == []
 
     async def test_publish_effect_unknown_when_success_receipt_cannot_be_saved(self) -> None:
         dao = FakePhaseDao()
@@ -759,6 +778,39 @@ class TestFreshSourceState:
         assert outcome.receipt.phase == "validated"
         assert outcome.receipt.error_code == "delivery_source_state_changed"
         assert outcome.receipt.publish_effect == "not_attempted"
+        # 确定未认领发布：暂存不再有交付价值，writer 退出前安全清理。
+        assert outcome.staged_cleaned is True
+        assert len(store.cancelled) == 1
+
+    async def test_source_recheck_failure_after_validation_discards_staged(self) -> None:
+        class _FailOnFreshCall(FakeArtifacts):
+            def __init__(self, pages: list[ArtifactRead], *, fail_at: int) -> None:
+                super().__init__(pages)
+                self._fresh_calls = 0
+                self._fail_at = fail_at
+
+            async def read_artifact(self, query: ArtifactReadQuery, *, user_scope: str) -> ArtifactRead:
+                if query.limit == 1:
+                    self._fresh_calls += 1
+                    if self._fresh_calls == self._fail_at:
+                        self.queries.append(query)
+                        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "artifact cleaned", "op-1")
+                return await super().read_artifact(query, user_scope=user_scope)
+
+        artifacts = _FailOnFreshCall([_read()], fail_at=3)
+        store = FakeStore()
+        dao = FakePhaseDao()
+
+        outcome = await _service(artifacts=artifacts, dao=dao, store=store).deliver(_command(), _context())
+
+        assert dao.phases == ["manifest_saved", "staged", "validated"]
+        assert store.published == []
+        assert outcome.receipt.phase == "validated"
+        assert outcome.receipt.error_code is not None
+        assert outcome.receipt.error_code.startswith("delivery_source_recheck_failed:")
+        assert outcome.receipt.publish_effect == "not_attempted"
+        assert outcome.staged_cleaned is True
+        assert len(store.cancelled) == 1
 
     async def test_unstable_state_stops_before_staging_fact(self) -> None:
         store = FakeStore()

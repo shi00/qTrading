@@ -189,7 +189,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
         with:
           # 禁用 setup-uv 自带缓存（默认键绑定 uv.lock，本仓库以 requirements*.txt 为准且未跟踪
           # uv.lock），改由下方 actions/cache 显式缓存 UV_CACHE_DIR（对齐 Windows 侧已验证方案）。
@@ -307,7 +307,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
         with:
           enable-cache: false
 
@@ -419,7 +419,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
         with:
           # 禁用 setup-uv 自带缓存：其默认缓存键绑定 uv.lock，本仓库以 requirements*.txt 为准
           # 且未跟踪 uv.lock（实测每次 Install dependencies 都在重新下载 ~300 MB wheel，耗时 2~3 分钟）；
@@ -505,7 +505,7 @@ jobs:
         id: sbom
         if: always()
         continue-on-error: true
-        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c  # v0.24.3
+        uses: anchore/sbom-action@dfcb83b97731532d72be422cbc51ee64adb6fd56  # v0.24.4
         with:
           path: .
           format: cyclonedx-json
@@ -620,7 +620,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
         with:
           enable-cache: false
 
@@ -717,7 +717,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
         with:
           enable-cache: false
 
@@ -831,7 +831,7 @@ jobs:
           python-version: '3.14'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
         with:
           enable-cache: false
 
@@ -844,7 +844,7 @@ jobs:
           uv pip install --system "$PIN"
 
       - name: Download coverage fragments
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           pattern: cov-*
           path: fragments
@@ -976,7 +976,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
         with:
           # 禁用 setup-uv 自带缓存：其 post-job 会对 D:\a\_temp\setup-uv-cache 执行
           # `uv cache prune --ci --force`，与下方 actions/cache 管理的 UV_CACHE_DIR 重复，
@@ -1181,7 +1181,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
         with:
           # 同 e2e-tests-windows：保留禁用 setup-uv 自带缓存（其 post-job prune 与磁盘清理
           # 步骤冲突，曾报 "Cache path ... does not exist on disk"）；改用下方 actions/cache
@@ -1362,7 +1362,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
         with:
           # 禁用 setup-uv 自带缓存：其 cache 依赖 glob 默认绑定 uv.lock（本项目无该文件），
           # 实测命中后 Install dependencies 仍需 5.5~9.0 分钟；改由下方 actions/cache
@@ -1609,7 +1609,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
         with:
           # 同 e2e-tests-windows：禁用 uv 本地缓存避免 post-job 报错
           enable-cache: false
@@ -1838,7 +1838,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
         with:
           enable-cache: false
 
@@ -1991,7 +1991,7 @@ jobs:
           python-version: '3.14'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
 
       - name: Recompile requirements
         shell: bash
@@ -2043,7 +2043,7 @@ jobs:
           cache: 'pip'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
 
       - name: Recompile requirements
         shell: bash
@@ -2340,7 +2340,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
 
       - name: Resolve llama-cpp-python version
         id: llama-version
@@ -3028,7 +3028,7 @@ jobs:
           Get-FileHash -Algorithm SHA256 Output\AStockScreener-Setup-${{ matrix.variant }}.exe | Format-List > Output\SHA256SUMS-${{ matrix.variant }}.txt
 
       - name: Generate SBOM
-        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c  # v0.24.3
+        uses: anchore/sbom-action@dfcb83b97731532d72be422cbc51ee64adb6fd56  # v0.24.4
         with:
           path: .
           format: cyclonedx-json
@@ -3488,7 +3488,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
 
       - name: Install dependencies
         run: |

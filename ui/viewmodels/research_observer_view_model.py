@@ -313,6 +313,12 @@ class MCPScopeCatalogPort(Protocol):
     async def list_services(self) -> tuple[Any, ...]: ...
 
 
+class RoleCatalogPort(Protocol):
+    """自定义角色目录读取面（``RoleCatalogService`` 子集，只读活跃角色）。"""
+
+    async def list_active(self) -> tuple[Any, ...]: ...
+
+
 class ModelCatalogPort(Protocol):
     """既有模型连接目录读取面（``ModelConfigurationService`` 子集，只读快照）。"""
 
@@ -807,10 +813,25 @@ class RoleOption:
     name_key: str
     version: str | None
     reject_key: str | None
+    #: 自定义角色的用户可读展示名（预置角色为 ``None``，由 View 按 ``name_key`` 渲染）。
+    display_name: str | None = None
 
     @property
     def eligible(self) -> bool:
         return self.reject_key is None
+
+
+@dataclass(frozen=True)
+class SkillOption:
+    """当前角色已授权的单个 Skill 版本（只来自 ``RoleSkillAssignment.enabled``）。"""
+
+    skill_id: str
+    version: str
+    display_name: str
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.skill_id, self.version)
 
 
 @dataclass(frozen=True)
@@ -1142,6 +1163,13 @@ class ResearchObserverState:
     model_selection_error_key: str | None = None
     role_options: tuple[RoleOption, ...] = ()
     role_selection_error_key: str | None = None
+    #: 自定义角色目录读取失败（预置角色仍可用；不把失败冒充「无自定义角色」）。
+    role_catalog_error_key: str | None = None
+    #: 当前角色已授权的 Skill 选项与本次显式手选（不自动勾选角色默认，R21）。
+    skill_scope_available: bool = False
+    skill_scope_error_key: str | None = None
+    skill_options: tuple[SkillOption, ...] = ()
+    skill_selection: tuple[tuple[str, str], ...] = ()
     #: 当前待发送选择（未随首问发送前可改）。
     model_selection: str | None = None
     #: 用户是否显式选择过模型（自动默认不写会话键；仅显式选择随首问落键）。
@@ -1150,6 +1178,7 @@ class ResearchObserverState:
     #: 已随首问冻结的选择（首问成功后记录；同会话内不再静默改写）。
     model_selection_frozen: str | None = None
     role_selection_frozen: str | None = None
+    skill_selection_frozen: tuple[tuple[str, str], ...] = ()
     budget: BudgetEstimate | None = None
     usage_round: CostUsageView | None = None
     usage_cumulative: CostUsageView | None = None
@@ -2580,6 +2609,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         unavailable_reason_key: str = UNAVAILABLE_NOT_WIRED,
         intake: MainTurnIntakePort | None = None,
         mcp_catalog: MCPScopeCatalogPort | None = None,
+        role_catalog: RoleCatalogPort | None = None,
         model_catalog: ModelCatalogPort | None = None,
         token_counter: Callable[[str, str | None], tuple[int, bool]] | None = None,
         view_store: ObservationViewStateStore | None = None,
@@ -2593,6 +2623,8 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         self._user_scope = user_scope
         self._intake = intake
         self._mcp_catalog = mcp_catalog
+        #: 自定义角色目录（未注入则只有预置 main/sub，不伪装已加载自定义角色）。
+        self._role_catalog = role_catalog
         #: 会话级模型选择存储（Task 7 端口；未注入即在界面如实显示未接线）。
         self._session_models = session_models
         #: 角色覆盖连接解析（默认 None → 不可能出现「角色继承」来源）。
@@ -2799,8 +2831,41 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         elif kind == ExecutionControlKind.CLOSE_UNKNOWN.value:
             await self.close_unknown_execution(execution_id, reason=reason)
 
+    def _resolve_retry_target(self, root: ExecutionNodeView, node_id: str) -> tuple[ExecutionNodeView | None, str]:
+        """在根执行子树内按计划 ``node_id`` 唯一解析目标叶（不猜）。
+
+        返回 ``(目标, "")``；缺失返回 ``CONTROL_TARGET_UNAVAILABLE``，同一子树内
+        多个执行共享同一 ``node_id``（跨轮历史/异常投影）返回
+        ``CONTROL_TARGET_AMBIGUOUS``——两者都显式拒绝，绝不按首个命中提交（R21）。
+        """
+
+        wanted = (node_id or "").strip()
+        if not wanted:
+            return None, "CONTROL_TARGET_UNAVAILABLE"
+        children: dict[str | None, list[ExecutionNodeView]] = {}
+        for item in self._state.execution_nodes:
+            children.setdefault(item.parent_execution_id, []).append(item)
+        matches: list[ExecutionNodeView] = []
+        seen: set[str] = set()
+        stack = list(children.get(root.execution_id, ()))
+        while stack:
+            current = stack.pop()
+            if current.execution_id == root.execution_id or current.execution_id in seen:
+                continue
+            seen.add(current.execution_id)
+            if current.node_id == wanted:
+                matches.append(current)
+            stack.extend(children.get(current.execution_id, ()))
+        if len(matches) == 1:
+            return matches[0], ""
+        return None, "CONTROL_TARGET_AMBIGUOUS" if len(matches) > 1 else "CONTROL_TARGET_UNAVAILABLE"
+
     async def retry_execution(self, execution_id: str, target_node_id: str) -> None:
-        """重试某单任务（``execution_id`` 为根执行，``target_node_id`` 为失败叶）。
+        """重试某单任务（``execution_id`` 为根执行，``target_node_id`` 为计划 node_id）。
+
+        UI 传入的是计划步骤身份（``ExecutionNodeView.node_id``），与执行身份
+        （``execution_id``）是不同命名空间：只在当前根执行子树内按 ``node_id``
+        唯一解析目标叶。缺失或存在歧义时显式拒绝，不按猜测提交（R21）。
 
         范围由服务按持久计划精确重算；UI 只提交目标身份与根执行预期版。
         """
@@ -2809,9 +2874,12 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             self._set_state(last_error_code="CONTROL_UNAVAILABLE")
             return
         node = self.execution_node(execution_id)
-        target = self.execution_node(target_node_id)
-        if node is None or target is None or node.current_round_id is None or not target.node_id:
+        if node is None or node.parent_execution_id is not None or node.current_round_id is None:
             self._set_control_error(execution_id, "retry", "CONTROL_TARGET_UNAVAILABLE")
+            return
+        target, resolution_error = self._resolve_retry_target(node, target_node_id)
+        if target is None:
+            self._set_control_error(execution_id, "retry", resolution_error)
             return
         if self._state.control_pending_execution_id is not None:
             return
@@ -5120,17 +5188,26 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         不进入选项，选中即显式拒绝（不静默换成默认模型）。
         """
 
-        role_options = build_role_options()
+        role_options, role_catalog_error = await self._load_role_options()
         current_role = self._state.role_selection
         role_selection = current_role
         if role_selection is None or self._role_option(role_options, role_selection) is None:
             role_selection = next((option.role_key for option in role_options if option.eligible), None)
+        if role_selection != current_role:
+            # 角色变化即作废旧角色的 Skill 授权视图与手选（不把上一角色能力带入）。
+            self._set_state(
+                skill_scope_available=False,
+                skill_scope_error_key=None,
+                skill_options=(),
+                skill_selection=(),
+            )
         catalog = self._model_catalog
         if catalog is None:
             self._set_state(
                 role_options=role_options,
                 role_selection=role_selection,
                 role_selection_error_key=None,
+                role_catalog_error_key=role_catalog_error,
                 model_selection_available=False,
                 model_selection_explicit=False,
             )
@@ -5144,6 +5221,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
                 role_options=role_options,
                 role_selection=role_selection,
                 role_selection_error_key=None,
+                role_catalog_error_key=role_catalog_error,
                 model_selection_error_key="agent_research_model_selection_error",
                 model_selection_explicit=False,
             )
@@ -5163,10 +5241,167 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             role_options=role_options,
             role_selection=role_selection,
             role_selection_error_key=None,
+            role_catalog_error_key=role_catalog_error,
         )
         # 角色选择落定后，若尚无会话级选择，来源标签可能从默认升级为「角色继承」。
         if self._state.session_model_connection_id is None:
             self._set_state(session_model_source_key=self._derive_session_model_source(None))
+
+    async def _load_role_options(self) -> tuple[tuple[RoleOption, ...], str | None]:
+        """预置角色 + 自定义角色目录的活跃角色；目录失败如实报 key（不冒充无自定义角色）。"""
+
+        options: list[RoleOption] = list(build_role_options())
+        catalog = self._role_catalog
+        if catalog is None:
+            return tuple(options), None
+        try:
+            active = await catalog.list_active()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # 目录失败不得静默丢自定义角色：保留既有选项（含已选角色），只报 key。
+            merged: dict[str, RoleOption] = {option.role_key: option for option in build_role_options()}
+            for existing in self._state.role_options:
+                merged.setdefault(existing.role_key, existing)
+            return tuple(merged.values()), "agent_research_role_catalog_error"
+        seen = {option.role_key for option in options}
+        for definition in active:
+            role_id = getattr(definition, "role_id", None)
+            if not isinstance(role_id, str) or not role_id or role_id in seen:
+                continue
+            version = getattr(definition, "role_version", None)
+            display_name = getattr(definition, "display_name", None)
+            options.append(
+                RoleOption(
+                    role_key=role_id,
+                    name_key="agent_research_role_name_unknown",
+                    version=version if isinstance(version, str) and version.strip() else None,
+                    reject_key=None
+                    if isinstance(version, str) and version.strip()
+                    else "agent_research_role_selection_version_missing",
+                    display_name=display_name if isinstance(display_name, str) and display_name.strip() else None,
+                )
+            )
+            seen.add(role_id)
+        return tuple(options), None
+
+    async def load_role_skill_scope(self) -> None:
+        """按当前角色读取已授权的 Skill 版本（``RoleSkillAssignment.enabled``）。
+
+        只把角色启用集合作为可选项，**不自动勾选**角色默认版本（R21：默认能力
+        不得绕过用户手选授予执行）。无分配记录 = 已核准的零能力（可用但无选项）；
+        读取失败如实报 key 并清空选项，不冒充「无可用 Skill」。
+        """
+
+        option = self._role_option(self._state.role_options, self._state.role_selection)
+        reader = getattr(self._service, "read_role_skill_assignment", None)
+        if option is None or option.version is None or not callable(reader):
+            self._set_state(
+                skill_scope_available=False,
+                skill_scope_error_key=None,
+                skill_options=(),
+                skill_selection=(),
+            )
+            return
+        read_assignment = cast(Callable[..., Awaitable[Any]], reader)
+        try:
+            assignment = await read_assignment(
+                user_scope=self._user_scope,
+                role_id=option.role_key,
+                role_version=option.version,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._set_state(
+                skill_scope_available=False,
+                skill_scope_error_key="agent_research_skill_scope_error",
+                skill_options=(),
+                skill_selection=(),
+            )
+            return
+        enabled = tuple(getattr(assignment, "enabled", ()) or ())
+        options = tuple(
+            SkillOption(
+                skill_id=ref.skill_id,
+                version=str(ref.version),
+                display_name=ref.skill_id,
+            )
+            for ref in enabled
+            if isinstance(getattr(ref, "skill_id", None), str) and getattr(ref, "skill_id", "")
+        )
+        allowed = {option.key for option in options}
+        selected = tuple(key for key in self._state.skill_selection if key in allowed)
+        self._set_state(
+            skill_scope_available=True,
+            skill_scope_error_key=None,
+            skill_options=options,
+            skill_selection=selected,
+        )
+
+    def toggle_role_skill(self, skill_id: str, version: str) -> None:
+        """勾选/取消本次允许的 Skill：只接受当前角色已授权选项（不越权手选）。"""
+
+        key = (skill_id, str(version))
+        if not any(option.key == key for option in self._state.skill_options):
+            self._set_state(skill_scope_error_key="agent_research_skill_selection_unknown")
+            return
+        selected = set(self._state.skill_selection)
+        if key in selected:
+            selected.discard(key)
+        else:
+            selected.add(key)
+        self._set_state(skill_selection=tuple(sorted(selected)), skill_scope_error_key=None)
+
+    async def _role_capability_bounds(self) -> tuple[frozenset[str] | None, frozenset[str] | None, str | None]:
+        """解析当前角色的授权上限（``skill:<id>@<ver>`` / MCP ``stable_key``）。
+
+        - 未选角色：返回 ``(None, None, None)``，不做交集（受理侧按策略未知处理）；
+        - 无授权端口：对应维度返回 ``None``（无法判定，不伪造零能力）；
+        - 有端口但无分配记录：返回空集（已核准的零能力）；
+        - 读取失败：返回错误 key，调用方零发送（不把未知授权当无限制）。
+        """
+
+        option = self._role_option(self._state.role_options, self._state.role_selection)
+        if option is None or option.version is None:
+            return None, None, None
+        skills: frozenset[str] | None = None
+        reader = getattr(self._service, "read_role_skill_assignment", None)
+        if callable(reader):
+            read_assignment = cast(Callable[..., Awaitable[Any]], reader)
+            try:
+                assignment = await read_assignment(
+                    user_scope=self._user_scope,
+                    role_id=option.role_key,
+                    role_version=option.version,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return None, None, "agent_research_skill_scope_error"
+            enabled = tuple(getattr(assignment, "enabled", ()) or ())
+            skills = frozenset(f"skill:{ref.skill_id}@{ref.version}" for ref in enabled)
+        mcp: frozenset[str] | None = None
+        lister = getattr(self._mcp_catalog, "list_role_assignments", None) if self._mcp_catalog is not None else None
+        if callable(lister):
+            list_assignments = cast(Callable[..., Awaitable[Any]], lister)
+            try:
+                assignments = await list_assignments()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return skills, None, "agent_research_mcp_scope_error"
+            matched = next(
+                (
+                    item
+                    for item in assignments
+                    if getattr(item, "role_id", None) == option.role_key
+                    and getattr(item, "role_version", None) == option.version
+                ),
+                None,
+            )
+            mcp = frozenset(binding.identity.stable_key() for binding in (getattr(matched, "available", ()) or ()))
+        return skills, mcp, None
 
     @staticmethod
     def _option(options: Sequence[ModelConnectionOption], connection_id: str | None) -> ModelConnectionOption | None:
@@ -5313,7 +5548,15 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         if option.reject_key is not None:
             self._set_state(role_selection_error_key=option.reject_key)
             return
-        self._set_state(role_selection=role_key, role_selection_error_key=None)
+        self._set_state(
+            role_selection=role_key,
+            role_selection_error_key=None,
+            # 切角色即作废旧角色的 Skill 授权视图与手选，避免把上一角色能力带入新角色。
+            skill_scope_available=False,
+            skill_scope_error_key=None,
+            skill_options=(),
+            skill_selection=(),
+        )
 
     def _selected_connection(self) -> Mapping[str, Any] | None:
         """当前选择的连接定义（未选择/目录未载入 → None，不猜候选）。"""
@@ -5527,6 +5770,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         if not text:
             self._set_state(composer_error_key="agent_research_empty_draft")
             return
+        mode = Mode(self._state.composer_mode)
         role_refs: tuple[tuple[str, str], ...] = ()
         role_key = self._state.role_selection
         if role_key is not None:
@@ -5542,11 +5786,27 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         if self._state.composer_pending:
             return
         self._track_inflight_cancellable()
+        # 先置 pending 再等待授权读取：避免两个并发首问在读取窗口内重复受理（重入保护）。
         self._set_state(composer_pending=True, composer_error_key=None, last_dispatch_reason=None)
-        selection = tuple(
-            self._mcp_identities[key] for key in self._state.mcp_scope_selected if key in self._mcp_identities
-        )
+        skill_refs: tuple[tuple[str, str], ...] = ()
+        selection: tuple[MCPServiceIdentity, ...] = ()
         try:
+            # 冻结能力 = 用户显式手选 ∩ 角色自身授权（默认能力不自动授予，R21）。
+            allowed_skills, allowed_mcp, bounds_error = await self._role_capability_bounds()
+            if bounds_error is not None:
+                if mode is Mode.EXECUTE:
+                    self._set_state(composer_pending=False, composer_error_key=bounds_error)
+                    return
+                # 讨论/计划零研究：授权未知时不携带任何外部能力，也不阻断直答/计划。
+                allowed_skills = allowed_mcp = frozenset()
+            skill_refs = self._state.skill_selection
+            if allowed_skills is not None:
+                skill_refs = tuple(ref for ref in skill_refs if f"skill:{ref[0]}@{ref[1]}" in allowed_skills)
+            selection = tuple(
+                self._mcp_identities[key] for key in self._state.mcp_scope_selected if key in self._mcp_identities
+            )
+            if allowed_mcp is not None:
+                selection = tuple(identity for identity in selection if identity.stable_key() in allowed_mcp)
             # 会话键优先；新会话仅当用户**显式**选择过模型才写键（自动默认不写，
             # 读失败时也不覆盖已存键，如实保持继承）。
             preferred = self._state.session_model_connection_id
@@ -5558,10 +5818,11 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
                 preferred = self._state.model_selection
             result = await intake.start_question(
                 text,
-                mode=Mode(self._state.composer_mode),
+                mode=mode,
                 session_id=self._state.session_id,
                 expected_revision=(self._state.session_draft_revision if self._state.session_id is not None else 0),
                 role_prompt_refs=role_refs,
+                skill_refs=skill_refs,
                 mcp_selection=selection,
                 model_connection_id=preferred,
             )
@@ -5578,6 +5839,7 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             # 选择随首问冻结（同会话内展示冻结值，不被后续点选静默改写）。
             "model_selection_frozen": self._state.model_selection,
             "role_selection_frozen": self._state.role_selection,
+            "skill_selection_frozen": skill_refs,
         }
         if main_turn is None:
             changes["last_dispatch_reason"] = self._dispatch_reason(result)
@@ -5922,6 +6184,7 @@ def shared_research_observer(
     unavailable_reason_key: str = UNAVAILABLE_NOT_WIRED,
     intake: MainTurnIntakePort | None = None,
     mcp_catalog: MCPScopeCatalogPort | None = None,
+    role_catalog: RoleCatalogPort | None = None,
     model_catalog: ModelCatalogPort | None = None,
     delivery: ArtifactDeliveryPort | None = None,
     cleanup: HistoryCleanupGateway | None = None,
@@ -5938,6 +6201,7 @@ def shared_research_observer(
         or _shared_vm._session_key != session_key
         or _shared_vm._intake is not intake
         or _shared_vm._mcp_catalog is not mcp_catalog
+        or _shared_vm._role_catalog is not role_catalog
         # 未显式注入目录时由 VM 自建只读目录实例，重复调用不得因 None 反复重建。
         or (model_catalog is not None and _shared_vm._model_catalog is not model_catalog)
         or _shared_vm._delivery is not delivery
@@ -5952,6 +6216,7 @@ def shared_research_observer(
             unavailable_reason_key=unavailable_reason_key,
             intake=intake,
             mcp_catalog=mcp_catalog,
+            role_catalog=role_catalog,
             model_catalog=model_catalog,
             delivery=delivery,
             cleanup=cleanup,

@@ -158,7 +158,12 @@ from services.agent_service.comparison import (
 )
 from services.agent_service.comparison_notes import AppStateComparisonLaneNotes, ComparisonLaneNotesPort
 from services.agent_service.control import RetryLauncher, plan_retry
-from services.agent_service.dispatch import DispatchOutcome, ResearchDispatcher, ResearchWorkflowResult
+from services.agent_service.dispatch import (
+    BindingIdentityProvider,
+    DispatchOutcome,
+    ResearchDispatcher,
+    ResearchWorkflowResult,
+)
 from services.agent_service.main_turn import derive_frozen_selection_policy, plan_spec_from_proposal
 from services.agent_service.skills import (
     SkillAvailabilityReceipt,
@@ -452,6 +457,7 @@ class AgentService:
         lane_withdrawer: LaneWithdrawer | None = None,
         lane_notes: ComparisonLaneNotesPort | None = None,
         retry_launcher: RetryLauncher | None = None,
+        retry_binding_identity_provider: BindingIdentityProvider | None = None,
     ) -> None:
         """``usage_dao`` 为共享模型调度账本（同一引擎）；缺省时费用投影如实报读取失败。
 
@@ -467,6 +473,9 @@ class AgentService:
         （N29）：未注入时复用本 DAO 引擎写 ``app_state``（无引擎则不持久化，读取
         面退回按执行行重建）。``retry_launcher`` 为单任务重试的原生投递端口
         （W-01）；未注入时重试只落持久事实并如实标 ``not_wired``，不伪造已重跑。
+        ``retry_binding_identity_provider`` 为重试轮的冻结绑定身份来源（与首次
+        派发同一权威快照）；注入投递端口而未接线时重试 fail-closed，不派发注定
+        无法建立轮次的载荷。
         """
 
         self._dao = dao
@@ -477,6 +486,7 @@ class AgentService:
         self._lane_withdrawer = lane_withdrawer
         self._lane_notes = lane_notes
         self._retry_launcher = retry_launcher
+        self._retry_binding_identity_provider = retry_binding_identity_provider
         #: 已停止的比较组（组派发门关闭事实）：在途编排的下一路一律零派发。
         self._stopped_groups: set[str] = set()
         # 进程内交付单飞（同一命令在途时不并发重发；原生发送按命令键幂等）。
@@ -1632,10 +1642,17 @@ class AgentService:
           ``PlanSpecProposal``（与派发面同源，不另造计划）；
         - 范围：``compute_retry_scope`` + ``build_retry_payload``，只重做目标叶及
           传递下游，范围外已完成前置原样保留；未知/完成/进行中叶拒绝重试；
+        - 载荷准入事实：角色/能力策略取权威冻结手选集，绑定身份取与首次派发
+          同一权威快照；已接线投递端口但身份不可得时 fail-closed（不派发注定
+          无法建立轮次的载荷）；
         - 落库：``record_retry_command`` 以 CAS + 命令键幂等记录重试事实（置
           ``planned``，旧轮成果不改写）；
         - 派发：仅当组合根注入 ``retry_launcher`` 时才投递原生载荷；未接线时
-          回执如实标 ``dispatch_state=not_wired``，不伪造已重跑。
+          回执如实标 ``dispatch_state=not_wired``，不伪造已重跑；
+        - 三态分列：落库成功（``applied``）与投递结果是两个事实——投递端明确
+          拒绝记 ``failed``（附原因），投递过程异常记 ``unknown``（可能已在原生
+          受理，不冒充成功也不断言未投递），成功记 ``submitted``（仅表示已交
+          持久 workflow，实际推进归父 workflow）。
         """
 
         self._require_open("retry_execution")
@@ -1653,6 +1670,18 @@ class AgentService:
             raise AgentServiceError(
                 AgentErrorCode.CONFIG_UNAVAILABLE, "frozen role/capability selection unavailable", identity
             )
+        launcher = self._retry_launcher
+        # 投递端口已接线时，重试轮必须带同一冻结绑定身份：父 workflow 入口据此
+        # 建立真实轮次（缺身份即零叶派发），不以自造身份或当前请求覆盖旧轮归属。
+        binding_identity = None
+        if launcher is not None:
+            provider = self._retry_binding_identity_provider
+            if provider is not None:
+                binding_identity = await provider(request.user_scope, request.execution_id)
+            if binding_identity is None:
+                raise AgentServiceError(
+                    AgentErrorCode.CONFIG_UNAVAILABLE, "retry binding identity unavailable", identity
+                )
         proposal = await self._dao.read_current_plan_proposal(
             user_scope=request.user_scope, execution_id=request.execution_id
         )
@@ -1679,6 +1708,8 @@ class AgentService:
             execution_id=request.execution_id,
             new_round_id=new_round_id,
             plan_digest=digest,
+            role_capabilities={policy.role_key: policy.capabilities},
+            binding_identity=binding_identity,
         )
         dao_request = RetryCommandRecord(
             user_scope=request.user_scope,
@@ -1695,8 +1726,8 @@ class AgentService:
             payload_digest=sha256_hex(json_doc(retry_plan.payload)),
         )
         receipt = await self._dao.record_retry_command(dao_request)
-        launcher = self._retry_launcher
         if launcher is None:
+            # 未注入投递端口：只落库，如实标 not_wired，不伪造已重跑。
             return receipt
         try:
             submitted, reason = await launcher.launch(
@@ -1708,18 +1739,20 @@ class AgentService:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            # 异常时无法证明「未投递」（可能在原生受理后才中断）：如实标未知，
+            # 既不当成功，也不断言落库后一定没有 workflow（R21）。
             classification = classify_error(exc, context="retry_launch")
             severity = classify_severity(exc, context="retry_launch")
             return replace(
                 receipt,
-                dispatch_state="failed",
+                dispatch_state="unknown",
                 dispatch_reason=f"{severity}:{classification.get('code', type(exc).__name__)}",
             )
-        return replace(
-            receipt,
-            dispatch_state="submitted" if submitted else "not_wired",
-            dispatch_reason=reason,
-        )
+        if not submitted:
+            # 投递端明确拒绝（门闩关闭等）：命令已落库但本次确未投递。
+            return replace(receipt, dispatch_state="failed", dispatch_reason=reason)
+        # submitted 只表示已交原生持久 workflow，不代表叶已重跑（实际推进归父）。
+        return replace(receipt, dispatch_state="submitted", dispatch_reason=reason)
 
     async def answer(self, request: SaveAnswerRequest) -> AnswerReceipt:
         """答复入口（§4.1 ``answer``）：委托答复线性化事务，回执三态分列。

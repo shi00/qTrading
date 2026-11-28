@@ -310,3 +310,68 @@ class TestAllRegisteredSingletonsReset:
         assert cls._instance is None, (  # type: ignore[attr-defined]
             f"{cls.__name__}._reset_singleton 未清空 _instance (R7)"
         )
+
+
+class TestTerminalStateDaoRegistryIsolation:
+    """D7-12: TerminalStateDaoRegistry 持有进程级共享 DAO 登记，须注册并统一复位（R15/R7）。"""
+
+    def test_registered_as_singleton(self) -> None:
+        import services.agent_service.workflows  # noqa: F401  (import 触发 @register_singleton)
+        from utils.singleton_registry import get_registered_singletons
+
+        assert "TerminalStateDaoRegistry" in get_registered_singletons()
+
+    def test_reset_all_singletons_clears_installed_dao(self) -> None:
+        from services.agent_service.workflows import TerminalStateDaoRegistry
+        from utils.singleton_registry import reset_all_singletons
+
+        sentinel = object()
+        TerminalStateDaoRegistry.install(sentinel)
+        assert TerminalStateDaoRegistry._instance is sentinel
+
+        reset_all_singletons()
+
+        assert TerminalStateDaoRegistry._instance is None
+
+
+class TestAgentSharedUiRuntimeStateIsolation:
+    """D7-12: 进程级决定仲裁器 / 共享研究观察 VM 由 autouse 夹具统一复位（R7）。"""
+
+    def test_reset_helper_clears_decision_arbiter(self) -> None:
+        from tests.unit.conftest import _reset_ui_shared_runtime_state
+        from ui.agent_decision_arbiter import get_decision_arbiter
+
+        arbiter = get_decision_arbiter()
+        assert (
+            arbiter.begin_submit(
+                "owner-x",
+                "decision-1",
+                execution_id="exec-1",
+                round_id="round-1",
+                has_open_modal_dialog=False,
+            )
+            is None
+        )
+        assert arbiter.owner == "owner-x"
+        assert arbiter.inflight_decision_id == "decision-1"
+        assert arbiter.inflight_scope == ("exec-1", "round-1")
+
+        _reset_ui_shared_runtime_state()
+
+        assert arbiter.owner is None
+        assert arbiter.inflight_decision_id is None
+        assert arbiter.inflight_scope == (None, None)
+
+    def test_reset_helper_disposes_shared_research_observer(self, monkeypatch) -> None:
+        import ui.viewmodels.research_observer_view_model as vm_mod
+
+        from tests.unit.conftest import _reset_ui_shared_runtime_state
+
+        # 避免默认连接目录触发真实 ModelConfigurationService 构造（本用例只验证复位入口）。
+        monkeypatch.setattr(vm_mod, "_default_model_catalog", lambda: None)
+        vm = vm_mod.shared_research_observer(None)
+        assert vm_mod._shared_vm is vm
+
+        _reset_ui_shared_runtime_state()
+
+        assert vm_mod._shared_vm is None

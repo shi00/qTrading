@@ -98,10 +98,16 @@ def _load_env_module() -> types.ModuleType:
 
 
 class _FakeConnection:
-    def __init__(self, on_run_sync: Callable[[], Awaitable[None]] | None) -> None:
+    def __init__(
+        self,
+        on_run_sync: Callable[[], Awaitable[None]] | None,
+        rollback_error: Exception | None = None,
+    ) -> None:
         self._on_run_sync = on_run_sync
+        self._rollback_error = rollback_error
         self.executed_sql: list[str] = []
         self.commit_calls = 0
+        self.rollback_calls = 0
 
     async def execute(self, statement: object, params: object = None) -> types.SimpleNamespace:
         self.executed_sql.append(str(statement))
@@ -112,6 +118,12 @@ class _FakeConnection:
         # D06-003：acquire 后必须先提交锁事务（防止 autobegin 吞掉迁移写入），
         # release 后再提交 unlock 事务。记录次数供时序断言。
         self.commit_calls += 1
+
+    async def rollback(self) -> None:
+        # D1-09：迁移失败时尽力回滚，把连接拉出 InFailedSqlTransaction 后再释放锁。
+        self.rollback_calls += 1
+        if self._rollback_error is not None:
+            raise self._rollback_error
 
     async def run_sync(self, _fn: object) -> None:
         if self._on_run_sync is not None:
@@ -125,7 +137,7 @@ class _FakeConnectContext:
     async def __aenter__(self) -> _FakeConnection:
         if self._engine.connect_error is not None:
             raise self._engine.connect_error
-        connection = _FakeConnection(self._engine.on_run_sync)
+        connection = _FakeConnection(self._engine.on_run_sync, rollback_error=self._engine.rollback_error)
         self._engine.connections.append(connection)
         return connection
 
@@ -140,10 +152,12 @@ class _FakeAsyncEngine:
         connect_error: Exception | None = None,
         on_run_sync: Callable[[], Awaitable[None]] | None = None,
         dispose_error: Exception | None = None,
+        rollback_error: Exception | None = None,
     ) -> None:
         self.connect_error = connect_error
         self.on_run_sync = on_run_sync
         self.dispose_error = dispose_error
+        self.rollback_error = rollback_error
         self.connect_calls = 0
         self.dispose_calls = 0
         self.connections: list[_FakeConnection] = []
@@ -197,6 +211,73 @@ async def test_success_path_disposes_engine(
     # D06-003：acquire 后、release 后各一次 commit，终结 autobegin 事务，
     # 保证迁移写入与 unlock 均不悬挂在 connect() 退出的隐式回滚里。
     assert connection.commit_calls == 2
+    # 成功路径不得回滚
+    assert connection.rollback_calls == 0
+
+
+async def test_migration_failure_rolls_back_and_does_not_commit(
+    alembic_env: types.ModuleType,
+    install_engine: Callable[[_FakeAsyncEngine], _FakeAsyncEngine],
+) -> None:
+    """D1-09：迁移失败时叠加在失效事务上的 commit 会覆盖真实根因，必须改为回滚。"""
+
+    async def _fail() -> None:
+        await _raise_runtime_error("migration failed")
+
+    engine = install_engine(_FakeAsyncEngine(on_run_sync=_fail))
+
+    with pytest.raises(RuntimeError, match="migration failed"):
+        await alembic_env.run_async_migrations()
+
+    connection = engine.connections[0]
+    # 只有 acquire 后终结锁事务的那一次 commit；失败事务绝不再提交
+    assert connection.commit_calls == 1
+    assert connection.rollback_calls == 1
+    # 回滚后仍须释放跨进程锁
+    assert any("pg_advisory_unlock" in sql for sql in connection.executed_sql)
+
+
+async def test_migration_failure_rollback_error_does_not_mask_original(
+    alembic_env: types.ModuleType,
+    install_engine: Callable[[_FakeAsyncEngine], _FakeAsyncEngine],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """回滚自身失败时只脱敏记录 warning，原始迁移异常必须继续上抛。"""
+
+    async def _fail() -> None:
+        await _raise_runtime_error("migration failed")
+
+    engine = install_engine(_FakeAsyncEngine(on_run_sync=_fail, rollback_error=RuntimeError("rollback failed")))
+    caplog.set_level("WARNING", logger=alembic_env.__name__)
+
+    with pytest.raises(RuntimeError, match="migration failed"):
+        await alembic_env.run_async_migrations()
+
+    connection = engine.connections[0]
+    assert connection.commit_calls == 1
+    messages = [record.getMessage() for record in caplog.records]
+    assert "Failed to roll back Alembic migration transaction: rollback failed" in messages
+    # 回滚失败仍尽力释放锁（unlock 本身失败由 release_migration_lock 兜底）
+    assert any("pg_advisory_unlock" in sql for sql in connection.executed_sql)
+
+
+async def test_cancelled_migration_skips_commit_and_rollback(
+    alembic_env: types.ModuleType,
+    install_engine: Callable[[_FakeAsyncEngine], _FakeAsyncEngine],
+) -> None:
+    """R2：取消路径不吞没 CancelledError，也不在取消中的连接上 commit / rollback。"""
+
+    engine = install_engine(_FakeAsyncEngine(on_run_sync=_raise_cancelled))
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await alembic_env.run_async_migrations()
+
+    assert exc_info.type is asyncio.CancelledError
+    connection = engine.connections[0]
+    assert connection.commit_calls == 1
+    assert connection.rollback_calls == 0
+    # 会话级 advisory lock 交由外层 NullPool 连接关闭释放，此处不显式 unlock
+    assert not any("pg_advisory_unlock" in sql for sql in connection.executed_sql)
 
 
 async def test_cross_process_lock_is_released_when_migration_fails(

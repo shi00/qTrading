@@ -163,21 +163,36 @@ class TestMacroSyncQuarterHelpers:
         assert _compute_gdp_publish_date(period) == datetime.date(2024, 4, 20)
 
     def test_latest_quarter_before_q1_month(self):
-        """1-3 月应返回去年 Q4。"""
+        """1-3 月中旬应返回去年 Q4。"""
         assert _latest_quarter_before(datetime.date(2024, 2, 15)) == "2023Q4"
-        assert _latest_quarter_before(datetime.date(2024, 3, 31)) == "2023Q4"
 
     def test_latest_quarter_before_q2_month(self):
-        """4-6 月应返回当年 Q1。"""
+        """4-6 月中旬应返回当年 Q1。"""
         assert _latest_quarter_before(datetime.date(2024, 5, 15)) == "2024Q1"
 
     def test_latest_quarter_before_q3_month(self):
-        """7-9 月应返回当年 Q2。"""
+        """7-9 月中旬应返回当年 Q2。"""
         assert _latest_quarter_before(datetime.date(2024, 8, 15)) == "2024Q2"
 
     def test_latest_quarter_before_q4_month(self):
-        """10-12 月应返回当年 Q3。"""
+        """10-12 月中旬应返回当年 Q3。"""
         assert _latest_quarter_before(datetime.date(2024, 11, 15)) == "2024Q3"
+
+    def test_latest_quarter_before_quarter_end_inclusive(self):
+        """D2-06：季末日当天应返回已结束的当季（旧实现 06-30 少算一季）。"""
+        assert _latest_quarter_before(datetime.date(2024, 3, 31)) == "2024Q1"
+        assert _latest_quarter_before(datetime.date(2024, 6, 30)) == "2024Q2"
+        assert _latest_quarter_before(datetime.date(2024, 9, 30)) == "2024Q3"
+        assert _latest_quarter_before(datetime.date(2024, 12, 31)) == "2024Q4"
+
+    def test_latest_quarter_before_day_before_quarter_end(self):
+        """季末日前一天仍属上一季。"""
+        assert _latest_quarter_before(datetime.date(2024, 6, 29)) == "2024Q1"
+        assert _latest_quarter_before(datetime.date(2025, 1, 1)) == "2024Q4"
+
+    def test_latest_quarter_before_cross_year(self):
+        """年初跨年边界：2025-01-05 → 2024Q4。"""
+        assert _latest_quarter_before(datetime.date(2025, 1, 5)) == "2024Q4"
 
 
 class TestMacroSyncMergeMacroDataWithGdp:
@@ -319,9 +334,11 @@ class TestMacroSyncSyncMacroMonthly:
         ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_macro_data = AsyncMock(return_value=pd.DataFrame({"period": ["202406"], "m2": [100.0]}))
+        ctx.api.get_cn_gdp = AsyncMock(return_value=None)
         strategy = MacroSyncStrategy(ctx)
         strategy.dao = MagicMock()
         strategy.dao.get_macro_latest_date = AsyncMock(return_value=None)
+        strategy.dao.get_gdp_periods = AsyncMock(return_value=[])
         strategy.dao.save_macro_economy = AsyncMock(return_value=1)
         result = SyncResult()
         await strategy._sync_macro_monthly(result)
@@ -341,9 +358,9 @@ class TestMacroSyncSyncMacroMonthly:
         await strategy._sync_macro_monthly(result)
         assert len(result.errors) > 0
 
-    @pytest.mark.asyncio
-    async def test_sync_macro_monthly_includes_cn_gdp(self):
-        """Phase 2D §3.2.6：_sync_macro_monthly 应调用 get_cn_gdp 拉取 GDP 数据。"""
+    @staticmethod
+    def _make_gdp_strategy(existing_periods):
+        """构造带 GDP 缺口查询桩的 strategy（月度数据固定为 202412）。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
@@ -355,8 +372,7 @@ class TestMacroSyncSyncMacroMonthly:
         ctx.api.get_cn_gdp = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    # latest 为 2024-12-01 时，Q4 未结束，_latest_quarter_before 返回 "2024Q3"
-                    "period": ["2024Q3"],
+                    "period": ["2024Q2"],
                     "gdp": [35000000.0],
                     "gdp_yoy": [5.2],
                     "pi": [2500000.0],
@@ -370,20 +386,104 @@ class TestMacroSyncSyncMacroMonthly:
         )
         strategy = MacroSyncStrategy(ctx)
         strategy.dao = MagicMock()
-        # latest 为 2024-12-01（12 月），Q4 未结束，_latest_quarter_before 返回 "2024Q3"
         strategy.dao.get_macro_latest_date = AsyncMock(return_value=datetime.date(2024, 12, 1))
+        strategy.dao.get_gdp_periods = AsyncMock(return_value=list(existing_periods))
         strategy.dao.save_macro_economy = AsyncMock(return_value=2)
+        return strategy, ctx
 
+    @staticmethod
+    def _quarter_ends(start_year: int, start_q: int, end_year: int, end_q: int) -> list[datetime.date]:
+        months = {1: 3, 2: 6, 3: 9, 4: 12}
+        days = {1: 31, 2: 30, 3: 30, 4: 31}
+        result = []
+        for year in range(start_year, end_year + 1):
+            q_lo = start_q if year == start_year else 1
+            q_hi = end_q if year == end_year else 4
+            for q in range(q_lo, q_hi + 1):
+                result.append(datetime.date(year, months[q], days[q]))
+        return result
+
+    @pytest.mark.asyncio
+    async def test_sync_macro_monthly_includes_cn_gdp(self):
+        """D2-06：首轮无 GDP 时按历史窗口区间补齐（start_q/end_q），而非单季。"""
+        strategy, ctx = self._make_gdp_strategy([])
         result = SyncResult()
-        await strategy._sync_macro_monthly(result)
+        with (
+            patch("data.sync.macro.get_now", return_value=datetime.datetime(2024, 12, 15)),
+            patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1),
+        ):
+            await strategy._sync_macro_monthly(result)
 
-        # 验证 get_cn_gdp 被调用，quarter 参数为 "2024Q3"
-        ctx.api.get_cn_gdp.assert_called_once_with(quarter="2024Q3")
-        # 验证 save_macro_economy 被调用（merged 含 GDP 行）
+        # 2024-12-15 → 最近已结束季度 2024Q3；窗口 = 2023Q1..2024Q3
+        ctx.api.get_cn_gdp.assert_called_once_with(start_q="2023Q1", end_q="2024Q3")
         strategy.dao.save_macro_economy.assert_called_once()
         saved_df = strategy.dao.save_macro_economy.call_args.args[0]
-        # 应包含 GDP 字段
         assert "gdp_yoy" in saved_df.columns
+
+    @pytest.mark.asyncio
+    async def test_sync_macro_monthly_backfills_gap_not_after_max_period(self):
+        """D2-06：最新季度已存在时仍补齐中间缺口（不依赖月度 MAX(period) 往后拉）。"""
+        existing = [p for p in self._quarter_ends(2023, 1, 2024, 3) if p != datetime.date(2024, 6, 30)]
+        strategy, ctx = self._make_gdp_strategy(existing)
+        result = SyncResult()
+        with (
+            patch("data.sync.macro.get_now", return_value=datetime.datetime(2024, 12, 15)),
+            patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1),
+        ):
+            await strategy._sync_macro_monthly(result)
+
+        ctx.api.get_cn_gdp.assert_called_once_with(start_q="2024Q2", end_q="2024Q2")
+
+    @pytest.mark.asyncio
+    async def test_sync_macro_monthly_gdp_multiple_missing_runs(self):
+        """D2-06：离散缺口按连续区间合并为多次 start_q/end_q 调用。"""
+        existing = [
+            datetime.date(2023, 3, 31),
+            datetime.date(2023, 9, 30),
+            datetime.date(2024, 3, 31),
+            datetime.date(2024, 9, 30),
+        ]
+        strategy, ctx = self._make_gdp_strategy(existing)
+        result = SyncResult()
+        with (
+            patch("data.sync.macro.get_now", return_value=datetime.datetime(2024, 12, 15)),
+            patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1),
+        ):
+            await strategy._sync_macro_monthly(result)
+
+        calls = [c.kwargs for c in ctx.api.get_cn_gdp.call_args_list]
+        assert calls == [
+            {"start_q": "2023Q2", "end_q": "2023Q2"},
+            {"start_q": "2023Q4", "end_q": "2023Q4"},
+            {"start_q": "2024Q2", "end_q": "2024Q2"},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_sync_macro_monthly_no_gdp_fetch_when_complete(self):
+        """D2-06：窗口内 GDP 无缺口时不调用 cn_gdp。"""
+        strategy, ctx = self._make_gdp_strategy(self._quarter_ends(2023, 1, 2024, 3))
+        result = SyncResult()
+        with (
+            patch("data.sync.macro.get_now", return_value=datetime.datetime(2024, 12, 15)),
+            patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1),
+        ):
+            await strategy._sync_macro_monthly(result)
+
+        ctx.api.get_cn_gdp.assert_not_called()
+        strategy.dao.get_gdp_periods.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_sync_gdp_backfill_skips_unpublished_quarter(self):
+        """D2-06：保守发布日未到的季度不请求（1 月 5 日不拉上年 Q4）。"""
+        strategy, ctx = self._make_gdp_strategy([])
+        result = SyncResult()
+        with (
+            patch("data.sync.macro.get_now", return_value=datetime.datetime(2025, 1, 5)),
+            patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1),
+        ):
+            await strategy._sync_macro_monthly(result)
+
+        ctx.api.get_cn_gdp.assert_called_once_with(start_q="2024Q1", end_q="2024Q3")
 
     @pytest.mark.asyncio
     async def test_sync_macro_monthly_gdp_permission_denied_does_not_block_m2(self):
@@ -398,6 +498,7 @@ class TestMacroSyncSyncMacroMonthly:
         strategy = MacroSyncStrategy(ctx)
         strategy.dao = MagicMock()
         strategy.dao.get_macro_latest_date = AsyncMock(return_value=datetime.date(2024, 12, 1))
+        strategy.dao.get_gdp_periods = AsyncMock(return_value=[])
         strategy.dao.save_macro_economy = AsyncMock(return_value=1)
 
         result = SyncResult()
@@ -1542,9 +1643,11 @@ class TestMacroSyncMonthlyUsesYyyymm:
         ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_macro_data = AsyncMock(return_value=pd.DataFrame({"period": ["202406"], "m2": [100.0]}))
+        ctx.api.get_cn_gdp = AsyncMock(return_value=None)
         strategy = MacroSyncStrategy(ctx)
         strategy.dao = MagicMock()
         strategy.dao.get_macro_latest_date = AsyncMock(return_value=pd.Timestamp("2024-06-01"))
+        strategy.dao.get_gdp_periods = AsyncMock(return_value=[])
         strategy.dao.save_macro_economy = AsyncMock(return_value=1)
         result = SyncResult()
         await strategy._sync_macro_monthly(result)
@@ -1864,6 +1967,7 @@ class TestMacroSyncCancellationPoints:
         """L319: cn_gdp 处理后触发取消 → return（save_macro_economy 未调用）。"""
         strategy, cancel_event = self._make_strategy_with_cancel_event()
         strategy.dao.get_macro_latest_date = AsyncMock(return_value=datetime.date(2024, 12, 1))
+        strategy.dao.get_gdp_periods = AsyncMock(return_value=[])
 
         strategy.context.api.get_macro_data = AsyncMock(
             return_value=pd.DataFrame({"period": ["202412"], "m2": [100.0]})
@@ -2171,3 +2275,29 @@ class TestIndexWeightPerIndexResumeWindow:
         assert result.status == SyncStatus.SUCCESS.value
         assert result.errors == []
         assert ctx.cache.sync_dao.update_sync_status.call_args.kwargs["status"] == "success"
+
+
+class TestMacroRunEntryHostCancelGuard:
+    """D2-08：macro 入口须先读宿主注入的轮次 cancel_event，不得复位后继续发请求。"""
+
+    @pytest.mark.asyncio
+    async def test_entry_host_cancel_returns_cancelled_without_sub_syncs(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.macro_dao = MagicMock()
+        ctx.api = MagicMock()
+        ctx.cancel_event = asyncio.Event()
+        ctx.cancel_event.set()
+        strategy = MacroSyncStrategy(ctx)
+        strategy._sync_macro_monthly = AsyncMock()
+        strategy._sync_shibor_daily = AsyncMock()
+        strategy._sync_index_weights = AsyncMock()
+
+        result = await strategy.run()
+
+        assert result.status == SyncStatus.CANCELLED.value
+        strategy._sync_macro_monthly.assert_not_awaited()
+        strategy._sync_shibor_daily.assert_not_awaited()
+        strategy._sync_index_weights.assert_not_awaited()
+        # 宿主注入的轮次事件不得被子策略清除
+        assert ctx.cancel_event.is_set() is True

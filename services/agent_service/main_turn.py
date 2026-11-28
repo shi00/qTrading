@@ -17,8 +17,9 @@
   :func:`plan_spec_from_proposal` 生成 ``PlanSpecProposal``（可执行节点表）。
   两者共用同一份步骤内容，不把可读步骤直接冒充可执行节点表。
 - **角色能力来源**：只复用本次请求已冻结的 Skill/MCP 显式手选集
-  （:func:`derive_frozen_selection_policy`），不新增角色能力配置表；未选择
-  视为空集并 fail-closed（``None``），不得解释为「全部允许」。
+  （:func:`derive_frozen_selection_policy`），不新增角色能力配置表；角色已选定但
+  未勾选 Skill/MCP 是**已核准的零能力集**（纯内部资料分析可执行），角色缺失/歧义
+  才是未知并 fail-closed（``None``），均不得解释为「全部允许」。
 - **如实拒绝**：计划来源/能力来源/受理事实任一不可得即零派发；``CancelledError``
   原样传播（R2），其余异常只记录脱敏原因，不伪造已派发（R21）。
 """
@@ -101,6 +102,7 @@ __all__ = [
     "MainTurnRequest",
     "MainTurnRunner",
     "PlanReference",
+    "build_comparison_plan_spec",
     "build_plan_spec_provider",
     "build_role_capability_provider",
     "decode_plan_reference",
@@ -209,20 +211,55 @@ def _source_refs(section: Mapping[str, Any]) -> tuple[SourceVersionRef, ...]:
     )
 
 
+def _capture_frozen_role_prompt_snapshots(
+    role_prompt_refs: Sequence[tuple[str, str]], *, user_scope: str
+) -> tuple[dict[str, str], ...]:
+    """受理时冻结内置研究角色的正文快照（默认正文 + 已保存追加）。
+
+    仅内置角色（``main`` / ``sub``）可在此读取同源正文；自定义角色正文由角色目录
+    冻结定义承载（不经设置页）。若本次读取的正文版本与调用方手选版本不一致，
+    说明受理前设置已被改过，显式失败而不冻结「名不副实」的快照（R21）。
+    """
+
+    from utils.config.llm import RESEARCH_ROLE_KEYS, read_research_role_prompt
+
+    snapshots: list[dict[str, str]] = []
+    for role_id, version in role_prompt_refs:
+        if role_id not in RESEARCH_ROLE_KEYS:
+            continue
+        text, current_version = read_research_role_prompt(role_id)
+        if current_version != version:
+            raise AgentServiceError(
+                AgentErrorCode.CONFIG_UNAVAILABLE,
+                f"role prompt version changed before acceptance: {current_version} != {version}",
+                user_scope,
+            )
+        snapshots.append({"role_id": role_id, "version": version, "text": text})
+    return tuple(snapshots)
+
+
 def derive_frozen_selection_policy(manifest_payload: str) -> FrozenSelectionPolicy | None:
-    """冻结 manifest → 角色能力策略；不可判定/空手选集合返回 ``None``（fail-closed）。
+    """冻结 manifest → 角色能力策略；不可判定返回 ``None``（fail-closed）。
 
     - 角色：``role_prompt_refs`` 必须恰好一项（读计划步骤不含角色字段，多个角色
       无法无歧义映射，按不可判定处理）；
     - 能力：``skill_refs`` 每项生成 ``skill:<id>@<version>``，``mcp_scope_digest``
       非空时生成 ``mcp_scope:<digest>``；
-    - 能力集为空 = 用户未显式手选任何 Skill/MCP：返回 ``None``，**不得**把「未
-      选择」解释为全部允许（契约 §6 默认拒绝）。
+    - **显式零能力**：角色已选定且冻结段携带 ``skill_refs`` 键、其值为空（且无 MCP
+      摘要），是用户明确核准的「零外部能力集」（``frozenset()``），返回空能力策略
+      而非 ``None``——纯内部资料分析节点（``capabilities=()``）可执行，不得因未
+      勾选 Skill/MCP 阻断；
+    - **策略缺失未知**：缺少角色、角色歧义，或冻结段缺少 ``skill_refs`` 键（无法
+      区分「显式零选择」与「未填写」）时返回 ``None``，由调用方零派发；不得把未知
+      或空能力解释为全部允许（契约 §6 默认拒绝，R21）。
     """
 
     section = _frozen_section(_manifest_object(manifest_payload))
     roles = _ref_pairs(section.get("role_prompt_refs"), "$.manifest_payload.role_prompt_refs")
     if len(roles) != 1:
+        return None
+    if "skill_refs" not in section:
+        # 无法区分「用户显式未选择」与「该字段缺失」：按未知处理，不猜零能力。
         return None
     capabilities = {
         f"skill:{skill_id}@{version}"
@@ -231,8 +268,6 @@ def derive_frozen_selection_policy(manifest_payload: str) -> FrozenSelectionPoli
     digest = section.get("mcp_scope_digest")
     if isinstance(digest, str) and digest:
         capabilities.add(f"mcp_scope:{digest}")
-    if not capabilities:
-        return None
     return FrozenSelectionPolicy(
         role_key=roles[0][0],
         capabilities=frozenset(capabilities),
@@ -369,14 +404,50 @@ def _auto_plan_requested(manifest: Mapping[str, Any]) -> bool:
     return _frozen_section(manifest).get(PLAN_SOURCE_KEY) == PLAN_SOURCE_AUTO
 
 
+def _is_comparison_manifest(manifest: Mapping[str, Any]) -> bool:
+    """比较组 manifest 以 ``shared`` 共同输入 + ``lanes`` 逐路冻结为标志。"""
+
+    return isinstance(manifest.get("shared"), Mapping) and isinstance(manifest.get("lanes"), list)
+
+
+#: 比较路确定性计划节点身份（与执行根 ``root`` 区分，避免叶身份歧义）。
+COMPARISON_PLAN_NODE_ID: Final[str] = "comparison_analysis"
+
+
+def build_comparison_plan_spec(manifest_payload: str, policy: FrozenSelectionPolicy) -> PlanSpecProposal | None:
+    """比较组冻结输入 → 单节点确定性计划（不读模型提案、不另选连接）。
+
+    目标取共同输入正文，角色/能力/来源全部取冻结手选集（角色、资料范围、Skill/MCP
+    能力），因此同一 manifest 每次派发得到同一计划；比较路各自的模型连接由
+    ``require_lane_parameters`` 在运行期锁定，不在计划节点里承载或覆盖。
+    """
+
+    section = _frozen_section(_manifest_object(manifest_payload))
+    target = section.get("text")
+    if not isinstance(target, str) or not target.strip():
+        return None
+    return PlanSpecProposal(
+        nodes=(
+            PlanNodeSpec(
+                node_id=COMPARISON_PLAN_NODE_ID,
+                target=target,
+                role_key=policy.role_key,
+                capabilities=tuple(sorted(policy.capabilities)),
+                source_refs=policy.source_refs,
+            ),
+        )
+    )
+
+
 def build_plan_spec_provider(dao: _ManifestReader, proposals: _PlanProposalReader | None = None) -> PlanSpecProvider:
     """生产计划来源：显式计划引用优先，其次执行模式首问的自动规划版本。
 
     - 显式 ``plan_ref``（「开始这份计划」）→ 已确认计划版 → 可执行节点表；
     - ``plan_source=auto``（执行模式首问）→ 本执行当前计划版（主回合已保存且经
       ``decode_plan_proposal`` 严格校验）→ 可执行节点表；无保存版即不可得；
-    - 角色/能力仍只取冻结手选集（``derive_frozen_selection_policy``），未选择即
-      不可得；其余形状一律返回 ``None``（派发侧据此 ``PLAN_UNAVAILABLE`` 零派发）。
+    - 角色/能力仍只取冻结手选集（``derive_frozen_selection_policy``）：角色缺失/
+      歧义即不可得（``None``）；已选定角色的零能力是已核准空集，可映射纯分析节点；
+      其余形状一律返回 ``None``（派发侧据此 ``PLAN_UNAVAILABLE`` 零派发）。
     """
 
     reader: _PlanProposalReader = proposals if proposals is not None else cast(_PlanProposalReader, dao)
@@ -399,6 +470,13 @@ def build_plan_spec_provider(dao: _ManifestReader, proposals: _PlanProposalReade
                 return None
             read_current = cast(Any, current)
             proposal = await read_current(user_scope=user_scope, execution_id=execution_id)
+        elif _is_comparison_manifest(decoded):
+            # 比较组共同输入没有模型计划提案：按冻结手选集构造确定性单节点计划；
+            # 角色/能力不可判定时仍 fail-closed（派发侧 PLAN_UNAVAILABLE）。
+            policy = derive_frozen_selection_policy(manifest)
+            if policy is None:
+                return None
+            return build_comparison_plan_spec(manifest, policy)
         else:
             return None
         if proposal is None:
@@ -412,7 +490,7 @@ def build_plan_spec_provider(dao: _ManifestReader, proposals: _PlanProposalReade
 
 
 def build_role_capability_provider(dao: _ManifestReader) -> RoleCapabilityProvider:
-    """生产角色能力来源：只取本次请求冻结的 Skill/MCP 手选集合。"""
+    """生产角色能力来源：只取本次请求冻结的 Skill/MCP 手选集合（零能力即空集）。"""
 
     async def _provide(user_scope: str, execution_id: str) -> Mapping[str, frozenset[str]] | None:
         manifest = await dao.read_authoritative_manifest(user_scope=user_scope, execution_id=execution_id)
@@ -705,8 +783,9 @@ class MainTurnIntake:
         """首问：必要时新建会话，冻结本次手选集合后受理。
 
         讨论/计划零研究派发；执行模式受理后先产出计划再派发。``role_prompt_refs``
-        / ``skill_refs`` / ``mcp_selection`` 为本次显式手选集（未选择即空集，
-        能力来源据此 fail-closed；不由本入口补默认角色/能力）。``revise_*`` 为
+        / ``skill_refs`` / ``mcp_selection`` 为本次显式手选集。角色已选定且三者无
+        Skill/MCP 时是已核准的零能力集（纯分析可执行）；角色缺失/歧义才是未知，
+        由能力来源 fail-closed（``None``）；不由本入口补默认角色/能力。
         可选修订声明：仅编辑并重发旧问题时声明，随新意图在同一受理事务内原子
         切换因果头（不覆盖原消息历史）；缺省表示普通新问题。
 
@@ -750,11 +829,18 @@ class MainTurnIntake:
                 )
             )
         preferred_connection_id = await self._resolve_preferred_connection(target_session, model_connection_id)
+        # 同步配置读取经 IO 线程池（R16）：与版本绑定同一来源冻结正文快照。
+        from utils.thread_pool import TaskType, ThreadPoolManager
+
+        role_prompt_snapshots = await ThreadPoolManager().run_async(
+            TaskType.IO, _capture_frozen_role_prompt_snapshots, role_prompt_refs, user_scope=self._user_scope
+        )
         manifest = self._base_manifest(
             text=question,
             mode=mode,
             purpose=Purpose.CONCEPT,
             role_prompt_refs=role_prompt_refs,
+            role_prompt_snapshots=role_prompt_snapshots,
             skill_refs=skill_refs,
             mcp_selection=mcp_selection,
         )
@@ -778,7 +864,7 @@ class MainTurnIntake:
         if self._main_turn is None:
             return result
         # 讨论/计划：受理后由生产主回合产出直答/可读计划；零研究动作由回合端口保证。
-        identity = self._main_turn_identity(target_session, result.receipt, revision=revision, manifest=manifest)
+        identity = self._main_turn_identity(target_session, result.receipt, manifest=manifest)
         clarification_answers = await self._consume_clarification(target_session)
         try:
             turn_outcome = await self._main_turn.run(
@@ -862,9 +948,10 @@ class MainTurnIntake:
         if runner is None:
             return replace(result, dispatch=self._plan_unavailable(result, cause="main_turn_not_wired"))
         if derive_frozen_selection_policy(manifest) is None:
-            # 未手选角色/Skills/MCP：无派发准入判据，先如实零派发（不耗模型、不猜授权）。
+            # 角色缺失/歧义（策略未知）：无派发准入判据，先如实零派发（不耗模型、不猜授权）。
+            # 已选定角色但未勾选 Skill/MCP 是已核准空能力，不在此拦截（纯分析可执行）。
             return replace(result, dispatch=self._plan_unavailable(result, cause="role_policy_missing"))
-        identity = self._main_turn_identity(session_id, result.receipt, revision=expected_revision, manifest=manifest)
+        identity = self._main_turn_identity(session_id, result.receipt, manifest=manifest)
         clarification_answers: tuple[ClarificationAnswerFact, ...] = ()
         try:
             clarification_answers = await self._consume_clarification(session_id)
@@ -1013,10 +1100,14 @@ class MainTurnIntake:
         session_id: str,
         receipt: SubmissionReceipt,
         *,
-        revision: int,
         manifest: CanonicalJson,
     ) -> LoopIdentity:
-        """由受理事实派生回合身份（digest 缺失时取冻结 manifest 摘要，不造假）。"""
+        """由受理事实派生回合身份（digest 缺失时取冻结 manifest 摘要，不造假）。
+
+        输入版直接消费回执承载的权威 ``input_revision``（受理事务内实际落库值）：
+        新受理恒为 1、同执行排队修订为 2、3…；不得用会话草稿版 ``+1`` 派生——
+        草稿版是元数据 CAS 令牌，与执行输入版无关（D7-03）。
+        """
 
         digest = receipt.intent_digest
         if not is_digest(digest):
@@ -1031,7 +1122,7 @@ class MainTurnIntake:
                 workflow_id=receipt.workflow_id,
             ),
             node_id="root",
-            input_revision=revision + 1,
+            input_revision=receipt.input_revision,
             actual_input_digest=digest,
             actual_model_ref=MAIN_TURN_MODEL_REF,
         )
@@ -1211,6 +1302,7 @@ class MainTurnIntake:
         mode: Mode,
         purpose: Purpose,
         role_prompt_refs: Sequence[tuple[str, str]] = (),
+        role_prompt_snapshots: Sequence[Mapping[str, str]] = (),
         skill_refs: Sequence[tuple[str, str]] = (),
         mcp_selection: Sequence[MCPServiceIdentity] = (),
     ) -> CanonicalJson:
@@ -1221,7 +1313,8 @@ class MainTurnIntake:
         计划由主回合产出并经严格校验保存，派发侧只读取该已保存计划版。
         ``mcp_selection`` 为空表示未选择（不解释为全部允许，§6 默认拒绝）；非空时
         按服务身份排序冻结并写入规范摘要 ``mcp_scope_digest``，供能力策略派生
-        ``mcp_scope:<digest>``。
+        ``mcp_scope:<digest>``。``role_prompt_snapshots`` 为受理时捕获的内置角色
+        正文快照（版本 + 正文），叶执行据此还原受理时 Prompt，不读改后的设置值。
         """
 
         selected = {identity.stable_key(): identity for identity in mcp_selection}
@@ -1250,6 +1343,11 @@ class MainTurnIntake:
             "mcp_scope_digest": digest,
             "output_requirements": {},
         }
+        if role_prompt_snapshots:
+            manifest["role_prompt_snapshots"] = [
+                {"role_id": item["role_id"], "version": item["version"], "text": item["text"]}
+                for item in role_prompt_snapshots
+            ]
         if mode is Mode.EXECUTE:
             manifest[PLAN_SOURCE_KEY] = PLAN_SOURCE_AUTO
         return json_doc(manifest)

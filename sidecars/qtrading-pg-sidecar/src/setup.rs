@@ -391,7 +391,10 @@ pub async fn ensure_binaries(layout: &Layout, progress: &dyn Fn(&str)) -> Result
         .timeout(Some(Duration::from_secs(300)))
         .temporary(false)
         .build();
-    let mut postgresql = PostgreSQL::new(settings);
+    // 用 ManagedPg 包住解压句柄：其 data_dir 即 PGDATA，若失败/早退时 PGDATA 尚有
+    // postmaster.pid（如残留活实例），上游 `impl Drop` 会无身份校验地 `pg_ctl stop`。
+    // 这里只解压，绝不允许任何隐式停止。
+    let mut postgresql = crate::run::ManagedPg::new(PostgreSQL::new(settings));
     let setup_result = postgresql.setup().await;
 
     if planted_guard {

@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pandas as pd
 import pytest
 
-from data.persistence.data_explorer_query_client import DataExplorerQueryClient
+from data.persistence.data_explorer_query_client import DataExplorerQueryClient, FilterValidationError
 from ui.viewmodels import Message
 from ui.viewmodels.data_explorer_view_model import (
     DataExplorerState,
@@ -811,12 +811,11 @@ class TestBuildFilters:
         result = vm._build_filters()
         assert result == [("close", ">", "10.5")]
 
-    def test_date_column_converts_format(self, vm):
+    def test_date_column_keeps_iso_format(self, vm):
+        """D2-13: 日期列不再把 2025-01-15 剥成 20250115（与 DATE 列表示冲突）。"""
         vm._set_state(filter_col="trade_date", filter_op="=", filter_val="2025-01-15")
         result = vm._build_filters()
-        # Date columns should convert format if needed
-        assert len(result) == 1
-        assert result[0][0] == "trade_date"
+        assert result == [("trade_date", "=", "2025-01-15")]
 
     def test_non_date_column_no_conversion(self, vm):
         vm._set_state(filter_col="ts_code", filter_op="=", filter_val="000001.SZ")
@@ -828,6 +827,49 @@ class TestBuildFilters:
         result = vm._build_filters()
         # Non-standard format should still produce a filter (no crash)
         assert len(result) == 1
+
+
+class TestFilterValidationFeedback:
+    """D2-13: 非法筛选值给出可读校验提示，不落到裸 DB 异常分类。"""
+
+    async def test_query_data_invalid_filter_sets_readable_error(self, vm, mock_db):
+        vm._set_state(
+            table_columns=("trade_date",),
+            table_rows=(TableRow(values=("stale",)),),
+            total_rows=99,
+        )
+        mock_db.get_table_count.side_effect = FilterValidationError(
+            "Invalid filter value 'not-a-date' for column 'trade_date' (DATE), expected a YYYY-MM-DD date."
+        )
+
+        result = await vm.query_data()
+
+        assert result.empty
+        assert vm.state.error_message is not None
+        assert vm.state.error_message.key == "data_filter_invalid"
+        assert "trade_date" in vm.state.error_message.params["detail"]
+        assert vm.state.total_rows == 0
+        assert vm.state.table_rows == ()
+        assert vm.state.is_loading is False
+
+    async def test_query_count_invalid_filter_sets_readable_error(self, vm, mock_db):
+        mock_db.get_table_count.side_effect = FilterValidationError(
+            "Invalid filter value 'abc' for column 'close' (BIGINT), expected an integer."
+        )
+
+        result = await vm.query_count()
+
+        assert result == 0
+        assert vm.state.error_message is not None
+        assert vm.state.error_message.key == "data_filter_invalid"
+
+    async def test_export_data_invalid_filter_propagates(self, vm, mock_db):
+        """导出失败不得返回空 DataFrame 冒充「无可导出数据」。"""
+        mock_db.query_table.side_effect = FilterValidationError(
+            "Invalid filter value 'abc' for column 'close' (BIGINT), expected an integer."
+        )
+        with pytest.raises(FilterValidationError, match="Invalid filter value"):
+            await vm.export_data()
 
 
 class TestNumericDetection:

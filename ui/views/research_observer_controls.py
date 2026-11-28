@@ -15,12 +15,34 @@ from ui.theme import AppColors, AppStyles
 from ui.viewmodels.research_observer_view_model import (
     ControlActionView,
     ControlResultView,
+    ExecutionNodeView,
     ResearchObserverState,
 )
 from ui.views.research_observer_widgets import error_text, hint_text, section_card, section_title
 
 #: 原因类动作（点击后进入原因输入，不直接提交）。
 _REASON_ACTIONS = frozenset({"terminate", "close_unknown"})
+
+#: 重试结果的派发状态 → 如实说明 key（未派发/未知不得读成已生效，R21）。
+_RETRY_DISPATCH_HINT_KEYS: dict[str, str] = {
+    "failed": "agent_research_control_retry_dispatch_failed",
+    "unknown": "agent_research_control_retry_dispatch_unknown",
+}
+
+
+def _root_execution(node: ExecutionNodeView, by_id: dict[str, ExecutionNodeView]) -> ExecutionNodeView | None:
+    """沿投影父子链上溯真实根执行；父不在投影时返回 ``None``（交 VM 显式拒绝）。"""
+
+    current = node
+    for _ in range(len(by_id) + 1):
+        parent_id = current.parent_execution_id
+        if parent_id is None:
+            return current
+        parent = by_id.get(parent_id)
+        if parent is None:
+            return None
+        current = parent
+    return None
 
 
 def _action_button(
@@ -108,10 +130,10 @@ def build_control_section(
     if not nodes:
         rows.append(hint_text("agent_research_no_executions"))
         return rows
-    roots = {node.execution_id: node for node in nodes if node.parent_execution_id is None}
+    by_id = {node.execution_id: node for node in nodes}
     for node in nodes:
         actions = control_actions(node.execution_id)
-        root = roots.get(node.parent_execution_id or "") if node.parent_execution_id else node
+        root = _root_execution(node, by_id)
         pending = state.control_pending_execution_id is not None
         buttons: list[ft.Control] = []
         for action in actions:
@@ -208,8 +230,15 @@ def build_control_section(
                     color=AppColors.TEXT_HINT,
                 )
             )
-        if result.native_control_state == "not_wired":
-            rows.append(hint_text("agent_research_control_native_not_wired"))
+        if result.error_code is None:
+            if result.native_control_state == "not_wired":
+                hint_key: str | None = "agent_research_control_native_not_wired"
+            elif result.kind == "retry":
+                hint_key = _RETRY_DISPATCH_HINT_KEYS.get(result.native_control_state)
+            else:
+                hint_key = None
+            if hint_key is not None:
+                rows.append(hint_text(hint_key))
     return rows
 
 

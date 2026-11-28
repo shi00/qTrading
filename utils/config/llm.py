@@ -440,6 +440,28 @@ def get_ai_role_prompt_version(role_key: str) -> str:
     return value if isinstance(value, str) else ""
 
 
+def read_research_role_prompt(role_key: str) -> tuple[str, str]:
+    """读取研究角色运行期正文与版本（默认只读正文 + 已保存追加，原样拼接）。
+
+    与设置页 ``_compose_role_template`` / 叶运行装配同一拼接规则：追加去空白后
+    非空才参与拼接，拼接内容为**原样追加**。返回 ``(text, version)``；未知角色
+    直接抛 ``ValueError``（不猜语义）。受理冻结快照与叶执行校验共用此来源，
+    避免两处实现漂移导致「同一版本、不同正文」。
+    """
+
+    from utils.config_handler import ConfigHandler
+    from utils.config_models import ROLE_PROMPT_DEFAULTS
+
+    if role_key not in RESEARCH_ROLE_KEYS:
+        raise ValueError(f"unknown research role: {role_key}")
+    default_text, default_version = ROLE_PROMPT_DEFAULTS[role_key]
+    append = ConfigHandler.get_ai_role_prompt_append(role_key)
+    saved_version = ConfigHandler.get_ai_role_prompt_version(role_key)
+    text = default_text if not append.strip() else f"{default_text}\n\n{append}"
+    version = saved_version if saved_version.strip() else default_version
+    return text, version
+
+
 def save_ai_role_prompts(appends: dict[str, str], versions: dict[str, str]) -> bool:
     """原子保存各研究角色的追加内容与绑定版本（F35 / J26）。
 

@@ -5,13 +5,16 @@
 - 发布前在**独占句柄**上核验目标「是否存在 + 文件身份 + 内容摘要」与用户确认一致，
   父目录身份未变；目标是重解析点（符号链接/junction）时拒绝覆盖；
 - 覆盖只作用于「用户确认过的那个文件」：句柄身份不符（同摘要异文件、预检后被
-  置换）即拒绝，绝不按路径重新猜测；确认过的目标优先经平台单步原子替换
-  （Windows ``ReplaceFileW``）换成暂存文件，旧目标落到同目录私有备份名——目标
-  路径在替换前后都持有文件，不存在「目标名无文件」的中间态。平台拒绝（如只读
-  目标）且事实未变时才退回「移开已确认目标 → 不覆盖移入」两步法，此时任何第三方
-  新文件都不会被本次发布覆掉；「移开已确认目标」本身也是条件替换：移开后按备份名
-  复核身份，窗口内被外部置换的就不是已确认文件，必须放回原处并失败（见
-  ``_GuardedFile.supersede_to``）；
+  置换）即拒绝，绝不按路径重新猜测；确认过的目标经**句柄绑定的两步受控替换**换成
+  暂存文件——先把已确认目标按句柄移为同目录私有备份，再按句柄把暂存文件不覆盖
+  移入目标名，两次改名都作用在已核身份的独占句柄上（D7-10：不再释放句柄后按路径
+  调用 ``ReplaceFileW``，消除句柄释放到路径替换之间的重绑窗口）。替换前后复核
+  目标父目录身份，替换后复核目标文件身份与摘要；任何第三方新文件都不会被本次
+  发布覆掉；「移开已确认目标」本身也是条件替换：移开后按备份名复核身份，窗口内
+  被外部置换的就不是已确认文件，必须放回原处并失败（见
+  ``_GuardedFile.supersede_to``）；两步之间若进程中断，目标名可能短暂无文件，
+  但旧目标留在可由原回执复算的私有备份名下，可经 ``inspect_publish`` /
+  ``resume_publish`` 核验续接；
 - 备份名由**暂存文件身份**派生（``_superseded_name``），不随机：中断后可按原
   交付回执（manifest 的 ``staged_volume_serial`` / ``staged_file_id``）复算出备份
   路径，用 ``WindowsManagedFileStore.inspect_publish`` 查询阶段事实、
@@ -66,10 +69,6 @@ _WIN_OPEN_EXISTING = 3
 _WIN_ATTRIBUTES = 0x80 | 0x00200000  # FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT
 _WIN_FILE_RENAME_INFO = 3
 _WIN_FILE_DISPOSITION_INFO = 4
-#: ``ReplaceFileW``：``REPLACEFILE_WRITE_THROUGH``（返回即已落盘）。
-_WIN_REPLACE_WRITE_THROUGH = 0x00000001
-#: ``ReplaceFileW``：``REPLACEFILE_IGNORE_MERGE_ERRORS``（属性/ACL 合并失败不致替换失败）。
-_WIN_REPLACE_IGNORE_MERGE_ERRORS = 0x00000002
 
 
 class DeliveryFileError(RuntimeError):
@@ -286,15 +285,6 @@ class _Win32FileApi:
             wintypes.DWORD,
         ]
         kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
-        kernel32.ReplaceFileW.argtypes = [
-            wintypes.LPCWSTR,
-            wintypes.LPCWSTR,
-            wintypes.LPCWSTR,
-            wintypes.DWORD,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-        ]
-        kernel32.ReplaceFileW.restype = wintypes.BOOL
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         kernel32.CloseHandle.restype = wintypes.BOOL
         self._kernel32: Any = kernel32
@@ -358,23 +348,6 @@ class _Win32FileApi:
         if not self._kernel32.SetFileInformationByHandle(
             handle, _WIN_FILE_DISPOSITION_INFO, ctypes.byref(info), ctypes.sizeof(info)
         ):
-            raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[reportAttributeAccessIssue]  # Windows-only：WinError 在 Linux 平台不存在
-
-    def replace_file(  # pragma: no cover -- win32 原生 API
-        self, replaced: Path, replacement: Path, backup: Path
-    ) -> None:
-        """``ReplaceFileW``：整卷内单步替换，旧文件落到 ``backup``，目标路径不留空档。
-
-        与「先移走旧文件、再移入新文件」不同，本调用由文件系统一次完成替换：目标
-        名称在前后都持有文件（P1-12）。两点实测语义必须由调用方兜住：① 备份名已
-        存在时平台会**静默覆盖**该文件，调用前须拒绝占用；② 只读目标会被拒绝
-        （``ERROR_ACCESS_DENIED``），调用方须按事实退回两步法。
-        """
-
-        import ctypes
-
-        flags = _WIN_REPLACE_WRITE_THROUGH | _WIN_REPLACE_IGNORE_MERGE_ERRORS
-        if not self._kernel32.ReplaceFileW(str(replaced), str(replacement), str(backup), flags, None, None):
             raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[reportAttributeAccessIssue]  # Windows-only：WinError 在 Linux 平台不存在
 
 
@@ -561,10 +534,10 @@ class WindowsManagedFileStore:
     def publish(self, *, target: DeliveryTarget, staged: StagedFile) -> PublishResult:
         """核验目标身份后替换为暂存内容，并回读目标内容摘要与文件身份。
 
-        覆盖已确认目标时先尝试平台单步原子替换（Windows ``ReplaceFileW``）：旧目标
-        落到由暂存身份派生的私有备份名，目标路径前后都持有文件，不存在「目标名无
-        文件」的中间态。平台拒绝（如只读目标）且事实未变时退回「移开已确认目标 →
-        不覆盖移入」两步法。备份只在身份与摘要都复核为原确认文件后按句柄删除。
+        覆盖已确认目标时采用句柄绑定的两步受控替换：已确认目标按句柄移为私有备份，
+        暂存文件按句柄不覆盖移入目标名；两次改名都在独占句柄上执行，替换前后复核
+        父目录与文件身份，不释放句柄后按路径替换（D7-10）。备份只在身份与摘要都
+        复核为原确认文件后按句柄删除。
         """
 
         target_path = Path(validate_delivery_target_path(target.target_path))
@@ -802,7 +775,8 @@ class WindowsManagedFileStore:
 
     @staticmethod
     def _assert_backup_available(backup_path: Path) -> None:
-        """备份名必须空闲：``ReplaceFileW`` 会静默覆盖已占用的备份名（实测）。"""
+        """备份名必须空闲：两步替换的「移开旧目标」不覆盖既有文件（Windows
+        ``ReplaceIfExists=0`` / POSIX ``O_EXCL`` 占位），占用即拒绝发布。"""
 
         try:
             occupied = os.path.lexists(backup_path)
@@ -821,70 +795,12 @@ class WindowsManagedFileStore:
         backup_path: Path,
         confirmed_identity: tuple[int, int],
     ) -> None:
-        """覆盖已确认目标：优先单步原子替换，平台拒绝且事实未变时退回两步法。"""
+        """覆盖已确认目标：句柄绑定的两步受控替换（不释放句柄后按路径替换）。"""
 
-        if _IS_WINDOWS:
-            # 原子替换必须由平台完成：两个独占句柄都须释放（ReplaceFileW 需要
-            # DELETE 访问权），因此「移开旧目标」与「移入新文件」不再分两步。
-            target_guard, _ = self._open_confirmed_target(target_path, target, staged)
-            target_guard.close()
-            staged_guard.close()
-            if self._try_atomic_replace(target=target, staged=staged, target_path=target_path, backup_path=backup_path):
-                return
-        self._two_step_replace(
-            target=target,
-            staged=staged,
-            target_path=target_path,
-            backup_path=backup_path,
-            confirmed_identity=confirmed_identity,
-        )
-
-    def _try_atomic_replace(
-        self,
-        *,
-        target: DeliveryTarget,
-        staged: StagedFile,
-        target_path: Path,
-        backup_path: Path,
-    ) -> bool:
-        """尝试单步原子替换；返回 ``False`` 仅当事实证明目标仍是原确认文件。"""
-
-        try:
-            _win32_api().replace_file(target_path, staged.path, backup_path)
-            return True
-        except OSError:
-            pass
-        # 不按错误码猜结论：按可核对事实判定替换是否已生效。
-        try:
-            current = _snapshot(target_path)
-        except OSError as exc:
-            raise DeliveryUnknownError(
-                "delivery_publish_unverified", "atomic replace failed and the target cannot be inspected"
-            ) from exc
-        if current.exists and (current.volume_serial, current.file_id) == (staged.volume_serial, staged.file_id):
-            return True
-        if (
-            current.exists
-            and (current.volume_serial, current.file_id) == (target.expected_volume_serial, target.expected_file_id)
-            and current.digest == target.expected_existing_digest
-        ):
-            return False
-        raise DeliveryUnknownError(
-            "delivery_publish_unverified", "atomic replace failed and its effect cannot be verified"
-        )
-
-    def _two_step_replace(
-        self,
-        *,
-        target: DeliveryTarget,
-        staged: StagedFile,
-        target_path: Path,
-        backup_path: Path,
-        confirmed_identity: tuple[int, int],
-    ) -> None:
-        """「移开已确认目标 → 不覆盖移入」：无原子替换可用时的兜底（有中断窗口）。"""
-
-        staged_guard = self._open_staged(staged)
+        # D7-10：此前先关闭 target_guard 与 staged_guard、再按路径调用 ReplaceFileW，
+        # 释放句柄到路径替换之间存在重绑窗口（同名路径可被换成另一个文件）。这里
+        # 两次改名都作用在已核身份的独占句柄上，并在替换前后复核父目录身份。
+        self._verify_publish_parent(target_path, staged)
         target_guard, _ = self._open_confirmed_target(target_path, target, staged)
         try:
             self._verify_guard(
@@ -915,11 +831,31 @@ class WindowsManagedFileStore:
                 raise DeliveryUnknownError(
                     "delivery_publish_unverified", "target publish failed and effect cannot be verified"
                 ) from exc
+            try:
+                self._verify_publish_parent(target_path, staged)
+            except DeliveryFileError as exc:
+                raise DeliveryUnknownError(
+                    "delivery_publish_unverified", "target parent changed during publish"
+                ) from exc
         finally:
             with contextlib.suppress(OSError):
-                staged_guard.close()
-            with contextlib.suppress(OSError):
                 target_guard.close()
+
+    @staticmethod
+    def _verify_publish_parent(target_path: Path, staged: StagedFile) -> None:
+        """复核目标父目录仍是暂存时记录的目录（替换前后都必须一致）。"""
+
+        try:
+            current = os.stat(target_path.parent)
+        except OSError as exc:
+            raise DeliveryFileError(
+                "delivery_target_parent_changed", "target parent directory cannot be inspected"
+            ) from exc
+        if (int(current.st_dev), _file_identity(current)) != (
+            staged.parent_volume_serial,
+            staged.parent_file_id,
+        ):
+            raise DeliveryFileError("delivery_target_parent_changed", "target parent changed since confirmation")
 
     @staticmethod
     def _verified_publish_snapshot(target_path: Path, staged: StagedFile) -> FileSnapshot:
