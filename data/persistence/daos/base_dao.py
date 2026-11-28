@@ -74,7 +74,7 @@ class MaintenanceBarrier:
     def __init__(self) -> None:
         self._epoch = 0
         self._active = 0
-        self._drained = asyncio.Event()
+        self._drained = asyncio.Event()  # R11_ALLOWED: 实例经 get_loop_local 按循环隔离，仅所属循环内使用
         self._drained.set()
 
     @property
