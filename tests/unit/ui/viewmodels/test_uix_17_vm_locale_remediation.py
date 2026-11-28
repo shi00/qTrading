@@ -73,8 +73,10 @@ class TestUIX17EmbeddedStatusCardCleanMessage:
         vm = EmbeddedStatusCardViewModel()
         state = vm.state
 
-        assert state.status_message.key == "embedded_pg_ready"
+        # 未取得真实状态前必须显示「检测中」，不得伪装成「已就绪」(R21, D1-12)
+        assert state.status_message.key == "embedded_pg_checking"
         assert "default" not in state.status_message.params
+        assert state.status_type == "info"
         assert state.info_message.key == "embedded_pg_no_config_needed"
         assert "default" not in state.info_message.params
 

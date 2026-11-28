@@ -2,7 +2,7 @@
 
 背景：``BaseDao._save_upsert`` 在用 ``pd.to_datetime(..., errors="coerce")`` 转换日期列时，
 脏日期（上游返回 ``''``/``'0'``/``'--'`` 或非法格式）会被**静默置为 NULL**，无任何日志。
-本模块为每次写入登记"最近一次写入的日期 coerce 率（coerced_rows / rows）"，供
+本模块为每次写入登记"最近一次写入的归一率（coerced_rows / rows，含日期 coerce 与数值 ±inf 归一）"，供
 ``HealthCheckMixin.check_data_health`` 在计算质量 tier 时读取——若某**关键表**最近一次
 写入的 coerce 率超过阈值，说明该表刚写入的数据可能是错/缺的，应视为质量降级，
 从而阻断依赖它的策略执行。

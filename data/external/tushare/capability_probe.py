@@ -533,8 +533,8 @@ class CapabilityProbeService:
                 ("stock_company", {"ts_code": PROBE_STOCK_CODE}),
                 ("stk_managers", {"ts_code": PROBE_STOCK_CODE}),
                 ("stk_surv", {"ts_code": PROBE_STOCK_CODE, "start_date": recent_date, "end_date": recent_date}),
-                # cn_gdp 激活（1 个，v1.10.0 P0-1：quarter 参数）
-                ("cn_gdp", {"quarter": f"{get_now().year - 1}Q4"}),
+                # cn_gdp 激活（1 个，D2-06：官方入参为 q，非 quarter）
+                ("cn_gdp", {"q": f"{get_now().year - 1}Q4"}),
                 # 独立付费特色数据（2 个，仅 points_10000+ 档位会探测）
                 ("cyq_perf", {"ts_code": PROBE_STOCK_CODE, "trade_date": recent_date}),
                 ("forecast_eps", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),

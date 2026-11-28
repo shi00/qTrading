@@ -138,6 +138,10 @@ pub fn stop_sidecar(data_dir: &Path) -> u8 {
 ///
 /// stdin 固定为 null（EOF）：maintenance-shell 的 `wait_for_enter` 依赖 stdin 结束，
 /// 避免测试在交互式终端下永久阻塞。故障注入通过独立子进程 env 隔离，不影响测试进程。
+///
+/// 注意：临时实例停止失败时 postgres 会按设计存活（禁止盲发信号），并继承 sidecar 的
+/// stdout/stderr 句柄（Windows 句柄继承语义，见 `read_stderr_snapshot` 注释）。此时
+/// `.output()` 会永远等不到 EOF，故这里改为「后台增量收集 + 子进程退出后限时收尾」。
 pub fn run_sidecar_env(args: &[&str], env: &[(&str, &str)]) -> (u8, String, String) {
     let mut cmd = std::process::Command::new(sidecar_path());
     for arg in args {
@@ -146,16 +150,66 @@ pub fn run_sidecar_env(args: &[&str], env: &[(&str, &str)]) -> (u8, String, Stri
     for (key, value) in env {
         cmd.env(key, value);
     }
-    let output = cmd
+    let mut child = cmd
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("failed to run sidecar with env");
+    let stdout = collect_pipe_async(child.stdout.take().expect("stdout piped"));
+    let stderr = collect_pipe_async(child.stderr.take().expect("stderr piped"));
+    let status = child.wait().expect("wait sidecar");
     (
-        output.status.code().unwrap_or(255) as u8,
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
+        status.code().unwrap_or(255) as u8,
+        finish_pipe_snapshot(stdout),
+        finish_pipe_snapshot(stderr),
     )
 }
+
+/// 增量读取管道（后台线程持续 drain，避免子进程写满管道阻塞）。
+struct PipeCapture {
+    buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    reader: std::thread::JoinHandle<()>,
+}
+
+fn collect_pipe_async(pipe: impl Read + Send + 'static) -> PipeCapture {
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&buf);
+    let reader = std::thread::spawn(move || {
+        let mut reader = BufReader::new(pipe);
+        let mut chunk = [0u8; 8192];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if let Ok(mut guard) = sink.lock() {
+                        guard.extend_from_slice(&chunk[..n]);
+                    }
+                }
+            }
+        }
+    });
+    PipeCapture { buf, reader }
+}
+
+/// 子进程退出后取管道输出快照：孙进程仍持有写端时最多等 [`PIPE_SNAPSHOT_TIMEOUT`]。
+fn finish_pipe_snapshot(cap: PipeCapture) -> String {
+    let deadline = std::time::Instant::now() + PIPE_SNAPSHOT_TIMEOUT;
+    while !cap.reader.is_finished() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if cap.reader.is_finished() {
+        let _ = cap.reader.join();
+    }
+    // 未在限时内到达 EOF（孙进程仍持有写端）：直接取当前已收集内容，读取线程自行结束。
+    cap.buf
+        .lock()
+        .map(|g| String::from_utf8_lossy(&g).into_owned())
+        .unwrap_or_default()
+}
+
+/// 子进程退出后等待管道输出的最大时长（孙进程可能仍持有写端）。
+const PIPE_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// 执行 `status` 命令，解析 JSON。
 pub fn status_json(data_dir: &Path) -> serde_json::Value {

@@ -566,6 +566,109 @@ class TestComparisonLaneBinding:
         assert "requires a frozen data consent" in str(excinfo.value)
 
 
+class TestPreferredConnectionSelection:
+    """普通叶执行使用受理时冻结的会话/角色模型选择；比较路不被其覆盖。"""
+
+    @pytest.mark.asyncio
+    async def test_provider_threads_preferred_connection_to_route(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: list[str | None] = []
+
+        async def _resolve(_scenario_id: str, *, preferred_connection_id: str | None = None) -> ScenarioDispatch:
+            captured.append(preferred_connection_id)
+            return _dispatch()
+
+        monkeypatch.setattr("services.ai_service.scenario_dispatch.resolve_executor", _resolve)
+
+        async def _provide(_context: LeafExecutionContext) -> str:
+            return "conn-session"
+
+        await resolve_agent_model_binding(_context(), preferred_connection_provider=_provide)
+
+        assert captured == ["conn-session"]
+
+    @pytest.mark.asyncio
+    async def test_explicit_connection_wins_over_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: list[str | None] = []
+
+        async def _resolve(_scenario_id: str, *, preferred_connection_id: str | None = None) -> ScenarioDispatch:
+            captured.append(preferred_connection_id)
+            return _dispatch()
+
+        monkeypatch.setattr("services.ai_service.scenario_dispatch.resolve_executor", _resolve)
+        provider_calls: list[int] = []
+
+        async def _provide(_context: LeafExecutionContext) -> str:
+            provider_calls.append(1)
+            return "conn-session"
+
+        await resolve_agent_model_binding(
+            _context(), preferred_connection_id="conn-explicit", preferred_connection_provider=_provide
+        )
+
+        assert captured == ["conn-explicit"]
+        assert provider_calls == []
+
+    @pytest.mark.asyncio
+    async def test_lane_freeze_ignores_session_preferred_connection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        group = _lane_group()
+        _install_dispatch(
+            monkeypatch,
+            _route_snapshot(_candidate("conn-local", fingerprint="fp-1", index=0)),
+        )
+        payload = _consent_payload(_binding(connection_id="conn-local"))
+
+        async def _consent(_context: LeafExecutionContext) -> dict[str, Any]:
+            return payload
+
+        provider_calls: list[int] = []
+
+        async def _provide(_context: LeafExecutionContext) -> str:
+            provider_calls.append(1)
+            return "conn-session"
+
+        resolved = await resolve_agent_model_binding(
+            _context(),
+            data_consent_provider=_consent,
+            lane_freeze_provider=_lane_provider(group),
+            preferred_connection_provider=_provide,
+        )
+
+        (route,) = resolved.snapshot.routes
+        (candidate,) = route["candidates"]
+        assert candidate["connection_id"] == "conn-local"
+        assert provider_calls == []
+
+    @pytest.mark.asyncio
+    async def test_blank_provider_selection_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def _provide(_context: LeafExecutionContext) -> str:
+            return "   "
+
+        with pytest.raises(ValueError) as excinfo:
+            await resolve_agent_model_binding(_context(), preferred_connection_provider=_provide)
+        assert "preferred model connection" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_default_wiring_forwards_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: list[str | None] = []
+
+        async def _resolve(_scenario_id: str, *, preferred_connection_id: str | None = None) -> ScenarioDispatch:
+            captured.append(preferred_connection_id)
+            return _dispatch()
+
+        monkeypatch.setattr("services.ai_service.scenario_dispatch.resolve_executor", _resolve)
+        dao = _ComparisonDao(
+            summary=SimpleNamespace(comparison_group_ref=None, comparison_lane_ref=None), manifest=None
+        )
+
+        async def _provide(_context: LeafExecutionContext) -> str:
+            return "conn-session"
+
+        wiring = default_leaf_runtime(dao, preferred_connection_provider=_provide)
+        await wiring.model_binding(_context())
+
+        assert captured == ["conn-session"]
+
+
 class TestResolveComparisonLaneFreeze:
     @pytest.mark.asyncio
     async def test_non_comparison_execution_returns_none(self) -> None:

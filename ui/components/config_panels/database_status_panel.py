@@ -12,7 +12,7 @@ CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import flet as ft
 
@@ -22,7 +22,7 @@ from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
-from ui.viewmodels.database_status_view_model import DatabaseStatusViewModel
+from ui.viewmodels.database_status_view_model import DatabaseStatusState, DatabaseStatusViewModel
 
 logger = logging.getLogger(__name__)
 
@@ -50,16 +50,85 @@ def _render_message(msg: Message | None) -> str:
     return I18n.get(msg.key, **msg.params)
 
 
+def _diag_value_text(items: Sequence[object] | None) -> str:
+    """诊断渠道三态文案: None=未知，空列表=无，非空=数量 (R21 不得把未知渲染成无)。"""
+    if items is None:
+        return I18n.get("db_status_value_unknown")
+    if not items:
+        return I18n.get("db_status_value_none")
+    return I18n.get("db_status_value_count", count=len(items))
+
+
+def _dispatch_refresh(vm: DatabaseStatusViewModel) -> None:
+    """提交 vm.refresh_status 到 page 任务队列 (挂载/点击共用)。"""
+    try:
+        page = ft.context.page
+    except RuntimeError:
+        logger.debug("[DatabaseStatusPanel] page not available for refresh_status")
+        return
+    if page is not None:
+        page.run_task(vm.refresh_status)
+
+
+def _build_diagnostics_controls(state: DatabaseStatusState) -> list[ft.Control]:
+    """渲染 issues / restore_residuals / dump_partials 三态诊断区 (D1-12 ①)。"""
+    controls: list[ft.Control] = []
+
+    issues_value = _diag_value_text(state.issues)
+    issues_color = AppColors.WARNING if state.issues else AppColors.TEXT_SECONDARY
+    controls.append(
+        ft.Text(
+            I18n.get("db_status_issues_label", value=issues_value),
+            size=AppStyles.FONT_SIZE_BODY_SM,
+            color=issues_color,
+        )
+    )
+    for issue in state.issues or []:
+        message = issue.get("message") or issue.get("code") or ""
+        controls.append(
+            ft.Text(
+                I18n.get("db_status_issue_item", message=message),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.WARNING,
+            )
+        )
+
+    for label_key, items in (
+        ("db_status_restore_residuals_label", state.restore_residuals),
+        ("db_status_dump_partials_label", state.dump_partials),
+    ):
+        items_color = AppColors.WARNING if items else AppColors.TEXT_SECONDARY
+        controls.append(
+            ft.Text(
+                I18n.get(label_key, value=_diag_value_text(items)),
+                size=AppStyles.FONT_SIZE_BODY_SM,
+                color=items_color,
+            )
+        )
+        for path in items or []:
+            controls.append(
+                ft.Text(
+                    I18n.get("db_status_residual_item", path=path),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.WARNING,
+                )
+            )
+
+    controls.append(
+        ft.Text(
+            I18n.get("db_status_residuals_scope_note"),
+            size=AppStyles.FONT_SIZE_CAPTION,
+            color=AppColors.TEXT_SECONDARY,
+        )
+    )
+    return controls
+
+
 def _on_refresh_click_factory(vm: DatabaseStatusViewModel) -> Callable[[ft.ControlEvent], None]:
     """Create on_click handler for refresh button — submits vm.refresh_status via page.run_task."""
 
     def _on_refresh_click(e: ft.ControlEvent) -> None:
-        try:
-            page = ft.context.page
-            if page is not None:
-                page.run_task(vm.refresh_status)
-        except RuntimeError:
-            logger.debug("[DatabaseStatusPanel] page not available for refresh_status")
+        _dispatch_refresh(vm)
 
     return _on_refresh_click
 
@@ -106,6 +175,9 @@ def DatabaseStatusPanel() -> ft.Container:
     ft.use_state(get_observable_state)
     # F04: 订阅主题状态, 主题热切换时重渲染并取当期 AppColors 颜色.
     ft.use_state(AppColors.get_observable_state)
+
+    # --- 挂载期自动刷新一次真实状态 (D1-12 ②, R16: 副作用只在 use_effect 中触发) ---
+    ft.use_effect(lambda: _dispatch_refresh(vm), dependencies=[])
 
     # --- Status display (driven by state.status_message / status_type) ---
     status_text = _render_message(state.status_message)
@@ -163,6 +235,9 @@ def DatabaseStatusPanel() -> ft.Container:
             )
         )
 
+    # --- Diagnostics display (issues / residuals, D1-12 ①) ---
+    diagnostics_controls = _build_diagnostics_controls(state)
+
     # --- Error message display ---
     error_text = _render_message(state.error_message)
     error_text_ctrl = ft.Text(
@@ -216,6 +291,7 @@ def DatabaseStatusPanel() -> ft.Container:
                     spacing=5,
                 ),
                 *info_controls,
+                *diagnostics_controls,
                 error_text_ctrl,
                 ft.Container(height=12),
                 SafeWrapRow(

@@ -7,7 +7,7 @@ and validates column-level consistency.
 Run: pytest tests/test_data_dictionary_alignment.py -v
 """
 
-from data.data_dictionary import COMMON_COLUMNS, columns_of
+from data.data_dictionary import COMMON_COLUMNS, TABLE_DEFINITIONS, columns_of
 from data.persistence.models import (
     BlockTrade,
     DailyQuotes,
@@ -137,3 +137,20 @@ class TestFinaAuditAuditSign:
     def test_fina_audit_dao_includes_audit_sign(self):
         dao_cols = get_model_columns(FinaAudit)
         assert "audit_sign" in dao_cols, "save_fina_audit should include audit_sign"
+
+
+class TestLowFrequencyDimensionMetadata:
+    """D2-12：申万分类/名称历史等低频维度表的健康检查元数据。"""
+
+    def test_sw_industry_classify_is_global_without_ts_code(self):
+        """分类快照无 ts_code，必须按 global 语义检查，否则 count(DISTINCT ts_code) 必抛错。"""
+        meta = TABLE_DEFINITIONS["sw_industry_classify"]
+        assert meta.get("type") == "global"
+        assert "ts_code" not in columns_of("sw_industry_classify")
+
+    def test_low_freq_dimension_tables_use_sync_status_freshness(self):
+        """低频维度表长期无变动属正常，新鲜度按 sync_status 成功同步时点评估。"""
+        for table in ("sw_industry_member", "stock_name_history"):
+            meta = TABLE_DEFINITIONS[table]
+            assert meta.get("type") != "global", f"{table} 仍需按股票覆盖统计"
+            assert meta["quality_config"].get("freshness_source") == "sync_status"

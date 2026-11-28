@@ -17,9 +17,11 @@ VM 不感知 locale: state 用 Message dataclass 产出 (key, params),
 View 渲染时 I18n.get(msg.key, **msg.params)。
 
 线程模型:
-- start_backup_with_default_path 是 async 命令: 默认路径生成含 ``mkdir`` / ``resolve``
-  同步磁盘 IO, 经 ``ThreadPoolManager`` 的 IO 池执行 (R16), 完成后再 await start_backup
-- start_backup 是 async 命令, 调用 MaintenanceService.dump
+- start_backup_with_default_path 是 async 命令: 首个 await 之前同步置忙态, 默认路径生成含
+  ``mkdir`` / ``resolve`` / ``exists`` 同步磁盘 IO, 经 ``ThreadPoolManager`` 的 IO 池执行 (R16),
+  完成后进入已持忙态的内部方法 ``_run_backup_locked``
+- start_backup 是 async 命令, 同样先同步置忙态再进入 ``_run_backup_locked``;
+  备份文件存在性探测经 IO 池执行 (R16), 再调用 MaintenanceService.dump
   (dump 已是 async, 内部通过 ThreadPoolManager 提交 subprocess, 不需额外包裹)
 - start_backup 将 dump 放入独立 task 并以 ``asyncio.shield`` 等待: 调用方被取消时
   只终止等待, dump 继续执行, busy 在 dump 真正终结时由其自身落地终态后释放
@@ -109,17 +111,38 @@ def _probe_restore_archive(path: Path) -> RestoreArchiveInfo:
     return _read_archive_info(path)
 
 
+def _unique_backup_path(directory: Path, base_name: str) -> Path:
+    """同一秒内重复备份时追加 ``-1`` / ``-2`` 后缀，避免同名路径碰撞（D1-11）。
+
+    调用方须已处于 IO 线程池（``exists`` 为同步磁盘探测，R16）。
+    """
+    candidate = directory / f"{base_name}.dump"
+    suffix = 1
+    while candidate.exists():
+        candidate = directory / f"{base_name}-{suffix}.dump"
+        suffix += 1
+    return candidate
+
+
+def _path_exists(path: Path) -> bool:
+    """备份文件存在性探测（经 IO 线程池执行，R16：不得在事件循环线程同步 stat）。"""
+    return path.exists()
+
+
 def _generate_default_backup_path() -> Path:
     """生成带时间戳的绝对默认备份路径 (P1-7).
 
     返回 ``<app data>/backups/qtrading-backup-YYYYMMDD-HHMMSS.dump`` 绝对路径，
     避免 CWD 不可预测导致备份文件丢失。备份目录不存在时尝试创建；
     创建失败时 fall back 到 ``Path.cwd()`` 并记 warning（不阻塞用户操作）。
+    同一秒内已存在同名文件时追加 ``-1`` / ``-2`` 递增后缀（D1-11：避免同秒
+    二次备份生成同名路径而被覆盖保护误判或相互覆盖）。
 
-    含 ``mkdir`` / ``resolve`` 同步磁盘 IO，调用方必须经 ``ThreadPoolManager`` 的
-    IO 池执行（R16），不得在 UI 事件处理器内直接调用。
+    含 ``mkdir`` / ``resolve`` / ``exists`` 同步磁盘 IO，调用方必须经
+    ``ThreadPoolManager`` 的 IO 池执行（R16），不得在 UI 事件处理器内直接调用。
     """
     timestamp = get_now().strftime("%Y%m%d-%H%M%S")
+    base_name = f"qtrading-backup-{timestamp}"
     backups_dir = Path(platformdirs.user_data_dir("qTrading")) / "backups"
     try:
         backups_dir.mkdir(parents=True, exist_ok=True)
@@ -129,8 +152,8 @@ def _generate_default_backup_path() -> Path:
             DataSanitizer.sanitize_error(str(backups_dir)),
             DataSanitizer.sanitize_error(e),
         )
-        return Path.cwd().resolve() / f"qtrading-backup-{timestamp}.dump"
-    return backups_dir.resolve() / f"qtrading-backup-{timestamp}.dump"
+        return _unique_backup_path(Path.cwd().resolve(), base_name)
+    return _unique_backup_path(backups_dir.resolve(), base_name)
 
 
 @dataclass(frozen=True)
@@ -167,8 +190,10 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
       生命周期由 hook 管理 (dispose_on_unmount=True)
 
     命令:
-    - start_backup_with_default_path() (async): IO 池生成默认路径后委托 start_backup
-    - start_backup(output_path) (async): 调用 dump() 更新 state
+    - start_backup_with_default_path() (async): 同步置忙态后经 IO 池生成默认路径, 再进入
+      ``_run_backup_locked``
+    - start_backup(output_path) (async): 同步置忙态后进入 ``_run_backup_locked``, 由后者
+      调用 dump() 更新 state
     - start_restore_wizard(input_path) (async): Step 1, 设置 restore_path + confirm_state="pending"
     - confirm_restore() (async): Step 2, confirm_state="offline_guidance" + 显示离线恢复指引消息
       (D36: 不直接调用 sidecar restore, 因 §13.3 维护锁在 qTrading 运行时会冲突)
@@ -199,33 +224,73 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
         return self._maintenance_service
 
     async def start_backup_with_default_path(self) -> None:
-        """手动备份 (默认路径): IO 池生成默认路径后委托 ``start_backup``.
+        """手动备份 (默认路径): 同步置忙态 → IO 池生成默认路径 → 执行备份.
 
-        R16: ``_generate_default_backup_path`` 含 ``mkdir`` / ``resolve`` 同步磁盘 IO,
-        不得在 UI 事件处理器内执行; 此处经 ``ThreadPoolManager`` 的 IO 池执行,
-        完成后再 ``await self.start_backup(output_path)``.
+        R16: ``_generate_default_backup_path`` 含 ``mkdir`` / ``resolve`` / ``exists``
+        同步磁盘 IO, 不得在 UI 事件处理器内执行; 此处经 ``ThreadPoolManager`` 的 IO 池执行.
+        D1-11: 忙态在**首个 await 之前**同步置位——双击窗口内第二次点击因 ``is_backing_up``
+        直接返回, 不会重复生成路径或并发备份; 路径准备失败/取消时负责释放忙态.
         R2: 路径准备阶段被取消时 ``CancelledError`` 继续透传, 不启动备份.
         """
-        output_path = await ThreadPoolManager().run_async(TaskType.IO, _generate_default_backup_path)
-        await self.start_backup(output_path)
+        if not self._acquire_backup_busy():
+            logger.debug("[BackupRestoreVM] start_backup_with_default_path skipped, backup in progress")
+            return
+        try:
+            output_path = await ThreadPoolManager().run_async(TaskType.IO, _generate_default_backup_path)
+        except asyncio.CancelledError:
+            self._release_backup_busy()
+            raise  # R2: 必须传播
+        except Exception:
+            # 忙态已置位，异常路径必须释放，否则入口被永久锁死。
+            self._release_backup_busy()
+            raise
+        await self._run_backup_locked(output_path)
 
     async def start_backup(self, output_path: Path) -> None:
-        """手动备份: 调用 ``dump(output_path)`` 更新 state.
+        """手动备份: 同步置忙态后调用 ``_run_backup_locked(output_path)``.
 
         - 重复点击守卫: ``is_backing_up`` 为 True 时跳过 (与 test_connection/save_config
-          同模式; UI 层 disabled 与重渲染间存在双击窗口, 同秒默认时间戳路径相同,
-          并发 dump 会写同一文件导致备份损坏)
-        - 备份文件覆盖保护: ``output_path.exists()`` 时不执行 (避免误覆盖)
-        - 调用前清空 error_message / backup_success_message / backup_path (旧路径残留)
-        - dump 在独立 task 中执行并经 ``asyncio.shield`` 等待: 调用方被取消时只终止
-          等待, dump 继续; busy 仅在 dump 真正终结时释放,
-          避免在途 dump 与下一次备份并发写同一文件
+          同模式; UI 层 disabled 与重渲染间存在双击窗口)
+        - 忙态在首个 await 之前置位, 保持到被 ``asyncio.shield`` 保护的底层 dump 真正
+          结束; 调用方被取消时只终止等待, dump 继续并在终结时释放忙态
+        - 备份文件存在性探测经 IO 线程池执行 (R16)
         - 异常时设 error_message; CancelledError 继续透传 (R2)
         """
-        if self._state.is_backing_up:
+        if not self._acquire_backup_busy():
             logger.debug("[BackupRestoreVM] start_backup skipped, backup in progress")
             return
-        if output_path.exists():  # noqa: ASYNC240  # 备份前一次性存在性探测，防误覆盖（非交互热路径）
+        await self._run_backup_locked(output_path)
+
+    def _acquire_backup_busy(self) -> bool:
+        """同步占位忙态；已忙返回 False（不覆盖已有运行的进度/错误消息）。"""
+        if self._state.is_backing_up:
+            return False
+        self._set_state(is_backing_up=True)
+        return True
+
+    def _release_backup_busy(self) -> None:
+        """释放忙态（dump 未启动的失败/取消路径使用）。"""
+        self._set_state(is_backing_up=False)
+
+    async def _run_backup_locked(self, output_path: Path) -> None:
+        """在已持忙态的前提下执行一次备份（入口须先 ``_acquire_backup_busy``）.
+
+        - ``output_path.exists()`` 迁入 IO 线程池（R16），避免在事件循环线程同步 stat
+        - 备份文件覆盖保护: 已存在时不执行, 设 error_message 并释放忙态
+        - 调用前清空 error_message / backup_success_message / backup_path (旧路径残留)
+        - dump 在独立 task 中执行并经 ``asyncio.shield`` 等待: 调用方被取消时只终止
+          等待, dump 继续; 忙态仅在 dump 真正终结时由 ``_run_dump`` 释放
+        - 存在性探测阶段被取消/异常: 忙态必须释放（dump 尚未启动, 无人释放）
+        """
+        try:
+            already_exists = await ThreadPoolManager().run_async(TaskType.IO, _path_exists, output_path)
+        except asyncio.CancelledError:
+            self._release_backup_busy()
+            raise  # R2: 必须传播
+        except Exception:
+            self._release_backup_busy()
+            raise
+        if already_exists:
             logger.warning(
                 "[BackupRestoreVM] backup file already exists, skip: %s",
                 DataSanitizer.sanitize_error(str(output_path)),  # R9: 路径可能含用户名等敏感信息
@@ -236,7 +301,6 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
             )
             return
         self._set_state(
-            is_backing_up=True,
             backup_path=None,
             progress_message=Message("backup_in_progress"),
             error_message=None,

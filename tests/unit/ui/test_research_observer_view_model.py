@@ -7,7 +7,18 @@ from typing import Any, cast
 
 import pytest
 
-from core.agent_types import DraftPayload, DraftRead, MCPServiceIdentity, Mode, Purpose, SessionAction
+from core.agent_types import (
+    DraftPayload,
+    DraftRead,
+    MCPServiceIdentity,
+    Mode,
+    Purpose,
+    RoleMCPAssignment,
+    RoleMCPServiceBinding,
+    RoleSkillAssignment,
+    SessionAction,
+    SkillVersionRef,
+)
 from ui.viewmodels.research_observer_view_model import (
     CATCH_UP_INCOMPLETE,
     MESSAGE_BRANCH_UNAVAILABLE_KEY,
@@ -39,6 +50,7 @@ from ui.viewmodels.research_observer_view_model import (
     ProgressSummaryView,
     ResearchObserverState,
     ResearchObserverViewModel,
+    build_role_options,
     reset_shared_research_observer,
     resolve_agent_research_service,
     SessionOriginView,
@@ -1606,17 +1618,33 @@ class TestMCPResearchScope:
 
 
 class _MainTurnIntake:
-    def __init__(self, *, answer: str = "直答", plan_reference: Any = None) -> None:
+    def __init__(
+        self,
+        *,
+        answer: str = "直答",
+        plan_reference: Any = None,
+        has_result: bool = True,
+        discussion_answer_text: str | None = None,
+        error: Exception | None = None,
+    ) -> None:
         self._answer = answer
         self._plan_reference = plan_reference
+        self._has_result = has_result
+        self._discussion_answer_text = discussion_answer_text
+        self._error = error
 
     async def start_question(self, text: str, **kwargs: Any) -> Any:
+        if self._error is not None:
+            raise self._error
         return SimpleNamespace(
             receipt=object(),
             dispatch=SimpleNamespace(submitted=False, reason="mode_research_disabled"),
             plan_reference=None,
             main_turn=SimpleNamespace(
-                outcome=SimpleNamespace(result=SimpleNamespace(body_text=self._answer)),
+                outcome=SimpleNamespace(
+                    result=SimpleNamespace(body_text=self._answer) if self._has_result else None,
+                    discussion_answer_text=self._discussion_answer_text,
+                ),
                 plan_reference=self._plan_reference,
             ),
         )
@@ -1625,7 +1653,7 @@ class _MainTurnIntake:
         raise AssertionError("not used")
 
 
-class _MainTurnComposerTests:
+class TestMainTurnComposer:
     @pytest.mark.asyncio
     async def test_send_surfaces_main_turn_answer(self) -> None:
         vm = ResearchObserverViewModel(_FakeService(), intake=_MainTurnIntake())
@@ -1647,6 +1675,46 @@ class _MainTurnComposerTests:
         await vm.send_first_question()
 
         assert vm.state.plan_reference == ("execution-0", 2)
+
+    @pytest.mark.asyncio
+    async def test_discuss_answer_without_round_result_surfaces_persisted_text(self) -> None:
+        """讨论直答不产出轮绑定成果：结论区取循环已确认落库的答复文本。"""
+
+        vm = ResearchObserverViewModel(
+            _FakeService(),
+            intake=_MainTurnIntake(has_result=False, discussion_answer_text="讨论结论正文"),
+        )
+        vm.set_composer_text("解释量价背离")
+        vm.set_composer_mode("discuss")
+
+        await vm.send_first_question()
+
+        assert vm.state.last_answer_text == "讨论结论正文"
+        assert vm.state.composer_error_key is None
+
+    @pytest.mark.asyncio
+    async def test_non_answer_outcome_keeps_answer_empty(self) -> None:
+        """澄清/计划等无答复终态不伪造结论文本。"""
+
+        vm = ResearchObserverViewModel(_FakeService(), intake=_MainTurnIntake(has_result=False))
+        vm.set_composer_text("量化一下")
+
+        await vm.send_first_question()
+
+        assert vm.state.last_answer_text == ""
+
+    @pytest.mark.asyncio
+    async def test_send_failure_keeps_answer_empty_and_reports_error(self) -> None:
+        vm = ResearchObserverViewModel(
+            _FakeService(),
+            intake=_MainTurnIntake(error=RuntimeError("boom")),
+        )
+        vm.set_composer_text("解释量价背离")
+
+        await vm.send_first_question()
+
+        assert vm.state.last_answer_text == ""
+        assert vm.state.composer_error_key == "RuntimeError"
 
 
 def _hit(session_id: str) -> Any:
@@ -2761,3 +2829,234 @@ class TestSessionOriginProjection:
         assert origin is not None
         assert origin.summary_items == ()
         assert origin.display_name is None
+
+
+class _RoleCatalog:
+    """自定义角色目录替身（只实现 VM 需要的 list_active）。"""
+
+    def __init__(self, definitions: tuple[Any, ...] = (), *, error: Exception | None = None) -> None:
+        self._definitions = definitions
+        self._error = error
+        self.calls = 0
+
+    async def list_active(self) -> tuple[Any, ...]:
+        self.calls += 1
+        if self._error is not None:
+            raise self._error
+        return self._definitions
+
+
+class _SkillAssignmentService(_FakeService):
+    """在既有 facade 替身上追加角色 Skill 分配读取面。"""
+
+    def __init__(self, assignment: Any | None = None, *, error: Exception | None = None) -> None:
+        super().__init__()
+        self.assignment = assignment
+        self.assignment_error = error
+        self.assignment_reads: list[tuple[str, str, str]] = []
+
+    async def read_role_skill_assignment(self, *, user_scope: str, role_id: str, role_version: str) -> Any:
+        self.assignment_reads.append((user_scope, role_id, role_version))
+        if self.assignment_error is not None:
+            raise self.assignment_error
+        return self.assignment
+
+
+class _BlockingSkillService(_FakeService):
+    """授权读取可挂起的 facade 替身：用于验证授权读取窗口内的并发首问不重复受理。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def read_role_skill_assignment(self, *, user_scope: str, role_id: str, role_version: str) -> Any:
+        self.started.set()
+        await self.release.wait()
+        return None
+
+
+class _SkillIntake(_FakeIntake):
+    """记录首问实际下发的 Skill 手选集合。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.skill_calls: list[tuple[tuple[str, str], ...]] = []
+
+    async def start_question(self, text: str, *, skill_refs: Any = (), **kwargs: Any) -> Any:
+        self.skill_calls.append(tuple(skill_refs))
+        return await super().start_question(text, skill_refs=skill_refs, **kwargs)
+
+
+class _MCPRoleCatalog:
+    """MCP 服务目录 + 角色 MCP 分配替身（验证范围与角色授权求交）。"""
+
+    def __init__(self, assignment: RoleMCPAssignment | None) -> None:
+        self._assignment = assignment
+        self.identity = MCPServiceIdentity(service_id="svc-quote", config_version=1)
+        self.other = MCPServiceIdentity(service_id="svc-news", config_version=2)
+
+    async def list_services(self) -> tuple[Any, ...]:
+        return (
+            SimpleNamespace(identity=self.identity, display_name="行情服务"),
+            SimpleNamespace(identity=self.other, display_name="新闻服务"),
+        )
+
+    async def list_role_assignments(self) -> tuple[RoleMCPAssignment, ...]:
+        return () if self._assignment is None else (self._assignment,)
+
+
+def _main_role_version() -> str:
+    version = build_role_options()[0].version
+    assert version is not None
+    return version
+
+
+class TestRoleCatalogAndSkillScope:
+    @pytest.mark.asyncio
+    async def test_custom_active_role_loaded_into_options(self) -> None:
+        definition = SimpleNamespace(role_id="custom-analyst", role_version="r2", display_name="自定义分析角色")
+        vm = ResearchObserverViewModel(
+            _FakeService(), intake=_FakeIntake(), role_catalog=cast(Any, _RoleCatalog((definition,)))
+        )
+
+        await vm.load_model_selection()
+
+        option = vm.state.role_option("custom-analyst")
+        assert option is not None
+        assert (option.version, option.eligible, option.display_name) == ("r2", True, "自定义分析角色")
+        assert vm.state.role_catalog_error_key is None
+
+    @pytest.mark.asyncio
+    async def test_role_catalog_failure_reported_without_hiding_preset_roles(self) -> None:
+        vm = ResearchObserverViewModel(
+            _FakeService(), intake=_FakeIntake(), role_catalog=cast(Any, _RoleCatalog(error=RuntimeError("boom")))
+        )
+
+        await vm.load_model_selection()
+
+        assert vm.state.role_catalog_error_key == "agent_research_role_catalog_error"
+        main_option = vm.state.role_option("main")
+        assert main_option is not None
+        assert (main_option.role_key, main_option.eligible, main_option.reject_key) == ("main", True, None)
+        assert main_option.version == _main_role_version()
+
+    @pytest.mark.asyncio
+    async def test_skill_selection_passes_through_and_intersects_role_authorization(self) -> None:
+        """冻结 Skill = 手选 ∩ 角色启用集合；角色默认版本不自动授予。"""
+
+        version = _main_role_version()
+        assignment = RoleSkillAssignment(
+            role_id="main",
+            role_version=version,
+            enabled=(SkillVersionRef("skill-a", 2), SkillVersionRef("skill-b", 1)),
+            defaults=(SkillVersionRef("skill-b", 1),),
+        )
+        service = _SkillAssignmentService(assignment)
+        intake = _SkillIntake()
+        vm = ResearchObserverViewModel(service, intake=intake)
+
+        await vm.load_model_selection()
+        await vm.load_role_skill_scope()
+
+        assert {option.key for option in vm.state.skill_options} == {("skill-a", "2"), ("skill-b", "1")}
+        vm.toggle_role_skill("skill-a", "2")
+        # 模拟越权注入：发送前仍必须与角色授权求交，未授权的 skill-x 不得下发。
+        vm._set_state(skill_selection=(("skill-a", "2"), ("skill-x", "9")))
+        vm.set_composer_text("整理内部资料")
+
+        await vm.send_first_question()
+
+        assert intake.skill_calls == [(("skill-a", "2"),)]
+        assert vm.state.skill_selection_frozen == (("skill-a", "2"),)
+        assert ("skill-b", "1") not in vm.state.skill_selection_frozen
+
+    @pytest.mark.asyncio
+    async def test_toggle_rejects_skill_outside_role_authorization(self) -> None:
+        version = _main_role_version()
+        assignment = RoleSkillAssignment(
+            role_id="main",
+            role_version=version,
+            enabled=(SkillVersionRef("skill-a", 2),),
+            defaults=(),
+        )
+        vm = ResearchObserverViewModel(_SkillAssignmentService(assignment), intake=_SkillIntake())
+        await vm.load_model_selection()
+        await vm.load_role_skill_scope()
+
+        vm.toggle_role_skill("skill-x", "9")
+
+        assert vm.state.skill_selection == ()
+        assert vm.state.skill_scope_error_key == "agent_research_skill_selection_unknown"
+
+    @pytest.mark.asyncio
+    async def test_role_assignment_read_failure_blocks_send(self) -> None:
+        service = _SkillAssignmentService(error=RuntimeError("boom"))
+        intake = _SkillIntake()
+        vm = ResearchObserverViewModel(service, intake=intake)
+        await vm.load_model_selection()
+        vm.set_composer_text("整理内部资料")
+
+        await vm.send_first_question()
+
+        assert intake.skill_calls == []
+        assert vm.state.composer_error_key == "agent_research_skill_scope_error"
+
+    @pytest.mark.asyncio
+    async def test_mcp_scope_intersects_role_authorization(self) -> None:
+        version = _main_role_version()
+        catalog = _MCPRoleCatalog(
+            RoleMCPAssignment(
+                role_id="main",
+                role_version=version,
+                available=(
+                    RoleMCPServiceBinding(identity=MCPServiceIdentity(service_id="svc-quote", config_version=1)),
+                ),
+            )
+        )
+        intake = _SkillIntake()
+        vm = ResearchObserverViewModel(_FakeService(), intake=intake, mcp_catalog=cast(Any, catalog))
+        await vm.load_model_selection()
+        await vm.load_mcp_scope()
+        vm.toggle_mcp_scope(catalog.identity.stable_key())
+        vm.toggle_mcp_scope(catalog.other.stable_key())
+        vm.set_composer_text("整理内部资料")
+
+        await vm.send_first_question()
+
+        assert intake.question_calls[0][4] == (catalog.identity,)
+
+    @pytest.mark.asyncio
+    async def test_discuss_send_not_blocked_by_skill_assignment_read_failure(self) -> None:
+        """讨论模式零研究：授权读取失败不阻断直答，且不携带未知外部能力。"""
+
+        service = _SkillAssignmentService(error=RuntimeError("boom"))
+        intake = _SkillIntake()
+        vm = ResearchObserverViewModel(service, intake=intake)
+        await vm.load_model_selection()
+        vm.set_composer_mode("discuss")
+        vm.set_composer_text("解释概念")
+
+        await vm.send_first_question()
+
+        assert intake.skill_calls == [()]
+        assert vm.state.composer_error_key is None
+
+    @pytest.mark.asyncio
+    async def test_concurrent_send_does_not_dispatch_twice_during_authorization_read(self) -> None:
+        """授权读取窗口内再次发送被 pending 拦住，不重复受理（重入保护）。"""
+
+        service = _BlockingSkillService()
+        intake = _SkillIntake()
+        vm = ResearchObserverViewModel(service, intake=intake)
+        await vm.load_model_selection()
+        vm.set_composer_text("研究银行股")
+
+        first = asyncio.create_task(vm.send_first_question())
+        await asyncio.wait_for(service.started.wait(), timeout=2)
+        second = asyncio.create_task(vm.send_first_question())
+        await second  # pending 已置位：第二次直接返回，不进入受理
+        service.release.set()
+        await first
+
+        assert intake.skill_calls == [()]

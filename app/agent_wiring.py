@@ -134,10 +134,11 @@ from services.agent_service.runtime import (
     RUNTIME_DB_NAME,
     CloseCommandIdentity,
     CloseFactOutcome,
+    DispatchGate,
     OwnerLoopBridge,
 )
 from services.agent_service.skills import ManagedSkillStore, SkillCatalogService
-from services.agent_service.tool_runtime import build_tool_runtime_factory
+from services.agent_service.tool_runtime import ToolApprovalCoordinator, build_tool_runtime_factory
 from services.agent_service.units import UnitConversion
 from services.agent_service.workflows import (
     ANSWER_MESSAGE_TOPIC,
@@ -288,6 +289,19 @@ class AgentWiring:
         """宿主就绪（组装成功且启动隔离就绪）；未就绪不得有任何派发/关闭链。"""
 
         return self.handle is not None and self.runtime is not None
+
+    @property
+    def tool_grant_revoker(self) -> AgentService | None:
+        """工具许可撤销端口（与 facade 同源；未接线时为 ``None``，不伪造撤销能力）。
+
+        仅当 facade 暴露真实 ``revoke_tool_grant``（委托 DAO 的 grant_revision CAS）
+        时返回它；否则如实返回 ``None``，UI 侧据此显示「撤销不可用」。
+        """
+
+        service = self.service
+        if service is not None and callable(getattr(service, "revoke_tool_grant", None)):
+            return service
+        return None
 
     def dispatch_closed(self) -> bool:
         """当前是否零派发（未 launch 的宿主没有任何派发路径）。"""
@@ -546,6 +560,36 @@ class _ProcessDispatchGate:
         return self._closed or not self._launched
 
 
+class _NativeRetryLauncher:
+    """单任务重试的原生投递端口（W-01 / D7-06）。
+
+    - 门闩关闭（未 launch / 关闭链已关派发）→ ``(False, "dispatch_closed")``，
+      不提交任何 workflow；
+    - workflow 身份由 ``(user_scope, execution_id, 新轮 round_id)`` 稳定派生，
+      宿主入口以 ``return-existing`` 启动 → 同轮重投命中原执行，不重复研究
+      （幂等投递靠身份而非进程内缓存）；
+    - 成功仅表示「已交持久 workflow」，叶是否重跑由父 workflow 推进，不在此冒充。
+    """
+
+    def __init__(self, *, gate: DispatchGate, submit: RootWorkflowSubmitter) -> None:
+        self._gate = gate
+        self._submit = submit
+
+    async def launch(
+        self,
+        payload: dict[str, object],
+        *,
+        user_scope: str,
+        execution_id: str,
+        round_id: str,
+    ) -> tuple[bool, str | None]:
+        if self._gate.dispatch_closed():
+            return False, "dispatch_closed"
+        workflow_id = stable_id("retry_workflow", [user_scope, execution_id, round_id])
+        await self._submit(workflow_id, cast(dict[str, Any], payload))
+        return True, None
+
+
 class _InFlightPortIo:
     """组合根端口调用的在途计数（关闭门闩的残余 IO 证据）。
 
@@ -620,19 +664,27 @@ class _NativeAnswerSender:
             self._port_io.exit("answer_send")
 
 
-def _build_answer_consumer(dao: Any, user_scope: str) -> Callable[[str, str], Awaitable[ConsumptionFact]]:
+def _build_answer_consumer(
+    dao: Any, user_scope: str, *, on_consumed: Callable[[str], None] | None = None
+) -> Callable[[str, str], Awaitable[ConsumptionFact]]:
     """生产答复消费者（P1-05）：按保存时同一命令身份派生并走 DAO 幂等 CAS。
 
     命令身份派生与 ``AgentDao.save_answer`` 一致（``stable_id("command",
     [user_scope, decision_id, client_command_id])``），不新建答复、不改投递事实；
     已消费重放由 DAO 返回原事实（重复投递只消费一次）。
+
+    ``on_consumed`` 在消费事务提交后按 ``decision_id`` 唤醒审批等待者（D7-01）；
+    只做唤醒，不传递授权事实——等待方醒后仍读取持久 ``agent_decision``。
     """
 
     async def _consume(decision_id: str, client_command_id: str) -> ConsumptionFact:
         command_record_id = stable_id("command", [user_scope, decision_id, client_command_id])
-        return await dao.consume_answer(
+        fact = await dao.consume_answer(
             ConsumeAnswerRequest(user_scope=user_scope, command_record_id=command_record_id)
         )
+        if on_consumed is not None:
+            on_consumed(fact.decision_id)
+        return fact
 
     return _consume
 
@@ -1041,6 +1093,27 @@ def _build_role_services(engine: Any) -> tuple[RoleCatalogService, SessionModelS
     )
 
 
+def _build_preferred_connection_provider(
+    dao: Any, role_catalog: RoleCatalogService, session_models: SessionModelStore
+) -> Callable[[Any], Awaitable[str | None]]:
+    """受理时冻结的会话/角色模型选择（普通叶执行的首选连接）。
+
+    - 自定义角色（目录中 ``active``）的模型覆盖优先；
+    - 否则沿用会话级模型选择（与讨论/计划主回合同一来源）；
+    - 无任何选择返回 ``None``（继承场景路由默认顺序）。
+    比较路独立冻结连接由 ``resolve_agent_model_binding`` 优先处理，不受本选择覆盖。
+    """
+
+    async def _provide(context: Any) -> str | None:
+        facts = await dao.read_leaf_dispatch_facts(context.execution_id, context.round_id)
+        definition = await role_catalog.resolve(context.node.role_key)
+        if definition is not None and definition.status == "active" and definition.model_connection_id:
+            return definition.model_connection_id
+        return await session_models.read(facts.session_id)
+
+    return _provide
+
+
 async def wire_agent_runtime(
     cache_manager: Any,
     *,
@@ -1090,9 +1163,12 @@ async def wire_agent_runtime(
     usage_dao = getattr(cache_manager, "ai_usage_dao", None)
     skills = _build_skill_catalog(dao, skills_root)
     service = AgentService(dao, usage_dao, skills=skills)
+    #: 审批等待登记（D7-01）：工具 runtime 与答复消费侧共享同一实例；消费事务
+    #: 提交后按 decision_id 唤醒，醒后仍以持久决定事实重核。
+    approvals = ToolApprovalCoordinator()
     #: 答复消费（P1-05）：原生 workflow 的 recv 消费步骤按同一用户域 + 共享账本
     #: 消费（未 launch 时无 workflow，安装无副作用；步骤缺少消费者时明确拒绝）。
-    AnswerConsumerRegistry.install(_build_answer_consumer(dao, user_scope))
+    AnswerConsumerRegistry.install(_build_answer_consumer(dao, user_scope, on_consumed=approvals.notify_consumed))
     try:
         runtime_url = _agent_runtime_sync_url(engine)
     except Exception as e:
@@ -1119,8 +1195,14 @@ async def wire_agent_runtime(
             )
             lifecycle = None
     if leaf_runtime is None:
-        tool_factory = None if lifecycle is None else build_tool_runtime_factory(dao=dao, lifecycle=lifecycle)
-        leaf_runtime = default_leaf_runtime(dao, tool_runtime_factory=tool_factory)
+        tool_factory = (
+            None if lifecycle is None else build_tool_runtime_factory(dao=dao, lifecycle=lifecycle, approvals=approvals)
+        )
+        leaf_runtime = default_leaf_runtime(
+            dao,
+            tool_runtime_factory=tool_factory,
+            preferred_connection_provider=_build_preferred_connection_provider(dao, role_catalog, session_models),
+        )
     try:
         install_leaf_runtime(leaf_runtime)
         # 父流程收敛后落应用执行终态（P1-08）：同一共享账本写入，不新建引擎。
@@ -1254,6 +1336,9 @@ async def wire_agent_runtime(
             residual.extend(ledger.residual_names())
         return tuple(residual)
 
+    #: 生产应用轮次绑定来源：冻结会话/输入版/执行代次，父 workflow 据此建轮次；
+    #: 首次派发与单任务重试共用同一权威快照（重试沿用原轮绑定，不自造身份）。
+    binding_identity_provider = build_binding_identity_provider(dao, application_version=settings.application_version)
     dispatcher = ResearchDispatcher(
         gate=gate,
         submit=_tracked_submit,
@@ -1262,10 +1347,7 @@ async def wire_agent_runtime(
         read_result=_tracked_read,
         # 生产角色能力来源：只取本次请求冻结的 Skill/MCP 显式手选集（未选择即零派发）。
         capability_provider=build_role_capability_provider(dao),
-        # 生产应用轮次绑定来源：冻结会话/输入版/执行代次，父 workflow 据此建轮次。
-        binding_identity_provider=build_binding_identity_provider(
-            dao, application_version=settings.application_version
-        ),
+        binding_identity_provider=binding_identity_provider,
     )
     fact_sink = (
         _LaunchedCloseFactSink(ledger=ledger, dao=dao, user_scope=user_scope)
@@ -1291,7 +1373,18 @@ async def wire_agent_runtime(
     #: 答复投递（P1-05）：已 launch 宿主复用同一 DBOS client 投递答复消息；
     #: 未 launch（零 workflow）不注入发送器 → facade 交付 fail-closed 拒绝。
     answer_sender = _NativeAnswerSender(client=handle.client, gate=gate, port_io=port_io) if launched else None
-    facade = AgentService(dao, usage_dao, dispatcher=dispatcher, skills=skills, answer_sender=answer_sender)
+    #: 单任务重试投递（W-01）：复用同一派发门闩与受管投递端口；未 launch 时门闩
+    #: 恒关，重试命令只落库并如实标零派发（不伪造已重跑）。
+    retry_launcher = _NativeRetryLauncher(gate=gate, submit=_tracked_submit)
+    facade = AgentService(
+        dao,
+        usage_dao,
+        dispatcher=dispatcher,
+        skills=skills,
+        answer_sender=answer_sender,
+        retry_launcher=retry_launcher,
+        retry_binding_identity_provider=binding_identity_provider,
+    )
     # 主回合生产构造：注入受治理模型回合工厂（复用 agent_research 场景路由/模型桥）；
     # 构造期零外发，路由不可用/缺配置时回合 fail-closed 并如实报错。
     turn_factory = (lambda _request: main_turn_turn) if main_turn_turn is not None else build_governed_turn_factory()

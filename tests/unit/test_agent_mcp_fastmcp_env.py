@@ -21,6 +21,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -188,7 +189,7 @@ class TestSecureEnvReferences:
                 kind=MCPTransportKind.STDIO,
                 command=config.transport.command,
                 cwd=config.transport.cwd,
-                env=(("MCP_TOKEN", "env:MCP_I18_MISSING_TOKEN"),),
+                secret_env=(("MCP_TOKEN", "env:MCP_I18_MISSING_TOKEN"),),
             ),
             budget=config.budget,
         )
@@ -198,6 +199,71 @@ class TestSecureEnvReferences:
 
         assert excinfo.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
         assert "secure env reference unavailable" in excinfo.value.sanitized_message
+
+    async def test_secret_env_reference_is_resolved_and_merged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``secret_env`` 的引用在 spawn 前解析，并与普通字面量合并进子进程环境。"""
+
+        monkeypatch.setenv("MCP_SYNTHETIC_LOCAL_TOKEN", "synthetic-local-value")
+        captured: list[tuple[tuple[str, str], ...]] = []
+
+        def _capture_create(cls: type[_ManagedStdioEnvironment], configured: tuple[tuple[str, str], ...]) -> Any:
+            captured.append(configured)
+            raise RuntimeError("stop before spawn")
+
+        monkeypatch.setattr(_ManagedStdioEnvironment, "create", classmethod(_capture_create))
+        base = _config()
+        config = replace(
+            base,
+            transport=replace(
+                base.transport,
+                env=(("LOG_LEVEL", "debug"),),
+                secret_env=(("MCP_TOKEN", "env:MCP_SYNTHETIC_LOCAL_TOKEN"),),
+            ),
+        )
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await FastMCPClientFactory().open(config)
+
+        assert excinfo.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+        assert captured == [(("LOG_LEVEL", "debug"), ("MCP_TOKEN", "synthetic-local-value"))]
+
+    async def test_plaintext_secret_env_is_rejected_before_any_spawn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """敏感字段只接受安全引用：明文秘密在准入即拒绝（禁止明文落库，R9/R10）。"""
+
+        def _no_create(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("明文秘密不得创建受管目录/启动子进程")
+
+        monkeypatch.setattr(_ManagedStdioEnvironment, "create", classmethod(_no_create))
+        base = _config()
+        config = replace(
+            base,
+            transport=replace(base.transport, secret_env=(("MCP_TOKEN", "synthetic-plaintext"),)),
+        )
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await FastMCPClientFactory().open(config)
+
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+
+    async def test_secure_reference_in_plain_env_is_rejected_before_any_spawn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """普通字段不得承载安全引用：分类必须显式，避免“引用/字面量”混放。"""
+
+        def _no_create(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("普通字段携带引用时不得创建受管目录/启动子进程")
+
+        monkeypatch.setattr(_ManagedStdioEnvironment, "create", classmethod(_no_create))
+        base = _config()
+        config = replace(
+            base,
+            transport=replace(base.transport, env=(("MCP_TOKEN", "env:MCP_SYNTHETIC_LOCAL_TOKEN"),)),
+        )
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await FastMCPClientFactory().open(config)
+
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
 
 
 class TestManagedTempDirectory:

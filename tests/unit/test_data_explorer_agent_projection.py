@@ -95,6 +95,20 @@ class TestAgentManagedTableExcludedFromExplorer:
             client.query_table("agent_message")
         assert client.get_table_schema("agent_message") == []
 
+    def test_sql_console_rejects_agent_table(self, client):
+        """SQL 控制台（execute_sql）同样不得越界直读 Agent 表原值。"""
+        result = client.execute_sql("SELECT * FROM agent_message")
+        assert result["success"] is False
+        assert result["data"] is None
+        assert _PRIVATE_RAW not in str(result["error"])
+
+    def test_sql_console_rejects_agent_table_via_query_to_xml(self, client):
+        """query_to_xml 把 SQL 藏在字符串常量里，词法上看不出表名，仍须被函数黑名单拒绝。"""
+        result = client.execute_sql("SELECT query_to_xml('SELECT body_text FROM agent_message', true, true, '')")
+        assert result["success"] is False
+        assert result["data"] is None
+        assert _PRIVATE_RAW not in str(result["error"])
+
     @pytest.mark.asyncio
     async def test_csv_and_xlsx_export_do_not_contain_private_fields(self, vm):
         """导出（CSV/XLSX 共用 query_table）对 Agent 表无产物，私有字段不外泄。"""

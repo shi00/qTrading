@@ -2103,6 +2103,12 @@ class SubmissionReceipt:
     ``mode`` 为受理时冻结的权威模式：派发必须用它决定是否启动研究（拿本次请求
     的模式会与受理权威值脱钩，P1-03）。历史回执无此键 → ``None``，调用方不得把
     未知当相等（R21）。
+
+    ``input_revision`` 为受理事务内实际落库的权威输入版（``agent_command.input_revision``），
+    主回合身份必须直接消费它，不得用会话草稿版派生（D7-03）。受理命令的输入版
+    恒为 1（``accept_request`` 固定写入），故历史回执无此键时解码为 1 是唯一权威
+    值而非猜测；同执行排队修订（``revise_queued``）以 ``RevisionReceipt.input_revision``
+    返回实际落库的新版（2、3…）。
     """
 
     command: CommandRef
@@ -2115,6 +2121,7 @@ class SubmissionReceipt:
     verified_at: str
     next_action: str | None
     mode: Mode | None = None
+    input_revision: int = 1
 
 
 _SUBMISSION_RECEIPT_KEYS: Final = frozenset(
@@ -2131,8 +2138,9 @@ _SUBMISSION_RECEIPT_KEYS: Final = frozenset(
     }
 )
 
-#: 可选键（向后兼容）：历史回执无 ``mode``，解码不伪造默认值。
-_SUBMISSION_RECEIPT_OPTIONAL_KEYS: Final = frozenset({"mode"})
+#: 可选键（向后兼容）：历史回执无 ``mode`` / ``input_revision``，解码按受理
+#: 命令的固定权威事实补齐（mode 未知为 None；受理输入版恒为 1）。
+_SUBMISSION_RECEIPT_OPTIONAL_KEYS: Final = frozenset({"mode", "input_revision"})
 
 
 def decode_submission_receipt(value: object, path: str = "$.submission_receipt") -> SubmissionReceipt:
@@ -2158,6 +2166,9 @@ def decode_submission_receipt(value: object, path: str = "$.submission_receipt")
             mode = Mode(mode_raw)
         except ValueError:
             _fail("invalid_tag", f"{path}.mode")
+    input_revision_raw = value.get("input_revision", 1)
+    if isinstance(input_revision_raw, bool) or not isinstance(input_revision_raw, int) or input_revision_raw < 1:
+        _fail("invalid_revision", f"{path}.input_revision")
     return SubmissionReceipt(
         command=decode_command_ref(value["command"], f"{path}.command"),
         command_record_id=_require_str(value["command_record_id"], f"{path}.command_record_id"),
@@ -2169,11 +2180,12 @@ def decode_submission_receipt(value: object, path: str = "$.submission_receipt")
         verified_at=require_utc_timestamp(value["verified_at"], f"{path}.verified_at"),
         next_action=next_raw,
         mode=mode,
+        input_revision=cast(int, input_revision_raw),
     )
 
 
 def encode_submission_receipt(receipt: SubmissionReceipt) -> dict[str, Any]:
-    """SubmissionReceipt → wire dict（9 键全量 + 可选 ``mode``）。"""
+    """SubmissionReceipt → wire dict（9 键全量 + 可选 ``mode`` + 权威 ``input_revision``）。"""
 
     wire: dict[str, Any] = {
         "command": encode_command_ref(receipt.command),
@@ -2185,6 +2197,7 @@ def encode_submission_receipt(receipt: SubmissionReceipt) -> dict[str, Any]:
         "commit_state": receipt.commit_state.value,
         "verified_at": require_utc_timestamp(receipt.verified_at, "$.verified_at"),
         "next_action": receipt.next_action,
+        "input_revision": receipt.input_revision,
     }
     if receipt.mode is not None:
         wire["mode"] = receipt.mode.value
@@ -2878,6 +2891,11 @@ class OperationGrantScope:
 
     由 operation 身份反查其绑定的 grant 与决定行事实；任一环节缺失以 ``None``
     字段表达（调用方必须按「无法证明授权」拒绝，不得猜测或补默认值，R21）。
+
+    审批闭环（D7-01）另带：决定的有界有效期、答复消费时刻与已消费答复的
+    批准值（``approval=False`` 才是用户明确拒绝；``None`` 表示未答/不可解释，
+    不得当作批准），以及 operation 的 phase/effect/io 三态——派发前据此确认
+    尚未出站/未入终态，避免重放二次外发。
     """
 
     user_scope: str
@@ -2890,6 +2908,16 @@ class OperationGrantScope:
     grant_state: ToolGrantState | None
     tool_call_id: str | None
     parameter_digest: str | None
+    #: 决定行 ``expires_at``（UTC 微秒 Z 文本）；``None`` = 无法核定有效期。
+    expires_at: str | None = None
+    #: 答复命令被消费的时刻（UTC 微秒 Z 文本）；``None`` = 尚未消费。
+    answer_consumed_at: str | None = None
+    #: 已消费答复的批准值；``None`` = 未答或答复不可解释（不得当作批准）。
+    approval: bool | None = None
+    #: operation 三态（只读提示；派发认领在事务内再次 CAS 复核）。
+    operation_phase: str | None = None
+    effect_state: str | None = None
+    io_state: str | None = None
 
 
 @dataclass(frozen=True)

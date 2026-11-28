@@ -1,3 +1,48 @@
+"""数据浏览器（表浏览 + SQL 控制台）只读查询客户端。
+
+SQL 控制台的越界直读防护分两层，**两层必须同时在位**：
+
+1. **数据库角色最小权限（主防线，真正的安全边界）**：``execute_sql`` 在事务内
+   ``SET LOCAL ROLE qtrading_explorer_ro``。该角色只对公开业务表有 ``SELECT``，
+   ``agent_*``（迁移 0048 的原始体/模型可见/公开导出三表示）与 ``app_state`` 无任何
+   权限；``query_to_xml``／``table_to_xml`` 等执行器为 SECURITY INVOKER，受限角色下
+   同样读不到受管表。角色创建属部署职责（应用不在迁移/启动时建角色），DBA 一次性执行::
+
+       CREATE ROLE qtrading_explorer_ro NOLOGIN;
+       GRANT CONNECT ON DATABASE <database> TO qtrading_explorer_ro;
+       GRANT USAGE ON SCHEMA public TO qtrading_explorer_ro;
+       REVOKE ALL ON ALL TABLES IN SCHEMA public FROM qtrading_explorer_ro;
+       DO $$
+       DECLARE tbl text;
+       BEGIN
+         FOR tbl IN
+           SELECT tablename FROM pg_tables
+           WHERE schemaname = 'public'
+             AND tablename NOT LIKE 'agent\\_%'
+             AND tablename <> 'app_state'
+         LOOP
+           EXECUTE format('GRANT SELECT ON TABLE public.%I TO qtrading_explorer_ro', tbl);
+         END LOOP;
+       END $$;
+       GRANT qtrading_explorer_ro TO <runtime_role>;  -- SET LOCAL ROLE 需成员资格
+
+   每次迁移新增表后重跑「收回 + 逐表授予」块（默认权限会覆盖新表，故需重跑）。
+
+2. **应用层前置校验（快失败提示，非安全边界）**：``validate_read_only_sql`` 拒绝
+   多语句、非 SELECT、危险关键字、受管标识符（``agent_*``／``pg_catalog``／
+   ``information_schema``）与任意执行/文件/大对象/改角色函数（``query_to_*``、
+   ``table_to_*``、``lo_*``、``pg_*``、``dblink*``、``set_config``）。
+   纯 sqlparse 词法检查**不完备**——``query_to_xml('SELECT ... FROM agent_message', ...)``
+   把 SQL 藏在字符串常量里，词法上只是普通字面量；因此必须依赖第 1 层兜底。
+
+角色不存在时第 1 层自动跳过（不破坏既有初始化），此时只剩应用层校验——这正是
+应用层不能省、但也不能单独承担安全边界的原因。若角色已创建但运行时角色不是其成员，
+``SET LOCAL ROLE`` 会失败并以脱敏错误返回（运行角色须按上方 GRANT 授权）。
+"""
+
+import contextlib
+import datetime
+import decimal
 import logging
 import re
 import threading
@@ -18,11 +63,123 @@ logger = logging.getLogger(__name__)
 # 不扩展关键字黑名单——statement_timeout 不关心 SQL 内容，只关心执行时长（报告 03 §2.2 C6）。
 _STATEMENT_TIMEOUT = "10s"
 
+# 连接建立超时（libpq connect_timeout，秒）。connect_timeout 只能在建连时设置，
+# 故在 create_engine 的 connect_args 注入，覆盖反射/浏览/导出全部只读路径。
+_CONNECT_TIMEOUT_SECONDS = 10
+
 # N03：Agent 受管表（``agent_`` 前缀）不进入通用数据页目录。这些表存放原值/模型
 # 可见/公开导出三表示（迁移 0048），公开表示只经 Agent 读取 API 提供；通用数据页
 # 按目录反射返回原始全列会绕过该投影（如 ``agent_message.body_text`` 原值、
 # ``model_text`` 模型可见），故浏览与导出共用的目录校验统一排除（fail closed）。
 _AGENT_MANAGED_TABLE_PREFIX = "agent_"
+
+# 数据浏览器专用只读角色的会话名（D2-01）。角色由部署流程创建（见模块 docstring），
+# 存在时 execute_sql 以 SET LOCAL ROLE 切到该角色；不存在时跳过，不破坏既有初始化。
+_EXPLORER_ROLE = "qtrading_explorer_ro"
+
+# 应用层前置校验（快失败提示，非安全边界；安全边界见模块 docstring 第 1 层）。
+_BLOCKED_IDENTIFIER_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bagent_\w*", re.IGNORECASE),  # Agent 受管表（迁移 0048 三表示）
+    re.compile(r"\bpg_catalog\b", re.IGNORECASE),  # 系统目录
+    re.compile(r"\binformation_schema\b", re.IGNORECASE),  # 标准元数据视图
+)
+# 可执行任意 SQL / 读写服务器文件 / 切换会话角色的函数前缀（含 schema 限定形态）。
+_BLOCKED_FUNCTION_PREFIXES = (
+    "query_to_",  # query_to_xml：在字符串常量内执行任意 SQL
+    "table_to_",  # table_to_xml：按表名读取整表
+    "cursor_to_",
+    "schema_to_",
+    "database_to_",
+    "lo_",  # 大对象 lo_import / lo_export
+    "pg_",  # pg_read_file / pg_sleep / pg_terminate_backend ...
+    "dblink",  # dblink / dblink_exec
+)
+# set_config 可改写 role 等 GUC，绕过第 1 层角色隔离。
+_BLOCKED_FUNCTION_NAMES = frozenset({"set_config"})
+_FUNCTION_CALL_PATTERN = re.compile(r"\b([a-z_][a-z0-9_$]*)\s*\(", re.IGNORECASE)
+# U&"..." 可用 \005f 之类的转义拼出 agent_message，词法上与受管标识符不同名，故整体禁用。
+_UNICODE_ESCAPE_IDENTIFIER_PATTERN = re.compile(r"\bu&\s*\"", re.IGNORECASE)
+# 危险关键字：词边界匹配，防制表符/换行/注释分隔绕过（P0-2）。
+_DANGEROUS_KEYWORD_PATTERN = re.compile(
+    r"\b(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|TRUNCATE|EXECUTE|GRANT|REVOKE|INTO|COPY)\b",
+    re.IGNORECASE,
+)
+
+
+def _statement_code_without_literals(statement: typing.Any) -> str:
+    """语句 → 去掉注释与字面量常量后的代码文本（保留双引号标识符原样）。
+
+    字面量（单引号、``$$...$$`` dollar-quoted、数值）内的文本不参与标识符/函数匹配
+    （它只是被服务器当参数传递的文本）；双引号是标识符引用（``Literal.String.Symbol``），
+    内容需参与匹配。
+    """
+    parts: list[str] = []
+    for token in statement.flatten():
+        ttype = token.ttype
+        if ttype is not None and (ttype in sqlparse.tokens.Comment or ttype in sqlparse.tokens.Literal):
+            # 双引号标识符（Literal.String.Symbol）保留内容参与匹配，其余字面量/注释整体抹去
+            parts.append(token.value if ttype in sqlparse.tokens.Literal.String.Symbol else " ")
+            continue
+        parts.append(token.value)
+    return "".join(parts)
+
+
+def _has_effective_content(statement: typing.Any) -> bool:
+    """语句是否含有效内容（忽略空白、注释与多余分号，如 ``SELECT 1;;`` 的尾项）。"""
+    for token in statement.flatten():
+        ttype = token.ttype
+        if ttype is not None and (ttype in sqlparse.tokens.Comment or ttype in sqlparse.tokens.Whitespace):
+            continue
+        if token.value.strip(" ;\t\r\n") == "":
+            continue
+        return True
+    return False
+
+
+def validate_read_only_sql(sql_query: str) -> str | None:
+    """SQL 控制台应用层前置校验：通过返回 None，否则返回错误消息。
+
+    规则：单条语句 + 仅 SELECT + 无危险关键字 + 无受管表/系统目录标识符 +
+    无任意执行/文件/大对象/改角色函数。仅为快失败提示，安全边界见模块 docstring
+    第 1 层（会话级只读低权限角色）。
+    """
+    if not isinstance(sql_query, str) or not sql_query.strip():
+        return "Empty query"
+    try:
+        parsed = sqlparse.parse(sql_query)
+    except Exception as e:
+        # F5-P2: R9 脱敏
+        return f"SQL Parse Error: {safe_error(e)}"
+
+    statements = [statement for statement in parsed if _has_effective_content(statement)]
+    if not statements:
+        return "Empty query"
+    if len(statements) > 1:
+        return "Security Alert: Only a single SQL statement is allowed."
+
+    statement = statements[0]
+    if statement.get_type() != "SELECT":
+        return f"Security Alert: Only SELECT statements are allowed. Found: {statement.get_type()}"
+
+    keyword = _DANGEROUS_KEYWORD_PATTERN.search(sql_query)
+    if keyword:
+        return f"Security Alert: Dangerous keyword '{keyword.group(1).upper()}' detected in query."
+
+    code_with_quotes = _statement_code_without_literals(statement)
+    if _UNICODE_ESCAPE_IDENTIFIER_PATTERN.search(code_with_quotes):
+        return "Security Alert: Unicode-escaped identifiers are not allowed."
+    code = code_with_quotes.replace('"', "")
+    for pattern in _BLOCKED_IDENTIFIER_PATTERNS:
+        identifier = pattern.search(code)
+        if identifier:
+            return f"Security Alert: Access to managed identifier '{identifier.group(0)}' is not allowed."
+
+    for function_name in _FUNCTION_CALL_PATTERN.findall(code):
+        lowered = function_name.lower()
+        if lowered in _BLOCKED_FUNCTION_NAMES or lowered.startswith(_BLOCKED_FUNCTION_PREFIXES):
+            return f"Security Alert: Function '{lowered}' is not allowed in the SQL console."
+    return None
+
 
 _OP_MAP = {
     "=": lambda c, v: c == v,
@@ -31,8 +188,62 @@ _OP_MAP = {
     ">=": lambda c, v: c >= v,
     "<=": lambda c, v: c <= v,
     "!=": lambda c, v: c != v,
-    "LIKE": lambda c, v: c.like(v),
 }
+
+# 反射列类型 → 比较参数解析规则。类型串来自 ``str(column.type)``（如 "BIGINT"、
+# "NUMERIC(18, 4)"、"DATE"、"TIMESTAMP WITHOUT TIME ZONE"）。
+_INTEGER_TYPE_PATTERN = re.compile(
+    r"^(SMALLINT|INTEGER|BIGINT|INT2|INT4|INT8|SMALLSERIAL|SERIAL|BIGSERIAL)\b",
+    re.IGNORECASE,
+)
+_NUMERIC_TYPE_PATTERN = re.compile(
+    r"^(NUMERIC|DECIMAL|REAL|DOUBLE|FLOAT)\b",
+    re.IGNORECASE,
+)
+_DATE_TYPE_PATTERN = re.compile(r"^(DATE|TIMESTAMP)\b", re.IGNORECASE)
+
+
+class FilterValidationError(ValueError):
+    """筛选值无法按反射列类型解析（应用层前置校验，非裸 DB 异常）。
+
+    由 ``_coerce_comparison_value`` 在构造语句前抛出，调用方（ViewModel）据此
+    给出可读校验提示，而不是把非法文本直接绑给 DATE/NUMERIC/BIGINT 列后
+    收到 ``operator does not exist`` 一类的数据库原始错误。
+    """
+
+
+def _coerce_comparison_value(col_name: str, col_type: str, val: typing.Any) -> typing.Any:
+    """按反射列类型把筛选文本解析为可比较的 Python 值。
+
+    未知列类型 / 数组类型原样返回，保持既有「交给数据库比较」的行为。
+    解析失败抛 :class:`FilterValidationError`。
+    """
+    text = str(val).strip()
+    normalized = col_type.strip().upper()
+    if not normalized or "[" in normalized:
+        return val
+
+    if _DATE_TYPE_PATTERN.match(normalized):
+        expected = "an ISO timestamp" if normalized.startswith("TIMESTAMP") else "a YYYY-MM-DD date"
+    elif _INTEGER_TYPE_PATTERN.match(normalized):
+        expected = "an integer"
+    elif _NUMERIC_TYPE_PATTERN.match(normalized):
+        expected = "a number"
+    else:
+        return val
+
+    try:
+        if _DATE_TYPE_PATTERN.match(normalized):
+            if normalized.startswith("TIMESTAMP"):
+                return datetime.datetime.fromisoformat(text)
+            return datetime.date.fromisoformat(text)
+        if _INTEGER_TYPE_PATTERN.match(normalized):
+            return int(text)
+        return decimal.Decimal(text)
+    except (ValueError, decimal.InvalidOperation) as e:
+        raise FilterValidationError(
+            f"Invalid filter value {text!r} for column '{col_name}' ({col_type}), expected {expected}."
+        ) from e
 
 
 class DataExplorerQueryClient:
@@ -106,6 +317,7 @@ class DataExplorerQueryClient:
                 DataExplorerQueryClient._shared_engine = sa.create_engine(
                     db_url_sync,
                     echo=False,
+                    connect_args={"connect_timeout": _CONNECT_TIMEOUT_SECONDS},
                     **pool_config,
                 )
 
@@ -113,6 +325,29 @@ class DataExplorerQueryClient:
     def _engine(self) -> sa.Engine | None:
         """只读属性，返回类级别共享引擎。"""
         return DataExplorerQueryClient._shared_engine
+
+    @contextlib.contextmanager
+    def _read_only_connection(self) -> typing.Iterator[typing.Any]:
+        """只读受限事务上下文（READ ONLY + statement_timeout）。
+
+        connect_timeout 在引擎创建时经 ``connect_args`` 注入（libpq 级别，不能按事务
+        设置）。``SET TRANSACTION READ ONLY`` / ``set_config`` 为 PostgreSQL 方言专属，
+        非 PG 引擎（单元测试用 SQLite）跳过，避免不支持该语句导致误报。
+
+        事务内统一先设置只读与超时，再做反射/计数/读行，5 万行导出同样受此约束。
+        """
+        engine = self._engine
+        assert engine is not None
+        with engine.connect() as conn:
+            with conn.begin():
+                if engine.dialect.name == "postgresql":
+                    conn.execute(sa.text("SET TRANSACTION READ ONLY"))
+                    # DAT-08: SET 不支持参数绑定，set_config(..., true) 等价 SET LOCAL
+                    conn.execute(
+                        sa.text("SELECT set_config('statement_timeout', :v, true)"),
+                        {"v": _STATEMENT_TIMEOUT},
+                    )
+                yield conn
 
     def close(self):
         """实例级 close 为空操作。
@@ -141,26 +376,34 @@ class DataExplorerQueryClient:
             logger.error("Error fetching tables: %s", safe_error(e))
             return []
 
-    def get_table_schema(self, table_name: str):
+    def get_table_schema(self, table_name: str, conn: typing.Any = None):
         """
         Get the schema (column names and types) for a specific table.
+
+        Args:
+            table_name: 表名（白名单校验在 conn 为 None 时执行）。
+            conn: 可选，调用方已有的只读连接；单次查询内复用反射结果，避免重复反射
+                （提供时视为调用方已完成表名白名单校验）。
+
         Returns:
             list[dict]: List of column info {'name': 'col_name', 'type': 'TEXT'}
         """
         self._ensure_engine()
         try:
-            self._validate_table_name(table_name)
-            assert self._engine is not None
-            insp = sa.inspect(self._engine)
-            columns = []
-            for col_info in insp.get_columns(table_name):
-                columns.append(
-                    {"name": col_info["name"], "type": str(col_info["type"])},
-                )
-            return columns
+            if conn is None:
+                self._validate_table_name(table_name)
+                with self._read_only_connection() as active_conn:
+                    return self._read_table_columns(active_conn, table_name)
+            return self._read_table_columns(conn, table_name)
         except Exception as e:
             logger.error("Error fetching schema for %s: %s", table_name, safe_error(e))
             return []
+
+    @staticmethod
+    def _read_table_columns(conn: typing.Any, table_name: str) -> list[dict]:
+        """在给定连接（只读事务内）反射列名与类型串。"""
+        insp = sa.inspect(conn)
+        return [{"name": col_info["name"], "type": str(col_info["type"])} for col_info in insp.get_columns(table_name)]
 
     def get_table_count(self, table_name: str, filters: list | None = None):
         """
@@ -186,11 +429,18 @@ class DataExplorerQueryClient:
             tbl = sa.table(table_name)
             stmt = sa.select(sa.func.count()).select_from(tbl)
 
-            if filters:
-                schema_cols = {c["name"] for c in self.get_table_schema(table_name)}
-                stmt = self._apply_filters(stmt, filters, schema_cols=schema_cols)
+            with self._read_only_connection() as conn:
+                if filters:
+                    schema_types = {
+                        c["name"]: str(c.get("type") or "") for c in self.get_table_schema(table_name, conn=conn)
+                    }
+                    stmt = self._apply_filters(
+                        stmt,
+                        filters,
+                        schema_cols=set(schema_types),
+                        schema_types=schema_types,
+                    )
 
-            with self._engine.connect() as conn:  # type: ignore[union-attr]
                 result = conn.execute(stmt)
                 return result.scalar() or 0
         except Exception as e:
@@ -229,9 +479,18 @@ class DataExplorerQueryClient:
             raise ValueError(f"Invalid table name: {table_name}")
 
     @staticmethod
-    def _apply_filters(stmt: typing.Any, filters: list | None, schema_cols: typing.Any = None):
+    def _apply_filters(
+        stmt: typing.Any,
+        filters: list | None,
+        schema_cols: typing.Any = None,
+        schema_types: typing.Mapping[str, str] | None = None,
+    ):
         """Apply WHERE filters using SQLAlchemy Core operators (zero f-string).
-        schema_cols: optional set of valid column names for whitelist validation."""
+
+        schema_cols: optional set of valid column names for whitelist validation.
+        schema_types: optional reflected column type strings; comparison values are
+            coerced/validated against the column type before binding.
+        """
         if not filters:
             return stmt
         for col_name, op, val in filters:
@@ -242,14 +501,18 @@ class DataExplorerQueryClient:
                     col_name,
                 )
                 continue
-            op_func = _OP_MAP.get(op)
-            if op_func is None:
+            if op not in _OP_MAP and op != "LIKE":
                 continue  # Skip unsupported operator
             col_obj = sa.column(col_name)
-            # Handle LIKE wildcards
-            if op == "LIKE" and "%" not in str(val):
-                val = f"%{val}%"
-            stmt = stmt.where(op_func(col_obj, val))
+            if op == "LIKE":
+                # LIKE 统一按文本匹配：DATE/BIGINT/NUMERIC 列直接 LIKE 会触发
+                # ``operator does not exist: date ~~ unknown``，故先 CAST 为字符串。
+                if "%" not in str(val):
+                    val = f"%{val}%"
+                stmt = stmt.where(sa.cast(col_obj, sa.String).like(val))
+                continue
+            col_type = (schema_types or {}).get(col_name, "")
+            stmt = stmt.where(_OP_MAP[op](col_obj, _coerce_comparison_value(col_name, col_type, val)))
         return stmt
 
     def query_table(
@@ -282,31 +545,39 @@ class DataExplorerQueryClient:
             tbl = sa.table(table_name)
             stmt = sa.select(sa.text("*")).select_from(tbl)
 
-            # 1. Apply Filters
-            schema_cols = {c["name"] for c in self.get_table_schema(table_name)}
-            if filters:
-                stmt = self._apply_filters(stmt, filters, schema_cols=schema_cols)
+            with self._read_only_connection() as conn:
+                # 单次查询内只反射一次 schema，过滤/排序共用（避免重复反射与重复建连）
+                schema_types = {
+                    c["name"]: str(c.get("type") or "") for c in self.get_table_schema(table_name, conn=conn)
+                }
 
-            # 2. Apply Sorting
-            if sort_col:
-                # Validate sort_col exists in the table schema
-                schema_cols = {c["name"] for c in self.get_table_schema(table_name)}
-                if sort_col in schema_cols:
-                    col_obj = sa.column(sort_col)
-                    stmt = stmt.order_by(
-                        sa.asc(col_obj) if sort_asc else sa.desc(col_obj),
+                # 1. Apply Filters
+                if filters:
+                    stmt = self._apply_filters(
+                        stmt,
+                        filters,
+                        schema_cols=set(schema_types),
+                        schema_types=schema_types,
                     )
-            elif table_name == "daily_quotes":
-                # Default sort for common tables
-                stmt = stmt.order_by(
-                    sa.desc(sa.column("trade_date")),
-                    sa.asc(sa.column("ts_code")),
-                )
 
-            # 3. Apply Pagination
-            stmt = stmt.limit(page_size).offset(offset)
+                # 2. Apply Sorting
+                if sort_col:
+                    # Validate sort_col exists in the table schema
+                    if sort_col in schema_types:
+                        col_obj = sa.column(sort_col)
+                        stmt = stmt.order_by(
+                            sa.asc(col_obj) if sort_asc else sa.desc(col_obj),
+                        )
+                elif table_name == "daily_quotes":
+                    # Default sort for common tables
+                    stmt = stmt.order_by(
+                        sa.desc(sa.column("trade_date")),
+                        sa.asc(sa.column("ts_code")),
+                    )
 
-            with self._engine.connect() as conn:  # type: ignore[union-attr]
+                # 3. Apply Pagination
+                stmt = stmt.limit(page_size).offset(offset)
+
                 result = conn.execute(stmt)
                 rows = result.fetchall()
                 if not rows:
@@ -325,7 +596,10 @@ class DataExplorerQueryClient:
         Includes safety checks to prevent modification queries and memory exhaustion.
 
         NOTE: This method intentionally accepts raw SQL (user's explicit intent).
-        Defense layers: sqlparse SELECT-only check + read-only connection.
+        Defense layers (see module docstring):
+        1. session-scoped least-privilege role ``qtrading_explorer_ro`` (security boundary);
+        2. app-layer validation (single statement, SELECT-only, managed identifiers/functions);
+        3. SET TRANSACTION READ ONLY + statement_timeout.
 
         Returns:
             dict: {
@@ -342,44 +616,10 @@ class DataExplorerQueryClient:
             # F5-P2: R9 脱敏，避免异常消息含 DB 连接字符串等敏感信息流向 UI
             return {"success": False, "data": None, "error": safe_error(e)}
 
-        # 1. Security Check with sqlparse
-        try:
-            parsed = sqlparse.parse(sql_query)
-        except Exception as e:
-            # F5-P2: R9 脱敏
-            return {
-                "success": False,
-                "data": None,
-                "error": f"SQL Parse Error: {safe_error(e)}",
-            }
-
-        if not parsed:
-            return {"success": False, "data": None, "error": "Empty query"}
-
-        for statement in parsed:
-            if statement.get_type() != "SELECT":
-                return {
-                    "success": False,
-                    "data": None,
-                    "error": f"Security Alert: Only SELECT statements are allowed. Found: {statement.get_type()}",
-                }
-
-        # 1.5. Defense-in-depth: Block dangerous keywords even if sqlparse misclassifies
-        # P0-2: Use regex word-boundary matching instead of trailing-space strings.
-        # Trailing-space matching ("DROP ") can be bypassed with tabs, newlines,
-        # or comments: DROP\ttable, DROP\n table, DROP(--comment)table.
-        # P1-2: Added INTO (SELECT...INTO creates tables) and COPY (filesystem access).
-        _DANGEROUS_KEYWORD_PATTERN = re.compile(
-            r"\b(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|TRUNCATE|EXECUTE|GRANT|REVOKE|INTO|COPY)\b",
-            re.IGNORECASE,
-        )
-        match = _DANGEROUS_KEYWORD_PATTERN.search(sql_query)
-        if match:
-            return {
-                "success": False,
-                "data": None,
-                "error": f"Security Alert: Dangerous keyword '{match.group(1).upper()}' detected in query.",
-            }
+        # 1. Application-layer pre-check (fast fail; R9 脱敏由 validator 内部处理)
+        validation_error = validate_read_only_sql(sql_query)
+        if validation_error is not None:
+            return {"success": False, "data": None, "error": validation_error}
 
         # 2. Execute with strictly Read-Only transaction and Memory Protection
         # P0-1: Use REPEATABLE READ + SET TRANSACTION READ ONLY instead of
@@ -395,6 +635,15 @@ class DataExplorerQueryClient:
                     # C6: SET LOCAL 在事务内生效，超时后语句被服务端取消（resource 滥用防线）
                     # DAT-08: SET 不支持参数绑定，改用 set_config(..., true) 等价 SET LOCAL（仅当前事务生效；依赖下方显式事务块）
                     conn.execute(sa.text("SELECT set_config('statement_timeout', :v, true)"), {"v": _STATEMENT_TIMEOUT})
+                    # 第 1 层（安全边界）：切到只读低权限角色，隔离 agent_*/app_state 等受管表。
+                    # 角色由部署流程创建；不存在时跳过以不破坏既有初始化（见模块 docstring）。
+                    role_exists = conn.execute(
+                        sa.text("SELECT 1 FROM pg_roles WHERE rolname = :role"),
+                        {"role": _EXPLORER_ROLE},
+                    ).fetchone()
+                    if role_exists is not None:
+                        # R4：角色名为冻结常量，不可内插，故用静态字面量（须与 _EXPLORER_ROLE 一致）
+                        conn.execute(sa.text("SET LOCAL ROLE qtrading_explorer_ro"))
                     result = conn.execute(sa.text(sql_query))
 
                     # Protection: Fetch at most 2000 rows to prevent memory explosion (DoS)

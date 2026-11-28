@@ -80,8 +80,10 @@ from services.agent_service.comparison import (
     verify_group_manifest_authority,
 )
 from services.agent_service.comparison_notes import AppStateComparisonLaneNotes
-from services.agent_service.dispatch import DispatchOutcome
+from services.agent_service.dispatch import DispatchOutcome, plan_spec_digest
+from services.agent_service.main_turn import build_plan_spec_provider, derive_frozen_selection_policy
 from services.agent_service.service import AgentService
+from services.agent_service.workflows import admit_research_plan
 
 pytestmark = pytest.mark.unit
 
@@ -1669,6 +1671,31 @@ class TestProductionRunEntry:
         assert all(lane.dispatch_submitted is True for lane in third.lanes)
 
     @pytest.mark.asyncio
+    async def test_reentry_with_new_service_resumes_queued_lane_without_new_identity(self) -> None:
+        group = _group()
+        lane_a, lane_b = group.lanes
+        dao = _RunDao(
+            group,
+            [
+                _row(group, lane_a.lane_ref, "running", f"exec-{lane_a.lane_ref}"),
+                _row(group, lane_b.lane_ref, "queued", f"exec-{lane_b.lane_ref}"),
+            ],
+        )
+        first = await _run_service(dao, _RunDispatcher()).run_comparison(_submission(group))
+        first_exec = {lane.lane_ref: lane.execution_id for lane in first.lanes}
+
+        # 崩溃重启：新服务实例 + 同一持久事实；同键重入只继续排队路，不产生新身份。
+        dao.executions[0] = _row(group, lane_a.lane_ref, "complete", f"exec-{lane_a.lane_ref}")
+        restarted = _RunDispatcher()
+        second = await _run_service(dao, restarted).run_comparison(_submission(group))
+
+        assert second.group_ref == first.group_ref
+        assert {lane.lane_ref: lane.execution_id for lane in second.lanes} == first_exec
+        assert restarted.calls == [f"exec-{lane_a.lane_ref}", f"exec-{lane_b.lane_ref}"]
+        assert second.view.complete_count == 1
+        assert second.view.ended is False
+
+    @pytest.mark.asyncio
     async def test_rejected_dispatch_is_isolated_per_lane(self) -> None:
         group = _group()
         lane_a, lane_b = group.lanes
@@ -1868,6 +1895,72 @@ class TestProductionRunEntry:
         with pytest.raises(EngineDisposedError) as excinfo:
             await service.read_comparison(query)
         assert str(excinfo.value) == "engine disposed"
+
+
+class _PlanManifestDao:
+    """计划来源端口最小替身：按执行身份返回冻结 manifest。"""
+
+    def __init__(self, manifest: str | None) -> None:
+        self.manifest = manifest
+
+    async def read_authoritative_manifest(self, *, user_scope: str, execution_id: str) -> str | None:
+        return self.manifest
+
+
+class TestComparisonPlanProvider:
+    @pytest.mark.asyncio
+    async def test_comparison_manifest_yields_deterministic_shared_plan(self) -> None:
+        group = _group()
+        provider = build_plan_spec_provider(_PlanManifestDao(group.manifest_payload))
+
+        spec = await provider(group.user_scope, "exec-lane-a")
+        again = await provider(group.user_scope, "exec-lane-b")
+
+        assert spec is not None
+        assert again == spec
+        (node,) = spec.nodes
+        assert node.node_id == "comparison_analysis"
+        assert node.target == group.shared.text
+        assert node.role_key == "role-main"
+        assert node.capabilities == tuple(sorted({"skill:skill-1@3", f"mcp_scope:{_digest('c')}"}))
+        assert node.source_refs == group.shared.source_refs
+
+        # 计划可被生产准入直接接受（不是 PLAN_UNAVAILABLE / 未配置角色策略）。
+        policy = derive_frozen_selection_policy(group.manifest_payload)
+        assert policy is not None
+        admission = admit_research_plan(
+            spec,
+            plan_digest=plan_spec_digest(spec),
+            role_capabilities={policy.role_key: policy.capabilities},
+        )
+        assert [record.node_id for record in admission.manifest.nodes] == ["comparison_analysis"]
+
+    @pytest.mark.asyncio
+    async def test_comparison_manifest_without_role_is_fail_closed(self) -> None:
+        group = _group(shared=replace(_shared(), role_prompt_refs=()))
+
+        spec = await build_plan_spec_provider(_PlanManifestDao(group.manifest_payload))(group.user_scope, "exec-lane")
+
+        assert spec is None
+
+    def test_each_lane_keeps_its_own_frozen_model_connection(self) -> None:
+        group = _group((_selection("conn-a", revision=3), _selection("conn-b", revision=4)))
+        models: list[tuple[str, int, str]] = []
+        for lane in group.lanes:
+            parameters = require_lane_parameters(group, lane.lane_ref)
+            models.append((parameters.connection_id, parameters.connection_revision, parameters.target_fingerprint))
+            request = build_lane_accept_request(
+                group,
+                lane,
+                expected_revision=0,
+                node_id="root",
+                workflow_id="comparison",
+                source_display_name="用户消息",
+            )
+            # 各路共享同一冻结 manifest，仅执行身份不同；连接不被他路改写。
+            assert request.manifest_payload == group.manifest_payload
+
+        assert models == [("conn-a", 3, "fp-conn-a"), ("conn-b", 4, "fp-conn-b")]
 
 
 class TestReadCostAndRetry:

@@ -269,6 +269,12 @@ def MCPServicesTab(lifecycle: Any | None = None) -> ft.Container:
                     size=AppStyles.FONT_SIZE_CAPTION,
                     color=AppColors.TEXT_HINT,
                 ),
+                _text_field("mcp_field_secret_env", draft.secret_env_text, "secret_env_text", multiline=True),
+                ft.Text(
+                    I18n.get("mcp_hint_secret_env"),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.TEXT_HINT,
+                ),
                 _text_field("mcp_field_cwd", draft.cwd, "cwd"),
             ]
             if is_stdio
@@ -542,7 +548,7 @@ def MCPServicesTab(lifecycle: Any | None = None) -> ft.Container:
                         ft.TextField(
                             label=I18n.get("mcp_role_version"),
                             value=draft.role_version,
-                            keyboard_type=ft.KeyboardType.NUMBER,
+                            keyboard_type=ft.KeyboardType.TEXT,
                             on_change=safe_on_change(_on_role_text("role_version")),
                             disabled=current.busy,
                             **_input_style(),

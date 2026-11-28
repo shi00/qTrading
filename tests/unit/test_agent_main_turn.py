@@ -60,6 +60,7 @@ from services.agent_service.loop import (
 from services.agent_service.main_turn import (
     FrozenSelectionPolicy,
     MainTurnIntake,
+    _capture_frozen_role_prompt_snapshots,
     MainTurnRequest,
     MainTurnRunner,
     PlanReference,
@@ -147,9 +148,85 @@ def test_base_manifest_empty_mcp_selection_keeps_digest_none() -> None:
     assert manifest["mcp_scope_digest"] is None
 
 
+def test_base_manifest_freezes_builtin_role_prompt_snapshot() -> None:
+    intake = object.__new__(MainTurnIntake)
+
+    manifest = json.loads(
+        intake._base_manifest(
+            text="研究问题",
+            mode=Mode.DISCUSS,
+            purpose=Purpose.CONCEPT,
+            role_prompt_refs=(("main", "v-1"),),
+            role_prompt_snapshots=({"role_id": "main", "version": "v-1", "text": "冻结正文"},),
+        )
+    )
+
+    assert manifest["role_prompt_refs"] == [["main", "v-1"]]
+    assert manifest["role_prompt_snapshots"] == [{"role_id": "main", "version": "v-1", "text": "冻结正文"}]
+
+
+def test_capture_role_prompt_snapshot_only_builtin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("utils.config.llm.read_research_role_prompt", lambda role_key: (f"正文-{role_key}", "v-1"))
+
+    snapshots = _capture_frozen_role_prompt_snapshots((("main", "v-1"), ("researcher", "v-1")), user_scope="u1")
+
+    assert snapshots == ({"role_id": "main", "version": "v-1", "text": "正文-main"},)
+
+
+def test_capture_role_prompt_snapshot_version_mismatch_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("utils.config.llm.read_research_role_prompt", lambda role_key: ("正文", "v-2"))
+
+    with pytest.raises(AgentServiceError) as excinfo:
+        _capture_frozen_role_prompt_snapshots((("main", "v-1"),), user_scope="u1")
+
+    assert excinfo.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_intake_freezes_builtin_role_prompt_snapshot_into_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("utils.config.llm.read_research_role_prompt", lambda role_key: ("受理时正文", "v-1"))
+    facade = _IntakeFacade(_intake_receipt())
+    intake = MainTurnIntake(facade, manifest_reader=_ManifestDao(None), user_scope="u1")
+
+    await intake.start_question("执行研究", mode=Mode.EXECUTE, role_prompt_refs=(("main", "v-1"),))
+
+    manifest = json.loads(facade.accepts[0].manifest_payload)
+    assert manifest["role_prompt_refs"] == [["main", "v-1"]]
+    assert manifest["role_prompt_snapshots"] == [{"role_id": "main", "version": "v-1", "text": "受理时正文"}]
+
+
 def test_policy_empty_selection_is_fail_closed() -> None:
-    assert derive_frozen_selection_policy(_manifest(skill_refs=[])) is None
     assert derive_frozen_selection_policy(_manifest(role_prompt_refs=[])) is None
+
+
+def test_policy_role_without_skills_or_mcp_is_approved_empty_capability_set() -> None:
+    """已选定角色且显式未勾选 Skill/MCP：零能力是已核准集合，不是策略缺失。"""
+
+    policy = derive_frozen_selection_policy(_manifest(skill_refs=[], mcp_scope_digest=None))
+
+    assert policy is not None
+    assert policy.role_key == "researcher"
+    assert policy.capabilities == frozenset()
+
+
+def test_policy_missing_selection_keys_is_unknown() -> None:
+    """缺少 skill_refs/mcp_scope_digest 键：无法区分显式零选择与缺失，按未知处理。"""
+
+    manifest = json_doc(
+        {
+            "schema_version": 1,
+            "text": "研究问题",
+            "mode": "execute",
+            "purpose": "concept",
+            "cutoff": None,
+            "source_refs": [],
+            "role_prompt_refs": [["researcher", "v1"]],
+        }
+    )
+
+    assert derive_frozen_selection_policy(manifest) is None
 
 
 def test_policy_multiple_roles_is_ambiguous() -> None:
@@ -388,7 +465,8 @@ async def test_plan_provider_auto_plan_requires_saved_version_and_selection() ->
 @pytest.mark.asyncio
 async def test_capability_provider_fail_closed_without_selection() -> None:
     assert await build_role_capability_provider(_ManifestDao(None))("u1", "e") is None
-    assert await build_role_capability_provider(_ManifestDao(_manifest(skill_refs=[])))("u1", "e") is None
+    empty = await build_role_capability_provider(_ManifestDao(_manifest(skill_refs=[])))("u1", "e")
+    assert empty == {"researcher": frozenset()}
     policy = await build_role_capability_provider(_ManifestDao(_manifest()))("u1", "e")
     assert policy == {"researcher": frozenset({"skill:skill-a@2"})}
 
@@ -597,7 +675,7 @@ async def _binding(user_scope: str, execution_id: str) -> ParentBindIdentity:
     )
 
 
-def _receipt() -> SubmissionReceipt:
+def _receipt(*, input_revision: int = 1) -> SubmissionReceipt:
     command = CommandRef(
         user_scope="u1",
         source_module="ui",
@@ -615,6 +693,7 @@ def _receipt() -> SubmissionReceipt:
         commit_state=CommitState.COMMITTED,
         verified_at="2026-01-01T00:00:00.000000Z",
         next_action=None,
+        input_revision=input_revision,
     )
 
 
@@ -944,6 +1023,64 @@ async def test_intake_plan_runs_production_main_turn_and_returns_reference() -> 
     assert len(request.identity.actual_input_digest) == 64
     assert result.main_turn is not None
     assert result.plan_reference == PlanReference(execution_id="execution-1", plan_revision=1)
+
+
+@pytest.mark.asyncio
+async def test_intake_main_turn_identity_uses_authoritative_input_revision_not_session_revision() -> None:
+    """新受理的权威输入版恒为 1：会话草稿版（expected_revision）不得混入回合身份。"""
+
+    facade = _IntakeFacade(_intake_receipt())
+    runner = _MainTurnRunnerStub(plan_reference=PlanReference(execution_id="execution-1", plan_revision=1))
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+    )
+
+    await intake.start_question("研究银行股", mode=Mode.PLAN, session_id="s1", expected_revision=7)
+
+    assert facade.requests[0].expected_revision == 7
+    assert runner.requests[0].identity.input_revision == 1
+
+
+@pytest.mark.asyncio
+async def test_intake_main_turn_identity_consumes_authoritative_revised_input_revision() -> None:
+    """同执行排队修订后的权威输入版（回执携带 N）必须原样进入回合身份。"""
+
+    facade = _IntakeFacade(_receipt(input_revision=2))
+    runner = _MainTurnRunnerStub(plan_reference=PlanReference(execution_id="execution-1", plan_revision=1))
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+    )
+
+    await intake.start_question("修订后的问题", mode=Mode.PLAN, session_id="s1", expected_revision=1)
+
+    assert runner.requests[0].identity.input_revision == 2
+
+
+@pytest.mark.asyncio
+async def test_intake_main_turn_identity_is_stable_across_replay() -> None:
+    """重放同一受理事实得出同一输入版与轮身份（不随会话稿版漂移）。"""
+
+    facade = _IntakeFacade(_intake_receipt())
+    runner = _MainTurnRunnerStub(plan_reference=PlanReference(execution_id="execution-1", plan_revision=1))
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+    )
+
+    await intake.start_question("继续分析", mode=Mode.PLAN, session_id="s1", expected_revision=3)
+    await intake.start_question("继续分析", mode=Mode.PLAN, session_id="s1", expected_revision=4)
+
+    identities = [request.identity for request in runner.requests]
+    assert [identity.input_revision for identity in identities] == [1, 1]
+    assert identities[0].round_id == identities[1].round_id
 
 
 @pytest.mark.asyncio
@@ -1459,6 +1596,70 @@ async def test_intake_execute_without_selection_returns_plan_unavailable() -> No
     assert result.dispatch is not None
     assert result.dispatch.reason_code == PLAN_UNAVAILABLE
     assert result.dispatch.reason_params == (("cause", "role_policy_missing"),)
+
+
+class _AcceptedManifestDao:
+    """读取最近一次受理的冻结 manifest（供派发侧能力来源复读同一份输入）。"""
+
+    def __init__(self, facade: _IntakeFacade) -> None:
+        self._facade = facade
+
+    async def read_authoritative_manifest(self, *, user_scope: str, execution_id: str) -> str | None:
+        return self._facade.accepts[0].manifest_payload if self._facade.accepts else None
+
+
+@pytest.mark.asyncio
+async def test_intake_execute_without_skills_dispatches_empty_capability_analysis() -> None:
+    """零 Skill/MCP 的执行首问：已核准空能力放行，纯分析节点（capabilities=()）可派发。"""
+
+    facade = _IntakeFacade(_intake_receipt())
+    runner = _MainTurnRunnerStub(plan_reference=PlanReference(execution_id="execution-1", plan_revision=1))
+    submitted: list[str] = []
+    empty_spec = PlanSpecProposal(
+        nodes=(
+            PlanNodeSpec(node_id="n1", target="整理内部资料", role_key="researcher", depends_on=(), capabilities=()),
+        )
+    )
+
+    async def _submit(workflow_id: str, payload: dict[str, Any]) -> None:
+        submitted.append(workflow_id)
+
+    async def _plan(user_scope: str, execution_id: str) -> PlanSpecProposal:
+        return empty_spec
+
+    async def _read(workflow_id: str) -> ResearchWorkflowResult:
+        return ResearchWorkflowResult(workflow_id=workflow_id, state="SUCCESS", output={"summary": "ok"})
+
+    dispatcher = ResearchDispatcher(
+        gate=_SwitchGate(closed=False),
+        submit=_submit,
+        plan_provider=_plan,
+        read_result=_read,
+        capability_provider=build_role_capability_provider(cast(Any, _AcceptedManifestDao(facade))),
+        binding_identity_provider=_binding,
+    )
+    intake = MainTurnIntake(
+        facade,
+        manifest_reader=_ManifestDao(None),
+        user_scope="u1",
+        main_turn=cast(Any, runner),
+        dispatcher=dispatcher,
+    )
+
+    result = await intake.start_question(
+        "整理内部资料",
+        mode=Mode.EXECUTE,
+        role_prompt_refs=(("researcher", "v1"),),
+    )
+
+    frozen = json.loads(facade.accepts[0].manifest_payload)
+    assert frozen["role_prompt_refs"] == [["researcher", "v1"]]
+    assert frozen["skill_refs"] == []
+    assert frozen["mcp_scope_digest"] is None
+    assert [request.mode for request in runner.requests] == [Mode.PLAN]
+    assert submitted == ["workflow-1"]
+    assert result.dispatch is not None
+    assert result.dispatch.submitted is True
 
 
 @pytest.mark.asyncio

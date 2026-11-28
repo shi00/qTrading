@@ -250,6 +250,34 @@ class TestControlCallbacks:
         _invoke(_buttons(rows)[I18n.get("agent_research_control_retry")].on_click)
         assert retried == [("e-root", "n-leaf")], "重试必带根执行身份与精确节点，不在 UI 内猜范围"
 
+    def test_retry_on_deep_node_forwards_walked_up_root(self) -> None:
+        root = _node("e-root")
+        mid = _node("e-mid", parent_execution_id="e-root", node_id="step-1", display_state="failed")
+        deep = _node("e-deep", parent_execution_id="e-mid", node_id="step-2", display_state="failed")
+        retried: list[tuple[str, str]] = []
+
+        rows = _build(
+            ResearchObserverState(available=True, execution_nodes=(root, mid, deep)),
+            lambda execution_id: (_action("retry"),) if execution_id == "e-deep" else (),
+            on_retry=lambda execution_id, node_id: retried.append((execution_id, node_id)),
+        )
+
+        _invoke(_buttons(rows)[I18n.get("agent_research_control_retry")].on_click)
+        assert retried == [("e-root", "step-2")], "深层叶须上溯到真实根，不能把中间执行当根"
+
+    def test_retry_with_parent_outside_projection_falls_back_to_self(self) -> None:
+        orphan = _node("e-orphan", parent_execution_id="e-gone", node_id="step-9")
+        retried: list[tuple[str, str]] = []
+
+        rows = _build(
+            ResearchObserverState(available=True, execution_nodes=(orphan,)),
+            lambda _execution_id: (_action("retry"),),
+            on_retry=lambda execution_id, node_id: retried.append((execution_id, node_id)),
+        )
+
+        _invoke(_buttons(rows)[I18n.get("agent_research_control_retry")].on_click)
+        assert retried == [("e-orphan", "step-9")], "根不可证时交 VM 显式拒绝，不在 UI 内伪装根"
+
     def test_reason_actions_prompt_with_kind_and_execution(self) -> None:
         node = _node("e-1")
         prompted: list[tuple[str, str]] = []
@@ -474,3 +502,45 @@ class TestControlResult:
         )
 
         assert I18n.get("agent_research_control_native_not_wired") in _texts(rows)
+
+    @pytest.mark.parametrize(
+        ("native_state", "hint_key"),
+        [
+            ("failed", "agent_research_control_retry_dispatch_failed"),
+            ("unknown", "agent_research_control_retry_dispatch_unknown"),
+        ],
+    )
+    def test_retry_dispatch_failed_and_unknown_are_rendered_not_as_success(
+        self, native_state: str, hint_key: str
+    ) -> None:
+        rows = _build(
+            ResearchObserverState(
+                available=True,
+                execution_nodes=(_node("e-1"),),
+                control_result=_result(
+                    kind="retry",
+                    display_state="planned",
+                    native_control_state=native_state,
+                ),
+            )
+        )
+
+        texts = _texts(rows)
+        assert I18n.get(hint_key) in texts, "未派发/投递未知必须显式说明，不静默读成成功"
+
+    def test_retry_error_result_does_not_append_dispatch_hint(self) -> None:
+        rows = _build(
+            ResearchObserverState(
+                available=True,
+                execution_nodes=(_node("e-1"),),
+                control_result=_result(
+                    kind="retry",
+                    applied=False,
+                    error_code="CONTROL_TARGET_UNAVAILABLE",
+                    native_control_state="unknown",
+                ),
+            )
+        )
+
+        texts = _texts(rows)
+        assert I18n.get("agent_research_control_retry_dispatch_unknown") not in texts

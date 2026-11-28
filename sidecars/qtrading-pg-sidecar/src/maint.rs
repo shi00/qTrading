@@ -22,7 +22,6 @@ use crate::protocol;
 use crate::run;
 use crate::setup::{self, DataDirState};
 use crate::state;
-use postgresql_embedded::PostgreSQL;
 use serde::Serialize;
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
@@ -33,19 +32,38 @@ const LISTEN_LOCAL: &str = "127.0.0.1";
 
 /// SQL 标识符白名单：`[A-Za-z_][A-Za-z0-9_]*` 且长度 ≤ 63（PostgreSQL NAMEDATALEN-1）。
 ///
-/// 会进入 SQL 文本或 psql `-U` 的标识符（库名、超级用户名）必须先经此校验，
-/// Python 侧同样校验；此处独立校验防止直接调用 CLI 绕过（R4：SQL 注入）。
-fn validate_identifier(value: &str, what: &str) -> Result<(), u8> {
+/// 会进入 SQL 文本的标识符（超级用户名 `ALTER USER <name> PASSWORD` 等）必须先经此
+/// 校验，Python 侧同样校验；此处独立校验防止直接调用 CLI 绕过（R4：SQL 注入）。
+pub(crate) fn validate_identifier(value: &str, what: &str) -> Result<(), u8> {
+    if is_standard_identifier(value) {
+        Ok(())
+    } else {
+        eprintln!("[sidecar] {what}非法（须为 [A-Za-z_][A-Za-z0-9_]*，长度 ≤ 63）: {value:?}");
+        Err(exit_codes::ARGUMENT_ERROR)
+    }
+}
+
+/// 标识符是否满足维护命令白名单（[`validate_identifier`] 与 doctor 兼容诊断共用同一判据）。
+fn is_standard_identifier(value: &str) -> bool {
     let mut chars = value.chars();
     let first_ok = chars
         .next()
         .map(|c| c.is_ascii_alphabetic() || c == '_')
         .unwrap_or(false);
     let rest_ok = chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
-    if first_ok && rest_ok && value.len() <= 63 {
+    first_ok && rest_ok && value.len() <= 63
+}
+
+/// dump 的标识符校验：库名/用户名只作为 argv 传给 `pg_dump`/`psql`（永不进入 SQL 文本），
+/// 因此对存量集群的非标名称放行，仅拒绝空值与控制字符（换行/NUL 等）。
+///
+/// 这是存量非标名称集群的**导出迁移路径**：run 不再拒绝既有集群启动，dump 仍可导出，
+/// 恢复/改密需要标准名称的集群（新集群由 run 前置白名单保证）。
+fn validate_dump_identifier(value: &str, what: &str) -> Result<(), u8> {
+    if !value.is_empty() && !value.chars().any(|c| c.is_control()) {
         Ok(())
     } else {
-        eprintln!("[sidecar] {what}非法（须为 [A-Za-z_][A-Za-z0-9_]*，长度 ≤ 63）: {value:?}");
+        eprintln!("[sidecar] {what}非法（不得为空或含控制字符）: {value:?}");
         Err(exit_codes::ARGUMENT_ERROR)
     }
 }
@@ -680,13 +698,57 @@ fn build_doctor_json_with_fs(
     }
 }
 
-pub fn doctor(data_dir: &Path) -> Result<(), u8> {
+pub fn doctor(args: &cli::DoctorArgs) -> Result<(), u8> {
     logging::init(None);
-    let json = build_doctor_json(data_dir);
+    let mut json = build_doctor_json(&args.data_dir);
+    append_identifier_compat_hint(
+        &mut json,
+        args.database.as_deref(),
+        args.username.as_deref(),
+    );
     protocol::print_json_line(&json).map_err(|e| {
         eprintln!("[sidecar] doctor JSON 输出失败: {e}");
         exit_codes::ARGUMENT_ERROR
     })
+}
+
+/// 存量集群标识符兼容提示（不改变退码，仅追加 warning issue）。
+///
+/// run 只对新建集群前置校验标识符白名单，既有集群一律放行（避免锁死数据）。
+/// 调用方显式传入库名/用户名时，若它们不满足维护命令契约（restore/reset-password
+/// 会把标识符拼入 SQL 文本），提示走 dump 导出 → 标准名称新集群 → restore 的迁移路径。
+fn append_identifier_compat_hint(
+    json: &mut DoctorJson,
+    database: Option<&str>,
+    username: Option<&str>,
+) {
+    if !json.initialized {
+        return;
+    }
+    let mut legacy: Vec<String> = Vec::new();
+    if let Some(db) = database {
+        if !is_standard_identifier(db) {
+            legacy.push(format!("库名 {db:?}"));
+        }
+    }
+    if let Some(user) = username {
+        if !is_standard_identifier(user) {
+            legacy.push(format!("用户名 {user:?}"));
+        }
+    }
+    if legacy.is_empty() {
+        return;
+    }
+    json.issues.push(Issue {
+        code: "legacy_identifier_contract",
+        severity: "warning",
+        message: format!(
+            "{} 不符合维护命令标识符契约（须为 [A-Za-z_][A-Za-z0-9_]*，长度 ≤ 63）：\
+             run 不会拒绝既有集群启动，dump 仍可导出；restore/reset-password 需标准名称，\
+             请先 dump 导出，再用标准名称新建集群并 restore 导入，最后切换配置",
+            legacy.join("、")
+        ),
+    });
 }
 
 /// 扫描 data_dir 兄弟目录中的 dump/restore 中断残留物（§13.7.44 / §7.5）+ initdb 明文
@@ -752,16 +814,12 @@ fn scan_residuals(layout: &Layout) -> (Vec<String>, Vec<String>, Vec<String>) {
 // ---- 临时实例管理（dump 离线 / restore / maintenance-shell 共用） ----
 
 struct TempInstance {
-    /// 必须保留 ownership：PostgreSQL::drop 会调用 pg_ctl stop（crate 0.22 行为），
-    /// 提前 drop 会立即停止 postgres，导致后续 psql 连接失败。
-    ///
-    /// 但 Drop **不能**作为停止成功的依据：crate 0.22 的 `impl Drop` 仅在
-    /// `postmaster.pid` 存在时执行一次 `pg_ctl stop -m fast`，且忽略退出结果、
-    /// 不等待/不校验进程是否真的退出（postgresql.rs `impl Drop` / `status()`）。
-    /// 因此 [`TempInstance::stop`] 显式 drop 后仍须复核真实存活状态，
-    /// 无法证明停止时必须向调用方返回硬失败。
+    /// 实例所有权句柄。`run::ManagedPg` 禁用了 crate 的隐式 Drop（上游 `impl Drop`
+    /// 只要 `postmaster.pid` 存在就无身份校验地 `pg_ctl stop`），因此本字段离开作用域
+    /// **不会**停止 postgres；停止唯一路径是 [`TempInstance::stop`] 内的
+    /// [`pgbin::graded_stop`]（带 ClusterIdentity 校验）。
     #[allow(dead_code)]
-    pg: PostgreSQL,
+    pg: run::ManagedPg,
     layout: Layout,
     port: u16,
     /// 启动后捕获的可验证身份；为 None 时 graded_stop 会 fail closed（不发送 PID 信号）。
@@ -853,29 +911,23 @@ impl TempInstance {
 
     /// 停止临时实例并**证明**其确实退出。
     ///
-    /// 返回值必须由调用方传播为硬失败：crate 0.22 的 `Drop` 只是 best-effort
-    /// （忽略 `pg_ctl stop` 退出结果），无法保证停止。这里显式 drop 句柄，
-    /// 并复核 Drop 前后的真实存活状态与耗时（退出预算：smart 25s → fast 5s →
-    /// kill grace 3s + 3s）。
+    /// 停止唯一来源是带身份校验的 [`pgbin::graded_stop`]；持有的 [`run::ManagedPg`] 不会
+    /// 触发 crate 的隐式 `pg_ctl stop`，因此身份失配时绝不会退化为「按 pid 文件盲发信号」。
+    /// 返回值必须由调用方传播为硬失败：无法证明停止即拒绝报告维护成功。
     async fn stop(self) -> Result<(), pgbin::StopFailure> {
-        let TempInstance {
-            pg,
-            layout,
-            identity,
-            ..
-        } = self;
-        let pid = identity.as_ref().map(|i| i.pid);
+        let pid = self.identity.as_ref().map(|i| i.pid);
         let started = std::time::Instant::now();
         let alive_before = pid.is_some_and(pgbin::process_alive);
 
-        let outcome =
-            pgbin::graded_stop(&layout.install_dir, &layout.data_dir, identity.as_ref()).await;
+        let outcome = pgbin::graded_stop(
+            &self.layout.install_dir,
+            &self.layout.data_dir,
+            self.identity.as_ref(),
+        )
+        .await;
 
-        // 显式释放句柄：crate 0.22 的 Drop 仅在 postmaster.pid 存在时执行一次
-        // `pg_ctl stop -m fast`，且忽略退出结果、不等待/不校验进程退出。它不能
-        // 作为停止成功依据；记录 Drop 后的真实状态供故障注入测试诊断。
-        drop(pg);
-        let alive_after = match identity.as_ref() {
+        // 夹带句柄随 self 释放且不执行任何停止动作；此处复核 graded_stop 之后的真实存活状态。
+        let alive_after = match self.identity.as_ref() {
             Some(id) => process_identity::verify_cluster_identity(id).is_ok(),
             None => pid.is_some_and(pgbin::process_alive),
         };
@@ -890,12 +942,12 @@ impl TempInstance {
         let pid_str = pid.map_or_else(|| "unknown".to_string(), |p| p.to_string());
         tracing::error!(
             "temp instance stop not proven: failure={failure}, mode={mode}, pid={pid_str}, \
-             alive_before={alive_before}, alive_after_drop={alive_after}, elapsed_ms={}",
+             alive_before={alive_before}, alive_after={alive_after}, elapsed_ms={}",
             elapsed.as_millis()
         );
         eprintln!(
             "[sidecar] 临时实例停止失败：{failure}（mode={mode}, pid={pid_str}, \
-             PG 存活：停止前={alive_before}, Drop 后={alive_after}, 耗时 {}ms）；\
+             PG 存活：停止前={alive_before}, 停止后={alive_after}, 耗时 {}ms）；\
              停止结果不可证明，拒绝报告维护成功",
             elapsed.as_millis()
         );
@@ -1056,7 +1108,10 @@ fn prepare_offline_dump(layout: &Layout) -> Result<(), u8> {
 
 pub async fn dump(args: cli::DumpArgs) -> Result<(), u8> {
     logging::init(None);
-    validate_database_name(&args.database)?;
+    // 存量集群可能使用非标库名/用户名（旧 run 无白名单）：dump 只把它们作为 argv
+    // 传给 pg_dump/psql，放行以保证备份/导出迁移路径不被锁死。
+    validate_dump_identifier(&args.database, "数据库名")?;
+    validate_dump_identifier(&args.username, "用户名")?;
     let layout = Layout::from_data_dir(&args.data_dir, None, None, None);
 
     if !layout.data_dir.join("PG_VERSION").exists() {
@@ -2508,6 +2563,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn validate_dump_identifier_accepts_legacy_names() {
+        // 存量集群可能由旧版 run 以非标名称创建：dump 仅作 argv 传递，放行以保证导出迁移
+        assert_eq!(validate_dump_identifier("my-db", "数据库名"), Ok(()));
+        assert_eq!(validate_dump_identifier("部门库", "数据库名"), Ok(()));
+        // 空值与控制字符仍拒绝
+        assert_eq!(
+            validate_dump_identifier("", "数据库名"),
+            Err(exit_codes::ARGUMENT_ERROR)
+        );
+        assert_eq!(
+            validate_dump_identifier("bad\nname", "数据库名"),
+            Err(exit_codes::ARGUMENT_ERROR)
+        );
+    }
+
+    #[test]
+    fn is_standard_identifier_matches_whitelist() {
+        assert!(is_standard_identifier("qtrading"));
+        assert!(is_standard_identifier("_x9"));
+        assert!(!is_standard_identifier("my-db"));
+        assert!(!is_standard_identifier("1db"));
+        assert!(!is_standard_identifier(""));
+        assert!(!is_standard_identifier(&"a".repeat(64)));
+    }
+
+    #[test]
+    fn doctor_hints_legacy_identifier_contract() {
+        let dir = unique_tmp("doctor-ident-legacy");
+        let data_dir = dir.join("postgres/16/data");
+        make_fake_cluster(&data_dir);
+
+        let mut json = build_doctor_json(&data_dir);
+        append_identifier_compat_hint(&mut json, Some("my-db"), Some("postgres"));
+        let hint = json
+            .issues
+            .iter()
+            .find(|i| i.code == "legacy_identifier_contract")
+            .expect("存量非标库名应产生兼容迁移提示");
+        assert_eq!(hint.severity, "warning");
+
+        // 标准名称 / 未提供名称：不追加提示
+        let mut ok = build_doctor_json(&data_dir);
+        append_identifier_compat_hint(&mut ok, Some("qtrading"), Some("postgres"));
+        assert!(ok
+            .issues
+            .iter()
+            .all(|i| i.code != "legacy_identifier_contract"));
+        append_identifier_compat_hint(&mut ok, None, None);
+        assert!(ok
+            .issues
+            .iter()
+            .all(|i| i.code != "legacy_identifier_contract"));
+
+        // 未初始化目录：无存量集群，不提示
+        let fresh = dir.join("postgres/17/data");
+        let mut fresh_json = build_doctor_json(&fresh);
+        append_identifier_compat_hint(&mut fresh_json, Some("my-db"), None);
+        assert!(fresh_json
+            .issues
+            .iter()
+            .all(|i| i.code != "legacy_identifier_contract"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn dump_rejects_invalid_database_name() {
         let dir = unique_tmp("dump-baddb");
@@ -2515,11 +2635,26 @@ mod tests {
         let args = cli::DumpArgs {
             data_dir,
             output: dir.join("out.dump"),
-            database: "bad name".to_string(),
+            database: "bad\nname".to_string(),
             username: DEFAULT_USERNAME.to_string(),
         };
         assert_eq!(dump(args).await, Err(exit_codes::ARGUMENT_ERROR));
         assert!(!dir.join("out.dump").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 存量非标库名不再被 dump 拒绝（导出迁移路径）；后续按未初始化目录失败。
+    #[tokio::test]
+    async fn dump_accepts_legacy_database_name() {
+        let dir = unique_tmp("dump-legacydb");
+        let data_dir = dir.join("postgres/16/data");
+        let args = cli::DumpArgs {
+            data_dir,
+            output: dir.join("out.dump"),
+            database: "my-db".to_string(),
+            username: "my-admin".to_string(),
+        };
+        assert_eq!(dump(args).await, Err(exit_codes::DUMP_RESTORE_FAILED));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -55,7 +55,7 @@ class TestDataExplorerQueryClientSecurity(TestDatabaseBase):
         sql = "SELECT * FROM test_users; DELETE FROM test_users;"
         result = self.db_manager.execute_sql(sql)
         self.assertFalse(result["success"])
-        self.assertIn("Only SELECT statements are allowed", result.get("error", ""))
+        self.assertIn("Only a single SQL statement is allowed", result.get("error", ""))
 
         count = self.db_manager.get_table_count("test_users")
         self.assertEqual(count, 2)
