@@ -36,6 +36,7 @@ from core.agent_types import (
     DraftTransferSourceKind,
     EventPage,
     EventReadQuery,
+    GrantRevisionRequest,
     HistoryQuery,
     HistoryRoundSelection,
     Mode,
@@ -52,6 +53,8 @@ from core.agent_types import (
     SessionChangeCommand,
     SourceStopCommand,
     SubmissionReceipt,
+    ToolGrantFact,
+    ToolGrantState,
     derive_draft_transfer_id,
     draft_transfer_payload_digest,
     json_doc,
@@ -262,6 +265,12 @@ class _FakeDao:
             consumption_count=0,
         )
         self.answer_command: Any = None
+        self.grant_fact = ToolGrantFact(
+            decision_id="decision-1",
+            grant_id="grant-1",
+            grant_revision=2,
+            grant_state=ToolGrantState.REVOKED,
+        )
         self.delivered_receipt = SimpleNamespace(
             command_record_id="cmd-1",
             delivery_state=DeliveryState.DELIVERED,
@@ -375,6 +384,12 @@ class _FakeDao:
         if self.error is not None:
             raise self.error
         return self.pending_page
+
+    async def revoke_tool_grant(self, request: GrantRevisionRequest) -> ToolGrantFact:
+        self.calls.append(("revoke_tool_grant", (request,), {}))
+        if self.error is not None:
+            raise self.error
+        return self.grant_fact
 
     async def read_answer_command(self, *, user_scope: str, command_record_id: str) -> AnswerCommandFact:
         self.calls.append(
@@ -1092,6 +1107,39 @@ class TestPendingAnswersAndDelivery:
             with pytest.raises(AgentServiceError) as excinfo:
                 await coroutine
             assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        assert fake.calls == []
+
+
+class TestToolGrantRevoke:
+    """撤销 facade：委托 DAO 的 grant_revision CAS，冲突原样传播，关闭后拒绝。"""
+
+    @staticmethod
+    def _grant_request() -> GrantRevisionRequest:
+        return GrantRevisionRequest(user_scope="u1", decision_id="decision-1", expected_grant_revision=1)
+
+    @pytest.mark.asyncio
+    async def test_revoke_delegates_to_dao_cas(self) -> None:
+        fake = _FakeDao()
+        request = self._grant_request()
+        assert await _service(fake).revoke_tool_grant(request) is fake.grant_fact
+        assert fake.calls == [("revoke_tool_grant", (request,), {})]
+
+    @pytest.mark.asyncio
+    async def test_revoke_cas_conflict_propagates_unwrapped(self) -> None:
+        fake = _FakeDao()
+        fake.error = AgentServiceError(AgentErrorCode.REVISION_CONFLICT, "grant cas lost", "u1/decision-1")
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _service(fake).revoke_tool_grant(self._grant_request())
+        assert excinfo.value is fake.error
+
+    @pytest.mark.asyncio
+    async def test_revoke_rejected_after_close(self) -> None:
+        fake = _FakeDao()
+        service = _service(fake)
+        await service.aclose()
+        with pytest.raises(AgentServiceError) as excinfo:
+            await service.revoke_tool_grant(self._grant_request())
+        assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
         assert fake.calls == []
 
 

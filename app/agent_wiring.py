@@ -290,6 +290,19 @@ class AgentWiring:
 
         return self.handle is not None and self.runtime is not None
 
+    @property
+    def tool_grant_revoker(self) -> AgentService | None:
+        """工具许可撤销端口（与 facade 同源；未接线时为 ``None``，不伪造撤销能力）。
+
+        仅当 facade 暴露真实 ``revoke_tool_grant``（委托 DAO 的 grant_revision CAS）
+        时返回它；否则如实返回 ``None``，UI 侧据此显示「撤销不可用」。
+        """
+
+        service = self.service
+        if service is not None and callable(getattr(service, "revoke_tool_grant", None)):
+            return service
+        return None
+
     def dispatch_closed(self) -> bool:
         """当前是否零派发（未 launch 的宿主没有任何派发路径）。"""
 

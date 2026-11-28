@@ -75,6 +75,7 @@ from core.agent_types import (
     EventReadQuery,
     ExecutionControlReceipt,
     ExecutionControlRequest,
+    GrantRevisionRequest,
     HistoryPage,
     HistoryQuery,
     MarkAnswerDeliveredRequest,
@@ -109,6 +110,7 @@ from core.agent_types import (
     SourceStopCommand,
     SourceStopReceipt,
     SubmissionReceipt,
+    ToolGrantFact,
     derive_accept_identity,
     json_doc,
     plan_spec_digest,
@@ -1772,6 +1774,17 @@ class AgentService:
 
         self._require_open("read_pending_answers")
         return await self._dao.read_pending_answers(user_scope=user_scope, limit=limit)
+
+    async def revoke_tool_grant(self, request: GrantRevisionRequest) -> ToolGrantFact:
+        """工具许可撤销（W-07 facade）：委托 DAO 的 grant_revision CAS。
+
+        ``pending|granted|claimed→revoked`` 单胜者；CAS 败者 ``REVISION_CONFLICT``
+        原样传播（不吞没、不把未知当撤销成功）。撤销不绑定派发 operation，也不
+        核期限/轮次：过期、未答或旧轮许可仍可被撤销。
+        """
+
+        self._require_open("revoke_tool_grant")
+        return await self._dao.revoke_tool_grant(request)
 
     async def save_clarification_decision(self, request: SaveClarificationDecisionRequest) -> ClarificationFact:
         """派发前提问的澄清决定（§4.1 facade）：幂等落决定，重放查回原事实。"""

@@ -1618,17 +1618,33 @@ class TestMCPResearchScope:
 
 
 class _MainTurnIntake:
-    def __init__(self, *, answer: str = "直答", plan_reference: Any = None) -> None:
+    def __init__(
+        self,
+        *,
+        answer: str = "直答",
+        plan_reference: Any = None,
+        has_result: bool = True,
+        discussion_answer_text: str | None = None,
+        error: Exception | None = None,
+    ) -> None:
         self._answer = answer
         self._plan_reference = plan_reference
+        self._has_result = has_result
+        self._discussion_answer_text = discussion_answer_text
+        self._error = error
 
     async def start_question(self, text: str, **kwargs: Any) -> Any:
+        if self._error is not None:
+            raise self._error
         return SimpleNamespace(
             receipt=object(),
             dispatch=SimpleNamespace(submitted=False, reason="mode_research_disabled"),
             plan_reference=None,
             main_turn=SimpleNamespace(
-                outcome=SimpleNamespace(result=SimpleNamespace(body_text=self._answer)),
+                outcome=SimpleNamespace(
+                    result=SimpleNamespace(body_text=self._answer) if self._has_result else None,
+                    discussion_answer_text=self._discussion_answer_text,
+                ),
                 plan_reference=self._plan_reference,
             ),
         )
@@ -1637,7 +1653,7 @@ class _MainTurnIntake:
         raise AssertionError("not used")
 
 
-class _MainTurnComposerTests:
+class TestMainTurnComposer:
     @pytest.mark.asyncio
     async def test_send_surfaces_main_turn_answer(self) -> None:
         vm = ResearchObserverViewModel(_FakeService(), intake=_MainTurnIntake())
@@ -1659,6 +1675,46 @@ class _MainTurnComposerTests:
         await vm.send_first_question()
 
         assert vm.state.plan_reference == ("execution-0", 2)
+
+    @pytest.mark.asyncio
+    async def test_discuss_answer_without_round_result_surfaces_persisted_text(self) -> None:
+        """讨论直答不产出轮绑定成果：结论区取循环已确认落库的答复文本。"""
+
+        vm = ResearchObserverViewModel(
+            _FakeService(),
+            intake=_MainTurnIntake(has_result=False, discussion_answer_text="讨论结论正文"),
+        )
+        vm.set_composer_text("解释量价背离")
+        vm.set_composer_mode("discuss")
+
+        await vm.send_first_question()
+
+        assert vm.state.last_answer_text == "讨论结论正文"
+        assert vm.state.composer_error_key is None
+
+    @pytest.mark.asyncio
+    async def test_non_answer_outcome_keeps_answer_empty(self) -> None:
+        """澄清/计划等无答复终态不伪造结论文本。"""
+
+        vm = ResearchObserverViewModel(_FakeService(), intake=_MainTurnIntake(has_result=False))
+        vm.set_composer_text("量化一下")
+
+        await vm.send_first_question()
+
+        assert vm.state.last_answer_text == ""
+
+    @pytest.mark.asyncio
+    async def test_send_failure_keeps_answer_empty_and_reports_error(self) -> None:
+        vm = ResearchObserverViewModel(
+            _FakeService(),
+            intake=_MainTurnIntake(error=RuntimeError("boom")),
+        )
+        vm.set_composer_text("解释量价背离")
+
+        await vm.send_first_question()
+
+        assert vm.state.last_answer_text == ""
+        assert vm.state.composer_error_key == "RuntimeError"
 
 
 def _hit(session_id: str) -> Any:

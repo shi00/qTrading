@@ -380,7 +380,8 @@ class LoopRunOutcome:
 
     ``CLARIFIED`` 终态不产出成果（``result`` 为 ``None``），只携带澄清提案
     ``clarification``；讨论模式的 ``ANSWERED`` 同样不产出轮绑定成果
-    （``result`` 为 ``None``，答复已作为公开消息入会话历史）；计划模式
+    （``result`` 为 ``None``，答复已作为公开消息入会话历史，其已确认落库的
+    答复文本由 ``discussion_answer_text`` 携带供调用方展示）；计划模式
     ``PLANNED`` 不产出轮绑定成果，计划结构化字段由 ``unsaved_structured_fields``
     携带（调用方按既有计划存储保存）。执行模式的终态必须有已保存成果
     （``result`` 非空）。
@@ -395,6 +396,9 @@ class LoopRunOutcome:
     clarification: TurnDecision | None = None
     #: 计划模式未落成果的结构化字段（计划步骤提案；``None`` 表示模型未给出）。
     unsaved_structured_fields: CanonicalJson | None = None
+    #: 讨论模式直答已确认落库的答复文本（仅 ``DISCUSS`` 的 ``ANSWERED`` 终态非空；
+    #: 其他终态为 ``None``，调用方不得据此伪造结论）。
+    discussion_answer_text: str | None = None
 
 
 LoopPolicy = ModePolicy
@@ -720,6 +724,8 @@ class ExecutionLoop:
                 tool_calls=tool_calls,
                 delegations=delegations,
                 observations=tuple(observations),
+                # 记录成功即答复已确认落库；结论区据此展示，不从内存另造文本。
+                discussion_answer_text=decision.text,
             )
         else:
             result_kind = ANSWER_RESULT_KIND

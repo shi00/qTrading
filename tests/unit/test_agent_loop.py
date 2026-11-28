@@ -280,6 +280,62 @@ def test_discuss_answer_is_not_a_round_bound_research_result() -> None:
     ] == [(MessageRole.ASSISTANT, "理解结论", None, None, "s1")]
 
 
+def test_discuss_answer_outcome_carries_persisted_answer_text() -> None:
+    """讨论直答终态显式携带已确认落库的答复文本（VM 结论区权威来源，不伪造）。"""
+
+    store = _RoundBoundStore()
+    messages = _MessageStore()
+    turn = _ScriptedTurn([TurnDecision(action=LoopAction.ANSWER, text="讨论结论正文")])
+
+    outcome = asyncio.run(
+        _loop(
+            mode=Mode.DISCUSS,
+            turn=turn,
+            store=store,
+            answer_messages=DiscussionAnswerRecorder(messages),
+        ).run()
+    )
+
+    assert outcome.result is None
+    assert [request.body_text for request in messages.requests] == ["讨论结论正文"]
+    # 结论区文本必须来自同一份已落库的公开消息，而非另一份内存副本。
+    assert outcome.discussion_answer_text == messages.requests[0].body_text
+
+
+def test_non_discuss_outcomes_carry_no_discussion_answer_text() -> None:
+    """非讨论终态不携带讨论答复文本（讨论/非讨论区分，避免模式串话）。"""
+
+    execute = asyncio.run(
+        _loop(
+            mode=Mode.EXECUTE,
+            turn=_ScriptedTurn([TurnDecision(action=LoopAction.ANSWER, text="执行直答")]),
+            store=_Store(),
+        ).run()
+    )
+    assert execute.result is not None and execute.result.body_text == "执行直答"
+    assert execute.discussion_answer_text is None
+
+    clarify = asyncio.run(
+        _loop(
+            mode=Mode.DISCUSS,
+            turn=_ScriptedTurn(
+                [
+                    TurnDecision(
+                        action=LoopAction.CLARIFY,
+                        text="关注行业还是个股？",
+                        structured_fields=json_doc(
+                            {"question": "关注行业还是个股？", "options": ["行业", "个股"], "impact": "口径"}
+                        ),
+                    )
+                ]
+            ),
+            store=_Store(),
+        ).run()
+    )
+    assert clarify.state is LoopRunState.CLARIFIED
+    assert clarify.discussion_answer_text is None
+
+
 def test_discuss_answer_without_message_store_fails_closed() -> None:
     """未接线消息端口即失败：不以内存文本冒充已保存答复（R21）。"""
 
