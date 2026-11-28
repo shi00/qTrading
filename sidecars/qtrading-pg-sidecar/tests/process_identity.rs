@@ -103,7 +103,6 @@ fn spawn_controlled_process_in(data_dir: &Path) -> Child {
 }
 
 /// 当前 epoch 秒：辅助进程刚创建，pid 文件第 3 行写该值即与 OS 创建时刻相容。
-#[cfg(unix)]
 fn now_epoch_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -363,4 +362,131 @@ fn process_alive(pid: u32) -> bool {
         // SAFETY: signal 0 仅探测存在性
         unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
     }
+}
+
+// ---- D1-02：实例句柄析构不得绕过 ClusterIdentity 盲发停止信号 ----
+//
+// `postgresql_embedded::PostgreSQL` 的 `impl Drop` 只要 `data_dir/postmaster.pid` 存在
+// 就无条件执行 `pg_ctl stop`（无身份校验）。当 pid 文件残留、PID 被复用（指向无关进程）
+// 且 graded_stop 按设计拒绝发信号时，句柄析构仍会终止该无关进程。修复后所有句柄由
+// ManagedPg 持有，停止只经 graded_stop。以下用例以受控辅助进程作为「被复用的 PID」：
+// 身份失配必须让命令硬失败退出，辅助进程存活且 pid 文件保留。
+
+/// 构造「已初始化」PGDATA 骨架（PG 主版本取运行期 bundled 版本，避免硬编码）。
+fn make_existing_cluster(data_dir: &Path) {
+    let pg_version = version_json()["postgres_version"]
+        .as_str()
+        .expect("version JSON 含 postgres_version")
+        .to_string();
+    let major = pg_version
+        .split('.')
+        .next()
+        .unwrap_or(&pg_version)
+        .to_string();
+    std::fs::create_dir_all(data_dir.join("global")).expect("create global");
+    std::fs::create_dir_all(data_dir.join("base")).expect("create base");
+    std::fs::write(data_dir.join("PG_VERSION"), format!("{major}\n")).expect("write PG_VERSION");
+    std::fs::write(data_dir.join("global/pg_control"), b"ctl").expect("write pg_control");
+    std::fs::write(data_dir.join("postgresql.conf"), "# conf\n").expect("write postgresql.conf");
+}
+
+/// 写 runtime/password（Unix 0600，满足 preflight 权限校验）。
+fn write_runtime_password(data_dir: &Path) {
+    let runtime = data_dir
+        .parent()
+        .expect("data_dir has parent")
+        .join("runtime");
+    std::fs::create_dir_all(&runtime).expect("create runtime");
+    let path = runtime.join("password");
+    std::fs::write(&path, "it-test-password").expect("write password");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("chmod password 0600");
+    }
+}
+
+/// TempInstance 路径（maintenance-shell）：pid 文件指向受控非 PG 进程 → 身份失配硬失败，
+/// 实例句柄析构不得向该 PID 发停止信号。
+///
+/// 仅 Unix：Windows `pg_ctl start` 会把残留 lock file 当作 stale 并重写 pid 文件，
+/// 无法据此构造「活 pid 文件 + 身份失配」窗口（与既有 PID 复用用例同因 Unix-only）。
+#[cfg(unix)]
+#[test]
+fn test_maintenance_shell_does_not_signal_reused_pid_on_drop() {
+    let (_tmp, data_dir) = unique_data_dir("d1_02_temp_drop");
+    make_existing_cluster(&data_dir);
+    write_runtime_password(&data_dir);
+
+    let mut helper = spawn_controlled_process();
+    let helper_pid = helper.id();
+    write_pidfile(&data_dir, helper_pid, now_epoch_secs(), 55432);
+    let pidfile_before =
+        std::fs::read_to_string(postmaster_pid_path(&data_dir)).expect("read pidfile");
+
+    let (code, _stdout, stderr) = run_sidecar_env(
+        &[
+            "maintenance-shell",
+            "--data-dir",
+            data_dir.to_str().expect("utf8 data_dir"),
+            "--database",
+            TEST_DATABASE,
+        ],
+        &[],
+    );
+
+    assert_eq!(
+        code, 12,
+        "TempInstance 启动失败且身份失配必须以 START_FAILED 硬退出；stderr:\n{stderr}"
+    );
+    assert!(
+        process_alive(helper_pid),
+        "复用 PID 的辅助进程不得收到停止信号（pid {helper_pid}）"
+    );
+    let pidfile_after =
+        std::fs::read_to_string(postmaster_pid_path(&data_dir)).expect("pidfile preserved");
+    assert_eq!(
+        pidfile_after, pidfile_before,
+        "postmaster.pid 必须原样保留（不得被隐式停止清理）"
+    );
+
+    kill_helper(&mut helper);
+}
+
+/// run 路径：PGDATA 已有活实例（pid 文件指向受控非 PG 进程）→ LOCK_CONFLICT 退出，
+/// 辅助进程存活、pid 文件保留（启动前置守卫 + 解压句柄析构均不得盲发信号）。
+#[test]
+fn test_run_does_not_signal_foreign_pidfile_instance() {
+    let (_tmp, data_dir) = unique_data_dir("d1_02_run_drop");
+    make_existing_cluster(&data_dir);
+    write_runtime_password(&data_dir);
+
+    let mut helper = spawn_controlled_process();
+    let helper_pid = helper.id();
+    write_pidfile(&data_dir, helper_pid, now_epoch_secs(), 55432);
+
+    let (code, _stdout, stderr) = run_sidecar_env(
+        &[
+            "run",
+            "--data-dir",
+            data_dir.to_str().expect("utf8 data_dir"),
+        ],
+        &[],
+    );
+
+    assert_eq!(
+        code, 50,
+        "活实例占用 PGDATA 必须以 LOCK_CONFLICT 退出；stderr:\n{stderr}"
+    );
+    assert!(
+        process_alive(helper_pid),
+        "辅助进程不得被杀（pid {helper_pid}）"
+    );
+    assert!(
+        postmaster_pid_path(&data_dir).exists(),
+        "postmaster.pid 必须保留"
+    );
+
+    kill_helper(&mut helper);
 }

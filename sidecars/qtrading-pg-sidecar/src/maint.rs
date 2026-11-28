@@ -22,7 +22,6 @@ use crate::protocol;
 use crate::run;
 use crate::setup::{self, DataDirState};
 use crate::state;
-use postgresql_embedded::PostgreSQL;
 use serde::Serialize;
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
@@ -790,16 +789,12 @@ fn scan_residuals(data_dir: &Path) -> (Vec<String>, Vec<String>) {
 // ---- 临时实例管理（dump 离线 / restore / maintenance-shell 共用） ----
 
 struct TempInstance {
-    /// 必须保留 ownership：PostgreSQL::drop 会调用 pg_ctl stop（crate 0.22 行为），
-    /// 提前 drop 会立即停止 postgres，导致后续 psql 连接失败。
-    ///
-    /// 但 Drop **不能**作为停止成功的依据：crate 0.22 的 `impl Drop` 仅在
-    /// `postmaster.pid` 存在时执行一次 `pg_ctl stop -m fast`，且忽略退出结果、
-    /// 不等待/不校验进程是否真的退出（postgresql.rs `impl Drop` / `status()`）。
-    /// 因此 [`TempInstance::stop`] 显式 drop 后仍须复核真实存活状态，
-    /// 无法证明停止时必须向调用方返回硬失败。
+    /// 实例所有权句柄。`run::ManagedPg` 禁用了 crate 的隐式 Drop（上游 `impl Drop`
+    /// 只要 `postmaster.pid` 存在就无身份校验地 `pg_ctl stop`），因此本字段离开作用域
+    /// **不会**停止 postgres；停止唯一路径是 [`TempInstance::stop`] 内的
+    /// [`pgbin::graded_stop`]（带 ClusterIdentity 校验）。
     #[allow(dead_code)]
-    pg: PostgreSQL,
+    pg: run::ManagedPg,
     layout: Layout,
     port: u16,
     /// 启动后捕获的可验证身份；为 None 时 graded_stop 会 fail closed（不发送 PID 信号）。
@@ -891,29 +886,23 @@ impl TempInstance {
 
     /// 停止临时实例并**证明**其确实退出。
     ///
-    /// 返回值必须由调用方传播为硬失败：crate 0.22 的 `Drop` 只是 best-effort
-    /// （忽略 `pg_ctl stop` 退出结果），无法保证停止。这里显式 drop 句柄，
-    /// 并复核 Drop 前后的真实存活状态与耗时（退出预算：smart 25s → fast 5s →
-    /// kill grace 3s + 3s）。
+    /// 停止唯一来源是带身份校验的 [`pgbin::graded_stop`]；持有的 [`run::ManagedPg`] 不会
+    /// 触发 crate 的隐式 `pg_ctl stop`，因此身份失配时绝不会退化为「按 pid 文件盲发信号」。
+    /// 返回值必须由调用方传播为硬失败：无法证明停止即拒绝报告维护成功。
     async fn stop(self) -> Result<(), pgbin::StopFailure> {
-        let TempInstance {
-            pg,
-            layout,
-            identity,
-            ..
-        } = self;
-        let pid = identity.as_ref().map(|i| i.pid);
+        let pid = self.identity.as_ref().map(|i| i.pid);
         let started = std::time::Instant::now();
         let alive_before = pid.is_some_and(pgbin::process_alive);
 
-        let outcome =
-            pgbin::graded_stop(&layout.install_dir, &layout.data_dir, identity.as_ref()).await;
+        let outcome = pgbin::graded_stop(
+            &self.layout.install_dir,
+            &self.layout.data_dir,
+            self.identity.as_ref(),
+        )
+        .await;
 
-        // 显式释放句柄：crate 0.22 的 Drop 仅在 postmaster.pid 存在时执行一次
-        // `pg_ctl stop -m fast`，且忽略退出结果、不等待/不校验进程退出。它不能
-        // 作为停止成功依据；记录 Drop 后的真实状态供故障注入测试诊断。
-        drop(pg);
-        let alive_after = match identity.as_ref() {
+        // 夹带句柄随 self 释放且不执行任何停止动作；此处复核 graded_stop 之后的真实存活状态。
+        let alive_after = match self.identity.as_ref() {
             Some(id) => process_identity::verify_cluster_identity(id).is_ok(),
             None => pid.is_some_and(pgbin::process_alive),
         };
@@ -928,12 +917,12 @@ impl TempInstance {
         let pid_str = pid.map_or_else(|| "unknown".to_string(), |p| p.to_string());
         tracing::error!(
             "temp instance stop not proven: failure={failure}, mode={mode}, pid={pid_str}, \
-             alive_before={alive_before}, alive_after_drop={alive_after}, elapsed_ms={}",
+             alive_before={alive_before}, alive_after={alive_after}, elapsed_ms={}",
             elapsed.as_millis()
         );
         eprintln!(
             "[sidecar] 临时实例停止失败：{failure}（mode={mode}, pid={pid_str}, \
-             PG 存活：停止前={alive_before}, Drop 后={alive_after}, 耗时 {}ms）；\
+             PG 存活：停止前={alive_before}, 停止后={alive_after}, 耗时 {}ms）；\
              停止结果不可证明，拒绝报告维护成功",
             elapsed.as_millis()
         );
