@@ -367,15 +367,39 @@ def _register_url_password(url: str) -> None:
         DataSanitizer.register_secret(unquote(password))
 
 
+def describe_db_env_override() -> str | None:
+    """返回覆盖数据库连接配置的环境变量名（无覆盖返回 ``None``）。
+
+    ``DATABASE_URL`` 覆盖整个连接目标（host/port/user/password/database 全部失效），
+    优先级高于仅覆盖密码的 ``DB_PASSWORD``；调用方据此向用户显式告警生效来源，
+    不得把一次「写入配置但被环境变量覆盖」当作保存成功（D1-05）。R9：只返回变量名。
+    """
+    if os.environ.get("DATABASE_URL"):
+        return "DATABASE_URL"
+    env_var = cfg.ENV_FALLBACK_MAP["db_password"]
+    if os.environ.get(env_var):
+        return env_var
+    return None
+
+
 def save_db_config(host: str, port: int, user: str, password: str, database: str) -> bool:
     """Save database configuration.
 
     All runtime URL resolution should go through get_db_url(), which rebuilds the
     URL from stored components + keyring password on every call.
+
+    凭据先于主机字段持久化：凭据失败即返回 False 且不写主机字段，避免留下
+    「新库地址 + 旧密码」的部分状态；空密码同样走 ``save_db_password("")``
+    清除旧凭据（D1-05）。``OVERRIDDEN_BY_ENV`` 表示密码由环境变量提供，主机字段
+    仍持久化，但调用方须先经 :func:`describe_db_env_override` 告警生效来源，
+    不得直接报「保存成功」。
     """
     from data.persistence.db_config_service import (  # lazy-import: 打破 ConfigHandler ↔ DatabaseConfigService 循环依赖
         DatabaseConfigService,
     )
+    from utils.config.secrets import (
+        SaveOutcome,
+    )  # lazy-import: 避免 config_handler↔db 循环内再引入 secrets 顶部依赖
 
     db_url = DatabaseConfigService.build_url(
         host=host,
@@ -386,7 +410,13 @@ def save_db_config(host: str, port: int, user: str, password: str, database: str
         async_driver=True,
     )
 
-    if not cfg.ConfigHandler.save_config(
+    outcome = cfg.ConfigHandler.save_db_password(password)
+    # save_db_password 返回 SaveOutcome（StrEnum，任何值均 truthy），不能直接作 bool
+    # 使用（否则 FAILED / FAILED_NO_SECURE_STORE 会被误判为成功，重新引入 D8-2 假报成功）。
+    if outcome not in (SaveOutcome.SAVED, SaveOutcome.OVERRIDDEN_BY_ENV):
+        return False
+
+    return cfg.ConfigHandler.save_config(
         {
             "db_host": host,
             "db_port": port,
@@ -394,20 +424,7 @@ def save_db_config(host: str, port: int, user: str, password: str, database: str
             "db_name": database,
             "db_url": re.sub(r"://([^:]+):([^@]+)@", r"://\1:****@", db_url),
         }
-    ):
-        return False
-
-    if password:
-        from utils.config.secrets import (
-            SaveOutcome,
-        )  # lazy-import: 避免 config_handler↔db 循环内再引入 secrets 顶部依赖
-
-        outcome = cfg.ConfigHandler.save_db_password(password)
-        # save_db_password 现返回 SaveOutcome（StrEnum，任何值均 truthy），不能直接作 bool 返回
-        # （否则 FAILED / FAILED_NO_SECURE_STORE 会被误判为成功，重新引入 D8-2 假报成功）。
-        # OVERRIDDEN_BY_ENV 视为成功：DB_PASSWORD 环境变量优先，get_db_password 运行时仍可读到密码。
-        return outcome in (SaveOutcome.SAVED, SaveOutcome.OVERRIDDEN_BY_ENV)
-    return True
+    )
 
 
 def get_db_config() -> dict:

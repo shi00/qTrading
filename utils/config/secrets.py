@@ -282,14 +282,53 @@ def get_db_password():
     return ""
 
 
+def _delete_keyring_item(item: str) -> bool:
+    """删除 keyring 条目（R9：仅打印条目名与脱敏错误，不打印值）。
+
+    「未存储」（``PasswordDeleteError``）视为已清除；keyring 后端整体不可用时，
+    该条目本就无法被 ``get_*`` 读取，同样视为无残留，避免无 keyring 的用户
+    因清除失败而无法保存数据库配置。其它删除失败返回 False（调用方不得报成功）。
+    """
+    try:
+        cfg.keyring.delete_password(cfg.KEYRING_SERVICE_NAME, item)
+        return True
+    except cfg.keyring.errors.PasswordDeleteError:  # type: ignore[reportAttributeAccessIssue]  # keyring.errors 运行时可用
+        return True
+    # NOTE(lazy): keyring 删除失败降级为「视为无残留」. ceiling: keyring 后端整体不可用时条目本就不可读. upgrade: 统一 keyring 可用性预检落地后改为显式清除失败.
+    except Exception as e:
+        if not is_keyring_available():
+            cfg.logger.debug(
+                "Keyring unavailable; stored %s cannot be read, treating as cleared: %s",
+                item,
+                cfg.DataSanitizer.sanitize_error(e),
+            )
+            return True
+        cfg.logger.error("Failed to delete keyring item %s: %s", item, cfg.DataSanitizer.sanitize_error(e))
+        return False
+
+
 def save_db_password(password: str) -> SaveOutcome:
     """保存数据库密码。
 
-    环境变量存在时返回 ``OVERRIDDEN_BY_ENV``（D8-2）；其余走统一的
-    keyring → AES → 明确失败降级链。
+    非空走统一的 keyring → AES → 明确失败降级链（环境变量存在时返回
+    ``OVERRIDDEN_BY_ENV``，D8-2）。空密码表示**清除**既有凭据：同步删除
+    keyring 条目与 ``db_password_encrypted``——否则切换数据库后旧库密码仍会
+    被新连接沿用（D1-05）。任一清除失败返回 ``FAILED``（不得报成功）；环境变量
+    覆盖时在清除陈旧副本后返回 ``OVERRIDDEN_BY_ENV``，供 UI 告警生效来源。
     """
     if not password:
-        return SaveOutcome.FAILED
+        keyring_cleared = _delete_keyring_item("db_password")
+        config_cleared = cfg.ConfigHandler.save_config({"db_password_encrypted": ""})
+        if not keyring_cleared or not config_cleared:
+            cfg.logger.error(
+                "Failed to clear stored db password (keyring_cleared=%s, config_cleared=%s)",
+                keyring_cleared,
+                config_cleared,
+            )
+            return SaveOutcome.FAILED
+        if os.environ.get(cfg.ENV_FALLBACK_MAP["db_password"]):
+            return SaveOutcome.OVERRIDDEN_BY_ENV
+        return SaveOutcome.SAVED
     return _store_secret(
         "db_password",
         password,

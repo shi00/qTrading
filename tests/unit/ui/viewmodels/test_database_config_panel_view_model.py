@@ -29,7 +29,13 @@ pytestmark = pytest.mark.unit
 @pytest.fixture
 def mock_config_handler():
     """Mock ConfigHandler 模块级 patch（VM 构造时加载配置）。"""
-    with patch("ui.viewmodels.database_config_panel_view_model.ConfigHandler") as m:
+    with (
+        patch("ui.viewmodels.database_config_panel_view_model.ConfigHandler") as m,
+        patch(
+            "ui.viewmodels.database_config_panel_view_model.describe_db_env_override",
+            return_value=None,
+        ),
+    ):
         m.get_db_config.return_value = {
             "host": "localhost",
             "port": 5432,
@@ -636,6 +642,70 @@ class TestSaveConfigCommand:
         # 不应触达 service 层
         mock_svc.test_connection.assert_not_called()
         mock_svc.ensure_tables_exist.assert_not_called()
+
+
+class TestSaveConfigEnvOverride:
+    """D1-05: 环境变量覆盖生效时不得报「保存成功」，须显式告警生效来源。"""
+
+    @staticmethod
+    def _prepare(vm) -> None:
+        vm.update_host("localhost")
+        vm.update_port("5432")
+        vm.update_user("postgres")
+        vm.update_password("pass")
+        vm.update_database("astock")
+
+    @pytest.mark.asyncio
+    async def test_save_config_env_override_shows_warning(self, mock_config_handler, mock_thread_pool):
+        vm = _make_vm(mock_config_handler)
+        self._prepare(vm)
+
+        mock_result = MagicMock()
+        mock_result.status = ConnectionStatus.SUCCESS
+        mock_result.message = "ok"
+
+        with (
+            patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc,
+            patch(
+                "ui.viewmodels.database_config_panel_view_model.describe_db_env_override",
+                return_value="DB_PASSWORD",
+            ),
+        ):
+            mock_svc.test_connection = AsyncMock(return_value=mock_result)
+            mock_svc.ensure_tables_exist = AsyncMock(return_value=(True, ""))
+            result = await vm.save_config()
+
+        assert result is True
+        assert vm.state.status_type == "warning"
+        assert vm.state.status_message is not None
+        assert vm.state.status_message.key == "secrets_save_overridden"
+        assert vm.state.status_message.params["env_var"] == "DB_PASSWORD"
+
+    @pytest.mark.asyncio
+    async def test_save_config_database_url_override_shows_warning(self, mock_config_handler, mock_thread_pool):
+        """DATABASE_URL 覆盖整个连接目标（host 配置不生效）同样须告警。"""
+        vm = _make_vm(mock_config_handler)
+        self._prepare(vm)
+
+        mock_result = MagicMock()
+        mock_result.status = ConnectionStatus.SUCCESS
+        mock_result.message = "ok"
+
+        with (
+            patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc,
+            patch(
+                "ui.viewmodels.database_config_panel_view_model.describe_db_env_override",
+                return_value="DATABASE_URL",
+            ),
+        ):
+            mock_svc.test_connection = AsyncMock(return_value=mock_result)
+            mock_svc.ensure_tables_exist = AsyncMock(return_value=(True, ""))
+            result = await vm.save_config()
+
+        assert result is True
+        assert vm.state.status_type == "warning"
+        assert vm.state.status_message is not None
+        assert vm.state.status_message.params["env_var"] == "DATABASE_URL"
 
 
 # --- 覆盖率补全：subscribe/_unsubscribe 边界 + get_config 异常分支 ---

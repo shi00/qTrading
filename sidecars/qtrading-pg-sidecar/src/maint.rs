@@ -630,8 +630,9 @@ fn build_doctor_json_with_fs(
     }
 
     // §13.7.44 / §7.5 残留物扫描：兄弟目录中 `<data_dir_name>.restore-*` 与 `*.partial`
-    // 由 dump/restore 中断产生，doctor 只读列出，不自动清理（用户确认后手动删除）
-    let (restore_residuals, dump_partials) = scan_residuals(&layout.data_dir);
+    // 由 dump/restore 中断产生，doctor 只读列出，不自动清理（用户确认后手动删除）。
+    // D1-05：initdb 被强杀/断电遗留的明文 pwfile 同样只读上报（cleanup 由持锁启动路径完成）。
+    let (restore_residuals, dump_partials, initdb_pwfiles) = scan_residuals(&layout);
     if !restore_residuals.is_empty() {
         issues.push(warning(
             "restore_residual",
@@ -647,6 +648,15 @@ fn build_doctor_json_with_fs(
             format!(
                 "检测到 dump 中断残留 .partial 文件（§13.7.44）：{}；建议删除",
                 dump_partials.join(", ")
+            ),
+        ));
+    }
+    if !initdb_pwfiles.is_empty() {
+        issues.push(warning(
+            "initdb_pwfile_residual",
+            format!(
+                "检测到 initdb 中断遗留的临时明文密码文件（D1-05）：{}；下次持锁启动会自动清理，也可立即删除",
+                initdb_pwfiles.join(", ")
             ),
         ));
     }
@@ -741,31 +751,44 @@ fn append_identifier_compat_hint(
     });
 }
 
-/// 扫描 data_dir 兄弟目录中的 dump/restore 中断残留物（§13.7.44 / §7.5）。
+/// 扫描 data_dir 兄弟目录中的 dump/restore 中断残留物（§13.7.44 / §7.5）+ initdb 明文
+/// pwfile 残留（D1-05）。
 ///
 /// - `<data_dir_name>.restore-*` 目录：restore 中断残留（`restore()` 失败路径已自清理，
 ///   但 sidecar 进程被 kill 时残留目录仍存在）
 /// - `*.partial` 文件：dump 中断残留（`dump()` 失败路径已自清理，但同上）
+/// - `<password_file>.pwinitdb`：initdb 被强杀/断电时遗留的**明文密码**文件（仅匹配
+///   由 `layout.password_file` 派生的确切路径，不误报同目录其它文件）
 ///
 /// 仅扫描 `data_dir.parent`：restore/dump 默认输出路径在兄弟目录中（§12.2 / §13.7.44），
 /// 用户自定义路径（如 `~/backups/`）不在扫描范围内（YAGNI：扫描全盘不可行）。
-fn scan_residuals(data_dir: &Path) -> (Vec<String>, Vec<String>) {
+/// 本函数只读上报，不删除任何文件。
+fn scan_residuals(layout: &Layout) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut restore_residuals: Vec<String> = Vec::new();
     let mut dump_partials: Vec<String> = Vec::new();
+    let mut initdb_pwfiles: Vec<String> = Vec::new();
 
+    // initdb 临时明文 pwfile 残留：路径由 password 文件派生，与 data_dir 兄弟目录无关，
+    // 故先独立探测（不受 data_dir parent / 名称解析的早退影响）。
+    let pwfile = setup::initdb_pwfile_path(&layout.password_file);
+    if std::fs::symlink_metadata(&pwfile).is_ok_and(|m| m.file_type().is_file()) {
+        initdb_pwfiles.push(pwfile.to_string_lossy().replace('\\', "/"));
+    }
+
+    let data_dir = &layout.data_dir;
     let parent = match data_dir.parent() {
         Some(p) => p,
-        None => return (restore_residuals, dump_partials),
+        None => return (restore_residuals, dump_partials, initdb_pwfiles),
     };
     let data_dir_name = match data_dir.file_name().and_then(|n| n.to_str()) {
         Some(n) => n,
-        None => return (restore_residuals, dump_partials),
+        None => return (restore_residuals, dump_partials, initdb_pwfiles),
     };
     let restore_prefix = format!("{data_dir_name}.restore-");
 
     let entries = match std::fs::read_dir(parent) {
         Ok(r) => r,
-        Err(_) => return (restore_residuals, dump_partials),
+        Err(_) => return (restore_residuals, dump_partials, initdb_pwfiles),
     };
     for entry in entries.flatten() {
         let path = entry.path();
@@ -783,7 +806,9 @@ fn scan_residuals(data_dir: &Path) -> (Vec<String>, Vec<String>) {
         }
     }
 
-    (restore_residuals, dump_partials)
+    // initdb 临时明文 pwfile 残留已在上方独立探测（不受早退影响）。
+
+    (restore_residuals, dump_partials, initdb_pwfiles)
 }
 
 // ---- 临时实例管理（dump 离线 / restore / maintenance-shell 共用） ----
@@ -2332,6 +2357,11 @@ mod tests {
         std::env::temp_dir().join(format!("qts-maint-test-{}-{}", std::process::id(), name))
     }
 
+    /// 由 data_dir 派生默认布局（scan_residuals 需要 password 文件路径定位 pwfile 残留）。
+    fn layout_for(data_dir: &Path) -> Layout {
+        Layout::from_data_dir(data_dir, None, None, None)
+    }
+
     /// 构造"已初始化"假 cluster 目录（仅文件骨架，不含真实 PG 数据）。
     fn make_fake_cluster(dir: &Path) {
         let pg_major = setup::bundled_pg_major().unwrap_or(16);
@@ -3800,6 +3830,40 @@ mod tests {
         assert!(ts.chars().all(|c| c.is_ascii_alphanumeric()));
     }
 
+    /// D1-05: initdb 被强杀/断电遗留的临时明文 pwfile 被 scan_residuals 识别。
+    #[test]
+    fn scan_residuals_detects_initdb_pwfile() {
+        let dir = unique_tmp("scan-pwinitdb");
+        let data_dir = dir.join("postgres/16/data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let layout = layout_for(&data_dir);
+        std::fs::create_dir_all(layout.password_file.parent().unwrap()).unwrap();
+        let pwfile = setup::initdb_pwfile_path(&layout.password_file);
+        std::fs::write(&pwfile, b"plaintext-pwd").unwrap();
+
+        let (_restore_residuals, _dump_partials, initdb_pwfiles) = scan_residuals(&layout);
+        assert_eq!(initdb_pwfiles.len(), 1);
+        assert!(initdb_pwfiles[0].ends_with("password.pwinitdb"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D1-05: doctor 以 warning 上报 initdb 明文 pwfile 残留，且只读不清理。
+    #[test]
+    fn doctor_reports_initdb_pwfile_residual() {
+        let dir = unique_tmp("doctor-pwinitdb");
+        let data_dir = dir.join("postgres/16/data");
+        make_fake_cluster(&data_dir);
+        let layout = layout_for(&data_dir);
+        std::fs::create_dir_all(layout.password_file.parent().unwrap()).unwrap();
+        let pwfile = setup::initdb_pwfile_path(&layout.password_file);
+        std::fs::write(&pwfile, b"plaintext-pwd").unwrap();
+
+        let doc = build_doctor_json(&data_dir);
+        assert_issue(&doc, "initdb_pwfile_residual", "warning");
+        assert!(pwfile.exists(), "doctor 只读，不得清理残留");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// §13.7.44 / §7.5 残留物扫描：`<data_dir_name>.restore-*` 兄弟目录被识别为残留。
     #[test]
     fn scan_residuals_detects_restore_sibling_dir() {
@@ -3814,7 +3878,8 @@ mod tests {
         // 写入部分文件模拟半截状态
         std::fs::write(residual1.join("PG_VERSION"), b"16\n").unwrap();
 
-        let (restore_residuals, dump_partials) = scan_residuals(&data_dir);
+        let (restore_residuals, dump_partials, _initdb_pwfiles) =
+            scan_residuals(&layout_for(&data_dir));
         assert_eq!(restore_residuals.len(), 2, "should detect 2 residual dirs");
         assert!(
             restore_residuals
@@ -3839,7 +3904,8 @@ mod tests {
         let normal = dir.join("weekly_backup.dump");
         std::fs::write(&normal, b"full dump").unwrap();
 
-        let (restore_residuals, dump_partials) = scan_residuals(&data_dir);
+        let (restore_residuals, dump_partials, _initdb_pwfiles) =
+            scan_residuals(&layout_for(&data_dir));
         assert!(restore_residuals.is_empty(), "no restore residual expected");
         assert_eq!(dump_partials.len(), 1, "should detect 1 partial file");
         assert!(
@@ -3860,7 +3926,8 @@ mod tests {
         std::fs::write(dir.join("readme.txt"), b"hi").unwrap();
         std::fs::write(dir.join("backup.dump"), b"full").unwrap();
 
-        let (restore_residuals, dump_partials) = scan_residuals(&data_dir);
+        let (restore_residuals, dump_partials, _initdb_pwfiles) =
+            scan_residuals(&layout_for(&data_dir));
         assert!(restore_residuals.is_empty());
         assert!(dump_partials.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
@@ -3876,7 +3943,8 @@ mod tests {
         let bak = dir.join("data.bak-20260723T120000Z");
         std::fs::create_dir_all(&bak).unwrap();
 
-        let (restore_residuals, dump_partials) = scan_residuals(&data_dir);
+        let (restore_residuals, dump_partials, _initdb_pwfiles) =
+            scan_residuals(&layout_for(&data_dir));
         assert!(
             restore_residuals.is_empty(),
             "bak dirs should not be reported as restore residuals: {restore_residuals:?}"
@@ -4164,7 +4232,7 @@ mod tests {
         // 根路径"/"或"C:\"的 parent 为 None；用 Path::new("/") 构造
         let root = Path::new(if cfg!(windows) { "C:\\" } else { "/" });
         // 不实际写文件，仅验证 parent=None 分支不 panic
-        let (restore, partials) = scan_residuals(root);
+        let (restore, partials, _initdb_pwfiles) = scan_residuals(&layout_for(root));
         assert!(restore.is_empty());
         assert!(partials.is_empty());
     }
@@ -4179,7 +4247,7 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
         let non_utf8 = std::ffi::OsString::from_vec(vec![0xFF, 0xFE, 0xFD]);
         let data_dir = std::env::temp_dir().join(non_utf8);
-        let (restore, partials) = scan_residuals(&data_dir);
+        let (restore, partials, _initdb_pwfiles) = scan_residuals(&layout_for(&data_dir));
         assert!(restore.is_empty(), "non-utf8 name should be skipped");
         assert!(partials.is_empty());
     }
@@ -4401,7 +4469,7 @@ mod tests {
         let nonexistent_parent = dir.join("nonexistent-parent");
         let data_dir = nonexistent_parent.join("data");
         // 不创建 nonexistent_parent，read_dir 会失败
-        let (restore, partials) = scan_residuals(&data_dir);
+        let (restore, partials, _initdb_pwfiles) = scan_residuals(&layout_for(&data_dir));
         assert!(restore.is_empty(), "should return empty on read_dir error");
         assert!(partials.is_empty());
         let _ = std::fs::remove_dir_all(&dir);

@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 from data.persistence.db_config_service import ConnectionStatus, DatabaseConfigService
 from ui.viewmodels import Message
 from ui.viewmodels.config_panel_view_model_base import ConfigPanelViewModelBase
-from utils.config.db import DatabaseMode, DatabaseModeResolution
+from utils.config.db import DatabaseMode, DatabaseModeResolution, describe_db_env_override
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error, get_error_message_key
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -468,11 +468,22 @@ class DatabaseConfigPanelViewModel(ConfigPanelViewModelBase[DatabaseConfigState]
                 if not await self._persist_database_mode(DatabaseMode.EXTERNAL):
                     return False
 
-            resolution = self._state.mode_resolution
-            if self._activate_mode_on_save and resolution is not None and resolution.restart_required:
-                self._show_success(Message("settings_db_mode_saved_restart"))
+            # D1-05: DB_PASSWORD / DATABASE_URL 环境变量优先级高于此处配置，写入的值
+            # 运行时不生效；不得报「保存成功」，须显式告警生效来源（VM 产出 Message，
+            # View 按当前 locale 渲染）。
+            env_override = describe_db_env_override()
+            if env_override is not None:
+                logger.warning(
+                    "[DatabaseConfigVM] %s overrides saved database config; entered values not effective",
+                    env_override,
+                )
+                self._show_warning(Message("secrets_save_overridden", {"env_var": env_override}))
             else:
-                self._show_success(Message("db_msg_saved"))
+                resolution = self._state.mode_resolution
+                if self._activate_mode_on_save and resolution is not None and resolution.restart_required:
+                    self._show_success(Message("settings_db_mode_saved_restart"))
+                else:
+                    self._show_success(Message("db_msg_saved"))
 
             if self._on_save_callback:
                 self._on_save_callback(config)

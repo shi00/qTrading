@@ -107,12 +107,17 @@ class TestOnboardingDBIntegration:
     """
 
     @pytest.mark.asyncio
-    async def test_db_success_advances_to_token_step(self, isolated_config, mock_db_thread_pool):
+    async def test_db_success_advances_to_token_step(self, isolated_config, mock_db_thread_pool, monkeypatch):
         """DB 验证成功 → OnboardingViewModel 状态前进到 token 步骤（step index 2）。
 
         P1-9: 精确断言 - 验证 DatabaseConfigService.test_connection 调用参数、
         ConfigHandler.save_db_config 调用次数与参数、state 字段值（status_message key）。
+
+        D1-05: 本用例断言「无环境变量覆盖」的常规成功路径；CI 集成任务会注入
+        DATABASE_URL，须先清除，否则 VM 按设计改为告警生效来源（warning）。
         """
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("DB_PASSWORD", raising=False)
         db_vm = _make_db_vm(isolated_config)
         _fill_valid_db_config(db_vm)
 
