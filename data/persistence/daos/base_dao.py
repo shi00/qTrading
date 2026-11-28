@@ -12,6 +12,7 @@ import pandas as pd
 import sqlalchemy as sa
 from sqlalchemy import Date, DateTime
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import StatementError
 
 from data.persistence import engine_provider
 from data.persistence.models import Base
@@ -47,6 +48,25 @@ _LONG_TX_ROW_THRESHOLD = 20_000
 _HAS_TOP_LEVEL_LIMIT = re.compile(r"\bLIMIT\b(?![^()]*\))", re.IGNORECASE)
 
 
+def _safe_db_error(exc: BaseException) -> str:
+    """DB 异常安全摘要（R9 / D1-06）：类名 + SQLSTATE + 脱敏描述，剔除绑定参数段。
+
+    所有对外的日志与异常消息都必须经本函数，禁止直接 ``str(e)`` / ``{e}``——
+    SQLAlchemy 的 DBAPIError 字符串默认带完整的 ``[parameters: {...}]``。
+    """
+    return DataSanitizer.sanitize_db_error(exc)
+
+
+def _db_error_traceback_allowed(exc: BaseException) -> bool:
+    """是否允许在日志中附带原始 traceback（R9 / D1-06）。
+
+    携带绑定参数的 DB 异常（``StatementError`` 及其子类如 ``DBAPIError``）一旦以
+    ``exc_info=True`` 落盘，traceback 会原样渲染异常字符串中的参数块，故禁带；
+    其余异常保留 traceback 以维持诊断价值。
+    """
+    return not isinstance(exc, StatementError)
+
+
 def _build_df_normalized(rows, cols):
     """构造 DataFrame 并归一化 Decimal 列（DAT-10/11）。
 
@@ -57,17 +77,43 @@ def _build_df_normalized(rows, cols):
     return normalize_decimal_columns(df)
 
 
+# D2-16: object 列中可能承载 Decimal / numpy 数值的 infer_dtype 取值。仅这些列参与非有限值判定，
+# 避免对字符串/日期列做无谓转换（字符串字面量 "inf" 不是数值，不得被改写为 NULL）。
+_NUMERIC_OBJECT_KINDS = frozenset({"decimal", "floating", "integer", "mixed", "mixed-integer", "mixed-integer-float"})
+
+
+def _non_finite_mask(series: pd.Series) -> pd.Series:
+    """返回「已存在但非有限数值」的行掩码（float / Decimal 的 ±inf，D2-16）。
+
+    ``pd.notna`` 对 ``float('inf')`` / ``Decimal('Infinity')`` 返回 True，若原样送进
+    有精度约束的 PG NUMERIC 会触发 numeric field overflow，使整批 UPSERT 回滚。
+    普通 NaN / ``Decimal('NaN')`` 在 ``pd.notna`` 下即为 False（由既有 NULL 归一处理），
+    不属于「已存在的非有限值」，因此不计入质量降级——避免把合法缺失误报为脏数据。
+    """
+    if pd.api.types.is_float_dtype(series.dtype):
+        arr = series.to_numpy(dtype="float64", na_value=np.nan)
+        return pd.Series(series.notna().to_numpy() & ~np.isfinite(arr), index=series.index)
+    if series.dtype == object and pd.api.types.infer_dtype(series, skipna=True) in _NUMERIC_OBJECT_KINDS:
+        numeric = typing.cast(pd.Series, pd.to_numeric(series, errors="coerce"))
+        arr = numeric.to_numpy(dtype="float64", na_value=np.nan)
+        return pd.Series(numeric.notna().to_numpy() & ~np.isfinite(arr), index=series.index)
+    return pd.Series(False, index=series.index, dtype=bool)
+
+
 def _normalize_records_frame(
     df_slice: pd.DataFrame,
     target_date_cols: list[str],
     target_datetime_cols: list[str],
 ) -> tuple[list[dict[str, typing.Any]], dict[str, dict[str, typing.Any]]]:
-    """把 DataFrame 归一化为与目标表列型匹配的 records + 日期 coerce 统计（PRF-03）。
+    """把 DataFrame 归一化为与目标表列型匹配的 records + 归一统计（PRF-03 / D2-16）。
 
     写入路径统一入口：供 batch upsert 的 CPU 线程池整体提交。
     单趟向量化归一：①日期 coerce → ②datetime64（各精度/时区）转为 Python 原生
-    naive datetime 并去除 tz → ③整帧 ``astype(object).where(notna, None)``。
+    naive datetime 并去除 tz → ③整帧 ``astype(object).where(mask, None)``。
     数值列/字符串/NaT 的 NULL 归一由整帧③统一完成，不再逐列重复（删除冗余的逐列数值列归一阶段）。
+
+    返回的统计按列登记：日期解析失败为 ``kind="date"``，数值 ±inf 为 ``kind="non_finite"``，
+    由 ``_save_upsert`` 分别告警并合并计入 ``WriteQuality``（不得无声吞没）。
     """
     df_clean = df_slice.copy()
 
@@ -100,9 +146,26 @@ def _normalize_records_frame(
             )
 
     # DAT-04 + PRF-03: 整帧单趟向量化归一 NA（str/numeric/NaT）→ None，替代逐单元格循环。
-    # astype(object) 后再按 notna mask 填 None：None 在 object 列可稳定保存，
+    # astype(object) 后再按 mask 填 None：None 在 object 列可稳定保存，
     # 不会被 str/float dtype 自动转回 NaN（`df_clean.where(notna, None)` 单独用会失败）。
+    # D2-16: 数值列的 ±inf 在 notna 下仍为 True，mask 必须按「有限值」判定；否则直送 PG NUMERIC
+    # 会因 numeric field overflow 使整批 UPSERT 回滚。非有限值归一为 NULL 的同时登记列级统计，
+    # 由 _save_upsert 显式告警并计入 WriteQuality，不做无声降级。
     mask = df_clean.notna()
+    for col in df_clean.columns:
+        if col in target_date_cols or col in target_datetime_cols:
+            continue
+        series = typing.cast(pd.Series, df_clean[col])
+        non_finite = _non_finite_mask(series)
+        count = int(non_finite.sum())
+        if count == 0:
+            continue
+        coerce_stats[col] = {
+            "count": count,
+            "samples": series.loc[non_finite.to_numpy()].head(3).tolist(),
+            "kind": "non_finite",
+        }
+        mask[col] = mask[col].to_numpy() & ~non_finite.to_numpy()
     df_clean = df_clean.astype(object).where(mask, None)
 
     records = typing.cast(list[dict[str, typing.Any]], df_clean.to_dict(orient="records"))
@@ -174,9 +237,15 @@ class BaseDao:
         except Exception as e:
             # P3-M5-ClassifyError-System-Gap: 用 classify_error 替代手写字符串匹配
             if classify_error(e, "db")["code"] == "interrupted":
+                # R5：生命周期错误仍以 EngineDisposedError 传播；from None 断开携带
+                # 绑定参数的原始异常链（R9 / D1-06），诊断要素保留在消息摘要中。
                 raise EngineDisposedError(
-                    f"[{self.__class__.__name__}] Engine disposed during guarded begin: {e}"
-                ) from e
+                    f"[{self.__class__.__name__}] Engine disposed during guarded begin: {_safe_db_error(e)}"
+                ) from None
+            if isinstance(e, StatementError):
+                raise DatabaseQueryError(
+                    f"[{self.__class__.__name__}] Database error during guarded begin: {_safe_db_error(e)}"
+                ) from None
             raise
 
     @staticmethod
@@ -305,8 +374,8 @@ class BaseDao:
             if isinstance(r, BaseException):
                 raise DatabaseQueryError(
                     f"[{BaseDao.__name__}] Chunked read failed; partial results discarded "
-                    f"to avoid silent data loss: {r}"
-                ) from r
+                    f"to avoid silent data loss: {_safe_db_error(r)}"
+                ) from None
         return list(results)
 
     @staticmethod
@@ -474,7 +543,7 @@ class BaseDao:
                 "[%s] %s | Chunked read failed, partial results discarded: %s",
                 self.__class__.__name__,
                 log_prefix,
-                DataSanitizer.sanitize_error(e),
+                _safe_db_error(e),
             )
             return pd.DataFrame()
         except Exception as e:
@@ -482,7 +551,7 @@ class BaseDao:
                 "[%s] %s: %s",
                 self.__class__.__name__,
                 log_prefix,
-                DataSanitizer.sanitize_error(e),
+                _safe_db_error(e),
             )
             return pd.DataFrame()
 
@@ -595,7 +664,7 @@ class BaseDao:
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.debug("[BaseDao] Engine sync_engine check skipped: %s", e)
+            logger.debug("[BaseDao] Engine sync_engine check skipped: %s", _safe_db_error(e))
 
         # P1-3: 共享事务连接（conn is not None）时，suppress_errors 必须忽略。
         # PostgreSQL 事务中发生错误后进入 "aborted" 状态，后续语句全部失败；
@@ -641,11 +710,11 @@ class BaseDao:
                 logger.warning(
                     "[%s] DB Closed during write (Shutdown): %s",
                     self.__class__.__name__,
-                    e,
+                    _safe_db_error(e),
                 )
                 raise EngineDisposedError(
-                    f"[{self.__class__.__name__}] Engine disposed during write, data not persisted: {e}"
-                ) from e
+                    f"[{self.__class__.__name__}] Engine disposed during write, data not persisted: {_safe_db_error(e)}"
+                ) from None
 
             # P1-3: 共享事务连接（is_shared_conn=True）时，suppress_errors 必须忽略。
             # PostgreSQL 事务中发生错误后进入 "aborted" 状态，后续语句全部失败；
@@ -659,11 +728,11 @@ class BaseDao:
                     "[BaseDao] Write Error on shared conn (%s: %s, %.1fms, suppress_errors ignored)\nSQL: %s...",
                     elapsed,
                     sql[:200],
-                    exc_info=True,
+                    exc_info=_db_error_traceback_allowed(e),
                 )
                 raise DatabaseQueryError(
-                    f"[{self.__class__.__name__}] Database write failed on shared conn: {e}"
-                ) from e
+                    f"[{self.__class__.__name__}] Database write failed on shared conn: {_safe_db_error(e)}"
+                ) from None
 
             if suppress_errors:
                 log_classified(
@@ -681,11 +750,13 @@ class BaseDao:
                     "[BaseDao] Write Error (%s: %s, %.1fms)\nSQL: %s...",
                     elapsed,
                     sql[:200],
-                    exc_info=True,
+                    exc_info=_db_error_traceback_allowed(e),
                 )
 
             if not suppress_errors:
-                raise DatabaseQueryError(f"[{self.__class__.__name__}] Database write failed: {e}") from e
+                raise DatabaseQueryError(
+                    f"[{self.__class__.__name__}] Database write failed: {_safe_db_error(e)}"
+                ) from None
             return -1
 
     @staticmethod
@@ -817,15 +888,26 @@ class BaseDao:
 
         records, coerce_stats = await ThreadPoolManager().run_async(TaskType.CPU, _prepare_records, df_slice)
 
-        total_coerced = sum(s["count"] for s in coerce_stats.values())
-        if total_coerced > 0:
+        date_coerced = sum(s["count"] for s in coerce_stats.values() if s.get("kind", "date") == "date")
+        non_finite_coerced = sum(s["count"] for s in coerce_stats.values() if s.get("kind") == "non_finite")
+        total_coerced = date_coerced + non_finite_coerced
+        if date_coerced > 0:
             logger.error(
                 "[%s] Insert '%s': %d 行日期字段无法解析已置 NULL（%s）。"
                 "上游日期格式异常，需恢复为 ISO 格式，避免静默错数据。",
                 self.__class__.__name__,
                 table_name,
-                total_coerced,
-                coerce_stats,
+                date_coerced,
+                {k: v for k, v in coerce_stats.items() if v.get("kind", "date") == "date"},
+            )
+        if non_finite_coerced > 0:
+            logger.error(
+                "[%s] Insert '%s': %d 行数值字段为非有限值（±inf，含 Decimal Infinity）已置 NULL（%s）。"
+                "该类值在 pd.notna 下为 True，直送 NUMERIC 会使整批 UPSERT 回滚；需修复上游取数/计算。",
+                self.__class__.__name__,
+                table_name,
+                non_finite_coerced,
+                {k: v for k, v in coerce_stats.items() if v.get("kind") == "non_finite"},
             )
         # DAT-01: 线程池 await 是另一处状态可变边界，执行 SQL 前必须复查引擎。
         self._check_engine(context="upsert:post-prepare")
@@ -884,7 +966,7 @@ class BaseDao:
                             await tx_conn.execute(stmt, chunk)
                             total_written += len(chunk)
 
-            # DAT-03: 登记表级日期 coerce 率，供数据质量门控判定该表是否降级。
+            # DAT-03: 登记表级归一率（日期 coerce + 数值非有限值），供数据质量门控判定该表是否降级。
             # 仅在 SQL 执行成功后登记：record_write 为"最近一次写入"覆盖式语义，
             # 若在执行前登记，写入失败（含 suppress_errors 吞错路径）会用未落库的
             # 本次尝试覆盖上次成功统计——coerced=0 时会清除该表已有的降级信号，
@@ -933,11 +1015,11 @@ class BaseDao:
                 logger.warning(
                     "[%s] DB Closed during upsert (Shutdown): %s",
                     self.__class__.__name__,
-                    e,
+                    _safe_db_error(e),
                 )
                 raise EngineDisposedError(
-                    f"[{self.__class__.__name__}] Engine disposed during upsert, data not persisted: {e}"
-                ) from e
+                    f"[{self.__class__.__name__}] Engine disposed during upsert, data not persisted: {_safe_db_error(e)}"
+                ) from None
 
             # P1-3: 共享事务连接（is_shared_conn=True）时，suppress_errors 必须忽略。
             # PostgreSQL 事务中发生错误后进入 "aborted" 状态，后续语句全部失败；
@@ -951,9 +1033,11 @@ class BaseDao:
                     "[BaseDao] UPSERT Error on shared conn (%s: %s, %.1fms, suppress_errors ignored) on %s",
                     elapsed,
                     table_name,
-                    exc_info=True,
+                    exc_info=_db_error_traceback_allowed(e),
                 )
-                raise
+                raise DatabaseQueryError(
+                    f"[{self.__class__.__name__}] Database write failed on shared conn: {_safe_db_error(e)}"
+                ) from None
 
             if suppress_errors:
                 log_classified(
@@ -972,10 +1056,12 @@ class BaseDao:
                     "[BaseDao] UPSERT Error (%s: %s, %.1fms) on %s",
                     elapsed,
                     table_name,
-                    exc_info=True,
+                    exc_info=_db_error_traceback_allowed(e),
                 )
             if not suppress_errors:
-                raise
+                raise DatabaseQueryError(
+                    f"[{self.__class__.__name__}] Database write failed: {_safe_db_error(e)}"
+                ) from None
             return -1
 
     @staticmethod
@@ -1090,9 +1176,11 @@ class BaseDao:
                 logger.warning(
                     "[%s] DB Closed during read (Shutdown): %s",
                     self.__class__.__name__,
-                    e,
+                    _safe_db_error(e),
                 )
-                raise EngineDisposedError(f"[{self.__class__.__name__}] Engine disposed during read: {e}") from e
+                raise EngineDisposedError(
+                    f"[{self.__class__.__name__}] Engine disposed during read: {_safe_db_error(e)}"
+                ) from None
 
             log_classified(
                 logger,
@@ -1102,7 +1190,9 @@ class BaseDao:
                 elapsed,
             )
             if not suppress_errors:
-                raise DatabaseQueryError(f"[{self.__class__.__name__}] Database read failed: {e}") from e
+                raise DatabaseQueryError(
+                    f"[{self.__class__.__name__}] Database read failed: {_safe_db_error(e)}"
+                ) from None
             return pd.DataFrame()
 
         if max_rows is not None and len(rows) > max_rows:
@@ -1221,9 +1311,11 @@ class BaseDao:
                 logger.warning(
                     "[%s] DB Closed during read (Shutdown): %s",
                     self.__class__.__name__,
-                    e,
+                    _safe_db_error(e),
                 )
-                raise EngineDisposedError(f"[{self.__class__.__name__}] Engine disposed during read: {e}") from e
+                raise EngineDisposedError(
+                    f"[{self.__class__.__name__}] Engine disposed during read: {_safe_db_error(e)}"
+                ) from None
 
             log_classified(
                 logger,
@@ -1233,7 +1325,9 @@ class BaseDao:
                 elapsed,
             )
             if not suppress_errors:
-                raise DatabaseQueryError(f"[{self.__class__.__name__}] Database read failed: {e}") from e
+                raise DatabaseQueryError(
+                    f"[{self.__class__.__name__}] Database read failed: {_safe_db_error(e)}"
+                ) from None
             return pd.DataFrame()
 
         # review03-C4: max_rows 检查位于 except 之外——超限是编程/查询错误，

@@ -42,11 +42,11 @@ import pandas as pd
 import pytest
 import pytest_asyncio
 from alembic import command
-from sqlalchemy import exc as sa_exc
 from sqlalchemy import func, insert, select, text
 
 import data.persistence.daos.base_dao as base_dao_module
 from data.cache.cache_manager import CacheManager
+from data.persistence.daos.base_dao import DatabaseQueryError
 from data.persistence.app_state_service import get_app_state, set_app_state_max
 from data.persistence.db_url_override import override_db_url
 from data.persistence.embedded_postgres.protocol import ConnectionInfo
@@ -412,7 +412,7 @@ class TestD05TransactionRecoveryContracts:
         dao = cache.sync_dao
         monkeypatch.setattr(base_dao_module, "_UPSERT_CHUNK_SIZE", 2)
 
-        with pytest.raises(sa_exc.DBAPIError) as exc_info:
+        with pytest.raises(DatabaseQueryError) as exc_info:
             async with dao._guarded_begin() as conn:
                 await dao._save_upsert(
                     _empty_day_frame_with_bad_date(),
@@ -439,7 +439,7 @@ class TestD05TransactionRecoveryContracts:
         monkeypatch.setattr(base_dao_module, "_UPSERT_CHUNK_SIZE", 2)
         monkeypatch.setattr(base_dao_module, "_LONG_TX_ROW_THRESHOLD", 2)
 
-        with pytest.raises(sa_exc.DBAPIError) as exc_info:
+        with pytest.raises(DatabaseQueryError) as exc_info:
             await dao._save_upsert(
                 _empty_day_frame_with_bad_date(),
                 "sync_empty_days",

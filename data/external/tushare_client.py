@@ -1683,15 +1683,25 @@ class TushareClient:
             end_m = f"{end_m.year}{end_m.month:02d}"
         return await self._handle_api_call(func, start_m=start_m, end_m=end_m)
 
-    async def get_cn_gdp(self, quarter: str):
+    async def get_cn_gdp(
+        self,
+        quarter: str | None = None,
+        start_q: str | None = None,
+        end_q: str | None = None,
+    ):
         """Get China GDP data by quarter.
 
-        Phase 2D §3.2.6 v1.10.0 P0-1：cn_gdp API 期望 ``quarter`` 参数（如 "2024Q4"），
-        与 ``get_macro_data(api_name, start_m, end_m)`` 的 YYYYMM 参数 schema 不兼容，
-        故新增专用 wrapper。
+        Phase 2D §3.2.6 v1.10.0 P0-1：cn_gdp API 与 ``get_macro_data(api_name,
+        start_m, end_m)`` 的 YYYYMM 参数 schema 不兼容，故新增专用 wrapper。
+
+        D2-06：按官方文档（doc_id=227）对齐入参——cn_gdp 只接受 ``q`` /
+        ``start_q`` / ``end_q``（无 ``quarter`` 参数）。传入不存在的 ``quarter``
+        会被 Tushare 忽略并返回默认窗口，导致按季度取数静默失效。
 
         Args:
-            quarter: 季度字符串，格式 "YYYYQN"（如 "2024Q4"）。
+            quarter: 单季度，格式 "YYYYQN"（如 "2024Q4"），映射为官方 ``q``。
+            start_q: 起始季度（含），映射为官方 ``start_q``。
+            end_q: 结束季度（含），映射为官方 ``end_q``。
 
         Returns:
             DataFrame with columns: quarter (renamed to period by _COLUMN_RENAMES),
@@ -1699,8 +1709,15 @@ class TushareClient:
         """
         if self.pro is None:
             return None
+        params: dict[str, typing.Any] = {}
+        if quarter:
+            params["q"] = quarter
+        if start_q:
+            params["start_q"] = start_q
+        if end_q:
+            params["end_q"] = end_q
         return await self._handle_api_call(
             self.pro.cn_gdp,
-            quarter=quarter,
             fields="quarter,gdp,gdp_yoy,pi,pi_yoy,si,si_yoy,ti,ti_yoy",
+            **params,
         )

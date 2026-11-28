@@ -606,12 +606,32 @@ class CacheManager:
         async def _check_single_table(table: str, meta: dict) -> tuple[str, dict]:
             table_type = meta.get("type", "stock")
             is_stock_table = table_type != "global"
-            is_sparse = meta.get("quality_config", {}).get("sparse", False)
+            quality_config = meta.get("quality_config", {})
+            is_sparse = quality_config.get("sparse", False)
 
             def _check_cancel() -> None:
                 # P3-M5: 关停/取消请求时及时中止健康检查，避免整体 >30s 才响应取消
                 if cancel_event is not None and cancel_event.is_set():
                     raise asyncio.CancelledError("cancel_event set during comprehensive health check")
+
+            def _fresh_ratio_from_date(value) -> float:
+                """按日期距今衰减计算新鲜度：<=7 天 1.0，<=30 天线性衰减，否则 0.0。"""
+                from utils.time_utils import parse_date
+
+                try:
+                    age_days = (get_now() - parse_date(value)).days
+                except (ValueError, TypeError) as exc:
+                    logger.debug(
+                        "[CacheManager] Health | Unparsable freshness date for %s: %s",
+                        table,
+                        safe_error(exc),
+                    )
+                    return 0.0
+                if age_days <= 7:
+                    return 1.0
+                if age_days <= 30:
+                    return max(0.0, 1.0 - (age_days - 7) / 23.0)
+                return 0.0
 
             tbl = ModelsBase.metadata.tables.get(table)
             if tbl is None:
@@ -643,66 +663,96 @@ class CacheManager:
                     else:
                         # OSS-01：列集合从 ORM 派生（纯结构，不触发 I18n）
                         cols = columns_of(table)
-                        keys = meta.get("sync_config", {}).get("keys", [])
-                        code_col = "con_code" if "con_code" in cols or "con_code" in keys else "ts_code"
-
-                        r = await conn.execute(
-                            sa.select(
-                                sa.func.count(sa.distinct(sa.column(code_col))),
-                            ).select_from(tbl),
-                        )
-                        _check_cancel()
-                        cnt = r.scalar() or 0
-                        ratio = min(1.0, cnt / total_stocks) if total_stocks > 0 else 0
-
+                        # D2-12：code 列必须是 ORM 真实存在的列；sync_config.keys 声明的列
+                        # 不保证物理存在（如 sw_industry_classify 无 ts_code），禁止先发查询再靠
+                        # UndefinedColumnError 探测列是否存在。
+                        code_col = "con_code" if "con_code" in cols else "ts_code"
+                        cnt = 0
+                        ratio = 0.0
                         fresh_ratio = 0.0
-                        date_col_candidates = []
-                        configured_col = meta.get("sync_config", {}).get("date_col")
-                        if configured_col:
-                            date_col_candidates.append(configured_col)
-                        date_col_candidates.extend(
-                            ["trade_date", "end_date", "ann_date"],
-                        )
-                        try:
-                            max_date = None
-                            for dc in date_col_candidates:
-                                try:
-                                    r2 = await conn.execute(
-                                        sa.select(
-                                            sa.func.max(sa.column(dc)),
-                                        ).select_from(tbl),
-                                    )
-                                    _check_cancel()
-                                    val = r2.scalar()
-                                    if val:
-                                        max_date = val
-                                        break
-                                except Exception as exc:
-                                    logger.debug(
-                                        "[CacheManager] Health | Date probe failed for %s.%s: %s",
-                                        table,
-                                        dc,
-                                        safe_error(exc),
-                                    )
-                                    continue
-                            if max_date:
-                                from utils.time_utils import parse_date
+                        if code_col not in cols:
+                            logger.warning(
+                                "[CacheManager] Health | Table %s has no stock code column (ts_code/con_code); "
+                                "coverage treated as unknown (ratio=0)",
+                                table,
+                            )
+                        else:
+                            r = await conn.execute(
+                                sa.select(
+                                    sa.func.count(sa.distinct(sa.column(code_col))),
+                                ).select_from(tbl),
+                            )
+                            _check_cancel()
+                            cnt = r.scalar() or 0
+                            ratio = min(1.0, cnt / total_stocks) if total_stocks > 0 else 0
 
-                                max_dt = parse_date(max_date)
-                                age_days = (get_now() - max_dt).days
-                                if age_days <= 7:
-                                    fresh_ratio = 1.0
-                                elif age_days <= 30:
-                                    fresh_ratio = max(0.0, 1.0 - (age_days - 7) / 23.0)
+                            # D2-12：低频维度表（sw_industry_member / stock_name_history 等）
+                            # 数据日期不代表同步新鲜度（长期无变动属正常），改按 sync_status
+                            # 成功同步时点评估；无成功记录时保持 0.0（未证实新鲜，不伪装）。
+                            if quality_config.get("freshness_source") == "sync_status":
+                                sync_tbl = ModelsBase.metadata.tables.get("sync_status")
+                                if sync_tbl is not None:
+                                    try:
+                                        r2 = await conn.execute(
+                                            sa.select(
+                                                sync_tbl.c.last_sync_date,
+                                                sync_tbl.c.status,
+                                            ).where(sync_tbl.c.table_name == table),
+                                        )
+                                        _check_cancel()
+                                        sync_row = r2.first()
+                                    except Exception as exc:
+                                        logger.debug(
+                                            "[CacheManager] Health | Sync-status freshness probe failed for %s: %s",
+                                            table,
+                                            safe_error(exc),
+                                        )
+                                        sync_row = None
+                                    if sync_row is not None:
+                                        sync_date, sync_status = sync_row[0], sync_row[1]
+                                        if sync_date and sync_status not in (
+                                            "failed",
+                                            "cancelled",
+                                            "skipped_permission",
+                                        ):
+                                            fresh_ratio = _fresh_ratio_from_date(sync_date)
+                            else:
+                                date_col_candidates = []
+                                configured_col = meta.get("sync_config", {}).get("date_col")
+                                if configured_col:
+                                    date_col_candidates.append(configured_col)
+                                date_col_candidates.extend(
+                                    ["trade_date", "end_date", "ann_date"],
+                                )
+                                # D2-12：先按 ORM 实际列集合过滤，再对存在的列取 max，
+                                # 不存在的候选列直接跳过（不再靠 SQL 异常探测）。
+                                valid_date_cols = [dc for dc in date_col_candidates if dc in cols]
+                                max_date = None
+                                for dc in valid_date_cols:
+                                    try:
+                                        r2 = await conn.execute(
+                                            sa.select(
+                                                sa.func.max(sa.column(dc)),
+                                            ).select_from(tbl),
+                                        )
+                                        _check_cancel()
+                                        val = r2.scalar()
+                                        if val:
+                                            max_date = val
+                                            break
+                                    except Exception as exc:
+                                        logger.debug(
+                                            "[CacheManager] Health | Date probe failed for %s.%s: %s",
+                                            table,
+                                            dc,
+                                            safe_error(exc),
+                                        )
+                                        continue
+                                if max_date:
+                                    fresh_ratio = _fresh_ratio_from_date(max_date)
 
                             if ratio < 0.01:
                                 fresh_ratio = 0.0
-                        except (ValueError, TypeError, RuntimeError) as exc:
-                            logger.debug(
-                                "[CacheManager] Health | Freshness check skipped for %s: %s",
-                                table,
-                                safe_error(exc),
-                            )
 
                     depth_ratio = None
                     if is_stock_table and global_trade_days > 0:
@@ -712,7 +762,7 @@ class CacheManager:
                         )
 
                     breadth_ratio = None
-                    is_daily_freq = meta.get("quality_config", {}).get("frequency") == "daily"
+                    is_daily_freq = quality_config.get("frequency") == "daily"
                     if is_daily_freq and global_expected_rows and global_expected_rows > 0:
                         try:
                             r_total = await conn.execute(

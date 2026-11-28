@@ -22,8 +22,9 @@ operation 并发重复即拒）→ 授权 claim（撤销先胜，携带 schema/�
 
 派发后超时/断线/协议解码失败/服务端错误响应均无确证，记 ``UNKNOWN`` 且不自动重试；
 只有端口在出站前显式拒绝（``MCPCallNotDispatched``）才判 ``FAILED``（效果确定未发生）。
-取消继续传播并释放归属；``UNKNOWN`` 的在途归属则保留到所属会话真实退出被确认后才
-释放（不立即释放占用、不放开重连重发，I53）。
+取消继续传播（R2）；出站等待期的取消/断连无法确证效果是否发生，按后效未知保留在途归属，
+``UNKNOWN`` 与出站未确认的归属均保留到所属会话真实退出被确认后才释放（不立即释放占用、
+不放开重连重发，I17/I53）。传输已完成而结果超出留存预算时连接级归属可释放，但结果不可留存。
 真实 jsonschema 适配器与每 send 目的地门仍 needs-spike，不在本轮宣称已验证。
 """
 
@@ -309,9 +310,19 @@ class MCPToolDispatcher:
             raise
         try:
             outcome = await self._invoke(session, request, arguments, guard, deadline_s)
-        except BaseException:
-            # 取消/异常继续传播（R2）：调用方已放弃本次等待，归属随取消一起释放。
+        except asyncio.CancelledError:
+            # 出站等待期取消/断连：传输是否已发出、是否已产生后效均无确证。不得立即释放
+            # 归属（那会把仍在途的调用从运行态抹除，破坏 I17/I53）；按后效未知保留，直到
+            # 所属会话真实退出被确认后统一回收。取消继续传播（R2）。
+            self._manager.mark_in_flight_unknown(request.identity, request.operation_id)
+            raise
+        except MCPBudgetExceeded:
+            # 传输已完成，仅返回载荷超出留存预算：连接级归属可释放；结果不可留存由异常明示。
             self._manager.release_in_flight(request.identity, request.operation_id)
+            raise
+        except BaseException:
+            # 其余逃逸同样不构成「效果确定未发生」的证据：保守保留归属并标后效未知（I53）。
+            self._manager.mark_in_flight_unknown(request.identity, request.operation_id)
             raise
         if outcome.state is ToolCallState.UNKNOWN:
             # 后效未知：不得立即释放归属，也不得让断开/重连把原 operation 视为已结束。

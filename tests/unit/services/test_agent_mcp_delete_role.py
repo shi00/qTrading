@@ -31,7 +31,12 @@ pytestmark = pytest.mark.unit
 _IDENTITY = MCPServiceIdentity(service_id="svc-delete", config_version=1)
 
 
-def _config(*, headers: tuple[tuple[str, str], ...] = ()) -> MCPServerConfig:
+def _config(
+    *,
+    headers: tuple[tuple[str, str], ...] = (),
+    env: tuple[tuple[str, str], ...] = (),
+    secret_env: tuple[tuple[str, str], ...] = (),
+) -> MCPServerConfig:
     if headers:
         transport = MCPTransportConfig(
             kind=MCPTransportKind.STREAMABLE_HTTP,
@@ -43,6 +48,8 @@ def _config(*, headers: tuple[tuple[str, str], ...] = ()) -> MCPServerConfig:
             kind=MCPTransportKind.STDIO,
             command=sys.executable,
             cwd=str(Path(sys.executable).parent),
+            env=env,
+            secret_env=secret_env,
         )
     return MCPServerConfig(
         identity=_IDENTITY,
@@ -117,8 +124,14 @@ class _World:
             roles=self.roles if roles_wired else None,
         )
 
-    async def save_config(self, *, headers: tuple[tuple[str, str], ...] = ()) -> None:
-        await self.configs.save(_config(headers=headers))
+    async def save_config(
+        self,
+        *,
+        headers: tuple[tuple[str, str], ...] = (),
+        env: tuple[tuple[str, str], ...] = (),
+        secret_env: tuple[tuple[str, str], ...] = (),
+    ) -> None:
+        await self.configs.save(_config(headers=headers, env=env, secret_env=secret_env))
 
 
 def _assignment(tools: tuple[str, ...] = ("search",)) -> RoleMCPAssignment:
@@ -239,6 +252,21 @@ class TestDeleteService:
         assert world.memory.values.get(AppStateMCPGrantStore.key_for(_IDENTITY)) is None
         # 授权记录（若存在）与配置都被真正删除，而不是靠空值冒充
         assert world.memory.deleted
+
+    async def test_stdio_secret_env_references_are_inventoried_on_delete(self) -> None:
+        """删除 stdio 服务同样盘点凭据引用（供人工撤销），普通字面量不回显。"""
+
+        world = _World()
+        await world.save_config(
+            env=(("LOG_LEVEL", "debug"),),
+            secret_env=(("MCP_TOKEN", "keyring:mcp-token"), ("API_KEY", "env:MCP_API_KEY")),
+        )
+
+        receipt = await world.lifecycle.delete_service(_IDENTITY, confirmation=True)
+
+        assert receipt.deleted_config is True
+        assert receipt.credential_references == ("env:MCP_API_KEY", "keyring:mcp-token")
+        assert "debug" not in receipt.credential_references
 
     async def test_missing_config_is_not_silently_idempotent(self) -> None:
         world = _World()

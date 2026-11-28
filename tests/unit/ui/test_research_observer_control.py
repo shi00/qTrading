@@ -276,7 +276,8 @@ class TestControlCommands:
         vm = ResearchObserverViewModel(cast(Any, service))
         await vm.refresh("s-1")
 
-        await vm.retry_execution("e-1", "e-2")
+        # UI 传入的是计划 node_id（非执行身份）：须在根子树内唯一解析目标叶。
+        await vm.retry_execution("e-1", "node-x")
 
         assert len(service.retry_requests) == 1
         request = service.retry_requests[0]
@@ -287,6 +288,132 @@ class TestControlCommands:
         assert vm.state.control_result is not None
         assert vm.state.control_result.kind == "retry"
         assert vm.state.control_result.native_control_state == "not_wired"
+
+    async def test_retry_resolves_node_under_deep_root_subtree(self) -> None:
+        service = _ControlService(
+            _read(
+                (
+                    _execution("e-root", display_state="failed", revision=4),
+                    _execution(
+                        "e-mid",
+                        display_state="failed",
+                        parent_execution_id="e-root",
+                        node_id="step-1",
+                        execution_kind="leaf",
+                    ),
+                    _execution(
+                        "e-leaf",
+                        display_state="failed",
+                        parent_execution_id="e-mid",
+                        node_id="step-2",
+                        execution_kind="leaf",
+                    ),
+                )
+            )
+        )
+        vm = ResearchObserverViewModel(cast(Any, service))
+        await vm.refresh("s-1")
+
+        await vm.retry_execution("e-root", "step-2")
+
+        assert len(service.retry_requests) == 1
+        request = service.retry_requests[0]
+        assert request.execution_id == "e-root"
+        assert request.targets == ("step-2",)
+        assert request.expected_execution_revision == 4
+
+    async def test_retry_missing_node_id_is_rejected(self) -> None:
+        service = _ControlService(
+            _read(
+                (
+                    _execution("e-1", display_state="failed"),
+                    _execution(
+                        "e-2",
+                        display_state="failed",
+                        parent_execution_id="e-1",
+                        node_id="node-x",
+                        execution_kind="leaf",
+                    ),
+                )
+            )
+        )
+        vm = ResearchObserverViewModel(cast(Any, service))
+        await vm.refresh("s-1")
+
+        await vm.retry_execution("e-1", "ghost")
+
+        assert service.retry_requests == []
+        result = vm.state.control_result
+        assert isinstance(result, ControlResultView)
+        assert result.error_code == "CONTROL_TARGET_UNAVAILABLE"
+
+    async def test_retry_ambiguous_node_id_is_rejected(self) -> None:
+        service = _ControlService(
+            _read(
+                (
+                    _execution("e-1", display_state="failed"),
+                    _execution(
+                        "e-2",
+                        display_state="failed",
+                        parent_execution_id="e-1",
+                        node_id="dup",
+                        execution_kind="leaf",
+                    ),
+                    _execution(
+                        "e-3",
+                        display_state="failed",
+                        parent_execution_id="e-1",
+                        node_id="dup",
+                        execution_kind="leaf",
+                    ),
+                )
+            )
+        )
+        vm = ResearchObserverViewModel(cast(Any, service))
+        await vm.refresh("s-1")
+
+        await vm.retry_execution("e-1", "dup")
+
+        assert service.retry_requests == [], "歧义目标不得按猜测提交"
+        result = vm.state.control_result
+        assert isinstance(result, ControlResultView)
+        assert result.error_code == "CONTROL_TARGET_AMBIGUOUS"
+
+    async def test_retry_node_outside_root_subtree_is_rejected(self) -> None:
+        service = _ControlService(
+            _read(
+                (
+                    _execution("e-1", display_state="failed"),
+                    _execution("other-root", display_state="failed", node_id="root-b"),
+                    _execution(
+                        "x-leaf",
+                        display_state="failed",
+                        parent_execution_id="other-root",
+                        node_id="node-x",
+                        execution_kind="leaf",
+                    ),
+                )
+            )
+        )
+        vm = ResearchObserverViewModel(cast(Any, service))
+        await vm.refresh("s-1")
+
+        await vm.retry_execution("e-1", "node-x")
+
+        assert service.retry_requests == [], "子树外同 node_id 不得被解析为本根目标"
+        assert vm.state.control_result is not None
+        assert vm.state.control_result.error_code == "CONTROL_TARGET_UNAVAILABLE"
+
+    async def test_retry_root_itself_is_not_a_target(self) -> None:
+        service = _ControlService(_read((_execution("e-1", display_state="failed"),)))
+        vm = ResearchObserverViewModel(cast(Any, service))
+        await vm.refresh("s-1")
+
+        await vm.retry_execution("e-1", "e-1")
+
+        assert service.retry_requests == []
+        assert vm.state.control_result is not None
+        assert vm.state.control_result.error_code == "CONTROL_TARGET_UNAVAILABLE"
 
     async def test_duplicate_command_key_is_stable(self) -> None:
         service = _ControlService(_read((_execution("e-1"),)))
@@ -460,25 +587,30 @@ class TestControlEdgeBranches:
         assert service.retry_requests == []
 
     async def test_retry_cancel_propagates_and_error_is_recorded(self) -> None:
-        cancel_service = _ControlService(
-            _read((_execution("e-1", display_state="failed"),)), retry_error=asyncio.CancelledError()
+        failed_leaf = (
+            _execution("e-1", display_state="failed"),
+            _execution(
+                "e-2",
+                display_state="failed",
+                parent_execution_id="e-1",
+                node_id="node-x",
+                execution_kind="leaf",
+            ),
         )
+        cancel_service = _ControlService(_read(failed_leaf), retry_error=asyncio.CancelledError())
         cancel_vm = ResearchObserverViewModel(cast(Any, cancel_service))
         await cancel_vm.refresh("s-1")
 
         with pytest.raises(asyncio.CancelledError) as info:
-            await cancel_vm.retry_execution("e-1", "e-1")
+            await cancel_vm.retry_execution("e-1", "node-x")
         assert info.value.args == ()
         assert cancel_vm.state.control_pending_execution_id is None
 
-        error_service = _ControlService(
-            _read((_execution("e-1", display_state="failed"),)),
-            retry_error=_ServiceError("OPERATION_UNKNOWN"),
-        )
+        error_service = _ControlService(_read(failed_leaf), retry_error=_ServiceError("OPERATION_UNKNOWN"))
         error_vm = ResearchObserverViewModel(cast(Any, error_service))
         await error_vm.refresh("s-1")
 
-        await error_vm.retry_execution("e-1", "e-1")
+        await error_vm.retry_execution("e-1", "node-x")
         assert error_vm.state.control_result is not None
         assert error_vm.state.control_result.error_code == "OPERATION_UNKNOWN"
 

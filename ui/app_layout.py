@@ -468,6 +468,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             unavailable_reason_key=research_unavailable_key,
             intake=main_turn_intake,
             mcp_catalog=getattr(agent_wiring, "mcp_lifecycle", None),
+            role_catalog=getattr(agent_wiring, "role_catalog", None),
             delivery=resolve_artifact_delivery(agent_wiring),
             cleanup=cleanup_gateway,
             cleanup_unavailable_reason=str(getattr(agent_wiring, "cleanup_failure", "") or "") or None,

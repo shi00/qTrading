@@ -58,6 +58,7 @@ class TestEngineManager:
             "postgresql://u:p@h/db",
             echo=False,
             future=True,
+            hide_parameters=True,
         )
         assert em.engine is mock_engine
         # R5: 引擎创建后 provider 恢复可用（mark_disposed(False)）

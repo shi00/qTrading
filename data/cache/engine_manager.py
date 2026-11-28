@@ -52,6 +52,10 @@ class EngineManager:
             connection_string,
             echo=False,
             future=True,
+            # D1-06 / R9：SQLAlchemy 默认把完整绑定参数渲染进异常字符串
+            # （``[parameters: {...}]``）。应用引擎统一隐藏参数，避免 DB 错误
+            # 在日志/异常链中泄露业务明文（DAO 侧另有脱敏与异常链断开的双层防护）。
+            hide_parameters=True,
             **pool_config,
         )
         # review03-C11 Step2: 记录引擎引用（语义化标记，与 disposed 状态同临界区维护）

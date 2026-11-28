@@ -378,6 +378,62 @@ class TestBuildUrl:
         assert result["user"] == "audit user"
         assert result["password"] == db_password
 
+    def test_ipv6_host_is_bracketed(self):
+        """裸 IPv6 必须包 `[]`，否则 `@::1:5432` 会被驱动解析成畸形 URL。"""
+        url = DatabaseConfigService.build_url("::1", 5432, "user", "pass", "mydb")
+        assert "@[::1]:5432/mydb" in url
+        assert make_url(url).host == "::1"
+
+    def test_bracketed_ipv6_host_is_not_double_wrapped(self):
+        url = DatabaseConfigService.build_url("[::1]", 5432, "user", "pass", "mydb")
+        assert "@[::1]:5432/mydb" in url
+        assert "[[" not in url
+        assert make_url(url).host == "::1"
+
+    def test_ipv6_zone_id_is_preserved_for_driver(self):
+        """zone id 的 `%` 不做百分号编码：SQLAlchemy/asyncpg 不还原 `%25`。"""
+        url = DatabaseConfigService.build_url("fe80::1%eth0", 5432, "user", "pass", "mydb")
+        assert "@[fe80::1%eth0]:5432/mydb" in url
+        assert make_url(url).host == "fe80::1%eth0"
+
+    def test_ipv6_userinfo_is_percent_encoded(self, db_password):
+        url = DatabaseConfigService.build_url("::1", 5432, "audit user", db_password, "mydb")
+        parsed = make_url(url)
+        assert parsed.username == "audit user"
+        assert parsed.password == db_password
+
+    @pytest.mark.parametrize("host", ["127.0.0.1/evil?x=1", "a@b", "host#frag", "a b", "h\tst", "[::1"])
+    def test_rejects_host_with_url_delimiters(self, host):
+        """host 直接进入 authority 段，含分隔符会改写 URL 目标（注入），必须拒绝。"""
+        with pytest.raises(ValueError) as exc_info:
+            DatabaseConfigService.build_url(host, 5432, "user", "pass", "mydb")
+        assert "invalid database host" in str(exc_info.value)
+
+
+class TestHostForClient:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("[::1]", "::1"),
+            ("::1", "::1"),
+            ("::", "::1"),
+            ("0.0.0.0", "127.0.0.1"),
+            ("*", "127.0.0.1"),
+            ("localhost", "localhost"),
+            ("127.0.0.1", "127.0.0.1"),
+        ],
+    )
+    def test_normalizes_to_single_target_address(self, raw, expected):
+        assert DatabaseConfigService.host_for_client(raw) == expected
+
+    @pytest.mark.asyncio
+    async def test_test_connection_strips_ipv6_brackets_for_asyncpg(self):
+        mock_conn = _make_mock_conn()
+        mock_connect = MagicMock(return_value=mock_conn)
+        with patch("data.persistence.db_config_service.asyncpg.connect", mock_connect):
+            await DatabaseConfigService.test_connection("[::1]", 5432, "user", "pass", "mydb")
+        assert mock_connect.call_args.kwargs["host"] == "::1"
+
 
 class TestParseUrl:
     def test_valid_postgresql_url(self):

@@ -12,6 +12,7 @@ import io
 import json
 import struct
 import sys
+from pathlib import Path
 import tempfile
 import time
 import zipfile
@@ -2378,6 +2379,71 @@ class TestWorkerLifecycle:
         assert result.read_state is ReadState.READY
         assert result.body_text == "hello 世界"
         assert worker.active_pids() == ()
+
+    @pytest.mark.asyncio
+    async def test_worker_subprocess_environment_strips_business_secrets(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """解析不可信附件的子进程不得继承父进程业务/数据库/AI 环境变量（R9）。"""
+
+        monkeypatch.setenv("DATABASE_URL", "postgresql://synthetic:secret@db.invalid/app")
+        monkeypatch.setenv("TUSHARE_TOKEN", "synthetic-tushare-token")
+        monkeypatch.setenv("OPENAI_API_KEY", "synthetic-openai-key")
+        probe = tmp_path / "probe.json"
+        valid = json.dumps(
+            _worker_entry(monkeypatch, b"hello", kind=AttachmentKind.TXT, selection=Selection(kind="all"))
+        ).encode("utf-8")
+        script = (
+            "import json,os,sys\n"
+            f"probe = {str(probe)!r}\n"
+            "open(probe, 'w', encoding='utf-8').write(json.dumps({"
+            "'keys': sorted(os.environ), 'cwd': os.getcwd(), "
+            "'temp': os.environ.get('TEMP'), 'tmp': os.environ.get('TMP')}))\n"
+            "sys.stdin.buffer.read()\n"
+            f"sys.stdout.buffer.write({valid!r})\n"
+        )
+        worker = SubprocessAttachmentWorker(command=(sys.executable, "-c", script), timeout_s=30.0)
+
+        result = await worker.extract(_request(b"hello"))
+
+        observed = json.loads(probe.read_text(encoding="utf-8"))
+        assert result.body_text == "hello"
+        for key in ("DATABASE_URL", "TUSHARE_TOKEN", "OPENAI_API_KEY"):
+            assert key not in observed["keys"]
+        # 解释器启动所必需的显式项仍在，否则子进程根本起不来（上方已成功产出结果）。
+        assert "PYTHONPATH" in observed["keys"]
+        assert all(isinstance(key, str) for key in observed["keys"])
+
+    @pytest.mark.asyncio
+    async def test_worker_runs_in_controlled_empty_temp_workspace(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """子进程工作目录/TEMP/TMP 指向本次提取专属目录，且提取结束后被删除。"""
+
+        probe = tmp_path / "probe.json"
+        valid = json.dumps(
+            _worker_entry(monkeypatch, b"hello", kind=AttachmentKind.TXT, selection=Selection(kind="all"))
+        ).encode("utf-8")
+        script = (
+            "import json,os,sys\n"
+            f"probe = {str(probe)!r}\n"
+            "open(probe, 'w', encoding='utf-8').write(json.dumps({"
+            "'cwd': os.getcwd(), "
+            "'temp': os.environ.get('TEMP'), 'tmp': os.environ.get('TMP')}))\n"
+            "sys.stdin.buffer.read()\n"
+            f"sys.stdout.buffer.write({valid!r})\n"
+        )
+        worker = SubprocessAttachmentWorker(command=(sys.executable, "-c", script), timeout_s=30.0)
+
+        await worker.extract(_request(b"hello"))
+
+        observed = json.loads(probe.read_text(encoding="utf-8"))
+        workspace = Path(observed["cwd"])
+        assert workspace.name.startswith("astock-attachment-worker-")
+        assert observed["temp"] == observed["tmp"] == str(workspace)
+        assert workspace != Path(__file__).resolve().parents[2]
+        # 提取结束即清理：受管目录（含解析库可能写下的临时文件）不留残留。
+        assert not workspace.exists()
 
     @pytest.mark.asyncio
     async def test_timeout_terminates_worker(self) -> None:
