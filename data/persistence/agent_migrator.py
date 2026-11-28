@@ -28,8 +28,8 @@ from dbos._datasource_migration import get_datasource_migration_versions
 from dbos._migration import get_migration_versions
 from sqlalchemy import text
 
-#: 冻结合同（HANDOFF §8.1 第 6 条）：dbos==3.4.0 固定路线下系统迁移版本数。
-EXPECTED_DBOS_MIGRATION_VERSION = 125
+#: 冻结合同（HANDOFF §8.1 第 6 条）：dbos==3.7.0 固定路线下系统迁移版本数。
+EXPECTED_DBOS_MIGRATION_VERSION = 136
 #: 冻结合同（HANDOFF §8.1 第 6 条）：Datasource 迁移版本数（datasource_outputs 一条）。
 EXPECTED_DATASOURCE_MIGRATION_VERSION = 1
 
@@ -38,14 +38,17 @@ AGENT_DS_SCHEMA = "agent_ds"
 RUNTIME_ROLE = "agent_runtime"
 RUNTIME_DATABASE = "qtrading_agent_runtime"
 
-# 运行角色最小权限（HANDOFF §8.1 第 3 条）：CONNECT + dbos USAGE + 系统表 CRUD + 序列，
-# 随后撤销 dbos_migrations 写权。全部为全静态 SQL 字面量（R4：schema/角色/库名为设计
-# 冻结值直接内联，零内插零拼接，text() 常量承载）。
+# 运行角色最小权限（HANDOFF §8.1 第 3 条）：CONNECT + dbos USAGE + 系统表 CRUD + 序列
+# + schema 内函数 EXECUTE（迁移 132 以 CREATE OR REPLACE 定义 dbos.enqueue_workflow；
+# 显式授予运行角色，不依赖 PostgreSQL 对 PUBLIC 的默认 EXECUTE），随后撤销
+# dbos_migrations 写权。全部为全静态 SQL 字面量（R4：schema/角色/库名为设计冻结值
+# 直接内联，零内插零拼接，text() 常量承载）。
 _RUNTIME_ROLE_GRANTS: tuple[sa.TextClause, ...] = (
     text("GRANT CONNECT ON DATABASE qtrading_agent_runtime TO agent_runtime"),
     text("GRANT USAGE ON SCHEMA dbos TO agent_runtime"),
     text("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA dbos TO agent_runtime"),
     text("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA dbos TO agent_runtime"),
+    text("GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA dbos TO agent_runtime"),
 )
 _RUNTIME_MIGRATIONS_WRITE_REVOKE = text(
     "REVOKE INSERT, UPDATE, DELETE ON TABLE dbos.dbos_migrations FROM agent_runtime"

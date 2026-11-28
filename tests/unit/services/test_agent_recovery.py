@@ -254,6 +254,9 @@ class TestStartupIsolation:
             for index in range(150)
         ]
         active.append(_Native(workflow_id="agent_research:root-1", status="DELAYED"))
+        active.append(
+            _Native(workflow_id="agent_leaf:suspended", status="SUSPENDED", parent_workflow_id="agent_research:root-1")
+        )
         client = _FakeClient(active)
         registry = _FakeRegistry(
             registered=(
@@ -599,6 +602,7 @@ class TestManualRecovery:
                 _Native("agent_leaf:a:r1:n2", "ENQUEUED", parent_workflow_id="agent_research:a"),
                 _Native("agent_leaf:a:r1:n3", "SUCCESS", parent_workflow_id="agent_research:a"),
                 _Native("agent_leaf:a:r1:n4", "ERROR", parent_workflow_id="agent_research:a"),
+                _Native("agent_leaf:a:r1:n5", "SUSPENDED", parent_workflow_id="agent_research:a"),
                 _Native("agent_leaf:b:r1:n1", "CANCELLED", parent_workflow_id="agent_research:b"),
             ]
         )
@@ -619,7 +623,12 @@ class TestManualRecovery:
 
         assert receipt.ready is True
         # 必要叶（取消/在途）先复接，root 最后；成功叶与已定失败叶不重跑
-        assert client.resumed == ["agent_leaf:a:r1:n1", "agent_leaf:a:r1:n2", "agent_research:a"]
+        assert client.resumed == [
+            "agent_leaf:a:r1:n1",
+            "agent_leaf:a:r1:n2",
+            "agent_leaf:a:r1:n5",
+            "agent_research:a",
+        ]
         # 未选研究（B）不被列举、不被扩入
         assert {"agent_leaf:b:r1:n1", "agent_research:b"}.isdisjoint(client.resumed)
         leaf_listing = [call for call in client.list_calls if call.get("parent_workflow_id") == "agent_research:a"]
@@ -628,6 +637,7 @@ class TestManualRecovery:
             "PENDING",
             "ENQUEUED",
             "DELAYED",
+            "SUSPENDED",
             "CANCELLED",
         }
 

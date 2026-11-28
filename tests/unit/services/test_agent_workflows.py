@@ -842,7 +842,7 @@ def test_observe_reports_cancelled_without_execution(monkeypatch: pytest.MonkeyP
     ]
 
 
-@pytest.mark.parametrize("state", ["PENDING", "ENQUEUED", "DELAYED"])
+@pytest.mark.parametrize("state", ["PENDING", "ENQUEUED", "DELAYED", "SUSPENDED"])
 def test_terminal_outcome_keeps_non_terminal_pending(state: str) -> None:
     """非终态不产生事实（不伪造结论，父不因未知收敛）。"""
     assert _terminal_outcome("a", state=state, output=None) is None

@@ -70,11 +70,13 @@ from services.agent_service.runtime import (
 from services.agent_service.workflows import LEAF_WORKFLOW_NAME, RESEARCH_WORKFLOW_NAME
 from utils.loop_local import get_loop_local
 
-#: 启动隔离的「在途」原生状态（HANDOFF §8.4 第 3 条：PENDING/ENQUEUED/DELAYED）。
+#: 启动隔离的「在途」原生状态（HANDOFF §8.4 第 3 条：PENDING/ENQUEUED/DELAYED；
+#: dbos 3.7.0 引入 SUSPENDED，未终结的挂起执行同属在途，须在启动时取消）。
 STARTUP_ACTIVE_STATUSES: Final[tuple[str, ...]] = (
     WorkflowStatusString.PENDING.value,
     WorkflowStatusString.ENQUEUED.value,
     WorkflowStatusString.DELAYED.value,
+    WorkflowStatusString.SUSPENDED.value,
 )
 
 #: 原生终态（取消复查只需确认不再处于在途状态）。
@@ -88,6 +90,7 @@ RECOVERY_RESUMABLE_LEAF_STATUSES: Final[tuple[str, ...]] = (
     WorkflowStatusString.PENDING.value,
     WorkflowStatusString.ENQUEUED.value,
     WorkflowStatusString.DELAYED.value,
+    WorkflowStatusString.SUSPENDED.value,
     WorkflowStatusString.CANCELLED.value,
 )
 

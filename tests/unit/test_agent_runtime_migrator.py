@@ -43,11 +43,11 @@ class TestVerifySnapshotGuardMatrix:
     @pytest.mark.parametrize(
         ("field", "value", "expected_fragment"),
         [
-            ("dbos_recorded", 0, "125"),  # 缺失表读作 0
-            ("dbos_recorded", 124, "125"),  # 旧
-            ("dbos_recorded", 126, "125"),  # 未来（DBOS 自身 verify 容忍，应用层须拒绝）
-            ("dbos_latest", 124, "125"),  # SDK 漂移（旧版 SDK）
-            ("dbos_latest", 126, "125"),  # SDK 漂移（升级未重新核）
+            ("dbos_recorded", 0, "136"),  # 缺失表读作 0
+            ("dbos_recorded", 135, "136"),  # 旧
+            ("dbos_recorded", 137, "136"),  # 未来（DBOS 自身 verify 容忍，应用层须拒绝）
+            ("dbos_latest", 135, "136"),  # SDK 漂移（旧版 SDK）
+            ("dbos_latest", 137, "136"),  # SDK 漂移（升级未重新核）
             ("datasource_recorded", 0, "1"),
             ("datasource_recorded", 2, "1"),
             ("datasource_latest", 2, "1"),
@@ -68,12 +68,12 @@ class TestVerifySnapshotGuardMatrix:
 
     def test_error_message_names_expected_versions(self) -> None:
         """错误消息包含期望版本与实际值，不含连接 URL（R9 脱敏边界）。"""
-        snapshot = _snapshot(dbos_recorded=124)
+        snapshot = _snapshot(dbos_recorded=135)
         with pytest.raises(AgentRuntimeMigrationError) as exc_info:
             _verify_snapshot(snapshot)
         message = str(exc_info.value)
-        assert "125" in message
-        assert "124" in message
+        assert "136" in message
+        assert "135" in message
         assert "postgresql" not in message.lower()
 
 

@@ -236,8 +236,8 @@ class TestMigrationKilledMidway:
         _run_migration_fault_host(url)
 
         dbos_recorded, dbos_latest, ds_recorded, ds_latest = _migration_versions(url)
-        assert (dbos_latest, ds_latest) == (125, 1)
-        assert dbos_recorded == 125  # 已提交的系统迁移保持（不丢历史/不暗降级）
+        assert (dbos_latest, ds_latest) == (136, 1)
+        assert dbos_recorded == 136  # 已提交的系统迁移保持（不丢历史/不暗降级）
         assert ds_recorded == 0  # 未提交的 Datasource 迁移不存在
         assert _workflow_row_count(url) == 0  # 被杀进程未产生任何派发
 
@@ -265,12 +265,12 @@ class TestMigrationKilledMidway:
         assert outcome.isolation is None
         assert outcome.failure == "assemble_failed:RuntimeError"
         assert _workflow_row_count(url) == 0
-        assert _migration_versions(url)[0] == 125  # 仍未改写已提交迁移
+        assert _migration_versions(url)[0] == 136  # 仍未改写已提交迁移
 
         # 故障消失后重装配：补齐 Datasource 迁移并精确到达冻结合同（可安全重试）
         handle = assemble_agent_runtime(_settings(url))
         try:
-            assert _migration_versions(url) == (125, 125, 1, 1)
+            assert _migration_versions(url) == (136, 136, 1, 1)
         finally:
             handle.close()
 
