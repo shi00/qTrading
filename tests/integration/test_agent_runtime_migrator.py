@@ -1,7 +1,7 @@
 """Agent 运行库独立迁移器集成测试（设计 §10.6 / HANDOFF §8.1）。
 
 真实 sidecar PG 上验证：
-- 双迁移顺序与产物：dbos（系统）+ agent_ds（事务检查点）schema 建立且版本精确 125/1
+- 双迁移顺序与产物：dbos（系统）+ agent_ds（事务检查点）schema 建立且版本精确 136/1
 - 运行角色最小权限：系统表 CRUD 授予 + dbos_migrations 写权撤销 + Datasource 最小授权
 - 版本守卫：缺/旧/未来均拒绝启动
 - 运行库为独立逻辑库 ``qtrading_agent_runtime``（同一 PG 实例，与业务库分离）
@@ -143,21 +143,42 @@ def _has_table_privilege(sync_url: str, schema: str, table: str, privilege: str)
         engine.dispose()
 
 
+def _has_function_privilege(sync_url: str, schema: str, function: str) -> bool:
+    """查询运行角色对 schema 内同名函数的 EXECUTE 权限（断言函数存在且唯一）。"""
+    engine = sa.create_engine(sync_url)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT COUNT(*), bool_and(has_function_privilege(:role, p.oid, 'EXECUTE')) "
+                    "FROM pg_catalog.pg_proc p "
+                    "JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace "
+                    "WHERE n.nspname = :schema AND p.proname = :function"
+                ),
+                {"role": RUNTIME_ROLE, "schema": schema, "function": function},
+            ).fetchone()
+            assert row is not None
+            assert row[0] == 1
+            return bool(row[1])
+    finally:
+        engine.dispose()
+
+
 class TestAgentRuntimeMigratorRealPg:
     """真实 PG 上的双迁移、最小权限与版本守卫。"""
 
     @pytest.mark.asyncio(loop_scope="session")
     async def test_fresh_migrate_creates_schemas_and_exact_versions(self, agent_runtime_pg_url: str) -> None:
-        """全新库双迁移：版本精确 125/1，两 schema 产物齐备。"""
+        """全新库双迁移：版本精确 136/1，两 schema 产物齐备。"""
         url = agent_runtime_pg_url
         await _reset_runtime_schemas(url)
 
         snapshot = run_agent_runtime_migrations(url)
 
-        assert EXPECTED_DBOS_MIGRATION_VERSION == 125
+        assert EXPECTED_DBOS_MIGRATION_VERSION == 136
         assert EXPECTED_DATASOURCE_MIGRATION_VERSION == 1
-        assert snapshot.dbos_recorded == 125
-        assert snapshot.dbos_latest == 125
+        assert snapshot.dbos_recorded == 136
+        assert snapshot.dbos_latest == 136
         assert snapshot.datasource_recorded == 1
         assert snapshot.datasource_latest == 1
 
@@ -199,6 +220,15 @@ class TestAgentRuntimeMigratorRealPg:
         assert _has_table_privilege(url, DBOS_SCHEMA, "dbos_migrations", "UPDATE") is False
         assert _has_table_privilege(url, DBOS_SCHEMA, "dbos_migrations", "DELETE") is False
         assert _has_table_privilege(url, DBOS_SCHEMA, "dbos_migrations", "SELECT")
+        # PostgreSQL 默认给 PUBLIC 授予函数 EXECUTE；先收回默认权限，再断言运行角色
+        # 仍可执行，才能真正覆盖 _RUNTIME_ROLE_GRANTS 的显式 GRANT EXECUTE 授权。
+        engine = sa.create_engine(url)
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA dbos FROM PUBLIC"))
+        finally:
+            engine.dispose()
+        assert _has_function_privilege(url, DBOS_SCHEMA, "enqueue_workflow")
         # Datasource 最小授权（HANDOFF §8.1 第 4 条）：outputs 可读写删、迁移表只读、
         # 检查点表无 UPDATE
         assert _has_table_privilege(url, AGENT_DS_SCHEMA, "datasource_outputs", "SELECT")
@@ -210,30 +240,30 @@ class TestAgentRuntimeMigratorRealPg:
 
     @pytest.mark.asyncio(loop_scope="session")
     async def test_version_guard_refuses_tampered_versions(self, agent_runtime_pg_url: str) -> None:
-        """版本守卫：recorded 被篡改（旧 124 / 未来 126）与缺失（0）均拒绝。"""
+        """版本守卫：recorded 被篡改（旧 135 / 未来 137）与缺失（0）均拒绝。"""
         url = agent_runtime_pg_url
         await _reset_runtime_schemas(url)
         run_agent_runtime_migrations(url)
 
         engine = sa.create_engine(url)
         try:
-            for tampered in (124, 126):
+            for tampered in (135, 137):
                 with engine.begin() as conn:
                     conn.execute(
                         text("UPDATE dbos.dbos_migrations SET version = :v"),
                         {"v": tampered},
                     )
-                with pytest.raises(AgentRuntimeMigrationError, match="125"):
+                with pytest.raises(AgentRuntimeMigrationError, match="136"):
                     verify_agent_runtime_versions(engine)
                 with engine.begin() as conn:
                     conn.execute(
                         text("UPDATE dbos.dbos_migrations SET version = :v"),
-                        {"v": 125},
+                        {"v": 136},
                     )
             # 缺失表（DROP 后 recorded 读作 0）→ 拒绝
             with engine.begin() as conn:
                 conn.execute(text("DROP TABLE dbos.dbos_migrations"))
-            with pytest.raises(AgentRuntimeMigrationError, match="125"):
+            with pytest.raises(AgentRuntimeMigrationError, match="136"):
                 verify_agent_runtime_versions(engine)
         finally:
             engine.dispose()

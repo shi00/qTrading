@@ -1438,9 +1438,10 @@ async def test_launched_close_fact_sink_persists_dispatch_close_for_settled_work
     assert [tuple(item.workflow_ids) for item in dao.close_requests] == [("wf-1", "wf-2")]
 
 
-async def test_launched_close_fact_sink_reports_unresolved_as_unknown() -> None:
+@pytest.mark.parametrize("state", ["DELAYED", "SUSPENDED"])
+async def test_launched_close_fact_sink_reports_unresolved_as_unknown(state: str) -> None:
     dao = _RecordingDao()
-    ledger = _ledger(_StatusClient(by_id={"wf-1": "DELAYED"}))
+    ledger = _ledger(_StatusClient(by_id={"wf-1": state}))
     ledger.track("wf-1")
     sink = _LaunchedCloseFactSink(ledger=ledger, dao=dao, user_scope="local-desktop")
 

@@ -8695,6 +8695,9 @@ def decode_role_mcp_assignment(value: object, path: str = "$.role_mcp_assignment
 CLEANUP_MAX_BATCH_IDS: Final = 200
 
 #: 九类原生目标（表, 常量匹配键）；只按常量键参数化删除，禁止 LIKE/前缀/全表。
+#: dbos 3.7.0 新增 dbos.external_objects 不纳入本清单：项目从不调用 store_external_object
+#: （外部存储未启用）且禁止对 dbos.* 做私有 DML；若将来启用外部存储，须重新评估清理覆盖
+#: （DBOSClient.delete_workflows 不删除该表）。
 CLEANUP_NATIVE_TARGETS: Final[tuple[tuple[str, str], ...]] = (
     ("dbos.workflow_status", "workflow_uuid"),
     ("dbos.workflow_input", "workflow_uuid"),

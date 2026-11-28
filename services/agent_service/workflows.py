@@ -1959,7 +1959,7 @@ def _terminal_outcome(
       无任何执行记录（如启动隔离取消）→ ``unknown`` + ``exit_verified=False``：
       执行已结束但成果不可知，**不得**报成 ``ended``（把未核退出伪装成正常结束），
       父保持观察、票据保持占用（树级额度不因未知放空）；
-    - 其余（PENDING/ENQUEUED/DELAYED）：非终态，不参与收敛。
+    - 其余（PENDING/ENQUEUED/DELAYED/SUSPENDED）：非终态，不参与收敛。
     """
 
     if state == WorkflowStatusString.SUCCESS.value:

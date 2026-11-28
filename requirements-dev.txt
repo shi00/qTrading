@@ -113,7 +113,7 @@ cyclonedx-python-lib==11.12.0
     # via pip-audit
 cyclopts==5.3.3
     # via fastmcp-slim
-dbos==3.4.0
+dbos==3.7.0
     # via astockscreener (pyproject.toml)
 decorator==5.3.1
     # via akshare
@@ -404,11 +404,11 @@ propcache==0.5.4
     # via
     #   aiohttp
     #   yarl
-psycopg==3.3.8
+psycopg==3.3.9
     # via
     #   astockscreener (pyproject.toml)
     #   dbos
-psycopg-binary==3.3.8 ; implementation_name != 'pypy'
+psycopg-binary==3.3.9 ; implementation_name != 'pypy'
     # via psycopg
 psycopg2-binary==2.9.13
     # via astockscreener (pyproject.toml)
@@ -629,6 +629,7 @@ typing-extensions==4.16.0
     #   alembic
     #   anyio
     #   beautifulsoup4
+    #   dbos
     #   fastapi
     #   fastmcp-slim
     #   huggingface-hub
