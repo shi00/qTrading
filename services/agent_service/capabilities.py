@@ -20,6 +20,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Protocol, cast
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.messages import BinaryContent, DataCapabilityPart
 from pydantic_ai.models import Model, ModelRequestContext
 from pydantic_ai.tools import RunContext
 from pydantic_ai_harness.compaction import SummarizingCompaction
@@ -403,18 +404,31 @@ class ResearchBoundaryPolicy:
 
 
 def _contains_binary_content(messages: Sequence[Any]) -> bool:
-    """待发消息是否含二进制内容（图片/文件）：文本估算无法计量，须显式不可估。"""
+    """待发消息是否含二进制内容（图片/文件）：文本估算无法计量，须显式不可估。
 
-    from pydantic_ai.messages import BinaryContent
+    递归覆盖 ``2.77.0`` ``DataCapabilityPart``（``CapabilityPart`` 家族，含
+    Harness 压缩回执等）：其 ``content`` 可能是 ``BinaryContent`` 或嵌套分型，
+    只查一层 ``content`` 会把二进制当作文本估算（R21）。
+    """
+
+    def _contains_binary_value(value: Any, depth: int = 0) -> bool:
+        if depth > 8:  # 异常深嵌套：保守判为含二进制（拒绝放行，不猜测）
+            return True
+        if isinstance(value, BinaryContent):
+            return True
+        if isinstance(value, DataCapabilityPart):
+            return _contains_binary_value(getattr(value, "content", None), depth + 1)
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            return any(_contains_binary_value(item, depth + 1) for item in value)
+        content = getattr(value, "content", None)
+        if content is not None and content is not value:
+            return _contains_binary_value(content, depth + 1)
+        return False
 
     for message in messages:
         for part in getattr(message, "parts", ()):
-            content = getattr(part, "content", None)
-            if isinstance(content, BinaryContent):
+            if _contains_binary_value(part):
                 return True
-            if isinstance(content, Sequence) and not isinstance(content, (str, bytes, bytearray)):
-                if any(isinstance(item, BinaryContent) for item in content):
-                    return True
     return False
 
 

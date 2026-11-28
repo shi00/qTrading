@@ -611,6 +611,40 @@ def _check_response_schema_support(model: str) -> bool:
     return False
 
 
+def _is_message_cache_provider(model: str) -> bool:
+    """消息级 ``cache_control`` 标注只对显式缓存点供应商有意义（§3.1-2）。
+
+    OpenAI 等自动缓存供应商不接受 ``cache_control_injection_points``；按模型
+    前缀保守判定，未列出的供应商静默忽略（不以外参触发 422）。
+    """
+
+    return model.startswith(("anthropic/", "bedrock/", "vertex_ai/", "openrouter/"))
+
+
+def _check_prompt_caching_support(model: str) -> bool:
+    """模型是否支持提示缓存标注（§3.1-2 缓存策略转译的前提）。
+
+    与 ``_check_reasoning_support`` 同一范式：litellm 已加载时用
+    ``supports_prompt_caching`` 精确判定；不可判定即视为不支持（保守忽略缓存
+    策略，不以非法外参触发 ``drop_params=False`` 拒绝）。
+    """
+    import services.ai_service as _ai
+
+    if _ai.litellm is not None:
+        try:
+            return _ai.litellm.utils.supports_prompt_caching(model=model)
+        except Exception as exc:
+            log_classified(
+                logger,
+                exc,
+                "general",
+                "[AIService] supports_prompt_caching check failed (%s) for %s: %s, treating as unsupported",
+                model,
+                exc_info=True,
+            )
+    return False
+
+
 def build_router_model_list(
     failover_config: dict,
     failover_credentials: dict[str, dict] | None = None,
@@ -1524,8 +1558,25 @@ class LiteLLMClient:
             request_params["max_tokens"] = int(request.max_output_tokens)
         if response_format is not None:
             request_params["response_format"] = dict(response_format)
-        if tool_choice is not None:
-            request_params["tool_choice"] = tool_choice
+        # §3.1-2：tool_choice / cache / thinking 由桥层一等字段承载，不混入
+        # frozen_params；此处按供应商能力转译，不支持的形态静默忽略（不以外参
+        # 触发 drop_params=False 的 422 拒绝）。
+        effective_tool_choice = request.tool_choice if request.tool_choice is not None else tool_choice
+        # 无工具时 tool_choice 无意义且部分供应商会直接拒绝（"tool_choice requires tools"），
+        # 故只在确有工具时透出。
+        if effective_tool_choice is not None and request.tools:
+            request_params["tool_choice"] = effective_tool_choice
+        if request.cache_policy is not None and request.cache_policy.get("enabled") is True:
+            if (
+                request.cache_policy.get("messages", True) is not False
+                and _is_message_cache_provider(litellm_model)
+                and _check_prompt_caching_support(litellm_model)
+            ):
+                request_params["cache_control_injection_points"] = [{"location": "message", "role": "system"}]
+        if request.thinking_policy is not None:
+            effort = request.thinking_policy.get("effort")
+            if isinstance(effort, str) and effort and _check_reasoning_support(litellm_model):
+                request_params["reasoning_effort"] = effort
         if stream:
             request_params["stream"] = True
             request_params["stream_options"] = {"include_usage": True}
@@ -2600,12 +2651,17 @@ class LiteLLMChatAdapter:
         response_format: Mapping[str, Any] | None = None,
         on_event: ChatStreamEventHandler | None = None,
     ) -> ChatTurnResponse:
+        kwargs: dict[str, Any] = {
+            "stream": stream,
+            "response_format": response_format,
+            "on_event": on_event,
+        }
+        if request.tool_choice is not None:
+            kwargs["tool_choice"] = request.tool_choice
         return await self._client.invoke_chat_connection(
             request,
             resolved_connection,
             deadline,
             attempt_context,
-            stream=stream,
-            response_format=response_format,
-            on_event=on_event,
+            **kwargs,
         )

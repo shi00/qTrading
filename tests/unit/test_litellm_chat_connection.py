@@ -124,6 +124,9 @@ def _chat_request(
     frozen_params: dict[str, Any] | None = None,
     max_output_tokens: int | None = 123,
     deadline: float | None = None,
+    tool_choice: str | None = None,
+    cache_policy: dict[str, Any] | None = None,
+    thinking_policy: dict[str, Any] | None = None,
 ) -> ChatTurnRequest:
     if deadline is None:
         deadline = asyncio.get_running_loop().time() + 60.0
@@ -137,6 +140,9 @@ def _chat_request(
         max_output_tokens=max_output_tokens,
         deadline=deadline,
         output_tools=output_tools,
+        tool_choice=tool_choice,
+        cache_policy=cache_policy,
+        thinking_policy=thinking_policy,
     )
 
 
@@ -370,6 +376,59 @@ class TestInvokeChatConnectionNonStream:
                 response_format={"type": "json_object"},
             )
         assert acompletion.await_args.kwargs["response_format"] == {"type": "json_object"}
+
+    async def test_tool_choice_forwarded_only_with_tools(self):
+        """§3.1-2：tool_choice 仅在有工具时透出（无工具会被部分供应商拒绝）。"""
+
+        with_tools = _chat_request(tools=(_tool_spec(),), tool_choice="none")
+        acompletion = AsyncMock(return_value=_nonstream_response(finish_reason="stop"))
+        with patch("services.ai_service.acompletion", acompletion):
+            await LiteLLMClient(MagicMock()).invoke_chat_connection(
+                with_tools, _connection(), with_tools.deadline, _attempt_context(), stream=False
+            )
+        assert acompletion.await_args.kwargs["tool_choice"] == "none"
+
+        without_tools = _chat_request(tool_choice="none")
+        acompletion = AsyncMock(return_value=_nonstream_response(finish_reason="stop"))
+        with patch("services.ai_service.acompletion", acompletion):
+            await LiteLLMClient(MagicMock()).invoke_chat_connection(
+                without_tools, _connection(), without_tools.deadline, _attempt_context(), stream=False
+            )
+        assert "tool_choice" not in acompletion.await_args.kwargs
+
+    async def test_thinking_policy_maps_to_reasoning_effort_when_supported(self):
+        """§3.1-2：thinking 策略在支持推理的模型上映射为 reasoning_effort。"""
+
+        request = _chat_request(thinking_policy={"effort": "high", "summary": True})
+        acompletion = AsyncMock(return_value=_nonstream_response(finish_reason="stop"))
+        with (
+            patch("services.ai_service.acompletion", acompletion),
+            patch(
+                "services.ai_service.litellm_client._check_reasoning_support",
+                return_value=True,
+            ),
+        ):
+            await LiteLLMClient(MagicMock()).invoke_chat_connection(
+                request, _connection(), request.deadline, _attempt_context(), stream=False
+            )
+        kwargs = acompletion.await_args.kwargs
+        assert kwargs["reasoning_effort"] == "high"
+        assert "thinking_summary" not in kwargs
+
+    async def test_cache_policy_injected_only_for_explicit_cache_providers(self):
+        """§3.1-2：仅显式缓存点供应商注入 cache_control_injection_points。"""
+
+        request = _chat_request(cache_policy={"enabled": True})
+        acompletion = AsyncMock(return_value=_nonstream_response(finish_reason="stop"))
+        with patch("services.ai_service.acompletion", acompletion):
+            await LiteLLMClient(MagicMock()).invoke_chat_connection(
+                request,
+                _connection(provider="openai", model="gpt-4o-mini"),
+                request.deadline,
+                _attempt_context(),
+                stream=False,
+            )
+        assert "cache_control_injection_points" not in acompletion.await_args.kwargs
 
     async def test_usage_missing_keeps_none(self):
         """usage 缺失 → usage_observed=False、usage=None，不倒灌 0（R21/§6.3）。"""

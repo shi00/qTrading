@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+from collections.abc import Mapping
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -226,6 +227,17 @@ class TestResolveAgentModelBinding:
         assert resolved.deadline >= before + 30.0
         assert resolved.deadline <= asyncio.get_running_loop().time() + 30.0
         assert require_leaf_turn_timeout(resolved) > 0
+
+    async def test_binding_profile_declares_explicit_window_and_no_vision(self) -> None:
+        """§3.1-3：按冻结连接证据显式注入 Profile，窗口未知显式 None（R21）。"""
+
+        resolved = await resolve_agent_model_binding(_context())
+
+        profile = cast("Mapping[str, Any]", resolved.profile)
+        assert profile["context_window"] is None  # 无路由/连接证据即未知，不猜默认窗口
+        assert profile["supports_image_input"] is False  # 视觉能力未证实不放行
+        assert profile["supported_image_media_types"] == ()
+        assert profile["supports_inline_system_prompts"] is False
 
     async def test_missing_route_timeout_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def _resolve(_scenario_id: str) -> ScenarioDispatch:

@@ -118,6 +118,7 @@ RateLimitError = None  # type: ignore[misc,assignment]
 ServiceUnavailableError = None  # type: ignore[misc,assignment]
 LiteLLMInternalServerError = None  # type: ignore[misc,assignment]
 LiteLLMAPIConnectionError = None  # type: ignore[misc,assignment]
+LiteLLMContextWindowExceededError = None  # type: ignore[misc,assignment]
 
 
 def _load_litellm_exceptions() -> bool:
@@ -129,7 +130,7 @@ def _load_litellm_exceptions() -> bool:
     global _LITELLM_AVAILABLE, _LITELLM_IMPORT_ATTEMPTED
     global LiteLLMAuthenticationError, ContentPolicyViolationError, PermissionDeniedError
     global LiteLLMNotFoundError, RateLimitError, ServiceUnavailableError
-    global LiteLLMInternalServerError, LiteLLMAPIConnectionError
+    global LiteLLMInternalServerError, LiteLLMAPIConnectionError, LiteLLMContextWindowExceededError
     if _LITELLM_IMPORT_ATTEMPTED:
         return _LITELLM_AVAILABLE
     _LITELLM_IMPORT_ATTEMPTED = True
@@ -138,6 +139,7 @@ def _load_litellm_exceptions() -> bool:
             APIConnectionError as LiteLLMAPIConnectionError,
             AuthenticationError as LiteLLMAuthenticationError,
             ContentPolicyViolationError,
+            ContextWindowExceededError as LiteLLMContextWindowExceededError,
             InternalServerError as LiteLLMInternalServerError,
             NotFoundError as LiteLLMNotFoundError,
             PermissionDeniedError,
@@ -288,6 +290,14 @@ def classify_error(e: Exception, context: str = "general") -> dict:
 
     if context == "llm":
         if _load_litellm_exceptions():
+            if LiteLLMContextWindowExceededError is not None and isinstance(e, LiteLLMContextWindowExceededError):
+                # 2.77.0 #11454：上下文超窗是确定性请求拒绝，不重试；桥层据此转译
+                # 为原生 ModelContextWindowExceededError 触发单次压缩重试。
+                return {
+                    "code": "context_window_exceeded",
+                    "message_key": "llm_err_context_window",
+                    "should_retry": False,
+                }
             if LiteLLMAuthenticationError is not None and isinstance(e, LiteLLMAuthenticationError):
                 return {"code": "auth_failed", "message_key": "llm_err_auth_failed", "should_retry": False}
             if ContentPolicyViolationError is not None and isinstance(e, ContentPolicyViolationError):

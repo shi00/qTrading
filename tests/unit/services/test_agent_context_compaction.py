@@ -1078,8 +1078,10 @@ class TestLeafRequestPipeline:
         )
         agent: Agent[None, str] = Agent(_rendering_model(calls), output_type=str, capabilities=(guard,))
 
-        result = await agent.run("继续", message_history=_varied_history(), model_settings={"timeout": 5.0})
-
+        # harness 0.77.0 起 estimate_context_tokens 按真实分词（CJK 1:1）计量：
+        # 待摘要片段须落在摘要窗口（8192）内，故用 6000 字符级历史（总量仍超
+        # 可用输入预算 4192）保持「压缩挽救而非边界先行终止」的回归意图。
+        result = await agent.run("继续", message_history=_varied_history(chars=6_000), model_settings={"timeout": 5.0})
         assert result.output == "最终答复"
         assert len(calls) == 2  # 摘要回合 + 主回合（边界未提前抛错）
         assert "压缩摘要内容" in _render_text(calls[1])

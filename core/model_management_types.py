@@ -550,6 +550,18 @@ FinishReason = Literal["final", "tool_calls", "refused", "length", "error"]
 #: 遗留 ``tool_or_text``）不进入公开桥——桥层不支持即明确拒绝，不静默降级。
 CHAT_OUTPUT_MODES: Final[tuple[str, ...]] = ("text", "tool", "native", "prompted")
 ChatOutputMode = Literal["text", "tool", "native", "prompted"]
+#: ``ModelSettings['tool_choice']`` 的一等投影（SDK ``ToolChoice`` 的字符串子集；
+#: 具名工具/列表形态不进入公开桥，桥层明确拒绝而非猜测供应商语义）。
+CHAT_TOOL_CHOICES: Final[tuple[str, ...]] = ("none", "required", "auto")
+#: ``ModelSettings['cache']`` 的投影键（``enabled`` + 供应商提示缓存保留期；
+#: ``messages`` 对应 SDK ``CacheConfig.messages`` 的消息级缓存开关）。
+CHAT_CACHE_POLICY_KEYS: Final[frozenset[str]] = frozenset({"enabled", "retention", "messages"})
+#: 提示缓存保留期（SDK ``CacheSetting`` 的字符串档位）。
+CHAT_CACHE_RETENTIONS: Final[tuple[str, ...]] = ("5m", "30m", "1h", "12h")
+#: ``ModelSettings['thinking'/'thinking_summary']`` 的投影键。
+CHAT_THINKING_POLICY_KEYS: Final[frozenset[str]] = frozenset({"effort", "summary"})
+#: 推理档位（SDK ``ThinkingLevel`` 的字符串子集）。
+CHAT_THINKING_EFFORTS: Final[tuple[str, ...]] = ("minimal", "low", "medium", "high", "xhigh", "max")
 CHAT_ROLES: Final[tuple[str, ...]] = ("system", "user", "assistant", "tool")
 #: 已选图片分型白名单：仅 PNG/JPEG（§10.1 ContentPart）。
 IMAGE_MIME_TYPES: Final[tuple[str, ...]] = ("image/png", "image/jpeg")
@@ -758,6 +770,12 @@ class ChatTurnRequest:
     时钟截止值（沿 InferenceRequest 语义）；``output_mode`` 为结构化输出的出站
     承载模式（见 :data:`CHAT_OUTPUT_MODES`）——模式与 schema 必须自洽，桥层据此
     生成供应商真实封装（native 不得把裸 schema 当 response_format 透传）。
+
+    ``tool_choice`` / ``cache_policy`` / ``thinking_policy`` 为 SDK ``ModelSettings``
+    的**一等投影**：上游能力（``WrapUpAtLimits`` 的 ``tool_choice='none'``、
+    ``Caching`` 的 ``cache``、``Thinking`` 的 ``thinking``/``thinking_summary``）
+    不得混入 ``frozen_params`` 原样外发（``drop_params=False`` 下会被供应商判为
+    非法外参）；桥层把它们投影到本组字段，出站适配器再按供应商能力转译或忽略。
     """
 
     model_call_id: str
@@ -771,12 +789,44 @@ class ChatTurnRequest:
     deadline: float
     output_tools: tuple[FunctionToolSpec, ...] = ()
     output_mode: ChatOutputMode = "text"
+    tool_choice: str | None = None
+    cache_policy: Mapping[str, Any] | None = None
+    thinking_policy: Mapping[str, Any] | None = None
 
     def ensure_valid(self) -> None:
         if not self.model_call_id:
             raise _invalid("invalid_field", "$.model_call_id")
         if self.output_mode not in CHAT_OUTPUT_MODES:
             raise _invalid("invalid_field", "$.output_mode")
+        if self.tool_choice is not None and self.tool_choice not in CHAT_TOOL_CHOICES:
+            raise _invalid("invalid_field", "$.tool_choice")
+        if self.cache_policy is not None:
+            if not isinstance(self.cache_policy, Mapping):
+                raise _invalid("invalid_field", "$.cache_policy")
+            extra = set(self.cache_policy) - CHAT_CACHE_POLICY_KEYS
+            if extra:
+                raise _invalid("invalid_field", "$.cache_policy")
+            enabled = self.cache_policy.get("enabled")
+            if enabled is not None and not isinstance(enabled, bool):
+                raise _invalid("invalid_field", "$.cache_policy.enabled")
+            retention = self.cache_policy.get("retention")
+            if retention is not None and retention not in CHAT_CACHE_RETENTIONS:
+                raise _invalid("invalid_field", "$.cache_policy.retention")
+            messages = self.cache_policy.get("messages")
+            if messages is not None and not isinstance(messages, bool):
+                raise _invalid("invalid_field", "$.cache_policy.messages")
+        if self.thinking_policy is not None:
+            if not isinstance(self.thinking_policy, Mapping):
+                raise _invalid("invalid_field", "$.thinking_policy")
+            extra = set(self.thinking_policy) - CHAT_THINKING_POLICY_KEYS
+            if extra:
+                raise _invalid("invalid_field", "$.thinking_policy")
+            effort = self.thinking_policy.get("effort")
+            if effort is not None and effort not in CHAT_THINKING_EFFORTS:
+                raise _invalid("invalid_field", "$.thinking_policy.effort")
+            summary = self.thinking_policy.get("summary")
+            if summary is not None and not isinstance(summary, bool):
+                raise _invalid("invalid_field", "$.thinking_policy.summary")
         if self.output_mode in ("native", "prompted") and self.output_schema is None:
             # native/prompted 都必须有结构化对象；缺失即请求自相矛盾（fail-closed，
             # 不以无约束文本冒充结构化回合，R21）

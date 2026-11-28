@@ -2220,6 +2220,10 @@ def _adapter_failure_reason(error: Exception) -> str:
         code = classify_error(error, context="llm").get("code")
         if isinstance(code, str) and code:
             return code
+    # 上下文超窗（2.77.0 #11454）：非 AppError 也输出稳定错误码，供桥层转译为
+    # 原生 ModelContextWindowExceededError 触发单次压缩重试（§3.1-6）。
+    if classify_error(error, context="llm").get("code") == "context_window_exceeded":
+        return "context_window_exceeded"
     return f"adapter error: {type(error).__name__}"
 
 
