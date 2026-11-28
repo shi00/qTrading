@@ -28,6 +28,20 @@ from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 
 logger = logging.getLogger(__name__)
 
+# D1-11: dispose 时调度的 stop() 任务强引用（asyncio 仅弱引用 task，VM 自身可能在
+# 卸载后立即被回收；若不在此持有引用，任务会被 GC 中断导致处理器永远收不到停止信号）。
+_dispose_stop_tasks: set[asyncio.Task[None]] = set()
+
+
+def _on_dispose_stop_done(task: asyncio.Task[None]) -> None:
+    """stop() 收尾：移除强引用；非取消异常记录（R2：取消由 task 自身传播，不吞没）。"""
+    _dispose_stop_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("[OnboardingVM] dispose stop() failed: %s", DataSanitizer.sanitize_error(str(exc)))
+
 
 # ------------------------------------------------------------------
 # Step config (pure data, shared with View)
@@ -178,6 +192,10 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         # 用于判断发起同步的那次运行是否仍「占有」data_sync 步（含离开后又返回）。
         self._sync_generation: int = 0
         self._nav_epoch: int = 0
+        # D1-11: 独立于 UI 展示态的取消/卸载标志。dispose() 会把 state 重置为默认快照
+        # （sync_in_progress=False），基于 state 的清理判据会漏发取消信号；本标志供
+        # 在途 `_ensure_processor()` / `start_sync` 在构造返回后判定是否必须中止。
+        self._disposed_or_cancelled: bool = False
 
         # --- Panel operation callbacks (View injects, View→VM function) ---
         self.fn_validate_database: Callable[[], Awaitable[bool]] | None = None
@@ -346,10 +364,16 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         return _combined
 
     def dispose(self) -> None:
-        if self._state.sync_in_progress:
+        sync_in_progress = self._state.sync_in_progress
+        # D1-11: 先于 state 重置置位独立标志——在途 `_ensure_processor()` 返回后据此中止，
+        # 不依赖已被重置的 sync_in_progress（也不依赖 View 侧的异步清理判据）。
+        self._disposed_or_cancelled = True
+        if sync_in_progress:
             logger.warning(
                 "[OnboardingVM] dispose() called while sync in progress; callbacks cleared, DataProcessor will self-complete"
             )
+        # 停止调度需在基类关闭协议清空 loop 前捕获；stop() 为 async，sync dispose 不能 await。
+        loop = self._get_loop_or_none()
         # UIR-F02-002: 卸载后任何在途同步的迟到结果都不得再导航，递增令牌使其作废。
         self._sync_generation += 1
         try:
@@ -370,6 +394,10 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
             self.on_complete = None
             self._step_validated.clear()
             self._persisted_schedule = None
+            # D1-11: 现场同步仍阻塞在 initialize_system 时，只有 stop() 置取消事件才能令其
+            # 尽快收敛（与 cancel_sync 同语义）；未在同步中时不停共享处理器，避免误伤。
+            if sync_in_progress:
+                self._schedule_processor_stop(loop)
             # 走基类三步原子关闭协议（shutdown_lock 翻转 disposed + 清 subscribers/
             # pending + cancel pending handle + 取消 cancellable 在途任务），使卸载后迟到
             # 的 _set_state 与已排队通知被统一 disposed 守卫拦截，旧 subscriber 不再被调用。
@@ -377,6 +405,30 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
             # disposed 翻转后再重置 state：此后任何迟到 _set_state 均被守卫拦截，直接赋值
             # 保证卸载后 state 恒为默认快照（与 system/data_source VM 既有范式一致）。
             self._state = OnboardingState()
+
+    def _schedule_processor_stop(self, loop: asyncio.AbstractEventLoop | None) -> None:
+        """卸载时调度已构造处理器的 ``stop()``（D1-11）。
+
+        ``stop()`` 为 async 而 ``dispose()`` 为同步，只能调度为任务；经
+        ``call_soon_threadsafe`` 投递，兼容同线程与跨线程卸载。任务在模块级集合持有
+        强引用，避免 VM 回收后任务被 GC 中断。
+        """
+        processor = self._data_processor
+        if processor is None or loop is None or not loop.is_running():
+            return
+
+        def _start_stop_task() -> None:
+            try:
+                task = loop.create_task(processor.stop())
+            except RuntimeError:
+                return
+            _dispose_stop_tasks.add(task)
+            task.add_done_callback(_on_dispose_stop_done)
+
+        try:
+            loop.call_soon_threadsafe(_start_stop_task)
+        except RuntimeError:
+            logger.debug("[OnboardingVM] dispose stop scheduling skipped (loop closed)", exc_info=True)
 
     # ------------------------------------------------------------------
     # Step Navigation
@@ -612,6 +664,11 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
     # ------------------------------------------------------------------
 
     async def start_sync(self, quick: bool = False):
+        if self._disposed:
+            logger.debug("[OnboardingVM] start_sync ignored: view model disposed")
+            return
+        # D1-11: 新一轮同步清除取消/卸载标志（取消后仍应允许用户重新发起同步）。
+        self._disposed_or_cancelled = False
         ensure_correlation_id()
         # UIR-F02-002: 本次运行令牌 + 发起时所在步/换步序号。只有该次同步仍占有
         # data_sync 步（未被取消、未被新一轮同步顶替、未手动换步、未卸载）时才推进。
@@ -644,6 +701,13 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
                 self._set_state(sync_progress=current / 100, sync_progress_message=Message("wizard_status_syncing"))
 
             dp = await self._ensure_processor()
+            # D1-11: 取消/卸载若发生在处理器构造期间（此时 _data_processor 尚为 None，
+            # cancel_sync/dispose 无法停止它），必须在构造返回后立即中止，否则会启动
+            # 一个无人回收的孤儿同步。owns_sync() 额外覆盖「取消后立即重新发起同步」
+            # ——旧运行被新一轮重置标志时，仍因代次不匹配而中止（不得并发同步）。
+            if self._disposed_or_cancelled or not owns_sync():
+                logger.info("[OnboardingVM] Sync aborted: cancelled/disposed during processor creation")
+                return
             result = await dp.initialize_system(
                 progress_callback=progress_callback,
                 quick=quick,
@@ -704,6 +768,9 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         await self._advance_current_step()
 
     async def cancel_sync(self):
+        # D1-11: 取消信号独立于 UI 展示态且必须先置位——处理器仍在构造时（_data_processor
+        # 为 None）无法 stop()，只能靠 start_sync 在构造返回后读到该标志并中止。
+        self._disposed_or_cancelled = True
         # UIR-F02-002: 取消即作废在途运行，避免其迟到成功结果推进步骤。
         self._sync_generation += 1
         try:

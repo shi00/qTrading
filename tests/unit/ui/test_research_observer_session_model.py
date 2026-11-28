@@ -189,6 +189,7 @@ class _RecordingIntake:
         session_id: str | None = None,
         expected_revision: int | None = None,
         role_prompt_refs: Any = (),
+        skill_refs: Any = (),
         mcp_selection: Any = (),
         model_connection_id: str | None = None,
     ) -> Any:

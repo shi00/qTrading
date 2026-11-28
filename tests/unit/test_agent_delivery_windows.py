@@ -178,18 +178,13 @@ class TestTargetRaceProtection:
     def test_publish_oserror_is_unknown_even_with_identical_target(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """单步替换与兜底移入都失败且目标已是同内容：不得凭内容判成功，只能 unknown。"""
+        """移开旧目标后移入失败且目标已是同内容：不得凭内容判成功，只能 unknown。"""
 
         target_path = tmp_path / "same.md"
         target_path.write_bytes(_CONTENT)
         store = _store()
         target = _target(target_path, existing=True, digest=_DIGEST, confirmed=True)
         staged = store.stage(target=target, content=_CONTENT, expected_digest=_DIGEST)
-
-        def refuse_replace(replaced: Path, replacement: Path, backup: Path) -> None:
-            raise OSError("platform replace refused")
-
-        monkeypatch.setattr(delivery_module._win32_api(), "replace_file", refuse_replace)
         real_move = _GuardedFile.move_to
 
         def refuse_move(mover: _GuardedFile, destination: Path) -> None:
@@ -260,11 +255,11 @@ class TestExclusiveOverwriteCondition:
         assert staged.path.exists()
 
 
-class TestAtomicReplace:
-    """单步原子替换与中断恢复：任意发布边界目标路径都不缺文件（P1-12）。"""
+class TestHandleBoundReplace:
+    """句柄绑定的两步受控替换与中断恢复（D7-10；任意替换边界都可由原回执核验）。"""
 
-    def test_readonly_target_falls_back_to_two_step(self, tmp_path: Path) -> None:
-        """只读目标会被 ``ReplaceFileW`` 拒绝：退回两步法仍能完成且不留残余。"""
+    def test_readonly_target_publishes_via_two_step(self, tmp_path: Path) -> None:
+        """只读目标同样经句柄绑定两步替换完成且不留残余。"""
 
         target_path = tmp_path / "readonly.csv"
         target_path.write_bytes(b"old")
@@ -282,36 +277,8 @@ class TestAtomicReplace:
         assert result.residue == ()
         assert list(tmp_path.glob("*.superseded.*")) == []
 
-    def test_replaced_foreign_file_is_restored_not_overwritten(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """替换窗口内目标被置换：移走的是外部文件，回滚放回原位且本次内容退回暂存名。"""
-
-        target_path = tmp_path / "out.txt"
-        target_path.write_bytes(b"old")
-        old_digest = hashlib.sha256(b"old").hexdigest()
-        store = _store()
-        target = _target(target_path, existing=True, digest=old_digest, confirmed=True)
-        staged = store.stage(target=target, content=_CONTENT, expected_digest=_DIGEST)
-        api = delivery_module._win32_api()
-        real_replace = api.replace_file
-
-        def racing_replace(replaced: Path, replacement: Path, backup: Path) -> None:
-            external = tmp_path / "external.tmp"
-            external.write_bytes(b"external-new")
-            os.replace(external, target_path)
-            real_replace(replaced, replacement, backup)
-
-        monkeypatch.setattr(api, "replace_file", racing_replace)
-        with pytest.raises(DeliveryFileError) as exc:
-            store.publish(target=target, staged=staged)
-        assert exc.value.code == "delivery_target_changed"
-        assert target_path.read_bytes() == b"external-new"
-        assert staged.path.read_bytes() == _CONTENT
-        assert list(tmp_path.glob("*.superseded.*")) == []
-
-    def test_hard_exit_after_replace_keeps_target_and_resumes(self, tmp_path: Path) -> None:
-        """硬退出发生在替换与备份清理之间：目标路径仍有文件，续接只按原回执。"""
+    def test_hard_exit_after_supersede_is_resumable(self, tmp_path: Path) -> None:
+        """硬退出发生在「移开旧目标」与「移入暂存」之间：按原回执核验并续接。"""
 
         target_path = tmp_path / "crash.md"
         target_path.write_bytes(b"old")
@@ -357,14 +324,13 @@ class TestAtomicReplace:
                 ),
                 encoding="utf-8",
             )
-            api = delivery._win32_api()
-            real_replace = api.replace_file
+            real_supersede = delivery._GuardedFile.supersede_to
 
-            def crash_after_replace(replaced, replacement, backup):
-                real_replace(replaced, replacement, backup)
+            def crash_after_supersede(self, destination, *, expected_identity):
+                real_supersede(self, destination, expected_identity=expected_identity)
                 os._exit(9)
 
-            api.replace_file = crash_after_replace
+            delivery._GuardedFile.supersede_to = crash_after_supersede
             store.publish(target=target, staged=staged)
             os._exit(10)
             """
@@ -387,13 +353,13 @@ class TestAtomicReplace:
             expected_volume_serial=facts["confirmed_target_volume_serial"],
             expected_file_id=facts["confirmed_target_file_id"],
         )
-        # 硬退出后用户选的路径仍然有文件（新内容），旧目标可按回执核验。
-        assert target_path.read_bytes() == b"new-body"
+        # 硬退出时已移开旧目标、尚未移入暂存：目标名暂时无文件，旧目标在可复算备份名。
+        assert not target_path.exists()
         store = _store()
         recovery = store.inspect_publish(target=target, staged=staged)
         assert (recovery.target_state, recovery.staged_state, recovery.backup_state) == (
-            "published",
             "absent",
+            "match",
             "match",
         )
         assert recovery.backup_path.read_bytes() == b"old"
@@ -401,6 +367,7 @@ class TestAtomicReplace:
         assert result.snapshot.digest == staged.digest
         assert result.residue == ()
         assert not recovery.backup_path.exists()
+        assert target_path.read_bytes() == b"new-body"
 
 
 class TestStagingSafety:

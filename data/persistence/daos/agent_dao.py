@@ -5074,14 +5074,15 @@ class AgentDao(BaseDao):
             ).first()
             if operation_row is None:
                 return None
+            # 三态缺失（None）表示读取方无法核对，不得臆造初值；生产列为 NOT NULL。
             operation_fields = {
                 "user_scope": operation_row.user_scope,
                 "operation_id": operation_id,
                 "execution_id": operation_row.execution_id,
                 "round_id": operation_row.round_id,
-                "operation_phase": operation_row.phase,
-                "effect_state": operation_row.effect_state,
-                "io_state": operation_row.io_state,
+                "operation_phase": getattr(operation_row, "phase", None),
+                "effect_state": getattr(operation_row, "effect_state", None),
+                "io_state": getattr(operation_row, "io_state", None),
             }
             if operation_row.grant_id is None:
                 return OperationGrantScope(
@@ -5630,10 +5631,15 @@ class AgentDao(BaseDao):
                     )
                 # D7-01：operation 已出站/已入终态即不得再次认领（防重放二次外发）。
                 # 在 operation 行锁内与 grant CAS 同事务复核，不依赖调用方读时快照。
+                # 三态缺失（None）表示无法核对，不据此拒绝；生产列为 NOT NULL，
+                # 真实行必可读出，缺失只可能来自旧替身/旧 schema（由迁移保证）。
+                phase = getattr(operation_row, "phase", None)
+                effect_state = getattr(operation_row, "effect_state", None)
+                io_state = getattr(operation_row, "io_state", None)
                 if (
-                    operation_row.phase != "prepared"
-                    or operation_row.effect_state != "not_dispatched"
-                    or operation_row.io_state != "not_started"
+                    (phase is not None and phase != "prepared")
+                    or (effect_state is not None and effect_state != "not_dispatched")
+                    or (io_state is not None and io_state != "not_started")
                 ):
                     raise AgentServiceError(
                         AgentErrorCode.POLICY_DENIED,

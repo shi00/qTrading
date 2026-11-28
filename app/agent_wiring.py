@@ -1093,6 +1093,27 @@ def _build_role_services(engine: Any) -> tuple[RoleCatalogService, SessionModelS
     )
 
 
+def _build_preferred_connection_provider(
+    dao: Any, role_catalog: RoleCatalogService, session_models: SessionModelStore
+) -> Callable[[Any], Awaitable[str | None]]:
+    """受理时冻结的会话/角色模型选择（普通叶执行的首选连接）。
+
+    - 自定义角色（目录中 ``active``）的模型覆盖优先；
+    - 否则沿用会话级模型选择（与讨论/计划主回合同一来源）；
+    - 无任何选择返回 ``None``（继承场景路由默认顺序）。
+    比较路独立冻结连接由 ``resolve_agent_model_binding`` 优先处理，不受本选择覆盖。
+    """
+
+    async def _provide(context: Any) -> str | None:
+        facts = await dao.read_leaf_dispatch_facts(context.execution_id, context.round_id)
+        definition = await role_catalog.resolve(context.node.role_key)
+        if definition is not None and definition.status == "active" and definition.model_connection_id:
+            return definition.model_connection_id
+        return await session_models.read(facts.session_id)
+
+    return _provide
+
+
 async def wire_agent_runtime(
     cache_manager: Any,
     *,
@@ -1177,7 +1198,11 @@ async def wire_agent_runtime(
         tool_factory = (
             None if lifecycle is None else build_tool_runtime_factory(dao=dao, lifecycle=lifecycle, approvals=approvals)
         )
-        leaf_runtime = default_leaf_runtime(dao, tool_runtime_factory=tool_factory)
+        leaf_runtime = default_leaf_runtime(
+            dao,
+            tool_runtime_factory=tool_factory,
+            preferred_connection_provider=_build_preferred_connection_provider(dao, role_catalog, session_models),
+        )
     try:
         install_leaf_runtime(leaf_runtime)
         # 父流程收敛后落应用执行终态（P1-08）：同一共享账本写入，不新建引擎。

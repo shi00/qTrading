@@ -104,35 +104,22 @@ from services.agent_service.mcp_budget import (
     measure_json_bytes,
 )
 from services.agent_service.mcp_stdio_transport import BudgetedStdioTransport
+from services.agent_service.subprocess_env import (
+    OS_BASELINE_KEYS,
+    TEMP_KEYS,
+    build_minimal_child_env,
+)
 from utils.sanitizers import DataSanitizer
 
 if TYPE_CHECKING:
     from typing import TextIO
 
-#: 子进程显式环境基线（覆盖 SDK ``get_default_environment()`` 在 Windows / POSIX 的
-#: 全部可注入键）：只为进程启动所必需的 OS 非秘密变量，不含应用秘密副本。
-_OS_BASELINE_KEYS: tuple[str, ...] = (
-    "SYSTEMROOT",
-    "SYSTEMDRIVE",
-    "WINDIR",
-    "PATH",
-    "PATHEXT",
-    "PROCESSOR_ARCHITECTURE",
-    "USERPROFILE",
-    "USERNAME",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "HOMEDRIVE",
-    "HOMEPATH",
-    "HOME",
-    "LOGNAME",
-    "SHELL",
-    "TERM",
-    "USER",
-)
+#: 子进程显式环境基线（正本见 :mod:`services.agent_service.subprocess_env`，
+#: 与附件 worker 共用同一份白名单）。
+_OS_BASELINE_KEYS: tuple[str, ...] = OS_BASELINE_KEYS
 
 #: 子进程临时目录键：强制指向本次连接专属受管目录，不继承应用/用户临时目录。
-_STDIO_TEMP_KEYS: tuple[str, ...] = ("TEMP", "TMP")
+_STDIO_TEMP_KEYS: tuple[str, ...] = TEMP_KEYS
 #: 受管专属临时目录名前缀（``mkdtemp`` 追加随机后缀，天然保证唯一、无竞争）。
 _STDIO_TEMP_PREFIX = "astock-mcp-stdio-"
 
@@ -177,8 +164,9 @@ def _resolve_http_headers(headers: tuple[tuple[str, str], ...]) -> dict[str, str
 def _resolve_stdio_env(configured: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], ...]:
     """解析 stdio 环境变量中的安全引用；非引用值按字面量使用。
 
-    本地 MCP 服务同样需要凭据：允许 ``env:NAME`` / ``keyring:item`` 形式，使凭据只以
-    引用落库、在 spawn 前才读取，避免把明文秘密写进配置存储（R9/R10）。
+    本地 MCP 服务同样需要凭据：``secret_env`` 里的值只允许 ``env:NAME`` /
+    ``keyring:item`` 引用（配置校验拒绝明文），使凭据只以引用落库、在 spawn 前才读取，
+    避免把明文秘密写进配置存储（R9/R10）；``env`` 里的普通字面量原样使用。
     """
 
     return tuple(
@@ -193,13 +181,11 @@ def _build_stdio_env(
 ) -> dict[str, str]:
     """显式白名单基线 + 配置项 + 强制受管 ``TEMP`` / ``TMP``。
 
-    基线只取 :data:`_OS_BASELINE_KEYS` 中实际存在的键（不含应用秘密副本）；
+    基线只取 :data:`OS_BASELINE_KEYS` 中实际存在的键（不含应用秘密副本）；
     ``TEMP`` / ``TMP`` 最后写入，配置项不得把子进程临时目录指回应用目录。
+    白名单与附件 worker 共用 :func:`build_minimal_child_env`，不各自复制。
     """
-    env = {key: os.environ[key] for key in _OS_BASELINE_KEYS if key in os.environ}
-    env.update(configured)
-    env.update({key: str(temp_dir) for key in _STDIO_TEMP_KEYS})
-    return env
+    return build_minimal_child_env(dict(configured), temp_dir=temp_dir)
 
 
 class _ManagedStdioEnvironment:
@@ -843,7 +829,11 @@ class FastMCPClientFactory:
         if is_stdio:
             try:
                 # 本地凭据只存引用：spawn 前才解析，失败即零派发（不建目录/不建进程）。
-                resolved_env = await asyncio.to_thread(_resolve_stdio_env, config.transport.env)
+                # 普通字面量（env）与敏感引用（secret_env）结构分开，合并后一次解析。
+                resolved_env = await asyncio.to_thread(
+                    _resolve_stdio_env,
+                    (*config.transport.env, *config.transport.secret_env),
+                )
             except ValueError as exc:
                 _discard_drain(drain)
                 raise AgentServiceError(

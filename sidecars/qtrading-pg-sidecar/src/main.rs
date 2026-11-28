@@ -30,7 +30,7 @@ async fn main() -> ExitCode {
         cli::Command::Run(args) => run::run(args).await,
         cli::Command::Status(args) => commands::status(&args.data_dir),
         cli::Command::Stop(args) => commands::stop(&args.data_dir).await,
-        cli::Command::Doctor(args) => maint::doctor(&args.data_dir),
+        cli::Command::Doctor(args) => maint::doctor(&args),
         cli::Command::Dump(args) => maint::dump(args).await,
         cli::Command::Restore(args) => maint::restore(args).await,
         cli::Command::MaintenanceShell(args) => maint::maintenance_shell(args).await,

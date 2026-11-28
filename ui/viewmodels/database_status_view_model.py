@@ -66,6 +66,12 @@ class DatabaseStatusState:
     status_type: str = "info"
     error_message: Message | None = None
     is_refreshing: bool = False
+    # 诊断故障渠道 (D1-12)：None = 未知（尚未刷新/刷新失败），空列表 = sidecar 明确报告无异常。
+    # R21: 不得用空列表冒充「无异常」——未知必须是 None，由 View 渲染为「未知」。
+    issues: list[dict[str, str]] | None = None
+    # 残留物扫描结果（sidecar 仅扫描数据目录同级，不递归子目录）
+    restore_residuals: list[str] | None = None
+    dump_partials: list[str] | None = None
 
 
 class DatabaseStatusViewModel(ObservableViewModelMixin[DatabaseStatusState]):
@@ -110,6 +116,8 @@ class DatabaseStatusViewModel(ObservableViewModelMixin[DatabaseStatusState]):
           （旧版 sidecar）时为 None（未知），不得用外置配置端口补位
         - log_dir 从 AppConfig 解析
         - doctor 已是 async，不需 ThreadPoolManager 包裹
+        - doctor 的故障渠道 (issues / restore_residuals / dump_partials) 原样透传到
+          state，不得丢弃；刷新前为 None（未知）。残留物扫描仅覆盖数据目录同级
         - 并发刷新按代际只采纳最新请求结果（旧请求晚返回不覆盖新状态）
         - 任务取消时复位最新代次的 is_refreshing 并继续传播 CancelledError (R2)，
           避免刷新按钮永久禁用；旧代次取消不清新代次标志
@@ -146,6 +154,9 @@ class DatabaseStatusViewModel(ObservableViewModelMixin[DatabaseStatusState]):
                 status_type=status_type,
                 is_refreshing=False,
                 error_message=None,
+                issues=result.issues,
+                restore_residuals=result.restore_residuals,
+                dump_partials=result.dump_partials,
             )
         except asyncio.CancelledError:
             # 取消不是业务失败：仅复位最新代次的刷新标志（旧代次由新代次拥有该标志），

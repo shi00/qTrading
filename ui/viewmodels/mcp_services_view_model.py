@@ -21,9 +21,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from core.agent_types import (
     MCP_BUDGET_FIELDS,
@@ -58,6 +59,13 @@ STATUS_SUCCESS = "success"
 STATUS_WARNING = "warning"
 STATUS_ERROR = "error"
 
+#: 角色版本合法形态（仓库既有约定）：
+#: - 角色目录（``RoleDefinition``）使用 ``r[1-9][0-9]*``；
+#: - 研究请求头 ``role_prompt_refs`` 使用 ``v[1-9][0-9]*``；
+#: - 历史分配记录（``RoleMCPAssignment``）只要求非空身份，兼容裸 ``[1-9][0-9]*``。
+#: 值原样保留，不做 ``int`` 强转（``r1`` / ``v1`` 均为合法版本）。
+_ROLE_VERSION: Final = re.compile(r"[rv]?[1-9][0-9]*")
+
 #: 列表项失效原因 → 行标注 i18n key（未登记的原因不标注，避免臆造文案）。
 #: N01：原因码在首次使用时惰性导入，避免模块级导入 ``services.agent_service``
 #: 触发包初始化拉入 DBOS / pydantic_ai。
@@ -89,6 +97,7 @@ DRAFT_TEXT_FIELDS = frozenset(
         "command",
         "args_text",
         "env_text",
+        "secret_env_text",
         "cwd",
         "url",
         "headers_text",
@@ -208,7 +217,10 @@ class MCPConfigDraft:
     transport_kind: str = MCPTransportKind.STDIO.value
     command: str = ""
     args_text: str = ""
+    #: 普通环境变量字面量（非敏感）。
     env_text: str = ""
+    #: 敏感凭据引用（``KEY=env:变量名`` / ``KEY=keyring:条目名``）。
+    secret_env_text: str = ""
     cwd: str = ""
     url: str = ""
     headers_text: str = ""
@@ -785,6 +797,7 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
             command=(draft.command.strip() or None) if is_stdio else None,
             args=_split_lines(draft.args_text) if is_stdio else (),
             env=_parse_pairs(draft.env_text, "env") if is_stdio else (),
+            secret_env=_parse_pairs(draft.secret_env_text, "secret_env") if is_stdio else (),
             cwd=(draft.cwd.strip() or None) if is_stdio else None,
             url=(draft.url.strip() or None) if not is_stdio else None,
             sse_compat_approved=draft.sse_compat_approved,
@@ -877,11 +890,8 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
         role_id = draft.role_id.strip()
         if not role_id:
             raise ValueError("role_id")
-        try:
-            role_version = int(draft.role_version.strip())
-        except ValueError:
-            raise ValueError("role_version") from None
-        if role_version < 1:
+        role_version = draft.role_version.strip()
+        if _ROLE_VERSION.fullmatch(role_version) is None:
             raise ValueError("role_version")
         tools_map = dict(draft.tools_text)
         bindings: list[RoleMCPServiceBinding] = []
@@ -903,7 +913,7 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
             default = config.identity
         assignment = RoleMCPAssignment(
             role_id=role_id,
-            role_version=str(role_version),
+            role_version=role_version,
             available=tuple(bindings),
             default_service=default,
         )
@@ -934,6 +944,7 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
             command=transport.command or "",
             args_text="\n".join(transport.args),
             env_text="\n".join(f"{key}={value}" for key, value in transport.env),
+            secret_env_text="\n".join(f"{key}={value}" for key, value in transport.secret_env),
             cwd=transport.cwd or "",
             url=transport.url or "",
             headers_text="\n".join(f"{key}={value}" for key, value in transport.headers),

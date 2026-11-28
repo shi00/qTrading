@@ -41,6 +41,23 @@ def is_graceful_shutdown_completed() -> bool:
     return _graceful_shutdown_completed
 
 
+def _atexit_cleanup_order() -> list[type[object]]:
+    """返回 atexit 清理顺序：注册逆序，但 ``_atexit_cleanup_last`` 标记类排到最后。
+
+    D1-03：``EmbeddedPostgresService`` 持有的 PG sidecar 必须比所有 DB 客户端（连接池）
+    更晚关闭，否则会先停 PG 再 dispose 引擎/连接。若仍按纯注册逆序，结果取决于模块
+    import 顺序（生产与测试不可控），故由注册表显式分层保证。
+    """
+
+    with _lock:
+        registered = list(_registry)
+    normal: list[type[object]] = []
+    last: list[type[object]] = []
+    for cls in reversed(registered):
+        (last if getattr(cls, "_atexit_cleanup_last", False) else normal).append(cls)
+    return normal + last
+
+
 def _atexit_cleanup_all() -> None:
     """Centralized atexit handler. Called once by Python at process exit.
 
@@ -57,19 +74,18 @@ def _atexit_cleanup_all() -> None:
     if is_graceful_shutdown_completed():
         return
 
-    with _lock:
-        for cls in reversed(list(_registry)):
-            if hasattr(cls, "_atexit_cleanup"):
-                try:
-                    cls._atexit_cleanup()  # type: ignore[attr-defined]
-                # NOTE(lazy): atexit 钩子内兜底避免单实例清理失败阻塞其他清理. ceiling: 单例 _atexit_cleanup 内逻辑不应抛异常. upgrade: 单例 _atexit_cleanup 内部分类处理或移除兜底.
-                except Exception as e:
-                    logger.warning(
-                        "[SingletonRegistry] atexit cleanup failed for %s: %s",
-                        cls.__name__,
-                        DataSanitizer.sanitize_error(e),
-                        exc_info=True,
-                    )
+    for cls in _atexit_cleanup_order():
+        if hasattr(cls, "_atexit_cleanup"):
+            try:
+                cls._atexit_cleanup()  # type: ignore[attr-defined]
+            # NOTE(lazy): atexit 钩子内兜底避免单实例清理失败阻塞其他清理. ceiling: 单例 _atexit_cleanup 内逻辑不应抛异常. upgrade: 单例 _atexit_cleanup 内部分类处理或移除兜底.
+            except Exception as e:
+                logger.warning(
+                    "[SingletonRegistry] atexit cleanup failed for %s: %s",
+                    cls.__name__,
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
 
 
 atexit.register(_atexit_cleanup_all)

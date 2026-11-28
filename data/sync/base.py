@@ -309,6 +309,21 @@ class ISyncStrategy(ABC):
         """Signal the strategy to stop gracefully."""
         self._cancelled = True
 
+    def _host_cancelled(self) -> bool:
+        """宿主注入的轮次 ``context.cancel_event`` 是否已置位（只读，绝不清除）。
+
+        D2-08：``DataProcessor.initialize_system`` 每轮注入一个共享 ``asyncio.Event``
+        到 ``context.cancel_event``，``request_cancel()`` / ``stop()`` 同步置位。子策略
+        ``_run_impl`` 入口必须先读该信号再复位自身的 ``_cancelled`` / ``_shutdown_event``，
+        否则会把上一阶段已生效的取消状态抹掉、继续发起请求。清除该事件的职责归宿主
+        （``clear_cancel()``），子策略不得清除。
+
+        用 ``is True`` 严格匹配 bool，理由同 ``_check_cancelled``：MagicMock 替身的
+        ``is_set()`` 返回非 bool 的 Mock 对象（truthy 但非 True），避免测试替身误触发。
+        """
+        cancel_event = self.context.cancel_event
+        return cancel_event is not None and cancel_event.is_set() is True
+
     def _check_cancelled(self, result: SyncResult) -> bool:
         """Check if cancelled and update result status. Returns True if cancelled."""
         # 统一取消信号通道：context.cancel_event 由 DataProcessor 在外部设置，

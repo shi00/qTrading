@@ -571,3 +571,32 @@ class TestSafeError:
         """空消息异常返回空字符串（脱敏后）。"""
         result = safe_error(ValueError(""))
         assert isinstance(result, str)
+
+
+class TestHostCancelled:
+    """D2-08：_host_cancelled 只读宿主注入的轮次 cancel_event，绝不清除。"""
+
+    @staticmethod
+    def _make_strategy(cancel_event=None):
+        ctx = SyncContext(api=MagicMock(), cache=MagicMock(), cancel_event=cancel_event)
+
+        class ConcreteStrategy(ISyncStrategy):
+            async def _run_impl(self, **kwargs):
+                return SyncResult()
+
+        return ConcreteStrategy(ctx)
+
+    def test_none_returns_false(self):
+        assert self._make_strategy(cancel_event=None)._host_cancelled() is False
+
+    def test_set_event_returns_true_and_keeps_event_set(self):
+        event = asyncio.Event()
+        event.set()
+        strategy = self._make_strategy(cancel_event=event)
+        assert strategy._host_cancelled() is True
+        assert event.is_set() is True
+
+    def test_cleared_event_returns_false(self):
+        event = asyncio.Event()
+        strategy = self._make_strategy(cancel_event=event)
+        assert strategy._host_cancelled() is False

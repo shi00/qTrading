@@ -127,6 +127,10 @@ LeafAgentRunner = Callable[[GatewayModel, LeafExecutionContext, LeafModelBinding
 #: 叶资料许可提供者（I43）：返回该叶的 15 键冻结资料上下文；``None`` = 无决定。
 DataConsentProvider = Callable[[LeafExecutionContext], Awaitable[Mapping[str, Any] | None]]
 
+#: 会话/角色模型选择提供者：返回受理时冻结的首选连接；``None`` = 继承场景路由默认。
+#: 仅用于非比较执行——比较路以独立冻结连接为最高优先级，不被当前会话选择覆盖。
+PreferredConnectionProvider = Callable[[LeafExecutionContext], Awaitable[str | None]]
+
 
 @dataclass(frozen=True, slots=True)
 class FrozenLaneBinding:
@@ -530,20 +534,23 @@ async def resolve_agent_model_binding(
     data_consent_provider: DataConsentProvider | None = None,
     lane_freeze_provider: LaneFreezeProvider | None = None,
     preferred_connection_id: str | None = None,
+    preferred_connection_provider: PreferredConnectionProvider | None = None,
 ) -> LeafModelBinding:
     """生产默认模型绑定：按 ``agent_research`` 场景路由取执行器与冻结快照。
 
     路由未启用/无候选/调度服务未组装 → 明确失败（不静默换模型、零外发）。
-    ``preferred_connection_id`` 为会话/角色层解析出的首选连接（``None`` 表示
-    继承场景路由默认顺序）：非 ``None`` 时透传给 ``resolve_executor`` 收窄候选，
-    首选连接不可用即显式失败，不静默丢弃用户选择（R21）。
+    ``preferred_connection_id`` / ``preferred_connection_provider`` 为会话/角色层
+    解析出的首选连接（``None`` 表示继承场景路由默认顺序）：非 ``None`` 时透传给
+    ``resolve_executor`` 收窄候选，首选连接不可用即显式失败，不静默丢弃用户选择
+    （R21）。两者同时给出时以显式 ``preferred_connection_id`` 为准。
     I43：资料许可决定随 binding 冻结——有决定则写 ``data_consent``（15 键）与
     operation 归属作用域；无决定（含未接线 provider）写 ``require_data_consent``
     且**不写** ``data_consent``（执行器零外发拒绝，不放行「无资料发送」）。
 
     F37 比较路（``lane_freeze_provider`` 命中）：快照收窄到该路冻结连接，且资料
     许可的连接 ID/版本必须与冻结值逐项相等；任一缺失/不同 → 抛错（零外发），
-    不以当前场景路由替换本路所选模型。
+    不以当前场景路由替换本路所选模型。比较路优先级最高：此时不读取会话/角色
+    首选连接，避免当前会话可变设置覆盖本路独立冻结的连接。
 
     期限：``deadline = now + dispatch.total_timeout_seconds``（派发侧冻结路由的总
     时限）；缺失 / 非法即抛错（零外发），不以臆造默认预算放行（R21）。
@@ -551,10 +558,19 @@ async def resolve_agent_model_binding(
 
     from services.ai_service.scenario_dispatch import resolve_executor
 
+    # 比较路优先：命中冻结路时忽略会话/角色首选连接（不让当前设置覆盖本路）。
+    lane_freeze = await lane_freeze_provider(context) if lane_freeze_provider is not None else None
+    effective_preferred = preferred_connection_id if lane_freeze is None else None
+    if effective_preferred is None and lane_freeze is None and preferred_connection_provider is not None:
+        effective_preferred = await preferred_connection_provider(context)
+    if effective_preferred is not None and (
+        not isinstance(effective_preferred, str) or not effective_preferred.strip()
+    ):
+        raise ValueError("preferred model connection must be non-empty text (zero model dispatch)")
     dispatch = (
         await resolve_executor(AGENT_RESEARCH_SCENARIO_ID)
-        if preferred_connection_id is None
-        else await resolve_executor(AGENT_RESEARCH_SCENARIO_ID, preferred_connection_id=preferred_connection_id)
+        if effective_preferred is None
+        else await resolve_executor(AGENT_RESEARCH_SCENARIO_ID, preferred_connection_id=effective_preferred)
     )
     if dispatch is None:
         raise RuntimeError(f"{AGENT_RESEARCH_SCENARIO_ID} route unavailable (zero model dispatch)")
@@ -569,7 +585,6 @@ async def resolve_agent_model_binding(
             f"{AGENT_RESEARCH_SCENARIO_ID} route total_timeout_seconds missing or invalid (zero model dispatch)"
         )
     deadline = asyncio.get_running_loop().time() + float(total_timeout)
-    lane_freeze = await lane_freeze_provider(context) if lane_freeze_provider is not None else None
     snapshot = dispatch.snapshot
     raw_consent = await data_consent_provider(context) if data_consent_provider is not None else None
     if lane_freeze is not None:
@@ -619,11 +634,15 @@ def default_leaf_runtime(
     dao: Any | None = None,
     *,
     tool_runtime_factory: ToolRuntimeFactory | None = None,
+    preferred_connection_provider: PreferredConnectionProvider | None = None,
 ) -> LeafRuntimeWiring:
     """生产默认装配：真实场景路由解析 + 资料许可提供者 + 真实叶 Agent 主体。
 
     ``dao`` 缺省时提供者与叶主体在运行时惰性取 ``CacheManager().agent_dao``；无法
     取得时掷错/如实失败（叶失败、零外发），不降级为「无许可约束」。
+    ``preferred_connection_provider`` 提供受理时冻结的会话/角色模型选择；缺省
+    （``None``）由场景路由默认顺序决定。比较路的独立冻结连接优先级不受其影响
+    （见 :func:`resolve_agent_model_binding`）。
     """
 
     provider: DataConsentProvider = (
@@ -640,7 +659,10 @@ def default_leaf_runtime(
 
     async def _model_binding(context: LeafExecutionContext) -> LeafModelBinding:
         return await resolve_agent_model_binding(
-            context, data_consent_provider=provider, lane_freeze_provider=lane_provider
+            context,
+            data_consent_provider=provider,
+            lane_freeze_provider=lane_provider,
+            preferred_connection_provider=preferred_connection_provider,
         )
 
     # lazy-import：leaf_agent 依赖本模块的类型与常量，模块级互引会成环。

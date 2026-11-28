@@ -1598,6 +1598,12 @@ class ComparisonRunReceipt:
     view: ComparisonGroupView
     dispatcher_wired: bool
 
+    @property
+    def all_accepted(self) -> bool:
+        """逐路是否都已保存受理事实（不代表已派发或已消费）。"""
+
+        return bool(self.lanes) and all(lane.execution_id is not None for lane in self.lanes)
+
 
 @dataclass(frozen=True, slots=True)
 class ComparisonReadQuery:

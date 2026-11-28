@@ -472,11 +472,12 @@ class TestConditionalSupersede:
         assert target_file.read_bytes() == b"old"
         assert staged.path.read_bytes() == _CONTENT
 
-    def test_windows_overwrite_never_splits_into_two_steps(self, store_env: Path, monkeypatch: pytest.MonkeyPatch):
-        """Windows 覆盖已确认目标由平台单步完成：不得先移走旧目标再移入（P1-12）。"""
+    def test_windows_overwrite_uses_handle_bound_two_step(self, store_env: Path, monkeypatch: pytest.MonkeyPatch):
+        """D7-10：覆盖已确认目标走句柄绑定两步替换（先移开旧目标、再按句柄不覆盖移入）。
 
-        if sys.platform != "win32":
-            pytest.skip("单步原子替换仅在 Windows 成立")
+        不再释放句柄后按路径调用平台替换：两次改名都必须发生在已核身份的独占句柄上。
+        """
+
         target_file = store_env / "out.txt"
         target_file.write_bytes(b"old")
         old_digest = hashlib.sha256(b"old").hexdigest()
@@ -498,7 +499,7 @@ class TestConditionalSupersede:
         monkeypatch.setattr(_GuardedFile, "supersede_to", spy_supersede)
         monkeypatch.setattr(_GuardedFile, "move_to", spy_move)
         result = store.publish(target=target, staged=staged)
-        assert calls == {"supersede": 0, "move": 0}
+        assert calls == {"supersede": 1, "move": 1}
         assert result.residue == ()
         assert target_file.read_bytes() == _CONTENT
         assert list(store_env.glob("*.superseded.*")) == []
@@ -663,17 +664,14 @@ class TestPublishRecovery:
 class _FakeWin32Api:
     """在 POSIX 上模拟 ``_Win32FileApi``：真实 fd + 可注入的内核调用结果。
 
-    Linux CI 无法执行 Windows 原生 API，但发布分支（``ReplaceFileW`` 单步替换、
-    句柄改名、``FileDispositionInfo`` 删除）必须同样被覆盖：本替身把内核调用映射为
-    POSIX 真实文件操作，并允许注入异常，从而在 Linux 上跑到同一段生产代码。
-    真实内核语义（独占共享、只读拒绝、原子性）仍由 win32-only 用例验证。
+    Linux CI 无法执行 Windows 原生 API，但发布分支（句柄改名、``FileDispositionInfo``
+    删除）必须同样被覆盖：本替身把内核调用映射为 POSIX 真实文件操作，并允许注入
+    异常，从而在 Linux 上跑到同一段生产代码。真实内核语义（独占共享、只读拒绝）
+    仍由 win32-only 用例验证。
     """
 
     def __init__(self) -> None:
         self.paths: dict[int, Path] = {}
-        self.replace_calls: list[tuple[Path, Path, Path]] = []
-        self.replace_hook: Callable[[Path, Path, Path], None] | None = None
-        self.replace_errors: list[OSError] = []
         self.rename_errors: list[OSError] = []
         self.rename_hook: Callable[[Path, Path], None] | None = None
         self.rename_fail_destinations: set[Path] = set()
@@ -726,16 +724,6 @@ class _FakeWin32Api:
         self._release(fd)
         os.unlink(path)
 
-    def replace_file(self, replaced: Path, replacement: Path, backup: Path) -> None:
-        replaced, replacement, backup = Path(replaced), Path(replacement), Path(backup)
-        self.replace_calls.append((replaced, replacement, backup))
-        if self.replace_hook is not None:
-            self.replace_hook(replaced, replacement, backup)
-        if self.replace_errors:
-            raise self.replace_errors.pop(0)
-        os.replace(replaced, backup)
-        os.replace(replacement, replaced)
-
 
 def _staged_stub(**overrides: object) -> StagedFile:
     """构造回执替身（不落盘），用于直接调用私有核验函数。"""
@@ -779,53 +767,58 @@ class TestSimulatedWindowsPublish:
         )
         return store, target, staged, backup
 
-    def test_atomic_replace_is_single_step_and_drops_verified_backup(
+    def test_publish_uses_handle_bound_two_step_and_drops_verified_backup(
         self, store_env: Path, fake_windows: _FakeWin32Api
     ):
-        """平台单步替换被真正使用：旧目标只按句柄删除一次，无残余。"""
+        """D7-10：覆盖已确认目标只走句柄绑定两步替换，不释放句柄后按路径替换。"""
 
         store, target, staged, backup = self._setup(store_env)
         result = store.publish(target=target, staged=staged)
-        assert fake_windows.replace_calls == [(store_env / "out.txt", staged.path, backup)]
         assert fake_windows.delete_calls == 1
         assert result.residue == ()
         assert (store_env / "out.txt").read_bytes() == _CONTENT
         assert not backup.exists()
         assert not staged.path.exists()
 
-    def test_atomic_replace_reports_applied_even_when_signalled_error(
+    def test_supersede_failure_is_reported_as_confirmed_and_keeps_target(
         self, store_env: Path, fake_windows: _FakeWin32Api
     ):
-        """平台报错但事实证明已替换：按事实继续，不凭错误码判失败。"""
-
-        store, target, staged, _ = self._setup(store_env)
-
-        def applied_then_error(replaced: Path, replacement: Path, backup: Path) -> None:
-            os.replace(replaced, backup)
-            os.replace(replacement, replaced)
-
-        fake_windows.replace_hook = applied_then_error
-        fake_windows.replace_errors = [OSError("platform reported failure")]
-        result = store.publish(target=target, staged=staged)
-        assert (store_env / "out.txt").read_bytes() == _CONTENT
-        assert result.residue == ()
-
-    def test_atomic_replace_refused_falls_back_to_two_step(self, store_env: Path, fake_windows: _FakeWin32Api):
-        """平台拒绝（如只读目标）且事实未变：退回两步法完成发布，能力不回退。"""
+        """移开旧目标失败（平台拒绝）：确定未替换，报可确证失败且不动目标/暂存。"""
 
         store, target, staged, backup = self._setup(store_env)
-        fake_windows.replace_errors = [OSError("access denied")]
-        result = store.publish(target=target, staged=staged)
-        assert len(fake_windows.replace_calls) == 1
-        assert (store_env / "out.txt").read_bytes() == _CONTENT
-        assert result.residue == ()
+        fake_windows.rename_errors = [OSError("access denied")]
+        with pytest.raises(DeliveryFileError) as exc:
+            store.publish(target=target, staged=staged)
+        assert exc.value.code == "delivery_target_changed"
+        assert (store_env / "out.txt").read_bytes() == b"old"
+        assert staged.path.read_bytes() == _CONTENT
         assert not backup.exists()
 
+    def test_parent_identity_change_after_replace_is_unknown(
+        self, store_env: Path, fake_windows: _FakeWin32Api, monkeypatch: pytest.MonkeyPatch
+    ):
+        """替换前后复核父目录身份：替换后父目录身份变了只能 unknown。"""
+
+        store, target, staged, _ = self._setup(store_env)
+        real = WindowsManagedFileStore._verify_publish_parent
+        calls = {"count": 0}
+
+        def counting(path: Path, staged_file: StagedFile) -> None:
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise DeliveryFileError("delivery_target_parent_changed", "changed during publish")
+            real(path, staged_file)
+
+        monkeypatch.setattr(WindowsManagedFileStore, "_verify_publish_parent", staticmethod(counting))
+        with pytest.raises(DeliveryUnknownError) as exc:
+            store.publish(target=target, staged=staged)
+        assert exc.value.code == "delivery_publish_unverified"
+        assert calls["count"] == 2
+
     def test_target_appearing_before_move_in_blocks_publish(self, store_env: Path, fake_windows: _FakeWin32Api):
-        """两步法窗口内目标被第三方占位：不覆盖、不放回失败的旧目标，只能 unknown。"""
+        """两步替换窗口内目标被第三方占位：不覆盖、不放回失败的旧目标，只能 unknown。"""
 
         store, target, staged, backup = self._setup(store_env)
-        fake_windows.replace_errors = [OSError("access denied")]
 
         def place_foreign(source: Path, destination: Path) -> None:
             if destination == backup:
@@ -843,7 +836,6 @@ class TestSimulatedWindowsPublish:
         """移开旧目标后移入失败：只能 unknown，旧目标留在可核备份名。"""
 
         store, target, staged, backup = self._setup(store_env)
-        fake_windows.replace_errors = [OSError("access denied")]
         fake_windows.rename_fail_destinations.add(store_env / "out.txt")
         with pytest.raises(DeliveryUnknownError) as exc:
             store.publish(target=target, staged=staged)
@@ -851,27 +843,18 @@ class TestSimulatedWindowsPublish:
         assert backup.read_bytes() == b"old"
         assert staged.path.read_bytes() == _CONTENT
 
-    def test_replace_failure_with_missing_target_is_unknown(self, store_env: Path, fake_windows: _FakeWin32Api):
-        """替换报错后目标已不存在：无法证明替换未发生，只能 unknown。"""
-
-        store, target, staged, _ = self._setup(store_env)
-        fake_windows.replace_hook = lambda replaced, replacement, backup: replaced.unlink()
-        fake_windows.replace_errors = [OSError("access denied")]
-        with pytest.raises(DeliveryUnknownError) as exc:
-            store.publish(target=target, staged=staged)
-        assert exc.value.code == "delivery_publish_unverified"
-        assert staged.path.read_bytes() == _CONTENT
-
-    def test_foreign_file_displaced_by_replace_is_restored(self, store_env: Path, fake_windows: _FakeWin32Api):
-        """窗口内目标被换成外部文件：回滚还原外部文件、本次内容退回暂存名，不删他人文件。"""
+    def test_unverified_backup_is_rolled_back_without_deleting_foreign_content(
+        self, store_env: Path, fake_windows: _FakeWin32Api
+    ):
+        """备份不是原确认文件：回滚本次内容、把外部内容放回原名，不按名删除。"""
 
         store, target, staged, backup = self._setup(store_env)
 
-        def swap_before_replace(replaced: Path, replacement: Path, backup_path: Path) -> None:
-            replaced.unlink()
-            replaced.write_bytes(b"external-new")
+        def tamper_backup(source: Path, destination: Path) -> None:
+            if destination == backup:
+                backup.write_bytes(b"external-new")
 
-        fake_windows.replace_hook = swap_before_replace
+        fake_windows.rename_hook = tamper_backup
         with pytest.raises(DeliveryFileError) as exc:
             store.publish(target=target, staged=staged)
         assert exc.value.code == "delivery_target_changed"
@@ -881,20 +864,21 @@ class TestSimulatedWindowsPublish:
         assert fake_windows.delete_calls == 0
 
     def test_unverifiable_backup_with_failed_rollback_is_unknown(self, store_env: Path, fake_windows: _FakeWin32Api):
-        """备份身份不符且回滚失败：保持现场并报告残余，不静默丢弃。"""
+        """备份身份不符且回滚失败：保持现场并报 unknown，不静默丢弃。"""
 
         store, target, staged, backup = self._setup(store_env)
 
-        def swap_before_replace(replaced: Path, replacement: Path, backup_path: Path) -> None:
-            replaced.unlink()
-            replaced.write_bytes(b"external-new")
+        def tamper_backup(source: Path, destination: Path) -> None:
+            if destination == backup:
+                backup.write_bytes(b"external-new")
 
-        fake_windows.replace_hook = swap_before_replace
-        fake_windows.rename_errors = [OSError("rollback locked")]
+        fake_windows.rename_hook = tamper_backup
+        fake_windows.rename_fail_destinations.add(staged.path)
         with pytest.raises(DeliveryUnknownError) as exc:
             store.publish(target=target, staged=staged)
         assert exc.value.code == "delivery_publish_unverified"
         assert backup.exists()
+        assert backup.read_bytes() == b"external-new"
 
     def test_backup_open_failure_is_reported_as_residue(self, store_env: Path, fake_windows: _FakeWin32Api):
         """备份无法独占复核：不删除、如实返回残余路径。"""
@@ -1037,28 +1021,17 @@ class TestSimulatedWindowsPublish:
         with pytest.raises(DeliveryFileError) as exc:
             store.publish(target=target, staged=staged)
         assert exc.value.code == "delivery_file_identity_unavailable"
-        assert fake_windows.replace_calls == []
+        assert (store_env / "out.txt").read_bytes() == b"old"
+        assert staged.path.read_bytes() == _CONTENT
 
-    def test_replace_failure_with_unreadable_target_is_unknown(
-        self, store_env: Path, fake_windows: _FakeWin32Api, monkeypatch: pytest.MonkeyPatch
-    ):
-        """替换报错且事后无法读取目标：无法证明，只能 unknown。"""
+    def test_verify_publish_parent_refuses_changed_parent(self, store_env: Path):
+        """父目录身份与暂存记录不一致即拒绝（替换前后复核的公共判据）。"""
 
-        store, target, staged, _ = self._setup(store_env)
-        fake_windows.replace_errors = [OSError("access denied")]
-        real_snapshot = delivery_module._snapshot
-        calls = {"count": 0}
-
-        def flaky_snapshot(path: Path) -> FileSnapshot:
-            calls["count"] += 1
-            if calls["count"] == 2:
-                raise PermissionError("unreadable")
-            return real_snapshot(path)
-
-        monkeypatch.setattr(delivery_module, "_snapshot", flaky_snapshot)
-        with pytest.raises(DeliveryUnknownError) as exc:
-            store.publish(target=target, staged=staged)
-        assert exc.value.code == "delivery_publish_unverified"
+        (store_env / "out.txt").write_bytes(b"old")
+        staged = _staged_stub(parent_volume_serial=0, parent_file_id=0)
+        with pytest.raises(DeliveryFileError) as exc:
+            WindowsManagedFileStore._verify_publish_parent(store_env / "out.txt", staged)
+        assert exc.value.code == "delivery_target_parent_changed"
 
 
 @pytest.mark.usefixtures("store_env")

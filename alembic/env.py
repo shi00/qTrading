@@ -145,7 +145,29 @@ async def run_async_migrations() -> None:
             await connection.commit()
             try:
                 await connection.run_sync(do_run_migrations)
-            finally:
+            except asyncio.CancelledError:
+                # R2：取消必须继续传播。取消中的连接可能已失效，此处不做
+                # rollback / commit：NullPool 连接随后关闭，回滚未提交事务并
+                # 释放会话级 advisory lock。
+                raise
+            except BaseException:
+                # D1-09：迁移失败时提交事务既违背回滚语义，也会在失效 /
+                # InFailedSqlTransaction 连接上抛出次生异常覆盖真实根因。
+                # 先尽力回滚把连接拉出失败事务（advisory lock 是会话级的，不随
+                # 回滚释放），再释放锁；清理自身失败只脱敏记录，绝不覆盖原始异常。
+                try:
+                    await connection.rollback()
+                except Exception as cleanup_error:
+                    # R9: 异常消息可能含连接串（含密码），须脱敏后再记录
+                    from utils.sanitizers import DataSanitizer
+
+                    logger.warning(
+                        "Failed to roll back Alembic migration transaction: %s",
+                        DataSanitizer.sanitize_error(cleanup_error),
+                    )
+                await release_migration_lock(connection)
+                raise
+            else:
                 await release_migration_lock(connection)
                 await connection.commit()
     finally:

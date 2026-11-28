@@ -5786,24 +5786,27 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         if self._state.composer_pending:
             return
         self._track_inflight_cancellable()
-        # 冻结能力 = 用户显式手选 ∩ 角色自身授权（默认能力不自动授予，R21）。
-        allowed_skills, allowed_mcp, bounds_error = await self._role_capability_bounds()
-        if bounds_error is not None:
-            if mode is Mode.EXECUTE:
-                self._set_state(composer_error_key=bounds_error)
-                return
-            # 讨论/计划零研究：授权未知时不携带任何外部能力，也不阻断直答/计划。
-            allowed_skills = allowed_mcp = frozenset()
-        skill_refs = self._state.skill_selection
-        if allowed_skills is not None:
-            skill_refs = tuple(ref for ref in skill_refs if f"skill:{ref[0]}@{ref[1]}" in allowed_skills)
+        # 先置 pending 再等待授权读取：避免两个并发首问在读取窗口内重复受理（重入保护）。
         self._set_state(composer_pending=True, composer_error_key=None, last_dispatch_reason=None)
-        selection = tuple(
-            self._mcp_identities[key] for key in self._state.mcp_scope_selected if key in self._mcp_identities
-        )
-        if allowed_mcp is not None:
-            selection = tuple(identity for identity in selection if identity.stable_key() in allowed_mcp)
+        skill_refs: tuple[tuple[str, str], ...] = ()
+        selection: tuple[MCPServiceIdentity, ...] = ()
         try:
+            # 冻结能力 = 用户显式手选 ∩ 角色自身授权（默认能力不自动授予，R21）。
+            allowed_skills, allowed_mcp, bounds_error = await self._role_capability_bounds()
+            if bounds_error is not None:
+                if mode is Mode.EXECUTE:
+                    self._set_state(composer_pending=False, composer_error_key=bounds_error)
+                    return
+                # 讨论/计划零研究：授权未知时不携带任何外部能力，也不阻断直答/计划。
+                allowed_skills = allowed_mcp = frozenset()
+            skill_refs = self._state.skill_selection
+            if allowed_skills is not None:
+                skill_refs = tuple(ref for ref in skill_refs if f"skill:{ref[0]}@{ref[1]}" in allowed_skills)
+            selection = tuple(
+                self._mcp_identities[key] for key in self._state.mcp_scope_selected if key in self._mcp_identities
+            )
+            if allowed_mcp is not None:
+                selection = tuple(identity for identity in selection if identity.stable_key() in allowed_mcp)
             # 会话键优先；新会话仅当用户**显式**选择过模型才写键（自动默认不写，
             # 读失败时也不覆盖已存键，如实保持继承）。
             preferred = self._state.session_model_connection_id

@@ -50,6 +50,10 @@ from utils.time_utils import get_now, to_utc_for_db
 
 logger = logging.getLogger(__name__)
 
+# D1-07: 维护窗口等待在途长批分块事务排空的上限（秒）。超时仍继续维护并记录
+# error——停机/清库不得被单个卡死的分块永久拖住；残留分块会因代际变化自行中止。
+_MAINTENANCE_DRAIN_TIMEOUT_SECONDS = 30.0
+
 
 from utils.singleton_registry import register_singleton
 
@@ -80,6 +84,8 @@ class CacheManager:
 
         del_loop_local("cache_maint_event")
         del_loop_local("cache_init_lock")
+        # D1-07: 维护代际/排空屏障同为 loop-local 状态，测试隔离须一并清理
+        del_loop_local("basedao_maint_barrier")
 
         # review03-C11 Step2: 清空 engine_provider 模块级状态，保证跨用例隔离
         engine_provider.reset_engine_provider()
@@ -209,19 +215,11 @@ class CacheManager:
             # 重试释放，否则 early-return 会让引擎/连接池泄漏到进程退出（atexit 亦跳过）。
             if self._disposed and self.engine is None:
                 return
-            # R5 修复 #M5-001：与 clear_all_cache 对称，先 clear 事件阻塞后续查询进入 DAO 路径
-            self._maintenance_event.clear()
             try:
-                BaseDao._get_maintenance_event().clear()
-            except Exception as e:
-                # P3-M5-ClassifyError-System-Gap: 接入 classify_severity 统一分类
-                severity = classify_severity(e, "db")
-                logger.debug(
-                    "[CacheManager] Maintenance event clear failed during dispose (severity=%s): %s",
-                    severity,
-                    safe_error(e),
-                )
-            try:
+                # R5 修复 #M5-001：与 clear_all_cache 对称，先阻塞后续查询进入 DAO 路径；
+                # D1-07：同时递增维护代际并等待在途长批分块事务排空。
+                # 放在 try 内：取消/异常路径由 finally 放行维护事件，避免写入永久阻塞。
+                await self._enter_maintenance()
                 self._disposed = True
                 # review03-C11 Step2: 同步 engine_provider，DAO 侧 R5 守卫即时生效
                 engine_provider.mark_disposed(True)
@@ -236,18 +234,8 @@ class CacheManager:
                 # web 模式下多 session 共享进程，必须重置以允许新 session 重建连接。
                 self._schema_initialized = False
             finally:
-                # R5 修复 #M5-001：与 clear_all_cache L359 对称，dispose 完成后 set 事件放行等待方
-                try:
-                    BaseDao._get_maintenance_event().set()
-                except Exception as e:
-                    # P3-M5-ClassifyError-System-Gap: 接入 classify_severity 统一分类
-                    severity = classify_severity(e, "db")
-                    logger.debug(
-                        "[CacheManager] Maintenance event set failed during dispose (severity=%s): %s",
-                        severity,
-                        safe_error(e),
-                    )
-                self._maintenance_event.set()
+                # R5 修复 #M5-001：与 clear_all_cache 对称，dispose 完成后 set 事件放行等待方
+                await self._exit_maintenance()
 
         # P3-M5-Close-DelLoopLocal-Risk 修复：close() 不删除 loop-local 锁实例。
         # 测试隔离已由 _reset_singleton 方法处理（该方法调用 del_loop_local）；
@@ -261,6 +249,54 @@ class CacheManager:
         if not self._maintenance_event.is_set():
             pass  # logger.info("[CacheManager] Waiting for maintenance...") removed
             await self._maintenance_event.wait()
+
+    async def _enter_maintenance(self) -> None:
+        """进入维护窗口：阻塞新写入、递增维护代际、等待在途长批分块排空（D1-07）。
+
+        调用方必须在 ``try/finally`` 中配对调用 :meth:`_exit_maintenance`，否则维护
+        事件不会重新 set，所有 DAO 写入将永久阻塞。
+
+        顺序要点：先 clear 事件（同一事件循环内同步生效，无 await 间隙），再递增代际，
+        最后等待排空——若反过来，写入可能在「等待排空」与「递增代际」之间登记为在途，
+        导致维护与分块抢写。代际递增放在排空之前，使被阻塞的写入恢复后必定观察到变化。
+        """
+        self._maintenance_event.clear()
+        try:
+            BaseDao._get_maintenance_event().clear()
+        except Exception as e:
+            # P3-M5-ClassifyError-System-Gap: 接入 classify_severity 统一分类
+            severity = classify_severity(e, "db")
+            logger.debug(
+                "[CacheManager] Maintenance event clear failed (severity=%s): %s",
+                severity,
+                safe_error(e),
+            )
+        barrier = BaseDao._get_maintenance_barrier()
+        barrier.bump_epoch()
+        if not await barrier.wait_drained(_MAINTENANCE_DRAIN_TIMEOUT_SECONDS):
+            logger.error(
+                "[CacheManager] Maintenance drain timeout (%.0fs): in-flight chunked writes still "
+                "active; proceeding with maintenance. Those writers will abort on their next epoch check.",
+                _MAINTENANCE_DRAIN_TIMEOUT_SECONDS,
+            )
+
+    async def _exit_maintenance(self) -> None:
+        """退出维护窗口：重新 set 维护事件放行等待的写入（D1-07）。
+
+        与 :meth:`_enter_maintenance` 配对；内部无 await，取消路径下 await 本方法仍会
+        完整执行，保证事件不会被遗留在 clear 状态。
+        """
+        try:
+            BaseDao._get_maintenance_event().set()
+        except Exception as e:
+            # P3-M5-ClassifyError-System-Gap: 接入 classify_severity 统一分类
+            severity = classify_severity(e, "db")
+            logger.debug(
+                "[CacheManager] Maintenance event set failed (severity=%s): %s",
+                severity,
+                safe_error(e),
+            )
+        self._maintenance_event.set()
 
     @staticmethod
     def _prepare_data_params(df: pd.DataFrame, cols: list, table_name: str | None = None):
@@ -409,12 +445,13 @@ class CacheManager:
         tables, materialized views). Falls back to metadata.drop_all() if
         the database user lacks OWNER/SUPERUSER privileges.
         """
-        self._maintenance_event.clear()
-        from data.persistence.daos.base_dao import BaseDao
         from data.persistence.models import metadata
 
-        BaseDao._get_maintenance_event().clear()
+        # D1-07：清库前阻塞新写入、递增维护代际并等待在途长批分块排空，
+        # 避免分块事务与 DROP SCHEMA 抢写、或把清库前的数据写入新库。
+        # 放在 try 内：取消/异常路径由 finally 放行维护事件，避免写入永久阻塞。
         try:
+            await self._enter_maintenance()
             # R5 修复 #M5-002：在 None 检查之前加 _disposed 守卫，防止 disposed 引擎被复用
             if self._disposed:
                 raise EngineDisposedError("CacheManager disposed during clear_all_cache")
@@ -444,19 +481,7 @@ class CacheManager:
             self._schema_initialized = False
             await self.init_db(force=True, auto_migrate=True)
         finally:
-            try:
-                from data.persistence.daos.base_dao import BaseDao
-
-                BaseDao._get_maintenance_event().set()
-            except Exception as e:
-                # P3-M5-ClassifyError-System-Gap: 接入 classify_severity 统一分类
-                severity = classify_severity(e, "db")
-                logger.debug(
-                    "[CacheManager] Failed to set BaseDao maintenance event (severity=%s): %s",
-                    severity,
-                    safe_error(e),
-                )
-            self._maintenance_event.set()
+            await self._exit_maintenance()
 
     # --- DELAGATIONS START HERE ---
 
@@ -606,12 +631,32 @@ class CacheManager:
         async def _check_single_table(table: str, meta: dict) -> tuple[str, dict]:
             table_type = meta.get("type", "stock")
             is_stock_table = table_type != "global"
-            is_sparse = meta.get("quality_config", {}).get("sparse", False)
+            quality_config = meta.get("quality_config", {})
+            is_sparse = quality_config.get("sparse", False)
 
             def _check_cancel() -> None:
                 # P3-M5: 关停/取消请求时及时中止健康检查，避免整体 >30s 才响应取消
                 if cancel_event is not None and cancel_event.is_set():
                     raise asyncio.CancelledError("cancel_event set during comprehensive health check")
+
+            def _fresh_ratio_from_date(value) -> float:
+                """按日期距今衰减计算新鲜度：<=7 天 1.0，<=30 天线性衰减，否则 0.0。"""
+                from utils.time_utils import parse_date
+
+                try:
+                    age_days = (get_now() - parse_date(value)).days
+                except (ValueError, TypeError) as exc:
+                    logger.debug(
+                        "[CacheManager] Health | Unparsable freshness date for %s: %s",
+                        table,
+                        safe_error(exc),
+                    )
+                    return 0.0
+                if age_days <= 7:
+                    return 1.0
+                if age_days <= 30:
+                    return max(0.0, 1.0 - (age_days - 7) / 23.0)
+                return 0.0
 
             tbl = ModelsBase.metadata.tables.get(table)
             if tbl is None:
@@ -643,66 +688,96 @@ class CacheManager:
                     else:
                         # OSS-01：列集合从 ORM 派生（纯结构，不触发 I18n）
                         cols = columns_of(table)
-                        keys = meta.get("sync_config", {}).get("keys", [])
-                        code_col = "con_code" if "con_code" in cols or "con_code" in keys else "ts_code"
-
-                        r = await conn.execute(
-                            sa.select(
-                                sa.func.count(sa.distinct(sa.column(code_col))),
-                            ).select_from(tbl),
-                        )
-                        _check_cancel()
-                        cnt = r.scalar() or 0
-                        ratio = min(1.0, cnt / total_stocks) if total_stocks > 0 else 0
-
+                        # D2-12：code 列必须是 ORM 真实存在的列；sync_config.keys 声明的列
+                        # 不保证物理存在（如 sw_industry_classify 无 ts_code），禁止先发查询再靠
+                        # UndefinedColumnError 探测列是否存在。
+                        code_col = "con_code" if "con_code" in cols else "ts_code"
+                        cnt = 0
+                        ratio = 0.0
                         fresh_ratio = 0.0
-                        date_col_candidates = []
-                        configured_col = meta.get("sync_config", {}).get("date_col")
-                        if configured_col:
-                            date_col_candidates.append(configured_col)
-                        date_col_candidates.extend(
-                            ["trade_date", "end_date", "ann_date"],
-                        )
-                        try:
-                            max_date = None
-                            for dc in date_col_candidates:
-                                try:
-                                    r2 = await conn.execute(
-                                        sa.select(
-                                            sa.func.max(sa.column(dc)),
-                                        ).select_from(tbl),
-                                    )
-                                    _check_cancel()
-                                    val = r2.scalar()
-                                    if val:
-                                        max_date = val
-                                        break
-                                except Exception as exc:
-                                    logger.debug(
-                                        "[CacheManager] Health | Date probe failed for %s.%s: %s",
-                                        table,
-                                        dc,
-                                        safe_error(exc),
-                                    )
-                                    continue
-                            if max_date:
-                                from utils.time_utils import parse_date
+                        if code_col not in cols:
+                            logger.warning(
+                                "[CacheManager] Health | Table %s has no stock code column (ts_code/con_code); "
+                                "coverage treated as unknown (ratio=0)",
+                                table,
+                            )
+                        else:
+                            r = await conn.execute(
+                                sa.select(
+                                    sa.func.count(sa.distinct(sa.column(code_col))),
+                                ).select_from(tbl),
+                            )
+                            _check_cancel()
+                            cnt = r.scalar() or 0
+                            ratio = min(1.0, cnt / total_stocks) if total_stocks > 0 else 0
 
-                                max_dt = parse_date(max_date)
-                                age_days = (get_now() - max_dt).days
-                                if age_days <= 7:
-                                    fresh_ratio = 1.0
-                                elif age_days <= 30:
-                                    fresh_ratio = max(0.0, 1.0 - (age_days - 7) / 23.0)
+                            # D2-12：低频维度表（sw_industry_member / stock_name_history 等）
+                            # 数据日期不代表同步新鲜度（长期无变动属正常），改按 sync_status
+                            # 成功同步时点评估；无成功记录时保持 0.0（未证实新鲜，不伪装）。
+                            if quality_config.get("freshness_source") == "sync_status":
+                                sync_tbl = ModelsBase.metadata.tables.get("sync_status")
+                                if sync_tbl is not None:
+                                    try:
+                                        r2 = await conn.execute(
+                                            sa.select(
+                                                sync_tbl.c.last_sync_date,
+                                                sync_tbl.c.status,
+                                            ).where(sync_tbl.c.table_name == table),
+                                        )
+                                        _check_cancel()
+                                        sync_row = r2.first()
+                                    except Exception as exc:
+                                        logger.debug(
+                                            "[CacheManager] Health | Sync-status freshness probe failed for %s: %s",
+                                            table,
+                                            safe_error(exc),
+                                        )
+                                        sync_row = None
+                                    if sync_row is not None:
+                                        sync_date, sync_status = sync_row[0], sync_row[1]
+                                        if sync_date and sync_status not in (
+                                            "failed",
+                                            "cancelled",
+                                            "skipped_permission",
+                                        ):
+                                            fresh_ratio = _fresh_ratio_from_date(sync_date)
+                            else:
+                                date_col_candidates = []
+                                configured_col = meta.get("sync_config", {}).get("date_col")
+                                if configured_col:
+                                    date_col_candidates.append(configured_col)
+                                date_col_candidates.extend(
+                                    ["trade_date", "end_date", "ann_date"],
+                                )
+                                # D2-12：先按 ORM 实际列集合过滤，再对存在的列取 max，
+                                # 不存在的候选列直接跳过（不再靠 SQL 异常探测）。
+                                valid_date_cols = [dc for dc in date_col_candidates if dc in cols]
+                                max_date = None
+                                for dc in valid_date_cols:
+                                    try:
+                                        r2 = await conn.execute(
+                                            sa.select(
+                                                sa.func.max(sa.column(dc)),
+                                            ).select_from(tbl),
+                                        )
+                                        _check_cancel()
+                                        val = r2.scalar()
+                                        if val:
+                                            max_date = val
+                                            break
+                                    except Exception as exc:
+                                        logger.debug(
+                                            "[CacheManager] Health | Date probe failed for %s.%s: %s",
+                                            table,
+                                            dc,
+                                            safe_error(exc),
+                                        )
+                                        continue
+                                if max_date:
+                                    fresh_ratio = _fresh_ratio_from_date(max_date)
 
                             if ratio < 0.01:
                                 fresh_ratio = 0.0
-                        except (ValueError, TypeError, RuntimeError) as exc:
-                            logger.debug(
-                                "[CacheManager] Health | Freshness check skipped for %s: %s",
-                                table,
-                                safe_error(exc),
-                            )
 
                     depth_ratio = None
                     if is_stock_table and global_trade_days > 0:
@@ -712,7 +787,7 @@ class CacheManager:
                         )
 
                     breadth_ratio = None
-                    is_daily_freq = meta.get("quality_config", {}).get("frequency") == "daily"
+                    is_daily_freq = quality_config.get("frequency") == "daily"
                     if is_daily_freq and global_expected_rows and global_expected_rows > 0:
                         try:
                             r_total = await conn.execute(

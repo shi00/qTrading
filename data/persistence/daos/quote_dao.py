@@ -9,6 +9,7 @@ import sqlalchemy as sa
 
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now
+from data.data_dictionary import TABLE_DEFINITIONS
 from data.constants import (
     MAJOR_INDICES,
     attach_daily_quotes_column_units,
@@ -144,39 +145,11 @@ _DENSITY_CHECKED_TABLES: frozenset[str] = frozenset(
 )
 
 
-_SAFE_TABLE_NAMES: frozenset[str] = frozenset(
-    {
-        "daily_quotes",
-        "daily_indicators",
-        "moneyflow_daily",
-        "margin_daily",
-        "northbound_holding",
-        "moneyflow_hsgt",
-        "index_daily",
-        "index_dailybasic",
-        "index_weight",
-        "limit_list",
-        "top_list",
-        "top_inst",
-        "block_trade",
-        "suspend_d",
-        "stk_limit",
-        "financial_reports",
-        "fina_audit",
-        "fina_forecast",
-        "fina_mainbz",
-        "dividend",
-        "repurchase",
-        "pledge_stat",
-        "shibor_daily",
-        "stk_holdernumber",
-        "top10_holders",
-        "trade_cal",
-        "stock_basic",
-        "macro_economy",
-        "market_news",
-    }
-)
+# D2-16: 安全表名白名单由 R12 正本 ``TABLE_DEFINITIONS`` ∩ ORM 实际表派生，杜绝手工清单与
+# 数据字典漂移（曾漏登记 express / pledge_detail 等 8 张业务表，使 check_table_has_data 对它们
+# 恒返回 False）。表名仅用于元数据查表（ORM 对象/列引用），不参与 SQL 字符串拼接，故派生扩大
+# 白名单不引入注入面；表名若不在 ORM metadata 中则本就不该被当作可查表。
+_SAFE_TABLE_NAMES: frozenset[str] = frozenset(TABLE_DEFINITIONS).intersection(Base.metadata.tables)
 
 # get_cached_dates_for_table 支撑的「表名 → 日期列」登记表（断点续传用）。
 # 新增同步表时须在此登记（守护测试见 tests/unit/test_sync_type_consistency.py），

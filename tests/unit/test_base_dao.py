@@ -9,6 +9,7 @@ import inspect
 import logging
 import math
 import pytest
+from contextlib import ExitStack
 from typing import cast, Any
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
@@ -16,11 +17,14 @@ import numpy as np
 import sqlalchemy as sa
 from decimal import Decimal
 from sqlalchemy import Date
+from sqlalchemy.exc import DBAPIError
 
 from data.persistence.daos.base_dao import (
     BaseDao,
     EngineDisposedError,
     DatabaseQueryError,
+    MaintenanceBarrier,
+    MaintenanceGenerationChangedError,
     _build_df_normalized,
     _normalize_records_frame,
 )
@@ -4129,3 +4133,432 @@ class TestNormalizeRecordsFrame:
         assert records[0]["event_time"] == datetime.datetime(2024, 1, 1, 10, 0, 0)
         assert records[1]["event_time"] is None
         assert _count_real_null(records) == 0
+
+    def test_float_inf_normalized_to_none_and_counted_as_non_finite(self):
+        """D2-16: ±inf 在 pd.notna 下为 True，必须按有限值判定归一为 None 并登记统计。"""
+        df = pd.DataFrame({"close": [1.5, float("inf"), float("-inf"), np.nan]})
+        records, stats = _normalize_records_frame(df, [], [])
+        assert records[0]["close"] == 1.5
+        assert records[1]["close"] is None
+        assert records[2]["close"] is None
+        assert records[3]["close"] is None  # 普通 NaN 由既有 NULL 归一处理
+        assert stats == {"close": {"count": 2, "samples": [float("inf"), float("-inf")], "kind": "non_finite"}}
+        assert _count_real_null(records) == 0
+
+    def test_decimal_infinity_in_object_column_normalized(self):
+        """D2-16: Decimal('Infinity') 混在 object 列中同样不得直送 NUMERIC。"""
+        df = pd.DataFrame({"amount": pd.Series([Decimal("Infinity"), Decimal("-Infinity"), Decimal("1.5"), None])})
+        records, stats = _normalize_records_frame(df, [], [])
+        assert records[0]["amount"] is None
+        assert records[1]["amount"] is None
+        assert records[2]["amount"] == Decimal("1.5")
+        assert records[3]["amount"] is None
+        assert stats["amount"]["count"] == 2
+        assert stats["amount"]["kind"] == "non_finite"
+
+    def test_plain_nan_is_missing_not_non_finite(self):
+        """D2-16: 合法缺失（float NaN / Decimal NaN）不得被误报为非有限值质量降级。"""
+        df = pd.DataFrame(
+            {
+                "a": [np.nan, 1.0],
+                "b": pd.Series([Decimal("NaN"), Decimal("2.5")], dtype=object),
+            }
+        )
+        records, stats = _normalize_records_frame(df, [], [])
+        assert records[0]["a"] is None
+        assert records[0]["b"] is None
+        assert stats == {}
+        assert _count_real_null(records) == 0
+
+    def test_string_literal_inf_not_treated_as_numeric_non_finite(self):
+        """D2-16: 字符串列中的字面量 "inf" 不是数值，必须原样保留。"""
+        df = pd.DataFrame({"note": ["inf", "normal", np.nan]})
+        records, stats = _normalize_records_frame(df, [], [])
+        assert records[0]["note"] == "inf"
+        assert records[1]["note"] == "normal"
+        assert records[2]["note"] is None
+        assert stats == {}
+
+
+class TestMaintenanceBarrier:
+    """D1-07: 维护代际（epoch）与在途写入排空计数的契约。"""
+
+    @pytest.mark.asyncio
+    async def test_epoch_monotonic(self):
+        barrier = MaintenanceBarrier()
+        epoch_before = barrier.epoch
+        assert barrier.bump_epoch() == epoch_before + 1
+        assert barrier.bump_epoch() == epoch_before + 2
+        assert barrier.epoch == epoch_before + 2
+
+    @pytest.mark.asyncio
+    async def test_wait_drained_blocks_until_last_writer_finishes(self):
+        barrier = MaintenanceBarrier()
+        barrier.begin_write()
+        barrier.begin_write()
+        drain_task = asyncio.create_task(barrier.wait_drained(1.0))
+        await asyncio.sleep(0.01)
+        assert not drain_task.done(), "仍有在途写入时不得判定排空"
+        barrier.end_write()
+        await asyncio.sleep(0.01)
+        assert not drain_task.done(), "最后一个在途写入未结束前不得判定排空"
+        barrier.end_write()
+        assert await asyncio.wait_for(drain_task, timeout=1.0) is True
+
+    @pytest.mark.asyncio
+    async def test_wait_drained_times_out_without_leaking_counter(self):
+        barrier = MaintenanceBarrier()
+        barrier.begin_write()
+        assert await barrier.wait_drained(0.01) is False, "超时须返回 False 而非永久阻塞"
+        barrier.end_write()
+        assert await barrier.wait_drained(0.01) is True
+        # 多余的回收不得把计数变负或卡住排空判定
+        barrier.end_write()
+        assert await barrier.wait_drained(0.01) is True
+
+
+class TestSaveUpsertMaintenanceEpoch:
+    """D1-07: 超长批 UPSERT 的分块事务必须与维护窗口互斥。
+
+    背景：``_save_upsert`` 在记录数超阈值时逐块独立事务；分块之间若发生清库
+    重建或停机关闭引擎，剩余分块会把维护前准备的陈旧数据写入新库（或与维护
+    期间 DDL 抢写）。修复后每块开事务前重新等待维护事件、复查引擎并校验维护
+    代际/引擎身份，跨代际立即中止。
+    """
+
+    @staticmethod
+    def _build_upsert_mocks(record_count: int):
+        mock_table = MagicMock()
+        mock_table.columns = {}
+        mock_col = MagicMock()
+        mock_col.name = "id"
+        mock_table.c = {"id": mock_col}
+        df = pd.DataFrame({"id": list(range(record_count)), "name": ["x"] * record_count})
+        records = [{"id": i, "name": "x"} for i in range(record_count)]
+        return df, mock_table, records
+
+    @staticmethod
+    def _enter_upsert_patches(mock_table, records, threshold: int = 2):
+        from data.persistence.daos import base_dao as bd_mod
+
+        mock_meta = MagicMock()
+        mock_meta.tables = {"test_table": mock_table}
+        mock_tpm_instance = MagicMock()
+        mock_tpm_instance.run_async = AsyncMock(return_value=(records, {}))
+        mock_stmt = MagicMock()
+        mock_stmt.excluded = MagicMock()
+        mock_stmt.on_conflict_do_nothing.return_value = mock_stmt
+        return (
+            patch.object(bd_mod, "_LONG_TX_ROW_THRESHOLD", threshold),
+            patch("data.persistence.models.Base.metadata", mock_meta),
+            patch("data.persistence.daos.base_dao.ThreadPoolManager", return_value=mock_tpm_instance),
+            patch("data.persistence.daos.base_dao.pg_insert", return_value=mock_stmt),
+        )
+
+    @pytest.mark.asyncio
+    async def test_epoch_change_aborts_remaining_chunks(self):
+        """第一块提交后维护代际变化 → 后续分块不得再开事务，抛受控异常。"""
+        from data.persistence.daos import base_dao as bd_mod
+
+        barrier = MaintenanceBarrier()
+        begins = 0
+
+        class _BeginCM:
+            async def __aenter__(self):
+                nonlocal begins
+                begins += 1
+                if begins == 1:
+                    # 模拟第一块提交后、下一块开始前进入维护窗口
+                    barrier.bump_epoch()
+                return AsyncMock()
+
+            async def __aexit__(self, *exc):
+                return False
+
+        mock_engine = MagicMock()
+        mock_engine.begin = MagicMock(side_effect=_BeginCM)
+        dao = bd_mod.BaseDao(mock_engine)
+        df, mock_table, records = self._build_upsert_mocks(1001)
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(bd_mod.BaseDao, "_get_maintenance_barrier", return_value=barrier))
+            for patch_ctx in self._enter_upsert_patches(mock_table, records):
+                stack.enter_context(patch_ctx)
+            with pytest.raises(MaintenanceGenerationChangedError, match="generation"):
+                await dao._save_upsert(df, "test_table", ["id", "name"], ["id"])
+
+        assert begins == 1, "跨代际后不得再开启后续分块事务"
+        assert await barrier.wait_drained(0.1) is True, "中止后不得残留排空计数"
+
+    @pytest.mark.asyncio
+    async def test_chunk_waits_for_maintenance_window_before_aborting(self):
+        """维护窗口期间后续分块不得抢写：必须先等待维护事件放行，再因代际变化中止。"""
+        from data.persistence.daos import base_dao as bd_mod
+
+        barrier = MaintenanceBarrier()
+        maint_event = asyncio.Event()
+        maint_event.set()
+        loop = asyncio.get_running_loop()
+        begins = 0
+        maintenance_released_at: list[float] = []
+
+        class _BeginCM:
+            async def __aenter__(self):
+                nonlocal begins
+                begins += 1
+                if begins == 1:
+                    # 模拟维护窗口开启：阻塞新写入 + 递增代际，50ms 后放行
+                    maint_event.clear()
+                    barrier.bump_epoch()
+
+                    async def _finish_maintenance():
+                        await asyncio.sleep(0.05)
+                        maintenance_released_at.append(loop.time())
+                        maint_event.set()
+
+                    asyncio.create_task(_finish_maintenance())
+                return AsyncMock()
+
+            async def __aexit__(self, *exc):
+                return False
+
+        mock_engine = MagicMock()
+        mock_engine.begin = MagicMock(side_effect=_BeginCM)
+        dao = bd_mod.BaseDao(mock_engine)
+        df, mock_table, records = self._build_upsert_mocks(1001)
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(bd_mod.BaseDao, "_get_maintenance_barrier", return_value=barrier))
+            stack.enter_context(patch.object(bd_mod.BaseDao, "_get_maintenance_event", return_value=maint_event))
+            for patch_ctx in self._enter_upsert_patches(mock_table, records):
+                stack.enter_context(patch_ctx)
+            with pytest.raises(MaintenanceGenerationChangedError) as exc_info:
+                await dao._save_upsert(df, "test_table", ["id", "name"], ["id"])
+            aborted_at = loop.time()
+
+        message = str(exc_info.value)
+        assert "epoch" in message and "remaining chunks discarded" in message
+
+        assert begins == 1, "维护窗口期间不得开启新的分块事务（抢写）"
+        assert maintenance_released_at, "维护窗口必须在放行前被观察到"
+        assert aborted_at >= maintenance_released_at[0], "中止必须发生在维护放行之后"
+
+    @pytest.mark.asyncio
+    async def test_drain_counter_released_when_chunk_raises(self):
+        """分块执行抛异常时排空计数必须回收，不得让维护窗口永久等待。"""
+        from data.persistence.daos import base_dao as bd_mod
+
+        barrier = MaintenanceBarrier()
+
+        class _BeginCM:
+            async def __aenter__(self):
+                conn = AsyncMock()
+                conn.execute = AsyncMock(side_effect=RuntimeError("chunk write failed"))
+                return conn
+
+            async def __aexit__(self, *exc):
+                return False
+
+        mock_engine = MagicMock()
+        mock_engine.begin = MagicMock(side_effect=_BeginCM)
+        dao = bd_mod.BaseDao(mock_engine)
+        df, mock_table, records = self._build_upsert_mocks(1001)
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(bd_mod.BaseDao, "_get_maintenance_barrier", return_value=barrier))
+            for patch_ctx in self._enter_upsert_patches(mock_table, records):
+                stack.enter_context(patch_ctx)
+            with pytest.raises(RuntimeError, match="chunk write failed"):
+                await dao._save_upsert(df, "test_table", ["id", "name"], ["id"])
+
+        assert await barrier.wait_drained(0.1) is True, "异常路径不得泄漏排空计数"
+
+    @pytest.mark.asyncio
+    async def test_normal_size_does_not_register_drain_counter(self):
+        """未触发超长批时不得登记排空计数（维护窗口不应等待单事务批次）。"""
+        from data.persistence.daos import base_dao as bd_mod
+
+        barrier = MaintenanceBarrier()
+        mock_engine = MagicMock()
+        mock_engine.begin = MagicMock(side_effect=lambda: _setup_mock_engine_begin_cm())
+        dao = bd_mod.BaseDao(mock_engine)
+        df, mock_table, records = self._build_upsert_mocks(2)
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(bd_mod.BaseDao, "_get_maintenance_barrier", return_value=barrier))
+            for patch_ctx in self._enter_upsert_patches(mock_table, records, threshold=20_000):
+                stack.enter_context(patch_ctx)
+            result = await dao._save_upsert(df, "test_table", ["id", "name"], ["id"])
+
+        assert result == 2
+        assert await barrier.wait_drained(0.01) is True
+
+
+def _setup_mock_engine_begin_cm():
+    class _BeginCM:
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    return _BeginCM()
+
+
+# D1-06 / R9：DB 异常绑定参数不得经日志 / traceback / 上抛异常泄露。
+# 测试内凭据均为显式构造值，非真实密钥（R10）。
+_TEST_BOUND_SECRET = "my-pin"
+_TEST_DSN_PASSWORD = "fake-dsn-password"
+
+
+class _FakePgError(Exception):
+    """模拟 asyncpg 驱动异常（带 sqlstate 属性）。"""
+
+    sqlstate: str
+
+    def __init__(self, message: str, sqlstate: str) -> None:
+        super().__init__(message)
+        self.sqlstate = sqlstate
+
+
+def _make_dbapi_error() -> DBAPIError:
+    """构造携带短凭据与连接串的 DBAPIError（模拟 SQLAlchemy 对 asyncpg 的包装）。"""
+    orig = _FakePgError(
+        'duplicate key value violates unique constraint "app_state_pkey"; '
+        f"dsn=postgresql+asyncpg://app_user:{_TEST_DSN_PASSWORD}@db.internal:5432/qtrading",
+        "23505",
+    )
+    return DBAPIError(
+        "INSERT INTO app_state (config_key, config_value) VALUES ($1, $2)",
+        ("config_key", _TEST_BOUND_SECRET),
+        orig,
+    )
+
+
+def _full_log_text(caplog) -> str:
+    """渲染含 exc_info 的完整日志文本（record.getMessage 不含 traceback）。"""
+    formatter = logging.Formatter("%(message)s")
+    return "\n".join(formatter.format(record) for record in caplog.records)
+
+
+class TestDbErrorRedaction:
+    """D1-06 / R9：日志、traceback 与上抛异常均不得含绑定参数明文。"""
+
+    @staticmethod
+    def _assert_no_leak(text: str) -> None:
+        assert _TEST_BOUND_SECRET not in text
+        assert _TEST_DSN_PASSWORD not in text
+
+    @pytest.mark.asyncio
+    async def test_read_db_raises_sanitized_error_without_cause(self, caplog):
+        mock_conn = AsyncMock()
+        mock_conn.exec_driver_sql.side_effect = _make_dbapi_error()
+        dao = BaseDao(_setup_mock_engine_connect(mock_conn))
+
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(DatabaseQueryError) as exc_info:
+                await dao._read_db("SELECT * FROM app_state", suppress_errors=False)
+
+        message = str(exc_info.value)
+        self._assert_no_leak(message)
+        # 诊断要素保留：安全类名 + SQLSTATE
+        assert "DBAPIError" in message
+        assert "sqlstate=23505" in message
+        # 原始异常链断开，调用方以 exc_info=True 记录也不会带出参数块
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__suppress_context__ is True
+        self._assert_no_leak(_full_log_text(caplog))
+
+    @pytest.mark.asyncio
+    async def test_write_db_shared_conn_raises_sanitized_error(self, caplog):
+        mock_conn = AsyncMock()
+        mock_conn.exec_driver_sql.side_effect = _make_dbapi_error()
+        dao = BaseDao(MagicMock())
+
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(DatabaseQueryError) as exc_info:
+                await dao._write_db(
+                    "INSERT INTO app_state VALUES ($1, $2)",
+                    params=("config_key", _TEST_BOUND_SECRET),
+                    conn=mock_conn,
+                )
+
+        message = str(exc_info.value)
+        self._assert_no_leak(message)
+        assert "sqlstate=23505" in message
+        assert exc_info.value.__cause__ is None
+        self._assert_no_leak(_full_log_text(caplog))
+
+    @pytest.mark.asyncio
+    async def test_save_upsert_shared_conn_raises_sanitized_error(self, caplog):
+        mock_conn = AsyncMock()
+        mock_conn.execute.side_effect = _make_dbapi_error()
+        mock_table = MagicMock()
+        mock_table.columns = {}
+        mock_col_a = MagicMock()
+        mock_col_a.name = "a"
+        mock_table.c = {"a": mock_col_a}
+        dao = BaseDao(MagicMock())
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+            caplog.at_level(logging.DEBUG),
+        ):
+            mock_cm._instance = None
+            mock_meta.tables = {"test_table": mock_table}
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"a": 1}], {}))
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+
+            with pytest.raises(DatabaseQueryError) as exc_info:
+                await dao._save_upsert(
+                    pd.DataFrame({"a": [1]}),
+                    "test_table",
+                    ["a"],
+                    ["a"],
+                    conn=mock_conn,
+                )
+
+        message = str(exc_info.value)
+        self._assert_no_leak(message)
+        assert "sqlstate=23505" in message
+        assert exc_info.value.__cause__ is None
+        self._assert_no_leak(_full_log_text(caplog))
+
+    @pytest.mark.asyncio
+    async def test_chunked_execute_raises_sanitized_error(self):
+        async def _failing_db_fn(sql, params, **kwargs):
+            raise _make_dbapi_error()
+
+        with pytest.raises(DatabaseQueryError) as exc_info:
+            await BaseDao._chunked_execute(
+                _failing_db_fn,
+                "SELECT 1 WHERE id IN ({placeholders})",
+                [1, 2],
+            )
+
+        message = str(exc_info.value)
+        self._assert_no_leak(message)
+        assert "sqlstate=23505" in message
+        assert exc_info.value.__cause__ is None
+
+    @pytest.mark.asyncio
+    async def test_guarded_begin_raises_sanitized_error(self):
+        engine = MagicMock()
+        engine.begin.return_value.__aenter__ = AsyncMock(side_effect=_make_dbapi_error())
+        engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+        dao = BaseDao(engine)
+
+        with pytest.raises(DatabaseQueryError) as exc_info:
+            async with dao._guarded_begin():
+                pass  # pragma: no cover - 建事务即失败
+
+        self._assert_no_leak(str(exc_info.value))
+        assert exc_info.value.__cause__ is None

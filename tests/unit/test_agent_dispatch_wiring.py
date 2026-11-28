@@ -852,7 +852,7 @@ def test_retry_launcher_propagates_submit_failure_and_cancellation() -> None:
     failing = _NativeRetryLauncher(
         gate=_FakeGate(closed=False), submit=_RecordingSubmitter(error=RuntimeError("dbos down"))
     )
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as exc_info:
         asyncio.run(
             failing.launch(
                 _RETRY_PAYLOAD,
@@ -861,11 +861,12 @@ def test_retry_launcher_propagates_submit_failure_and_cancellation() -> None:
                 round_id=_RETRY_ROUND_ID,
             )
         )
+    assert str(exc_info.value) == "dbos down"
 
     cancelled = _NativeRetryLauncher(
         gate=_FakeGate(closed=False), submit=_RecordingSubmitter(error=asyncio.CancelledError())
     )
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError) as cancel_info:
         asyncio.run(
             cancelled.launch(
                 _RETRY_PAYLOAD,
@@ -874,6 +875,7 @@ def test_retry_launcher_propagates_submit_failure_and_cancellation() -> None:
                 round_id=_RETRY_ROUND_ID,
             )
         )
+    assert isinstance(cancel_info.value, asyncio.CancelledError)
 
 
 def test_submit_and_dispatch_without_dispatcher_is_zero_dispatch() -> None:
