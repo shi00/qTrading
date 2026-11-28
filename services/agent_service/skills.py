@@ -97,7 +97,6 @@ BEHAVIORAL_FRONTMATTER_FIELDS: frozenset[str] = frozenset(
         "paths",
         "shell",
         "tools",
-        "when_to_use",
     }
 )
 
@@ -354,6 +353,9 @@ class SkillManifest:
     ignored_behavioral_fields: tuple[str, ...]
     model_invocable: bool
     user_invocable: bool
+    #: 2.77.0 #13678：``when_to_use`` 由 Harness 原生识别，不再当作未知行为字段；
+    #: 本层原样保留供目录/提示展示，不参与导入赋权。
+    when_to_use: str | None = None
 
 
 def _require_safe_entry_name(name: str) -> str:
@@ -773,6 +775,7 @@ def parse_skill_manifest(data: bytes, *, directory_name: str) -> SkillManifest:
             mapping.get("disable-model-invocation"), "disable-model-invocation", default=False
         ),
         user_invocable=_frontmatter_boolean(mapping.get("user-invocable"), "user-invocable", default=True),
+        when_to_use=_frontmatter_text(mapping.get("when_to_use"), "when_to_use"),
     )
 
 

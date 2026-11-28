@@ -44,9 +44,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, ClassVar, Final, Protocol, cast
 
@@ -68,12 +68,16 @@ from core.model_management_types import (
     TextContentPart,
 )
 from pydantic_ai import UnexpectedModelBehavior
+from pydantic_ai.exceptions import ModelAPIError, ModelContextWindowExceededError
+from pydantic_ai.framing import wrap
 from pydantic_ai.messages import (
+    CompactionPart,
     ModelMessage,
     ModelRequest,
     ModelResponse,
     ModelResponsePart,
     ModelResponseStreamEvent,
+    RetryFeedbackPart,
     RetryPromptPart,
     SystemPromptPart,
     TextContent,
@@ -92,6 +96,10 @@ logger = logging.getLogger(__name__)
 
 #: 选型别名（ResolveModelId 仅解析该别名，HANDOFF §6.2）
 BOUND_MODEL_ALIAS: Final[str] = "qtrading:bound"
+
+#: 上下文超窗稳定错误码（Executor / error_classifier 同源；桥层据此转译为原生
+#: ``ModelContextWindowExceededError`` 触发单次压缩重试，§3.1-6）。
+CONTEXT_WINDOW_EXCEEDED_CODE: Final[str] = "context_window_exceeded"
 
 # 流通道有界深度（SQ-02「实际 delta 有界事件」）：生产侧 on_event await 受阻
 # 即对适配器产生背压；消费侧 get 逐事件取出。有界值不承载语义，仅需有限。
@@ -128,7 +136,7 @@ class ChatTurnExecutor(Protocol):
 _REFUSED_MESSAGE: Final[str] = "chat turn refused by provider policy"
 
 
-class ModelTurnRefusedError(UnexpectedModelBehavior):
+class ModelTurnRefusedError(UnexpectedModelBehavior, ModelAPIError):
     """提供方确定内容拒绝（完成的模型回合，非协议 / 传输失败）。
 
     真实 Executor 以 ``status="failed"`` + ``transport_state="ok"`` + 完整
@@ -137,7 +145,25 @@ class ModelTurnRefusedError(UnexpectedModelBehavior):
     ``except UnexpectedModelBehavior`` 仍可捕获）让消费方把「确定拒绝」与普通
     模型 / 协议失败分类；拒绝原文只留在 ``body``（内部事实，调用方不得写入
     日志 / 用户可见字段，R9/R21），message 不含原文。
+
+    ``2.77.0`` 起 ``UnexpectedModelBehavior`` 不再继承 ``ModelAPIError``（#11732
+    谱系拆分）；同时继承两者，使既有按 ``ModelAPIError`` 分类的消费方仍能识别
+    拒绝（否则会被当成未知异常）。两族 ``__init__`` 协作会菱形冲突，故显式
+    初始化（字段取两族并集）；``UnexpectedModelBehavior.__reduce__`` 仍按
+    ``(message, body)`` 重建，可被 DBOS 持久化重放。叶运行按本类最先捕获（B7）。
     """
+
+    def __init__(self, message: str, body: str | None = None) -> None:
+        RuntimeError.__init__(self, message)
+        self.message = message
+        self.body = body
+        # ModelAPIError 一等字段：分类消费方可能读取（model_name 用绑定别名，
+        # 真实模型身份由响应承载，不在此臆造具体模型，R21）。
+        self.model_name = BOUND_MODEL_ALIAS
+        self.provider_error_code: str | None = None
+        self.provider_error_type: str | None = None
+        self.retry_after: float | None = None
+        self.in_stream = False
 
 
 def _refused_response(outcome: ChatTurnOutcome) -> ChatTurnResponse | None:
@@ -339,6 +365,26 @@ def _map_request_parts(message: ModelRequest, path: str) -> tuple[list[str], lis
                     # 无 tool_call_id 的重试反馈映射为用户文本；空值不抬升为空 parts
                     # （用户空正文仍按原规则拒绝，不放宽）
                     messages.append(ChatMessage(role="user", content_parts=(TextContentPart(text=text or ""),)))
+            case RetryFeedbackPart(content=content):
+                # 2.77.0 起重试反馈由 RetryFeedbackPart 承载（RetryPromptPart 仅作
+                # 历史重放兼容）：无 tool_call_id，映射为用户文本；框架外层标签
+                # 保证来源可辨（不冒充用户原话）。
+                text = _content_to_text(content, part_path)
+                messages.append(ChatMessage(role="user", content_parts=(TextContentPart(text=text or ""),)))
+            case CompactionPart(content=content, provider_name=provider_name, provider_details=provider_details):
+                # 2.77.0 请求侧 CompactionPart 不经 prepare_messages 转译（B1）：
+                # 仅本地摘要（无供应商加密字段）可转义为带来源标签的用户文本；
+                # 含供应商字段即不可移植，明确拒绝而非静默丢弃（R21）。
+                if provider_name is not None or provider_details is not None:
+                    raise ModelTurnProtocolError("unknown_part", f"{part_path}.compaction.provider_details")
+                if not isinstance(content, str) or not content:
+                    raise ModelTurnProtocolError("invalid_field", f"{part_path}.compaction.content")
+                messages.append(
+                    ChatMessage(
+                        role="user",
+                        content_parts=(TextContentPart(text=wrap("conversation_summary", content)),),
+                    )
+                )
             case _:
                 raise _reject_part(part, part_path)
     return instructions, messages
@@ -398,26 +444,72 @@ def _map_tool_spec(spec: ToolDefinition, *, output_tool: bool, schema_version: s
     )
 
 
-def _deadline_from_settings(model_settings: Mapping[str, Any]) -> float:
+def _deadline_from_settings(model_settings: Mapping[str, Any], *, default_timeout: float | None = None) -> float:
     """回合冻结绝对 deadline（单调时钟）：ModelSettings['timeout']（秒）投影。
 
     timeout / deadline 区分（§6.3）：SDK ``timeout`` 为回合预算来源，桥层换算
     为单调时钟绝对值；缺失 / 元组形态 / 非正数明确拒绝（zero outbound，
     不臆造默认预算，R21）。
+
+    ``default_timeout`` 仅供**不带 settings 的内部子请求**（原生
+    ``FileUnderstanding`` / ``Advisor`` / ``SummarizingCompaction`` 的摘要子
+    ``Agent``）注入同一冻结绝对期限的剩余秒数；裸构造（``None``）保持
+    fail-closed。显式 settings 优先，默认值不覆盖调用方给出的预算。
     """
     timeout = model_settings.get("timeout")
     if not isinstance(timeout, int | float) or isinstance(timeout, bool) or timeout <= 0:
-        raise ModelTurnProtocolError("invalid_field", "$.settings.timeout")
+        if default_timeout is None:
+            raise ModelTurnProtocolError("invalid_field", "$.settings.timeout")
+        timeout = default_timeout
+        if not isinstance(timeout, int | float) or isinstance(timeout, bool) or timeout <= 0:
+            raise ModelTurnProtocolError("invalid_field", "$.settings.timeout")
     return asyncio.get_running_loop().time() + float(timeout)
 
 
-def _frozen_params(model_settings: Mapping[str, Any]) -> dict[str, Any]:
-    """冻结采样参数：settings 全量透传（timeout 已消费为 deadline，剔除）。
+#: ``ModelSettings`` 中由一等字段承载、不得混入 ``frozen_params`` 的键（§3.1-2）。
+_PROJECTED_SETTING_KEYS: Final[frozenset[str]] = frozenset({"tool_choice", "cache", "thinking", "thinking_summary"})
 
-    未知键原样保留（不裁剪）；适配器 / 供应商对不支持的键自行报错（§10.1
-    参数完整性优先，桥层不代裁剪）。
+
+def _project_settings(
+    model_settings: Mapping[str, Any],
+) -> tuple[dict[str, Any], str | None, Mapping[str, Any] | None, Mapping[str, Any] | None]:
+    """``ModelSettings`` → (frozen_params, tool_choice, cache_policy, thinking_policy)。
+
+    ``tool_choice`` / ``cache`` / ``thinking`` / ``thinking_summary`` 是 SDK
+    能力写入的**一等控制项**：原样混入 ``frozen_params`` 会在
+    ``drop_params=False`` 下被供应商判为非法外参，因此在此投影为独立字段，
+    由出站适配器按供应商能力转译或忽略（§3.1-2）。未知键仍原样保留（不裁剪）。
     """
-    return {key: value for key, value in model_settings.items() if key != "timeout"}
+    frozen: dict[str, Any] = {
+        key: value for key, value in model_settings.items() if key != "timeout" and key not in _PROJECTED_SETTING_KEYS
+    }
+
+    tool_choice = model_settings.get("tool_choice")
+    if tool_choice is not None and not isinstance(tool_choice, str):
+        raise ModelTurnProtocolError("invalid_field", "$.settings.tool_choice")
+
+    cache_setting = model_settings.get("cache")
+    cache_policy: Mapping[str, Any] | None = None
+    if isinstance(cache_setting, bool):
+        cache_policy = {"enabled": cache_setting}
+    elif isinstance(cache_setting, str):
+        cache_policy = {"enabled": True, "retention": cache_setting}
+    elif isinstance(cache_setting, Mapping):
+        cache_policy = {"enabled": True, **dict(cache_setting)}
+
+    thinking_level = model_settings.get("thinking")
+    thinking_summary = model_settings.get("thinking_summary")
+    thinking_policy: dict[str, Any] = {}
+    if isinstance(thinking_level, str):
+        thinking_policy["effort"] = thinking_level
+    elif thinking_level is True:
+        thinking_policy["effort"] = "medium"
+    if thinking_summary is not None:
+        if not isinstance(thinking_summary, bool):
+            raise ModelTurnProtocolError("invalid_field", "$.settings.thinking_summary")
+        thinking_policy["summary"] = thinking_summary
+
+    return frozen, tool_choice, cache_policy, thinking_policy or None
 
 
 def derive_model_call_id(call_identity: str, turn_index: int) -> str:
@@ -449,6 +541,7 @@ def build_chat_turn_request(
     *,
     tool_schema_version: str,
     model_call_id: str,
+    default_timeout: float | None = None,
 ) -> ChatTurnRequest:
     """SDK 消息 → core ``ChatTurnRequest`` 一次投影（§6.3）。
 
@@ -504,16 +597,20 @@ def build_chat_turn_request(
         for spec in model_request_parameters.function_tools
     )
     output_object = model_request_parameters.output_object
+    frozen_params, tool_choice, cache_policy, thinking_policy = _project_settings(model_settings)
     request = ChatTurnRequest(
         model_call_id=model_call_id,
         messages=tuple(chat_messages),
         instructions=tuple(instructions),
         tools=(*function_tools, *output_tools),
         output_schema=output_object.json_schema if output_object is not None else None,
-        frozen_params=_frozen_params(model_settings),
+        frozen_params=frozen_params,
         max_output_tokens=model_settings.get("max_tokens"),
-        deadline=_deadline_from_settings(model_settings),
+        deadline=_deadline_from_settings(model_settings, default_timeout=default_timeout),
         output_mode=cast("ChatOutputMode", output_mode),
+        tool_choice=tool_choice,
+        cache_policy=cache_policy,
+        thinking_policy=thinking_policy,
     )
     request.ensure_valid()
     return request
@@ -547,19 +644,16 @@ def map_usage(usage: NormalizedLLMUsage | None) -> RequestUsage:
 
     账本事实由 Recorder 经 ``execute_chat_turn`` 承载——SDK 默认 0 **不倒灌
     账本**（§6.3）；核心字段 None（未计量）在 SDK 层以 0 + unmeasured 标记
-    承载，不进入任何落账路径。
+    承载，不进入任何落账路径。缓存读写写入 ``RequestUsage`` **顶层一等字段**
+    （而非 ``details``），使 ``2.77.0`` ``WarnOnCacheBusts`` 能直接生效（§3.1-5）。
     """
     if usage is None:
         return RequestUsage(unmeasured_requests=1)
-    details: dict[str, int] = {}
-    if usage.cache_read_tokens is not None:
-        details["cache_read_tokens"] = usage.cache_read_tokens
-    if usage.cache_write_tokens is not None:
-        details["cache_write_tokens"] = usage.cache_write_tokens
     return RequestUsage(
         input_tokens=usage.input_total_tokens or 0,
         output_tokens=usage.output_tokens or 0,
-        details=details,
+        cache_read_tokens=usage.cache_read_tokens or 0,
+        cache_write_tokens=usage.cache_write_tokens or 0,
     )
 
 
@@ -724,6 +818,18 @@ class GatewayStreamedResponse(StreamedResponse):
     def timestamp(self) -> datetime:
         return self._timestamp
 
+    def get(self) -> ModelResponse:
+        """终态响应（§3.1-4）：保留 ``2.77.0`` 原生 ``state`` / ``failed_attempts``
+        判定，仅回填真实服务模型 ID（流式 failover 不被主候选别名掩盖）。
+        """
+        response = super().get()
+        outcome = self.channel.outcome
+        actual: str | None = None
+        if outcome is not None and outcome.response is not None:
+            actual = outcome.response.actual_model
+        model_id = f"qtrading:{actual}" if isinstance(actual, str) and actual else BOUND_MODEL_ALIAS
+        return replace(response, model_id=model_id)
+
     async def _get_event_iterator(self) -> AsyncIterator[ModelResponseStreamEvent]:
         # model_call_id 经 provider_response_id 承载（SDK 请求追踪通道；账本
         # 关联经 invocation=model_call_id 双通道稳定，HANDOFF §6.1 L197）
@@ -809,6 +915,12 @@ class GatewayStreamedResponse(StreamedResponse):
             if refused is not None:
                 raise ModelTurnRefusedError(_REFUSED_MESSAGE, refused.refusal)
             if outcome.status == "failed":
+                # 上下文超窗（零公开分片）：转译为原生异常，触发单次压缩重试；
+                # 已公开分片后仍按普通失败收敛（不拼半截内容为整回合，R21）。
+                if outcome.partial_text is None and outcome.error_code == CONTEXT_WINDOW_EXCEEDED_CODE:
+                    raise ModelContextWindowExceededError(
+                        self.model_name, "chat turn rejected: context window exceeded", in_stream=True
+                    )
                 raise UnexpectedModelBehavior(f"chat turn failed: {outcome.error_code}", outcome.partial_text)
         # 截断流（通道干净结束但从未收到 finish 事件）不得当作成功回合：无终止
         # 确认即「未核收尾」，外层结果与账本须按失败收敛（R21，不静默截断）。
@@ -863,6 +975,7 @@ class GatewayModel(Model):
         tool_schema_version: str,
         call_identity: str,
         profile: ModelProfile | None = None,
+        default_timeout_provider: Callable[[], float] | None = None,
     ) -> None:
         super().__init__(settings=None, profile=profile)
         self._executor = executor
@@ -872,6 +985,12 @@ class GatewayModel(Model):
         if not isinstance(call_identity, str) or not call_identity:
             raise ValueError("call_identity must be non-empty text (persistent execution identity)")
         self._call_identity = call_identity
+        # 原生内部子请求（FileUnderstanding / Advisor / SummarizingCompaction 的
+        # 摘要 Agent）不传 timeout：装配期注入同一冻结绝对期限的剩余秒数，避免
+        # 内部子调用在裸 settings 下 fail-closed（§3.1-1）；默认 None 保持裸调用。
+        self._default_timeout_provider = default_timeout_provider
+        # 上次实际服务模型（用于 ``model_id`` 回报真实身份而非绑定别名，§3.1-4）
+        self._actual_model: str | None = None
         # 本步骤内已发出的模型回合数：重放从步骤起点重新执行时归零，同一回合
         # 复得同一调用号（账本 invocation 幂等复用，恢复不新造 operation）。
         self._turn_index = 0
@@ -886,6 +1005,20 @@ class GatewayModel(Model):
 
     @property
     def model_name(self) -> str:
+        return BOUND_MODEL_ALIAS
+
+    @property
+    def model_id(self) -> str:
+        """SDK 完全限定模型身份（§3.1-4）。
+
+        基类默认 ``f"{system}:{model_name}"`` 会产生 ``qtrading:qtrading:bound``
+        的双前缀并把绑定别名当成真实模型。此处回报上次实际服务模型的
+        ``qtrading:<actual_model>``；实际模型未知时**只**回报绑定别名
+        ``qtrading:bound``（不臆造具体模型，R21）。
+        """
+        actual = self._actual_model
+        if isinstance(actual, str) and actual:
+            return f"qtrading:{actual}"
         return BOUND_MODEL_ALIAS
 
     @property
@@ -921,6 +1054,18 @@ class GatewayModel(Model):
         self._turn_index += 1
         return derive_model_call_id(self._call_identity, turn_index)
 
+    def _default_timeout_for(self, settings: Mapping[str, Any] | None) -> float | None:
+        """缺省 timeout 的内部子请求取同一冻结期限剩余秒数（§3.1-1）。
+
+        调用方显式给出 timeout 时**不**调用 provider（不覆盖显式预算）；未注入
+        provider 时返回 ``None``，由 ``_deadline_from_settings`` 维持 fail-closed。
+        """
+        if self._default_timeout_provider is None:
+            return None
+        if isinstance(settings, Mapping) and "timeout" in settings:
+            return None
+        return self._default_timeout_provider()
+
     async def request(
         self,
         messages: list[ModelMessage],
@@ -937,6 +1082,7 @@ class GatewayModel(Model):
             params,
             tool_schema_version=self._tool_schema_version,
             model_call_id=self._next_model_call_id(),
+            default_timeout=self._default_timeout_for(resolved_settings),
         )
         outcome = await self._executor.execute_chat_turn(request, self._snapshot, binding=self._binding, on_event=None)
         return self._response_from_outcome(outcome)
@@ -962,6 +1108,7 @@ class GatewayModel(Model):
             params,
             tool_schema_version=self._tool_schema_version,
             model_call_id=self._next_model_call_id(),
+            default_timeout=self._default_timeout_for(resolved_settings),
         )
         channel = _TurnChannel()
         streamed = GatewayStreamedResponse(
@@ -1011,14 +1158,21 @@ class GatewayModel(Model):
             response = outcome.response
             response.ensure_valid()
             finish = map_finish_reason(response.finish_reason)
+            if response.actual_model:
+                self._actual_model = response.actual_model
             return ModelResponse(
                 parts=map_response_parts(response),
                 usage=map_usage(response.usage),
                 model_name=response.actual_model,
-                model_id=BOUND_MODEL_ALIAS,
+                model_id=self.model_id,
                 provider_response_id=outcome.model_call_id,
                 finish_reason=cast(Any, finish),
             )
+        # 上下文超窗（2.77.0 #11454）：零公开分片时转译为原生异常，触发
+        # 框架的单次压缩重试（§3.1-6）；已公开分片后的失败保持普通失败，
+        # 不把半截内容伪装成可重试的整回合（R21）。
+        if outcome.partial_text is None and outcome.error_code == CONTEXT_WINDOW_EXCEEDED_CODE:
+            raise ModelContextWindowExceededError(self.model_name, "chat turn rejected: context window exceeded")
         # 失败终态（transport failed / 非流路径零公开分片）：如实抛出稳定码，
         # 不伪造响应（R21）；工作流侧经 DBOS 重试语义接续
         raise UnexpectedModelBehavior(f"chat turn failed: {outcome.error_code}", outcome.partial_text)

@@ -43,8 +43,6 @@ attrs==26.1.0
     #   jsonschema
     #   jsonschema-path
     #   referencing
-authlib==1.9.8
-    # via fastmcp-slim
 beartype==0.23.1
     # via
     #   fastmcp-slim
@@ -94,7 +92,6 @@ croniter==7.0.0
 cryptography==50.0.2
     # via
     #   astockscreener (pyproject.toml)
-    #   authlib
     #   joserfc
     #   pyjwt
     #   secretstorage
@@ -124,9 +121,9 @@ exchange-calendars==4.13.2
     # via pandas-market-calendars
 fastapi==0.162.0
     # via astockscreener (pyproject.toml)
-fastmcp==4.2.0
+fastmcp==4.2.6
     # via astockscreener (pyproject.toml)
-fastmcp-slim==4.2.0
+fastmcp-slim==4.2.6
     # via fastmcp
 fastuuid==0.14.0
     # via litellm
@@ -152,7 +149,7 @@ frozenlist==1.8.0
     #   aiosignal
 fsspec==2026.9.0
     # via huggingface-hub
-genai-prices==0.2.3
+genai-prices==0.2.5
     # via
     #   pydantic-ai-harness
     #   pydantic-ai-slim
@@ -177,7 +174,7 @@ html5lib==1.1
     # via akshare
 httpcore==1.0.9
     # via httpx
-httpcore2==2.16.0 ; sys_platform != 'emscripten'
+httpcore2==2.16.2 ; sys_platform != 'emscripten'
     # via httpx2
 httpx==0.28.1
     # via
@@ -185,14 +182,14 @@ httpx==0.28.1
     #   flet
     #   litellm
     #   openai
-    #   pydantic-ai-harness
-httpx2==2.16.0
+httpx2==2.16.2
     # via
     #   astockscreener (pyproject.toml)
     #   fastmcp-slim
     #   genai-prices
     #   huggingface-hub
     #   mcp
+    #   pydantic-ai-harness
     #   pydantic-ai-slim
 httpx2-jsfetch==1.0 ; sys_platform == 'emscripten'
     # via httpx2
@@ -231,9 +228,9 @@ jmespath==1.1.0
     #   boto3
     #   botocore
 joserfc==1.8.0
-    # via
-    #   authlib
-    #   fastmcp-slim
+    # via fastmcp-slim
+json-repair==0.64.9
+    # via pydantic-ai-harness
 jsonpath==0.82.2
     # via akshare
 jsonref==1.1.0
@@ -371,15 +368,15 @@ pydantic==2.14.3
     #   pydantic-ai-slim
     #   pydantic-graph
     #   pydantic-settings
-pydantic-ai-harness==0.66.0
+pydantic-ai-harness==0.77.0
     # via astockscreener (pyproject.toml)
-pydantic-ai-slim==2.66.0
+pydantic-ai-slim==2.77.0
     # via
     #   astockscreener (pyproject.toml)
     #   pydantic-ai-harness
 pydantic-core==2.50.4
     # via pydantic
-pydantic-graph==2.66.0
+pydantic-graph==2.77.0
     # via pydantic-ai-slim
 pydantic-settings==2.16.2
     # via
@@ -505,6 +502,7 @@ truststore==0.10.5 ; sys_platform != 'emscripten'
     # via
     #   httpcore2
     #   httpx2
+    #   pydantic-ai-slim
 tushare==1.4.29
     # via astockscreener (pyproject.toml)
 typing-extensions==4.16.0

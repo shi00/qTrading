@@ -60,6 +60,8 @@ from services.agent_service.leaf_agent import (
     LEAF_MODEL_PROTOCOL_FAILED,
     LEAF_MODEL_REF_UNAVAILABLE,
     LEAF_MODEL_REFUSED,
+    LEAF_MODEL_REQUEST_REJECTED,
+    LEAF_MODEL_TRUNCATED,
     LEAF_POLICY_DENIED,
     LEAF_PREDECESSOR_ARTIFACT_UNAVAILABLE,
     LEAF_RESULT_SAVE_FAILED,
@@ -74,6 +76,7 @@ from services.agent_service.leaf_runtime import LeafModelBinding
 from services.agent_service.mcp_tools import ToolCallOutcome as _ToolCallOutcome
 from services.agent_service.mcp_tools import ToolCallState as _ToolCallState
 from services.agent_service.model import GatewayModel
+from services.agent_service.tool_loop import MAX_TOOL_ROUNDS
 from services.agent_service.workflows import LeafExecutionContext
 
 pytestmark = pytest.mark.unit
@@ -276,6 +279,7 @@ class _FakeAgent:
         deferred_tool_results: Any = None,
         model_settings: Any = None,
         timeout: float | None = None,
+        usage_limits: Any = None,
         event_stream_handler: Any = None,
     ) -> _RunResult:
         self.run_calls += 1
@@ -284,7 +288,12 @@ class _FakeAgent:
         self.message_history = message_history
         self.deferred_tool_results = deferred_tool_results
         self.run_kwargs.append(
-            {"model_settings": model_settings, "timeout": timeout, "event_stream_handler": event_stream_handler}
+            {
+                "model_settings": model_settings,
+                "timeout": timeout,
+                "usage_limits": usage_limits,
+                "event_stream_handler": event_stream_handler,
+            }
         )
         handler_events = type(self).handler_events
         if event_stream_handler is not None and handler_events is not None:
@@ -625,6 +634,17 @@ class TestRunLeafAgentFailures:
         assert outcome.error_code == LEAF_MODEL_REF_UNAVAILABLE
         assert dao.drafts == []
 
+    async def test_incomplete_final_response_fails_without_save(self, _fake_agent: type[_FakeAgent]) -> None:
+        # B6 / R21：流早退（state='incomplete'）不得落库为已完成成果
+        _fake_agent.messages = [ModelResponse([], model_name="provider-model-1", state="incomplete")]
+        dao = _Dao()
+
+        outcome = await run_leaf_agent(_model(), _context(), _binding(), dao=dao)
+
+        assert outcome.state == "failed"
+        assert outcome.error_code == LEAF_MODEL_PROTOCOL_FAILED
+        assert dao.drafts == []
+
     async def test_save_not_confirmed_never_reports_complete(self) -> None:
         dao = _Dao(save_result=SimpleNamespace(final_output_saved=False))
 
@@ -707,6 +727,31 @@ class TestRunLeafAgentFailures:
 
         assert outcome.state == "failed"
         assert outcome.error_code == LEAF_MODEL_FAILED
+        assert dao.drafts == []
+
+    async def test_truncated_output_maps_to_truncated_without_save(self, _fake_agent: type[_FakeAgent]) -> None:
+        # B7：输出截断 / 工具调用未闭合不得当作成果
+        from pydantic_ai.exceptions import IncompleteToolCall
+
+        _fake_agent.error = IncompleteToolCall("tool call incomplete")
+        dao = _Dao()
+
+        outcome = await run_leaf_agent(_model(), _context(), _binding(), dao=dao)
+
+        assert outcome.state == "failed"
+        assert outcome.error_code == LEAF_MODEL_TRUNCATED
+        assert dao.drafts == []
+
+    async def test_request_rejected_maps_to_rejected_without_save(self, _fake_agent: type[_FakeAgent]) -> None:
+        from pydantic_ai.exceptions import ModelRequestRejectedError
+
+        _fake_agent.error = ModelRequestRejectedError("provider-model-1", "rejected")
+        dao = _Dao()
+
+        outcome = await run_leaf_agent(_model(), _context(), _binding(), dao=dao)
+
+        assert outcome.state == "failed"
+        assert outcome.error_code == LEAF_MODEL_REQUEST_REJECTED
         assert dao.drafts == []
 
     async def test_model_refusal_maps_to_refused_without_leaking_body(
@@ -801,6 +846,10 @@ class TestLeafDeadlineAndPublicEvents:
         assert 0 < timeout <= 60.0
         assert run_kwargs["model_settings"] == {"timeout": timeout}
         assert run_kwargs["event_stream_handler"] is None
+        # B8：子运行请求计入同一预算，故 request_limit 预留描述子请求配额
+        limits = run_kwargs["usage_limits"]
+        assert limits.request_limit == MAX_TOOL_ROUNDS + 2
+        assert limits.tool_calls_limit == MAX_TOOL_ROUNDS
 
     async def test_run_timed_out_maps_to_deadline_exhausted(self, _fake_agent: type[_FakeAgent]) -> None:
         _fake_agent.error = RunTimedOut("timed out")
@@ -878,6 +927,27 @@ class TestLeafDeadlineAndPublicEvents:
         with pytest.raises(asyncio.CancelledError) as excinfo:
             await run_leaf_agent(_model(), _context(), _binding(), dao=dao, on_event=_cancel)
         assert type(excinfo.value) is asyncio.CancelledError
+
+    async def test_superseded_stream_fragments_are_dropped(self, _fake_agent: type[_FakeAgent]) -> None:
+        """B6：被重试取代的旧 attempt 分片不得与新分片混排。"""
+
+        from pydantic_ai.messages import ModelResponseOrigin
+
+        old = ModelResponseOrigin(run_id="run-1", run_step=0, attempt=1)
+        new = ModelResponseOrigin(run_id="run-1", run_step=0, attempt=2)
+        _fake_agent.handler_events = [
+            PartStartEvent(index=0, part=TextPart(content="新尝试"), origin=new),
+            PartStartEvent(index=0, part=TextPart(content="旧尝试"), origin=old),
+            FinalResultEvent(tool_name=None, tool_call_id=None, origin=new),
+        ]
+        dao = _Dao()
+        seen: list[Any] = []
+
+        outcome = await run_leaf_agent(_model(), _context(), _binding(), dao=dao, on_event=seen.append)
+
+        assert outcome.state == "complete"
+        assert [event.text_delta for event in seen if event.kind == "text_delta"] == ["新尝试"]
+        assert [event.sequence for event in seen] == [1, 2]
 
 
 class TestBuildLeafAgentRunner:

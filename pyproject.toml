@@ -60,7 +60,7 @@ dependencies = [
     "readerwriterlock>=1.0.10",
     "filelock>=4.2.4",  # S1 统一模型管理：配置文件跨进程锁（§5.1）; Security: CVE-2026-112940/112913/112907 fixed in 4.2.1
     "cachetools>=7.2.6",
-    "pydantic>=2.14.1",
+    "pydantic>=2.14.1,!=2.14.4",  # 2.14.4 在 PyPI 已标弃用/异常，显式排除（PR-1A 传递升级复核）
     "aiohttp>=3.14.5",  # Security: CVE-2026-111064/GHSA-2g87-pp6c-29x5/CVE-2026-111063 fixed in 3.14.4
     "pillow>=13.0.0",  # Security: CVE-2026-112395/112397/112400/112404/112895/112896/112897/112899 (image parsing DoS / OOB read / uninitialized memory) fixed in 13.0.0; PYSEC-2026-2253~2257 fixed in 12.3.0
     "soupsieve>=3.0.4",  # Security: CVE-2026-85999/86000 (ReDoS) fixed in 2.9.0; transitive via beautifulsoup4 (akshare/bs4)
@@ -68,12 +68,12 @@ dependencies = [
     "tenacity>=9.2.1,<10",  # S2 统一模型管理（ADR-0014）：S3 ScenarioExecutor 单连接重试策略消费
     "dbos==3.4.0",  # Agent 运行栈（设计 §10.6）：DBOS 持久化执行运行库（双迁移宿主）；破坏性演进与内部迁移版本强耦合 → == 精确固定（版本守卫 dbos_migrations=125 精确相等）
     "psycopg[binary]==3.3.8",  # Agent 运行栈：DBOS SQLAlchemyDatasource/DBOSClient 的 psycopg3 驱动（与既有 psycopg2-binary 模块名不同可并存）；DBOS 内部强耦合 → == 精确固定（Q3 裁决）
-    "pydantic-ai-slim==2.66.0",  # Agent 模型桥（设计 §10.1/HANDOFF §6）：GatewayModel 固定框架；slim 发行不含未用可选集成；SDK 内部结构（StreamedResponse/_parts_manager）强耦合 → == 精确固定（Q3 裁决）
-    "pydantic-ai-harness[skills]==0.66.0",  # Agent 计划/压缩能力（设计 §10.1、HANDOFF §6）：PlanStore/Planning/SummarizingCompaction 宿主，须与 pydantic-ai-slim 2.66.0 锁步 → == 精确固定（Q5 裁决）
+    "pydantic-ai-slim==2.77.0",  # Agent 模型桥（设计 §10.1/HANDOFF §6）：GatewayModel 固定框架；slim 发行不含未用可选集成；SDK 内部结构（StreamedResponse/_parts_manager）强耦合 → == 精确固定（Q3 裁决）
+    "pydantic-ai-harness[skills,repair-tool-arguments]==0.77.0",  # Agent 计划/压缩能力（设计 §10.1、HANDOFF §6）：PlanStore/Planning/SummarizingCompaction 宿主，须与 pydantic-ai-slim 2.77.0 锁步 → == 精确固定（Q5 裁决）
     "pypdf==6.21.4",  # Agent 附件 PDF 文本抽取（E-01）：纯 Python 实现、无系统依赖，输出文本边界可测 → == 精确固定（Q5 裁决）；6.19.0→6.21.4 修复 CVE-2026-113789/119208 等（pip-audit CI 门禁）
     "jsonschema>=4.26.0",  # Agent MCP 工具参数闭合校验（E-02-5）：MCP 目录 schema → 参数全量校验的正式适配器
-    "fastmcp>=4.1.4",  # Agent MCP 真实传输正式客户端（E-02-5，services/agent_service/mcp_fastmcp.py）：运行期硬依赖，缺失将导致包导入与附件 worker 子进程入口失败；Security: GHSA-7xgj-8392-5q4r (transform 后组件授权绕过，直呼路径跳过 AuthCheck) / GHSA-vqqp-x5qm-5qp4 (OAuth client credentials 缺 issuer 绑定致 client secret 泄漏) fixed in 4.1.2
-    "httpx2==2.16.0",  # Agent MCP 传输层（I07 复核）：mcp_fastmcp.py 直接 import httpx2，此前仅由 fastmcp-slim/genai-prices/mcp 等传递引入 → 显式声明防上游变更；与 Agent 栈一致精确固定
+    "fastmcp>=4.2.6,<5",  # Agent MCP 真实传输正式客户端（E-02-5，services/agent_service/mcp_fastmcp.py）：运行期硬依赖，缺失将导致包导入与附件 worker 子进程入口失败；Security: GHSA-7xgj-8392-5q4r (transform 后组件授权绕过，直呼路径跳过 AuthCheck) / GHSA-vqqp-x5qm-5qp4 (OAuth client credentials 缺 issuer 绑定致 client secret 泄漏) fixed in 4.1.2；4.2.6 移除 authlib 运行期依赖、修 keep_alive=False stdio 提前退出与二进制结果还原；<5 避开预发布版
+    "httpx2==2.16.2",  # Agent MCP 传输层（I07 复核）：mcp_fastmcp.py 直接 import httpx2，此前仅由 fastmcp-slim/genai-prices/mcp 等传递引入 → 显式声明防上游变更；与 Agent 栈一致精确固定（2.16.2 修 2.16.1 类型别名在 Py 3.13/3.14 运行期 TypeError）
 ]
 
 [project.optional-dependencies]

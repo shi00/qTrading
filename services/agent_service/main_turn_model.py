@@ -30,7 +30,11 @@ from core.agent_types import (
     json_doc,
     stable_id,
 )
-from services.agent_service.leaf_runtime import AGENT_RESEARCH_SCENARIO_ID, AGENT_TOOL_SCHEMA_VERSION
+from services.agent_service.leaf_runtime import (
+    AGENT_RESEARCH_SCENARIO_ID,
+    AGENT_TOOL_SCHEMA_VERSION,
+    model_profile_for_connection,
+)
 from services.agent_service.loop import LoopAction, TurnContext, TurnDecision
 from services.agent_service.main_turn import MainTurnRequest
 from utils.sanitizers import DataSanitizer
@@ -343,6 +347,8 @@ async def run_governed_turn(
             "main_turn",
             [identity.user_scope, identity.execution_id, identity.round_id, identity.node_id],
         ),
+        # §3.1-3：主回合同样按冻结连接证据显式注入 Profile（窗口/视觉/内联系统提示）
+        profile=model_profile_for_connection(route.snapshot, effective_connection_id),
     )
     try:
         output = await invoke_agent(

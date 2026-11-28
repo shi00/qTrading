@@ -81,7 +81,7 @@ class _ModelFactory:
 
 @pytest.mark.asyncio
 async def test_discuss_turn_answers_through_governed_route() -> None:
-    route = _RouteRecorder(SimpleNamespace(executor=object(), snapshot=object()))
+    route = _RouteRecorder(SimpleNamespace(executor=object(), snapshot=SimpleNamespace(routes=())))
     invoker = _Invoker(_TurnEnvelope(answer=_AnswerDraft(answer="银行股要看息差与资产质量")))
     models = _ModelFactory()
     request = MainTurnRequest(identity=_IDENTITY, mode=Mode.DISCUSS, prompt_text="银行股怎么看")
@@ -110,7 +110,7 @@ async def test_discuss_turn_answers_through_governed_route() -> None:
 
 @pytest.mark.asyncio
 async def test_plan_turn_returns_readable_plan_and_structured_steps() -> None:
-    route = _RouteRecorder(SimpleNamespace(executor=object(), snapshot=object()))
+    route = _RouteRecorder(SimpleNamespace(executor=object(), snapshot=SimpleNamespace(routes=())))
     invoker = _Invoker(
         _TurnEnvelope(
             plan=_PlanDraft(
@@ -166,7 +166,7 @@ async def test_missing_route_fails_closed_before_any_model_call() -> None:
 
 @pytest.mark.asyncio
 async def test_attached_sources_fail_closed_without_consent_channel() -> None:
-    route = _RouteRecorder(SimpleNamespace(executor=object(), snapshot=object()))
+    route = _RouteRecorder(SimpleNamespace(executor=object(), snapshot=SimpleNamespace(routes=())))
     invoker = _Invoker(_TurnEnvelope(answer=_AnswerDraft(answer="x")))
     request = MainTurnRequest(
         identity=_IDENTITY,
@@ -198,7 +198,7 @@ async def test_attached_sources_fail_closed_without_consent_channel() -> None:
 
 @pytest.mark.asyncio
 async def test_factory_binds_request_text_and_returns_agent_turn() -> None:
-    route = _RouteRecorder(SimpleNamespace(executor=object(), snapshot=object()))
+    route = _RouteRecorder(SimpleNamespace(executor=object(), snapshot=SimpleNamespace(routes=())))
     invoker = _Invoker(_TurnEnvelope(answer=_AnswerDraft(answer="答")))
     factory = build_governed_turn_factory(
         resolve_route=route,
@@ -214,7 +214,7 @@ async def test_factory_binds_request_text_and_returns_agent_turn() -> None:
     assert invoker.calls[0]["prompt"] == "问题文本"
 
 
-_ROUTE = SimpleNamespace(executor=object(), snapshot=object())
+_ROUTE = SimpleNamespace(executor=object(), snapshot=SimpleNamespace(routes=()))
 
 
 class _RaisingInvoker:

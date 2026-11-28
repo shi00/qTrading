@@ -41,6 +41,7 @@ from pydantic_ai import UnexpectedModelBehavior
 from pydantic_ai._parts_manager import ModelResponsePartsManager
 from pydantic_ai.messages import (
     BinaryContent,
+    CompactionPart,
     ModelMessage,
     ModelRequest,
     ModelResponse,
@@ -513,6 +514,126 @@ class TestBuildChatTurnRequest:
         assert request.deadline > asyncio.get_running_loop().time() + 29.0
 
     @pytest.mark.asyncio
+    async def test_projected_controls_not_in_frozen_params(self):
+        # §3.1-2：SDK 能力写入的一等控制项投影到独立字段，不混入 frozen_params
+        settings = _settings(
+            tool_choice="none",
+            cache=True,
+            thinking="high",
+            thinking_summary=True,
+        )
+        request = build_chat_turn_request(
+            [ModelRequest(parts=[UserPromptPart(content="go")])],
+            settings,
+            _params(),
+            tool_schema_version="v1",
+            model_call_id=_MC,
+        )
+        assert request.tool_choice == "none"
+        assert request.cache_policy == {"enabled": True}
+        assert request.thinking_policy == {"effort": "high", "summary": True}
+        assert "tool_choice" not in request.frozen_params
+        assert "cache" not in request.frozen_params
+        assert "thinking" not in request.frozen_params
+        assert "thinking_summary" not in request.frozen_params
+        request.ensure_valid()
+
+    @pytest.mark.asyncio
+    async def test_cache_retention_projected(self):
+        request = build_chat_turn_request(
+            [ModelRequest(parts=[UserPromptPart(content="go")])],
+            _settings(cache="1h"),
+            _params(),
+            tool_schema_version="v1",
+            model_call_id=_MC,
+        )
+        assert request.cache_policy == {"enabled": True, "retention": "1h"}
+
+    @pytest.mark.asyncio
+    async def test_cache_config_mapping_projected(self):
+        # SDK CacheConfig 形态（retention + messages）保真投影，不臆造键
+        request = build_chat_turn_request(
+            [ModelRequest(parts=[UserPromptPart(content="go")])],
+            _settings(cache={"retention": "1h", "messages": False}),
+            _params(),
+            tool_schema_version="v1",
+            model_call_id=_MC,
+        )
+        assert request.cache_policy == {"enabled": True, "retention": "1h", "messages": False}
+        request.ensure_valid()
+
+    @pytest.mark.asyncio
+    async def test_default_timeout_used_when_subrequest_has_no_timeout(self):
+        # §3.1-1：原生内部子请求不传 timeout 时，装配期注入的冻结期限兜底
+        request = build_chat_turn_request(
+            [ModelRequest(parts=[UserPromptPart(content="go")])],
+            {},
+            _params(),
+            tool_schema_version="v1",
+            model_call_id=_MC,
+            default_timeout=5.0,
+        )
+        assert request.deadline > asyncio.get_running_loop().time() + 4.0
+
+    @pytest.mark.asyncio
+    async def test_explicit_timeout_wins_over_default(self):
+        request = build_chat_turn_request(
+            [ModelRequest(parts=[UserPromptPart(content="go")])],
+            {"timeout": 60.0},
+            _params(),
+            tool_schema_version="v1",
+            model_call_id=_MC,
+            default_timeout=5.0,
+        )
+        assert request.deadline > asyncio.get_running_loop().time() + 59.0
+
+    @pytest.mark.asyncio
+    async def test_compaction_part_local_maps_to_framed_user_text(self):
+        # B1：请求侧 CompactionPart（无供应商加密字段）转义为用户文本并去元数据
+        request = build_chat_turn_request(
+            [
+                ModelRequest(
+                    parts=[
+                        CompactionPart(content="此前摘要正文", metadata={"receipts": 2}),
+                        UserPromptPart(content="继续"),
+                    ]
+                )
+            ],
+            _settings(),
+            _params(),
+            tool_schema_version="v1",
+            model_call_id=_MC,
+        )
+        user_messages = [m for m in request.messages if m.role == "user"]
+        assert user_messages[0].content_parts[0].text.startswith("<conversation_summary>")
+        assert "此前摘要正文" in user_messages[0].content_parts[0].text
+        assert user_messages[1].content_parts[0].text == "继续"
+
+    @pytest.mark.asyncio
+    async def test_compaction_part_with_provider_details_rejected(self):
+        # 供应商自带压缩部件只允许出现在 ModelResponse；请求侧组装即被 SDK 拒绝，
+        # 桥层的防御性拒绝分支因此不会在合法路径上触发。
+        with pytest.raises(ValueError) as excinfo:
+            ModelRequest(parts=[CompactionPart(content="encrypted", provider_name="anthropic")])
+        assert "provider_name" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_retry_feedback_part_maps_to_user_text(self):
+        # B3：2.77.0 重试反馈由 RetryFeedbackPart 承载（无 tool_call_id）
+        from pydantic_ai.messages import RetryFeedbackPart, RetryInfo
+
+        retry = RetryInfo(cause="validation_error")
+        request = build_chat_turn_request(
+            [ModelRequest(parts=[RetryFeedbackPart(content="字段缺失", retry=retry)])],
+            _settings(),
+            _params(),
+            tool_schema_version="v1",
+            model_call_id=_MC,
+        )
+        assert request.messages[0].role == "user"
+        assert request.messages[0].content_parts[0].text == "字段缺失"
+
+    @pytest.mark.asyncio
     async def test_unknown_request_part_rejected(self):
         class _WeirdPart:
             part_kind = "compaction"
@@ -725,7 +846,9 @@ class TestOutcomeMapping:
         usage = map_usage(_USAGE)
         assert usage.input_tokens == 100
         assert usage.output_tokens == 30
-        assert usage.details["cache_read_tokens"] == 20
+        # 缓存读写进入 RequestUsage 顶层一等字段（2.77.0 WarnOnCacheBusts 依赖）
+        assert usage.cache_read_tokens == 20
+        assert usage.cache_write_tokens == 0  # None（未计量）不伪装为正数
 
     @pytest.mark.asyncio
     async def test_request_success_response_shape(self):
@@ -738,7 +861,8 @@ class TestOutcomeMapping:
         assert response.provider_response_id == executor.calls[0]["request"].model_call_id
         assert response.provider_response_id == executor.last_outcome.model_call_id
         assert response.model_name == "glm-4-air"  # 实际模型承载（不伪装别名）
-        assert response.model_id == BOUND_MODEL_ALIAS
+        # 2.77.0 语境：真实服务模型进 model_id（流式/非流一阶对齐，§3.1-4）
+        assert response.model_id == "qtrading:glm-4-air"
         assert [p.content for p in response.parts if isinstance(p, TextPart)] == ["hello"]
         assert response.usage.input_tokens == 100
         # Executor 收到的绑定 / 快照与模型持有的同一冻结对象
@@ -754,6 +878,10 @@ class TestOutcomeMapping:
         assert "refused" in excinfo.value.message
         assert excinfo.value.body == "敏感内容"  # 拒绝保真：原文一次转出
         assert isinstance(excinfo.value, ModelTurnRefusedError)  # 拒绝可分类（非协议失败）
+        # B7：2.77.0 谱系拆分后仍同时是 ModelAPIError（既有分类消费方可识别）
+        from pydantic_ai.exceptions import ModelAPIError
+
+        assert isinstance(excinfo.value, ModelAPIError)
 
     @pytest.mark.asyncio
     async def test_request_real_executor_refusal_shape_raises_refused(self):
@@ -802,6 +930,39 @@ class TestOutcomeMapping:
             await model.request([ModelRequest(parts=[UserPromptPart(content="hi")])], _settings(), _params())
         assert excinfo.value.code == expected_code
         assert excinfo.value.field_path == expected_path
+
+    @pytest.mark.asyncio
+    async def test_request_context_window_exceeded_translates_to_native_error(self):
+        """§3.1-6：零公开分片的超窗失败转译为原生异常（触发单次压缩重试）。"""
+        from pydantic_ai.exceptions import ModelContextWindowExceededError
+
+        executor = _FakeExecutor(_failed_outcome(error_code="context_window_exceeded"))
+        model = _gateway(executor)
+        with pytest.raises(ModelContextWindowExceededError) as excinfo:
+            await model.request([ModelRequest(parts=[UserPromptPart(content="hi")])], _settings(), _params())
+        assert excinfo.value.message == "chat turn rejected: context window exceeded"
+
+    @pytest.mark.asyncio
+    async def test_request_context_window_after_fragments_stays_plain_failure(self):
+        """已公开分片后的超窗不伪装为可重试整回合（R21）。"""
+        from pydantic_ai.exceptions import ModelContextWindowExceededError
+
+        executor = _FakeExecutor(_failed_outcome(error_code="context_window_exceeded", partial_text="半截正文"))
+        model = _gateway(executor)
+        with pytest.raises(UnexpectedModelBehavior) as excinfo:
+            await model.request([ModelRequest(parts=[UserPromptPart(content="hi")])], _settings(), _params())
+        assert not isinstance(excinfo.value, ModelContextWindowExceededError)
+
+    def test_model_id_reports_alias_until_actual_model_known(self):
+        """§3.1-4：未发生真实回合前只回报绑定别名（不臆造模型）。"""
+        model = _gateway(_FakeExecutor())
+        assert model.model_id == BOUND_MODEL_ALIAS
+
+    @pytest.mark.asyncio
+    async def test_model_id_reports_actual_model_after_turn(self):
+        model = _gateway(_FakeExecutor(_succeeded_outcome()))
+        await model.request([ModelRequest(parts=[UserPromptPart(content="hi")])], _settings(), _params())
+        assert model.model_id == "qtrading:glm-4-air"
 
 
 # ---------------------------------------------------------------------------
@@ -869,6 +1030,9 @@ class TestStreamPath:
         assert response.usage.input_tokens == 100
         # 流式路径同样沿真实模型身份回报（非绑定别名，R21）
         assert response.model_name == "glm-4-air"
+        # §3.1-4：流式终态响应回填真实模型 ID（不被主候选别名掩盖）
+        assert response.model_id == "qtrading:glm-4-air"
+        assert response.state == "complete"
 
     @pytest.mark.asyncio
     async def test_stream_failure_does_not_end_cleanly(self):

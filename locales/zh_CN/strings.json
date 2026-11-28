@@ -1174,6 +1174,7 @@
     "llm_err_dns": "DNS 解析失败，请检查域名或网络设置",
     "llm_err_ssl": "SSL 证书错误，请检查网络环境",
     "llm_err_model_not_found": "模型不存在或不支持，请检查模型名称",
+    "llm_err_context_window": "输入超出模型上下文窗口，请缩短对话或改用更大窗口的模型",
     "llm_err_content_policy": "内容违规，请求被拒绝",
     "llm_err_insufficient_quota": "账户余额不足，请充值后重试",
     "llm_err_unknown": "连接失败，请查看日志获取详细信息",

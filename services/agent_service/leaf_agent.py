@@ -32,11 +32,17 @@ from typing import Any, Final, Literal, Protocol, cast
 from pydantic_ai import Agent, DeferredToolRequests, UnexpectedModelBehavior
 from pydantic_ai.agent import EventStreamHandler
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import RunTimedOut
+from pydantic_ai.exceptions import (
+    IncompleteToolCall,
+    ModelRequestRejectedError,
+    OutputTokenLimitExceeded,
+    RunTimedOut,
+)
 from pydantic_ai.messages import (
     FinalResultEvent,
     FunctionToolCallEvent,
     ModelResponse,
+    ModelResponseOrigin,
     PartDeltaEvent,
     PartStartEvent,
     TextPart,
@@ -44,6 +50,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.tools import RunContext
+from pydantic_ai.usage import UsageLimits
 
 from core.agent_types import (
     AgentErrorCode,
@@ -75,7 +82,7 @@ from services.agent_service.leaf_runtime import (
     require_leaf_turn_timeout,
 )
 from services.agent_service.model import GatewayModel, ModelTurnRefusedError
-from services.agent_service.tool_loop import ToolLoopPorts, run_agent_tool_loop
+from services.agent_service.tool_loop import MAX_TOOL_ROUNDS, ToolLoopPorts, run_agent_tool_loop
 from services.agent_service.tool_runtime import ToolRunScope, ToolRuntimeFactory
 from services.agent_service.workflows import NodeOutcome
 
@@ -93,6 +100,8 @@ __all__ = [
     "LEAF_MODEL_PROTOCOL_FAILED",
     "LEAF_MODEL_REFUSED",
     "LEAF_MODEL_REF_UNAVAILABLE",
+    "LEAF_MODEL_REQUEST_REJECTED",
+    "LEAF_MODEL_TRUNCATED",
     "LEAF_POLICY_DENIED",
     "LEAF_PREDECESSOR_ARTIFACT_UNAVAILABLE",
     "LEAF_RESULT_KIND",
@@ -148,6 +157,10 @@ LEAF_TIMEOUT_UNAVAILABLE: Final[str] = "leaf_timeout_unavailable"
 LEAF_DEADLINE_EXHAUSTED: Final[str] = "leaf_deadline_exhausted"
 #: 桥层协议事实失败（如截断流无 finish 确认 / 收尾未核）：不保存成果（R21）。
 LEAF_MODEL_PROTOCOL_FAILED: Final[str] = "leaf_model_protocol_failed"
+#: 输出被截断（输出 token 上限 / 工具调用未闭合）：不保存半截成果（R21）。
+LEAF_MODEL_TRUNCATED: Final[str] = "leaf_model_truncated"
+#: 请求被提供方拒绝（非内容拒绝，如上下文超窗未能在本轮压缩挽救）。
+LEAF_MODEL_REQUEST_REJECTED: Final[str] = "leaf_model_request_rejected"
 #: 提供方确定内容拒绝（完成的模型回合，Executor 已 halt 且保住用量）：与协议 /
 #: 普通模型失败分类不同，不保存成果；拒绝原文不进入终态 / 日志（R9/R21）。
 LEAF_MODEL_REFUSED: Final[str] = "leaf_model_refused"
@@ -500,6 +513,25 @@ def _actual_model_ref(result: Any) -> str | None:
     return None
 
 
+def _final_response_complete(result: Any) -> bool:
+    """最终 ``ModelResponse`` 是否声明 ``state == 'complete'``（B6 / R21）。
+
+    流早退（``incomplete``）/ 取消（``interrupted``）/ 挂起（``suspended``）不得
+    当作完成回合落库半截成果；无 ``ModelResponse`` 亦视为未确认完成。
+    """
+
+    for message in reversed(result.all_messages()):
+        if isinstance(message, ModelResponse):
+            return getattr(message, "state", None) == "complete"
+    return False
+
+
+def _leaf_usage_limits() -> UsageLimits:
+    """叶运行预算（2.77.0 #14154）：子运行请求计入同一限制，故预留描述子请求配额。"""
+
+    return UsageLimits(request_limit=MAX_TOOL_ROUNDS + 2, tool_calls_limit=MAX_TOOL_ROUNDS)
+
+
 def _authorized_connection_id(binding: LeafModelBinding) -> str | None:
     """冻结绑定里的真实授权连接（资料许可绑定的 connection_id）；无则 ``None``。"""
 
@@ -528,13 +560,21 @@ def _event_stream_handler(on_event: LeafEventHandler) -> EventStreamHandler[Leaf
     """公开事件回调装配：回调异常隔离（记录类型名后继续），取消照常传播（R2）。
 
     回调只具观察语义：失败不得改变模型回合与成果事实；可等待返回值按背压 await。
+    ``2.77.0`` ``ModelResponseOrigin``（#14402）：被重试取代的旧 attempt 分片不再
+    透出（避免同一回合的旧文本与新文本混排），按 ``origin.supersedes`` 判定。
     """
 
     sequence = 0
+    current_origin: ModelResponseOrigin | None = None
 
     async def _handler(_run_context: Any, stream: Any) -> None:
-        nonlocal sequence
+        nonlocal sequence, current_origin
         async for event in stream:
+            origin = getattr(event, "origin", None)
+            if isinstance(origin, ModelResponseOrigin):
+                if current_origin is not None and current_origin.supersedes(origin):
+                    continue
+                current_origin = origin
             mapped = _leaf_stream_event(event, sequence + 1)
             if mapped is None:
                 continue
@@ -872,6 +912,7 @@ async def run_leaf_agent(
                 deps=deps,
                 model_settings=settings,
                 timeout=settings["timeout"],
+                usage_limits=_leaf_usage_limits(),
                 event_stream_handler=event_stream_handler,
             )
         else:
@@ -886,6 +927,7 @@ async def run_leaf_agent(
                 ),
                 turn_model_settings=_turn_model_settings,
                 event_stream_handler=event_stream_handler,
+                usage_limits=_leaf_usage_limits(),
             )
             result = loop_result.run_result
             unknown_operation_refs = loop_result.unknown_operation_refs
@@ -924,6 +966,23 @@ async def run_leaf_agent(
             context.node.node_id,
         )
         return _failed(context, LEAF_MODEL_REFUSED)
+    except (IncompleteToolCall, OutputTokenLimitExceeded):
+        # 截断类失败（B7 / R21）：输出预算耗尽或工具调用未闭合，半截内容不得
+        # 当作成果（不保存、不伪造 complete）。
+        logger.warning(
+            "[LeafAgent] leaf model output truncated (execution=%s node=%s)",
+            context.execution_id,
+            context.node.node_id,
+        )
+        return _failed(context, LEAF_MODEL_TRUNCATED)
+    except ModelRequestRejectedError:
+        # 请求被提供方拒绝（非内容拒绝；如超窗后压缩未能挽救）：如实失败。
+        logger.warning(
+            "[LeafAgent] leaf model request rejected (execution=%s node=%s)",
+            context.execution_id,
+            context.node.node_id,
+        )
+        return _failed(context, LEAF_MODEL_REQUEST_REJECTED)
     except AgentServiceError as e:
         if e.code is AgentErrorCode.BUDGET_BLOCKED:
             code = LEAF_TOOL_BUDGET_EXCEEDED
@@ -963,6 +1022,14 @@ async def run_leaf_agent(
             context.node.node_id,
         )
         return _failed(context, LEAF_MODEL_REF_UNAVAILABLE)
+    if not _final_response_complete(result):
+        # B6 / R21：流早退等未完成回合不得落库为「已完成」成果。
+        logger.warning(
+            "[LeafAgent] final model response incomplete, leaf fails without save (execution=%s node=%s)",
+            context.execution_id,
+            context.node.node_id,
+        )
+        return _failed(context, LEAF_MODEL_PROTOCOL_FAILED)
 
     draft = ResearchResultDraft(
         user_scope=facts.user_scope,

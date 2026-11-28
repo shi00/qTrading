@@ -343,6 +343,9 @@ def plan_compaction(messages: Sequence[ModelMessage], *, keep_messages: int) -> 
 
     没有任何安全切点（例如唯一可切处会拆散配对）时返回 ``boundary_uncuttable``，
     调用方必须放弃本次压缩，而不是产生半截配对的历史。
+
+    待摘要片段是否超摘要模型窗口由调用方用 :func:`summarize_segment_within_window`
+    复核（窗口未知或超窗即拒绝外发，R21）。
     """
 
     if isinstance(keep_messages, bool) or not isinstance(keep_messages, int) or keep_messages < 1:

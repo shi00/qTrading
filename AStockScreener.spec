@@ -65,6 +65,23 @@ hiddenimports = [
     "apscheduler.triggers.cron",
     "apscheduler.triggers.interval",
     "llama_cpp",
+    # Agent 运行时栈（pydantic-ai 2.77.0 / harness 0.77.0）：harness 的
+    # ``_LAZY_EXPORTS`` 与各能力子包按需动态导入，PyInstaller 静态分析无法发现。
+    "pydantic_ai",
+    "pydantic_ai.models",
+    "pydantic_ai.messages",
+    "pydantic_ai.profiles",
+    "pydantic_ai.usage",
+    "pydantic_ai_harness",
+    "pydantic_ai_harness.compaction",
+    "pydantic_ai_harness.planning",
+    "pydantic_ai_harness.skills",
+    "pydantic_ai_harness.repair_tool_arguments",
+    "fastmcp",
+    "httpx2",
+    "json_repair",
+    "dbos",
+    "psycopg",
 ]
 
 # llama_cpp 通过 ctypes.CDLL 在 llama_cpp/lib/ 目录加载 llama.dll + ggml*.dll + mtmd.dll，

@@ -31,6 +31,7 @@ from typing import Any, Final, Protocol, cast
 from core.model_management_types import ExecutionSnapshot
 from pydantic_ai.profiles import ModelProfile
 
+from services.agent_service.capability_wiring import resolve_leaf_context_windows
 from services.agent_service.comparison import (
     ComparisonLaneParameters,
     FrozenComparisonGroup,
@@ -610,7 +611,42 @@ async def resolve_agent_model_binding(
         snapshot=snapshot,
         binding=binding,
         deadline=deadline,
+        profile=_leaf_model_profile(snapshot, raw_consent),
     )
+
+
+def model_profile_for_connection(snapshot: ExecutionSnapshot, connection_id: str | None = None) -> ModelProfile:
+    """按冻结连接证据构造显式 Profile（§3.1-3；叶与主回合共用）。
+
+    原生 ``Model.context_window`` 直接读 ``profile['context_window']``，且
+    ``_file_input.unsupported_file_input`` 在 ``supports_image_input`` 缺失时
+    默认 ``True``。此处显式声明：窗口取真实授权连接（无则首候选）与其余候选
+    中最严者，未知显式 ``None``（R21）；视觉能力未证实即 ``False``（不放行
+    图片）；``supports_inline_system_prompts=False`` 使原生 ``prepare_messages``
+    把压缩回执/计划提醒转为 ``<system>`` 包裹文本（B2）。
+    """
+
+    window, candidate_windows = resolve_leaf_context_windows(
+        snapshot, scenario_id=AGENT_RESEARCH_SCENARIO_ID, connection_id=connection_id
+    )
+    strictest = None if window is None else min((window, *candidate_windows))
+    return ModelProfile(
+        context_window=strictest,
+        supports_image_input=False,
+        supported_image_media_types=(),
+        supports_inline_system_prompts=False,
+    )
+
+
+def _leaf_model_profile(snapshot: ExecutionSnapshot, raw_consent: Mapping[str, Any] | None) -> ModelProfile:
+    """叶侧 Profile：从资料许可绑定取真实授权连接（无则按首候选）。"""
+
+    connection_id: str | None = None
+    if isinstance(raw_consent, Mapping):
+        value = raw_consent.get("connection_id")
+        if isinstance(value, str) and value:
+            connection_id = value
+    return model_profile_for_connection(snapshot, connection_id)
 
 
 async def unavailable_leaf_agent(
@@ -712,6 +748,9 @@ def build_gateway_model(
         tool_schema_version=binding.tool_schema_version,
         call_identity=leaf_call_identity(context),
         profile=binding.profile,
+        # 原生内部子请求（FileUnderstanding / Advisor / SummarizingCompaction 的
+        # 摘要 Agent）不传 timeout：共享同一冻结绝对期限的剩余秒数（§3.1-1）。
+        default_timeout_provider=lambda: require_leaf_turn_timeout(binding),
     )
 
 

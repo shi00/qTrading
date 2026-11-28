@@ -23,6 +23,7 @@ from typing import Any, Final, Protocol
 
 from pydantic_ai import Agent, AgentRunResult, DeferredToolRequests, DeferredToolResults
 from pydantic_ai.messages import ToolCallPart
+from pydantic_ai.usage import UsageLimits
 
 from core.agent_types import AgentErrorCode, AgentServiceError
 from services.agent_service.mcp_tools import ToolCallOutcome, ToolCallState
@@ -137,18 +138,23 @@ async def run_agent_tool_loop(
     ports: ToolLoopPorts,
     turn_model_settings: TurnModelSettings | None = None,
     event_stream_handler: Any = None,
+    usage_limits: UsageLimits | None = None,
 ) -> ToolLoopResult:
     """首轮 + Deferred 续跑；原 ``tool_call_id`` 回填；``UNKNOWN`` 不重试。
 
     ``turn_model_settings`` 每轮调用一次：叶把同一冻结绝对期限换算出的剩余预算
     逐轮交出（桥层 ``timeout`` = 该轮剩余），SDK 运行期限取同一值；否则时段
     无界。``event_stream_handler`` 原样交每轮 ``run``（公开事件回调）。
+    ``usage_limits`` 原样交每轮 ``run``（2.77.0 #14154：内部子运行请求计入同一
+    预算，配额由装配方预留）。
     """
 
     def _run_kwargs() -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
         if event_stream_handler is not None:
             kwargs["event_stream_handler"] = event_stream_handler
+        if usage_limits is not None:
+            kwargs["usage_limits"] = usage_limits
         if turn_model_settings is not None:
             settings = dict(turn_model_settings())
             timeout = settings.get("timeout")

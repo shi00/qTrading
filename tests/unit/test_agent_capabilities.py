@@ -24,6 +24,7 @@ from core.agent_types import AgentErrorCode, AgentServiceError, Mode
 from services.agent_service.capabilities import (
     ResearchBoundary,
     ResearchBoundaryPolicy,
+    _contains_binary_content,
     build_planning_capability,
     build_summarizing_compaction,
     evaluate_research_boundary,
@@ -359,6 +360,31 @@ class TestResearchBoundaryCapability:
             await boundary.before_model_request(cast(Any, None), request_context)
         assert error.value.code is AgentErrorCode.POLICY_DENIED
         assert "unestimable" in error.value.sanitized_message
+
+    def test_binary_inside_data_capability_part_is_detected(self) -> None:
+        """B2：CapabilityPart 家族（含 Harness 压缩回执）内的二进制须递归识别。"""
+
+        import dataclasses
+
+        from pydantic_ai.messages import DataCapabilityPart, UserSource
+
+        @dataclasses.dataclass
+        class BinPart(  # type: ignore[reportCallIssue]  # pydantic-ai 能力部件以类关键字参数声明命名空间/标签，类型存根未建模
+            DataCapabilityPart, namespace="test_cap", tag="bin"
+        ):
+            pass
+
+        messages = [
+            ModelRequest(
+                parts=[
+                    UserPromptPart(content="说明"),
+                    BinPart(source=UserSource(), content=BinaryContent(data=b"x", media_type="image/png")),
+                ]
+            )
+        ]
+
+        assert _contains_binary_content(messages) is True
+        assert _contains_binary_content([ModelRequest(parts=[UserPromptPart(content="纯文本")])]) is False
 
 
 class TestBoundaryTokenCountingModel:
