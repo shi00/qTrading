@@ -861,13 +861,12 @@ mod tests {
         .unwrap();
 
         let layout = Layout::from_data_dir(&data_dir, Some(&install_dir), None, None);
-        drop(build_postgresql(
-            &layout,
-            "127.0.0.1",
-            "postgres",
-            "dummy-password",
-            55432,
-        ));
+        // 用作用域结束代替 `drop(..)`：ManagedPg 不实现 Drop，显式 drop 会触发
+        // clippy::drop_non_drop；作用域结束同样验证「离开作用域不碰 pg_ctl」。
+        {
+            let _instance =
+                build_postgresql(&layout, "127.0.0.1", "postgres", "dummy-password", 55432);
+        }
         assert!(
             !marker.exists(),
             "ManagedPg drop 不得调用 pg_ctl（隐式停止）；实际被调用"
