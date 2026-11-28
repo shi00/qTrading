@@ -25,7 +25,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Literal, Protocol, cast
 
@@ -52,6 +52,7 @@ from core.agent_types import (
     ResearchResult,
     ResearchResultDraft,
     RoleDefinition,
+    decode_json_doc,
     is_digest,
 )
 from core.model_management_types import ModelTurnProtocolError
@@ -190,6 +191,117 @@ class RolePromptIdentity:
 #: 角色 Prompt 读取端口（生产读设置页已保存的默认+追加；测试可注入替身）。
 RolePromptReader = Callable[[str], RolePromptIdentity]
 
+#: 受理冻结的 manifest 中角色 Prompt 引用/正文快照键（比较组取 ``shared`` 段）。
+_ROLE_PROMPT_REFS_KEY: Final = "role_prompt_refs"
+_ROLE_PROMPT_SNAPSHOTS_KEY: Final = "role_prompt_snapshots"
+
+
+@dataclass(frozen=True, slots=True)
+class _FrozenRolePromptRef:
+    """受理冻结的角色 Prompt 引用：版本必填，正文快照可缺（旧/比较 manifest）。"""
+
+    version: str
+    identity: RolePromptIdentity | None
+
+
+#: 冻结角色 Prompt 提供者：只读受理时冻结的 manifest，返回冻结正文身份。
+#: 缺失/版本不一致即抛错（由调用方收敛为 ``LEAF_ROLE_PROMPT_UNAVAILABLE``，零外发）。
+FrozenRolePromptProvider = Callable[[LeafExecutionContext], Awaitable[RolePromptIdentity]]
+
+
+def _manifest_section(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
+    """冻结输入段：比较组 manifest 取 ``shared``，普通 manifest 取顶层。"""
+
+    shared = manifest.get("shared")
+    return shared if isinstance(shared, Mapping) else manifest
+
+
+def _frozen_role_prompt_ref(manifest_payload: str, role_key: str) -> _FrozenRolePromptRef:
+    """从冻结 manifest 取该角色的 ``(version, 正文快照)``；缺失即显式失败。"""
+
+    try:
+        manifest = decode_json_doc(manifest_payload)
+    except Exception as exc:  # 非规范字节按不可用处理，不猜语义（R21）
+        raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "frozen manifest unreadable", role_key) from exc
+    if not isinstance(manifest, Mapping):
+        raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "frozen manifest not an object", role_key)
+    section = _manifest_section(manifest)
+
+    versions: list[str] = []
+    refs = section.get(_ROLE_PROMPT_REFS_KEY)
+    if isinstance(refs, list):
+        for item in refs:
+            if (
+                isinstance(item, (list, tuple))
+                and len(item) == 2
+                and item[0] == role_key
+                and isinstance(item[1], str)
+                and item[1].strip()
+            ):
+                versions.append(item[1])
+    if len(versions) != 1:
+        raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "frozen role prompt ref missing", role_key)
+    version = versions[0]
+
+    snapshots = section.get(_ROLE_PROMPT_SNAPSHOTS_KEY)
+    matches = (
+        [item for item in snapshots if isinstance(item, Mapping) and item.get("role_id") == role_key]
+        if isinstance(snapshots, list)
+        else []
+    )
+    if len(matches) > 1:
+        raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "frozen role prompt snapshot ambiguous", role_key)
+    if not matches:
+        return _FrozenRolePromptRef(version=version, identity=None)
+    snapshot = matches[0]
+    text = snapshot.get("text")
+    snapshot_version = snapshot.get("version")
+    if snapshot_version != version or not isinstance(text, str) or not text.strip():
+        raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "frozen role prompt snapshot invalid", role_key)
+    return _FrozenRolePromptRef(version=version, identity=RolePromptIdentity(text=text, version=version))
+
+
+def build_frozen_role_prompt_provider(dao: Any | None) -> FrozenRolePromptProvider:
+    """生产冻结角色 Prompt 来源：只读受理时冻结的权威 manifest（不读运行期设置冒充）。
+
+    - 有正文快照（受理时为内置角色写入）：直接使用快照正文与冻结版本；
+    - 无正文快照（旧 manifest / 比较组 manifest）：读当前设置值，但**必须**与冻结
+      版本一致，否则显式失败——不以改后的正文冒充受理时快照。
+    """
+
+    async def _provide(context: LeafExecutionContext) -> RolePromptIdentity:
+        source = _resolve_agent_dao(dao)
+        if source is None:
+            raise AgentServiceError(
+                AgentErrorCode.CONFIG_UNAVAILABLE, "role prompt snapshot source unavailable", context.node.role_key
+            )
+        facts = await source.read_leaf_dispatch_facts(context.execution_id, context.round_id)
+        manifest = await source.read_authoritative_manifest(
+            user_scope=facts.user_scope, execution_id=context.execution_id
+        )
+        if not isinstance(manifest, str) or not manifest:
+            raise AgentServiceError(
+                AgentErrorCode.CONFIG_UNAVAILABLE, "frozen manifest unavailable", context.node.role_key
+            )
+        ref = _frozen_role_prompt_ref(manifest, context.node.role_key)
+        from utils.config.llm import RESEARCH_ROLE_KEYS
+
+        # 正文快照只对内置角色成立；自定义角色必须走冻结定义 + 版本校验路径。
+        if ref.identity is not None and context.node.role_key in RESEARCH_ROLE_KEYS:
+            return ref.identity
+        from utils.thread_pool import TaskType, ThreadPoolManager
+
+        current = await ThreadPoolManager().run_async(TaskType.IO, _read_saved_role_prompt, context.node.role_key)
+        if current.version != ref.version:
+            raise AgentServiceError(
+                AgentErrorCode.CONFIG_UNAVAILABLE,
+                f"role prompt version changed after acceptance: {current.version} != {ref.version}",
+                context.node.role_key,
+            )
+        return RolePromptIdentity(text=current.text, version=ref.version)
+
+    return _provide
+
 
 def _read_saved_role_prompt(
     role_key: str,
@@ -208,9 +320,7 @@ def _read_saved_role_prompt(
     替换即伪造取值；设置页的变量预览仅用于核对。
     """
 
-    from utils.config_handler import ConfigHandler
-    from utils.config.llm import RESEARCH_ROLE_KEYS
-    from utils.config_models import ROLE_PROMPT_DEFAULTS
+    from utils.config.llm import RESEARCH_ROLE_KEYS, read_research_role_prompt
 
     if role_key not in RESEARCH_ROLE_KEYS:
         if definition is None:
@@ -230,11 +340,8 @@ def _read_saved_role_prompt(
             )
         return RolePromptIdentity(text=definition.prompt_body, version=definition.role_version)
 
-    default_text, default_version = ROLE_PROMPT_DEFAULTS[role_key]
-    append = ConfigHandler.get_ai_role_prompt_append(role_key)
-    version = ConfigHandler.get_ai_role_prompt_version(role_key)
-    text = default_text if not append.strip() else f"{default_text}\n\n{append}"
-    return RolePromptIdentity(text=text, version=version or default_version)
+    text, version = read_research_role_prompt(role_key)
+    return RolePromptIdentity(text=text, version=version)
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,14 +411,27 @@ def _leaf_instructions(context: LeafExecutionContext, prompt: RolePromptIdentity
     return f"{prompt.text}\n节点角色：{context.node.role_key}；节点目标：{context.node.target}"
 
 
-async def _resolve_role_prompt(reader: RolePromptReader | None) -> RolePromptIdentity:
-    """解析并冻结本次运行的角色 Prompt（同步配置读取经 IO 线程池，R16）。"""
+async def _resolve_role_prompt(
+    context: LeafExecutionContext,
+    reader: RolePromptReader | None,
+    frozen_provider: FrozenRolePromptProvider | None,
+) -> RolePromptIdentity:
+    """按节点冻结角色解析并冻结本次运行的 Prompt（同步配置读取经 IO 线程池，R16）。
 
+    优先级：显式 ``reader``（装配/测试注入）→ 受理冻结 manifest 提供者 → 末路
+    读设置页。生产 ``build_leaf_agent_runner`` 总会接线冻结提供者；末路仅为
+    ``run_leaf_agent`` 直调（测试/排障）保留，缺失或版本不一致时显式失败，
+    不静默降级为子角色正文。
+    """
+
+    role_key = context.node.role_key
     if reader is not None:
-        return reader(LEAF_ROLE_PROMPT_KEY)
+        return reader(role_key)
+    if frozen_provider is not None:
+        return await frozen_provider(context)
     from utils.thread_pool import TaskType, ThreadPoolManager
 
-    return await ThreadPoolManager().run_async(TaskType.IO, _read_saved_role_prompt, LEAF_ROLE_PROMPT_KEY)
+    return await ThreadPoolManager().run_async(TaskType.IO, _read_saved_role_prompt, role_key)
 
 
 def _leaf_prompt(context: LeafExecutionContext, predecessor_summaries: tuple[str, ...] = ()) -> str:
@@ -566,13 +686,15 @@ async def run_leaf_agent(
     result_kind: str = LEAF_RESULT_KIND,
     tool_runtime_factory: ToolRuntimeFactory | None = None,
     role_prompt_reader: RolePromptReader | None = None,
+    frozen_role_prompt_provider: FrozenRolePromptProvider | None = None,
     on_event: LeafEventHandler | None = None,
 ) -> NodeOutcome:
     """执行一次叶 Agent 回合并保存成果；失败如实返回 ``failed``（R21）。
 
     ``tool_runtime_factory=None`` 保持无工具单轮（第 2 项已验证行为）；显式注入时
     在归属事实可知后构造 runtime，并走 Deferred 工具循环。``role_prompt_reader``
-    缺省时读设置页已保存的角色 Prompt（默认正文 + 追加），读不到即失败不放行。
+    与 ``frozen_role_prompt_provider`` 缺省时读设置页已保存的角色 Prompt
+    （默认正文 + 追加），读不到即失败不放行；生产装配接线前者为受理冻结 manifest。
 
     期限：每个模型回合的 ``ModelSettings['timeout']`` 与 SDK 运行期限都取自绑定
     冻结绝对期限的剩余秒数（``require_leaf_turn_timeout``）；期限不可核验 / 已耗尽
@@ -609,7 +731,7 @@ async def run_leaf_agent(
         return _failed(context, LEAF_DEADLINE_EXHAUSTED)
 
     try:
-        role_prompt = await _resolve_role_prompt(role_prompt_reader)
+        role_prompt = await _resolve_role_prompt(context, role_prompt_reader, frozen_role_prompt_provider)
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -631,7 +753,7 @@ async def run_leaf_agent(
         return _failed(context, LEAF_ROLE_PROMPT_UNAVAILABLE)
     logger.debug(
         "[LeafAgent] role prompt frozen (role=%s version=%s execution=%s node=%s)",
-        LEAF_ROLE_PROMPT_KEY,
+        context.node.role_key,
         role_prompt.version,
         context.execution_id,
         context.node.node_id,
@@ -964,6 +1086,8 @@ def build_leaf_agent_runner(
                 context.node.node_id,
             )
             return _failed(context, LEAF_ATTRIBUTION_UNAVAILABLE)
+        # 未显式注入读取端口时，按受理冻结 manifest 解析角色正文（生产默认）。
+        frozen_provider = None if role_prompt_reader is not None else build_frozen_role_prompt_provider(resolved)
         return await run_leaf_agent(
             model,
             context,
@@ -971,6 +1095,7 @@ def build_leaf_agent_runner(
             dao=resolved,
             tool_runtime_factory=tool_runtime_factory,
             role_prompt_reader=role_prompt_reader,
+            frozen_role_prompt_provider=frozen_provider,
             on_event=on_event,
         )
 

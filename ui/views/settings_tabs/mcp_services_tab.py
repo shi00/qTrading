@@ -548,7 +548,7 @@ def MCPServicesTab(lifecycle: Any | None = None) -> ft.Container:
                         ft.TextField(
                             label=I18n.get("mcp_role_version"),
                             value=draft.role_version,
-                            keyboard_type=ft.KeyboardType.NUMBER,
+                            keyboard_type=ft.KeyboardType.TEXT,
                             on_change=safe_on_change(_on_role_text("role_version")),
                             disabled=current.busy,
                             **_input_style(),

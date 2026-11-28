@@ -21,9 +21,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from core.agent_types import (
     MCP_BUDGET_FIELDS,
@@ -57,6 +58,13 @@ STATUS_INFO = "info"
 STATUS_SUCCESS = "success"
 STATUS_WARNING = "warning"
 STATUS_ERROR = "error"
+
+#: 角色版本合法形态（仓库既有约定）：
+#: - 角色目录（``RoleDefinition``）使用 ``r[1-9][0-9]*``；
+#: - 研究请求头 ``role_prompt_refs`` 使用 ``v[1-9][0-9]*``；
+#: - 历史分配记录（``RoleMCPAssignment``）只要求非空身份，兼容裸 ``[1-9][0-9]*``。
+#: 值原样保留，不做 ``int`` 强转（``r1`` / ``v1`` 均为合法版本）。
+_ROLE_VERSION: Final = re.compile(r"[rv]?[1-9][0-9]*")
 
 #: 列表项失效原因 → 行标注 i18n key（未登记的原因不标注，避免臆造文案）。
 #: N01：原因码在首次使用时惰性导入，避免模块级导入 ``services.agent_service``
@@ -882,11 +890,8 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
         role_id = draft.role_id.strip()
         if not role_id:
             raise ValueError("role_id")
-        try:
-            role_version = int(draft.role_version.strip())
-        except ValueError:
-            raise ValueError("role_version") from None
-        if role_version < 1:
+        role_version = draft.role_version.strip()
+        if _ROLE_VERSION.fullmatch(role_version) is None:
             raise ValueError("role_version")
         tools_map = dict(draft.tools_text)
         bindings: list[RoleMCPServiceBinding] = []
@@ -908,7 +913,7 @@ class MCPServicesViewModel(ObservableViewModelMixin[MCPServicesState]):
             default = config.identity
         assignment = RoleMCPAssignment(
             role_id=role_id,
-            role_version=str(role_version),
+            role_version=role_version,
             available=tuple(bindings),
             default_service=default,
         )
