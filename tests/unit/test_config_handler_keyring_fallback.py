@@ -80,11 +80,29 @@ class TestConfigHandlerKeyringFallback:
         )
         assert saved_configs == [{"db_password_encrypted": ""}]
 
-    def test_save_db_password_returns_false_for_empty(self, monkeypatch):
+    def test_save_db_password_empty_clears_stored_credentials(self, monkeypatch):
+        """D1-05：空密码表示清除旧凭据（keyring 条目 + 加密字段），清除成功返回 SAVED。"""
         import utils.config_handler as cfg_mod
 
+        monkeypatch.delenv("DB_PASSWORD", raising=False)
+        delete_calls = []
+        monkeypatch.setattr(
+            cfg_mod.keyring,
+            "delete_password",
+            lambda service, key: delete_calls.append((service, key)),
+        )
+        saved_configs = []
+        monkeypatch.setattr(
+            cfg_mod.ConfigHandler,
+            "save_config",
+            lambda payload: saved_configs.append(payload) or True,
+        )
+
         result = cfg_mod.ConfigHandler.save_db_password("")
-        assert result is SaveOutcome.FAILED
+
+        assert result is SaveOutcome.SAVED
+        assert delete_calls == [(cfg_mod.KEYRING_SERVICE_NAME, "db_password")]
+        assert saved_configs == [{"db_password_encrypted": ""}]
 
     def test_get_db_password_reads_encrypted_fallback(self, monkeypatch):
         import utils.config_handler as cfg_mod
