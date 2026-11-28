@@ -2091,6 +2091,167 @@ class TestWindowsJobObject:
         monkeypatch.setattr(module, "_job_kernel32", lambda: _FakeApi())
         assert module._WindowsJob.create() is None
 
+    def test_create_returns_none_when_job_object_creation_fails(self, monkeypatch) -> None:
+        """CreateJobObjectW 返回空句柄时不得继续设置限额，直接返回 None。"""
+        import services.embedded_pg_maintenance_service as module
+
+        class _FakeApi:
+            def CreateJobObjectW(self, attrs, name):
+                return 0
+
+            def CloseHandle(self, handle):
+                raise AssertionError("未创建的 Job 不应关闭句柄")
+
+        monkeypatch.setattr(module, "_job_kernel32", lambda: _FakeApi())
+        assert module._WindowsJob.create() is None
+
+    def test_job_kernel32_declares_signatures_and_caches(self, monkeypatch) -> None:
+        """kernel32 懒加载：仅首次声明 Job API 签名，后续复用同一句柄。"""
+        import services.embedded_pg_maintenance_service as module
+
+        calls: list[str] = []
+        fake = MagicMock()
+
+        def _win_dll(name, use_last_error=False):
+            calls.append(name)
+            return fake
+
+        monkeypatch.setattr(module, "_JOB_KERNEL32", None)
+        monkeypatch.setattr(ctypes, "WinDLL", _win_dll, raising=False)
+
+        assert module._job_kernel32() is fake
+        assert calls == ["kernel32"]
+        assert fake.CreateJobObjectW.argtypes == [ctypes.c_void_p, ctypes.c_wchar_p]
+        assert fake.CreateJobObjectW.restype is ctypes.c_void_p
+        assert fake.TerminateJobObject.argtypes == [ctypes.c_void_p, ctypes.c_uint32]
+        # 第二次调用直接复用缓存，不重复加载 DLL
+        assert module._job_kernel32() is fake
+        assert calls == ["kernel32"]
+
+    def test_terminate_on_open_job_reports_kernel_result(self) -> None:
+        import services.embedded_pg_maintenance_service as module
+
+        fake = _FakeJobKernel32([1])
+        job = module._WindowsJob(1234, fake)
+        assert job.terminate() is True
+        assert fake.terminated == 1
+
+    def test_wait_empty_false_when_query_fails(self) -> None:
+        """QueryInformationJobObject 失败时无法证明归零，必须返回 False。"""
+        import services.embedded_pg_maintenance_service as module
+
+        class _FakeApi:
+            def QueryInformationJobObject(self, *args):
+                return False
+
+        assert module._WindowsJob(1234, _FakeApi()).wait_empty(0.2) is False
+
+    def test_assign_registers_process_handle_and_always_closes_it(self) -> None:
+        import services.embedded_pg_maintenance_service as module
+
+        assigned: list[tuple[object, object]] = []
+        closed: list[object] = []
+
+        class _FakeApi:
+            def OpenProcess(self, access, inherit, pid):
+                assert pid == 77
+                return 4321
+
+            def AssignProcessToJobObject(self, job_handle, process_handle):
+                assigned.append((job_handle, process_handle))
+                return True
+
+            def CloseHandle(self, handle):
+                closed.append(handle)
+                return True
+
+        proc = MagicMock()
+        proc.pid = 77
+        proc.poll.return_value = None
+
+        assert module._WindowsJob(1234, _FakeApi()).assign(proc) is True
+        assert assigned == [(1234, 4321)]
+        assert closed == [4321]
+
+    def test_assign_closes_process_handle_when_assignment_fails(self) -> None:
+        import services.embedded_pg_maintenance_service as module
+
+        closed: list[object] = []
+
+        class _FakeApi:
+            def OpenProcess(self, access, inherit, pid):
+                return 4321
+
+            def AssignProcessToJobObject(self, job_handle, process_handle):
+                return False
+
+            def CloseHandle(self, handle):
+                closed.append(handle)
+                return True
+
+        proc = MagicMock()
+        proc.pid = 77
+        proc.poll.return_value = None
+
+        assert module._WindowsJob(1234, _FakeApi()).assign(proc) is False
+        assert closed == [4321]
+
+    def test_assign_rejects_closed_job_exited_process_and_open_failure(self) -> None:
+        """三种不可登记场景均返回 False 且不产生副作用。"""
+        import services.embedded_pg_maintenance_service as module
+
+        closed: list[object] = []
+
+        class _FakeApi:
+            def OpenProcess(self, access, inherit, pid):
+                return 0
+
+            def AssignProcessToJobObject(self, job_handle, process_handle):
+                raise AssertionError("进程句柄打开失败时不应登记")
+
+            def CloseHandle(self, handle):
+                closed.append(handle)
+                return True
+
+        live_proc = MagicMock()
+        live_proc.pid = 77
+        live_proc.poll.return_value = None
+
+        closed_job = module._WindowsJob(1234, _FakeApi())
+        closed_job.close()
+        assert closed_job.assign(live_proc) is False
+
+        exited_proc = MagicMock()
+        exited_proc.pid = 78
+        exited_proc.poll.return_value = 0
+        assert module._WindowsJob(1234, _FakeApi()).assign(exited_proc) is False
+
+        assert module._WindowsJob(1234, _FakeApi()).assign(live_proc) is False
+        assert closed == [1234]
+
+    def test_create_windows_job_returns_none_on_oserror(self, monkeypatch, caplog) -> None:
+        """Job 创建抛 OSError 时降级为无 Job（取消按未确认处理）。"""
+        import services.embedded_pg_maintenance_service as module
+
+        monkeypatch.setattr(os, "name", "nt")
+        with (
+            patch.object(module._WindowsJob, "create", side_effect=OSError("boom")),
+            caplog.at_level(logging.WARNING),
+        ):
+            assert module.EmbeddedPgMaintenanceService._create_windows_job() is None
+        assert any("Job Object 创建失败" in r.message for r in caplog.records)
+
+    def test_create_windows_job_logs_unavailable_on_none(self, monkeypatch, caplog) -> None:
+        import services.embedded_pg_maintenance_service as module
+
+        monkeypatch.setattr(os, "name", "nt")
+        with (
+            patch.object(module._WindowsJob, "create", return_value=None),
+            caplog.at_level(logging.DEBUG),
+        ):
+            assert module.EmbeddedPgMaintenanceService._create_windows_job() is None
+        assert any("Job Object 不可用" in r.message for r in caplog.records)
+
     def test_request_cancel_without_job_reports_unproven(self, monkeypatch, maintenance_service, caplog) -> None:
         """D1-04: Windows 无受控 Job 时只能报「取消未确认」，不得强杀裸 PID。"""
         from services.embedded_pg_maintenance_service import CancelStatus
