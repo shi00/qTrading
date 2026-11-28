@@ -102,6 +102,7 @@ __all__ = [
     "MainTurnRequest",
     "MainTurnRunner",
     "PlanReference",
+    "build_comparison_plan_spec",
     "build_plan_spec_provider",
     "build_role_capability_provider",
     "decode_plan_reference",
@@ -376,6 +377,41 @@ def _auto_plan_requested(manifest: Mapping[str, Any]) -> bool:
     return _frozen_section(manifest).get(PLAN_SOURCE_KEY) == PLAN_SOURCE_AUTO
 
 
+def _is_comparison_manifest(manifest: Mapping[str, Any]) -> bool:
+    """比较组 manifest 以 ``shared`` 共同输入 + ``lanes`` 逐路冻结为标志。"""
+
+    return isinstance(manifest.get("shared"), Mapping) and isinstance(manifest.get("lanes"), list)
+
+
+#: 比较路确定性计划节点身份（与执行根 ``root`` 区分，避免叶身份歧义）。
+COMPARISON_PLAN_NODE_ID: Final[str] = "comparison_analysis"
+
+
+def build_comparison_plan_spec(manifest_payload: str, policy: FrozenSelectionPolicy) -> PlanSpecProposal | None:
+    """比较组冻结输入 → 单节点确定性计划（不读模型提案、不另选连接）。
+
+    目标取共同输入正文，角色/能力/来源全部取冻结手选集（角色、资料范围、Skill/MCP
+    能力），因此同一 manifest 每次派发得到同一计划；比较路各自的模型连接由
+    ``require_lane_parameters`` 在运行期锁定，不在计划节点里承载或覆盖。
+    """
+
+    section = _frozen_section(_manifest_object(manifest_payload))
+    target = section.get("text")
+    if not isinstance(target, str) or not target.strip():
+        return None
+    return PlanSpecProposal(
+        nodes=(
+            PlanNodeSpec(
+                node_id=COMPARISON_PLAN_NODE_ID,
+                target=target,
+                role_key=policy.role_key,
+                capabilities=tuple(sorted(policy.capabilities)),
+                source_refs=policy.source_refs,
+            ),
+        )
+    )
+
+
 def build_plan_spec_provider(dao: _ManifestReader, proposals: _PlanProposalReader | None = None) -> PlanSpecProvider:
     """生产计划来源：显式计划引用优先，其次执行模式首问的自动规划版本。
 
@@ -407,6 +443,13 @@ def build_plan_spec_provider(dao: _ManifestReader, proposals: _PlanProposalReade
                 return None
             read_current = cast(Any, current)
             proposal = await read_current(user_scope=user_scope, execution_id=execution_id)
+        elif _is_comparison_manifest(decoded):
+            # 比较组共同输入没有模型计划提案：按冻结手选集构造确定性单节点计划；
+            # 角色/能力不可判定时仍 fail-closed（派发侧 PLAN_UNAVAILABLE）。
+            policy = derive_frozen_selection_policy(manifest)
+            if policy is None:
+                return None
+            return build_comparison_plan_spec(manifest, policy)
         else:
             return None
         if proposal is None:

@@ -68,6 +68,28 @@ SHARED_MCP_DISCONNECT_REASON: Final[str] = "shared_mcp_disconnected"
 #: 云端聊天连接 kind（本地 kinds 需设备内核验，对比入口明确拒绝）。
 _ADAPTER_LITELLM: Final[str] = "litellm_chat"
 
+#: 对比路冻结的主研究角色（子角色只由主角色分配执行，不可作为对比入口角色）。
+_COMPARISON_ROLE_KEY: Final[str] = "main"
+
+
+class _SessionRevisionUnavailable(RuntimeError):
+    """会话草稿版读取失败/不可判定：显式中止，不猜 ``expected_revision``。"""
+
+    code: Final[str] = "session_revision_unavailable"
+
+
+def _comparison_role_refs() -> tuple[tuple[str, str], ...]:
+    """对比共同输入冻结的主角色 ``(role_key, version)``（与叶运行同源版本）。"""
+
+    from utils.config_handler import ConfigHandler
+    from utils.config_models import ROLE_PROMPT_DEFAULTS
+
+    default_version = ROLE_PROMPT_DEFAULTS[_COMPARISON_ROLE_KEY][1]
+    saved = ConfigHandler.get_ai_role_prompt_version(_COMPARISON_ROLE_KEY)
+    version = saved.strip() if isinstance(saved, str) and saved.strip() else default_version
+    return ((_COMPARISON_ROLE_KEY, version),)
+
+
 _GROUP_STATE_KEYS: Final[Mapping[str, str]] = {
     "queued": "agent_comparison_group_queued",
     "running": "agent_comparison_group_running",
@@ -163,7 +185,7 @@ _MCP_IMPACT_KEYS: Final[Mapping[str, str]] = {
 class ComparisonServicePort(Protocol):
     """对比相关服务面（``AgentService`` 子集；宿主注入，UI 不 import app）。"""
 
-    async def submit_comparison(self, request: ComparisonSubmissionRequest) -> Any: ...
+    async def run_comparison(self, request: ComparisonSubmissionRequest) -> Any: ...
 
     async def read_comparison(self, query: ComparisonReadQuery) -> ComparisonGroupView: ...
 
@@ -576,7 +598,15 @@ class ResearchComparisonViewModel(ObservableViewModelMixin[ResearchComparisonSta
                 "comparison_group_command",
                 [self._user_scope, session_id, text, *(lane.connection_id for lane in selections)],
             )
-            shared = ComparisonSharedInput(text=text, mode=Mode(self._state.mode), purpose=Purpose.END_OF_DAY_RESEARCH)
+            shared = ComparisonSharedInput(
+                text=text,
+                mode=Mode(self._state.mode),
+                purpose=Purpose.END_OF_DAY_RESEARCH,
+                role_prompt_refs=_comparison_role_refs(),
+                # 对比面板不选 Skill/MCP：显式零外部能力集是已核准空集，不是未知。
+                skill_refs=(),
+                mcp_scope_digest=None,
+            )
             try:
                 group = freeze_comparison_group(
                     user_scope=self._user_scope,
@@ -593,7 +623,7 @@ class ResearchComparisonViewModel(ObservableViewModelMixin[ResearchComparisonSta
                     error_code=exc.code,
                 )
                 return
-            receipt = await service.submit_comparison(
+            receipt = await service.run_comparison(
                 ComparisonSubmissionRequest(
                     user_scope=self._user_scope,
                     session_id=session_id,
@@ -607,6 +637,13 @@ class ResearchComparisonViewModel(ObservableViewModelMixin[ResearchComparisonSta
         except asyncio.CancelledError:
             self._set_state(submitting=False)
             raise
+        except _SessionRevisionUnavailable as exc:
+            self._set_state(
+                submitting=False,
+                error_key="agent_comparison_session_revision_unavailable",
+                error_code=exc.code,
+            )
+            return
         except Exception as exc:
             self._set_state(
                 submitting=False,
@@ -646,6 +683,13 @@ class ResearchComparisonViewModel(ObservableViewModelMixin[ResearchComparisonSta
         except asyncio.CancelledError:
             self._set_state(retrying_lane=None)
             raise
+        except _SessionRevisionUnavailable as exc:
+            self._set_state(
+                retrying_lane=None,
+                error_key="agent_comparison_session_revision_unavailable",
+                error_code=exc.code,
+            )
+            return
         except Exception as exc:
             self._set_state(
                 retrying_lane=None,
@@ -802,7 +846,7 @@ class ResearchComparisonViewModel(ObservableViewModelMixin[ResearchComparisonSta
         return durations
 
     async def _session_revision(self, session_id: str) -> int:
-        """会话稿版（受理 CAS 基线）；读取失败返回 0（服务层按冲突如实拒绝）。"""
+        """会话稿版（受理 CAS 基线）；读取失败/不可判定即显式抛错，不猜 0。"""
 
         service = cast(ComparisonServicePort, self._service)
         try:
@@ -812,10 +856,12 @@ class ResearchComparisonViewModel(ObservableViewModelMixin[ResearchComparisonSta
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.debug("[ComparisonVM] session revision read failed: %s", type(exc).__name__)
-            return 0
-        revision = getattr(getattr(read, "summary", None), "draft_revision", 0)
-        return revision if isinstance(revision, int) and not isinstance(revision, bool) and revision >= 0 else 0
+            logger.warning("[ComparisonVM] session revision read failed: %s", type(exc).__name__)
+            raise _SessionRevisionUnavailable("session draft revision unavailable") from exc
+        revision = getattr(getattr(read, "summary", None), "draft_revision", None)
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise _SessionRevisionUnavailable("session draft revision unavailable")
+        return revision
 
     def _mcp_impact(self) -> dict[str, str] | None:
         """共享 MCP 断线的逐路决策（服务层 ``plan_group_stop``）；未知组返回 ``None``。"""
